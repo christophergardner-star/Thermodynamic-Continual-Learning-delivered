@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BACKBONE      = "distilgpt2"   # 82M, hidden=768, fast on CPU
-MAX_STEPS     = 100            # steps per model (~15-20 min total)
+MAX_STEPS     = 500            # steps per model (~50 min total)
 BATCH_SIZE    = 2
 MAX_LENGTH    = 64
 LR            = 3e-4
@@ -36,6 +36,7 @@ WEIGHT_DECAY  = 0.1
 LAMBDA_C      = 0.3            # consistency loss weight for ASC
 EMA_DECAY     = 0.995
 WARP_DIM      = 256
+WARP_LR       = 1e-3           # warp uses higher LR — it needs to stay ahead
 SEED          = 42
 
 torch.manual_seed(SEED)
@@ -101,7 +102,15 @@ def run_model(label, use_asc=False):
             p.requires_grad = False
         params = params + list(warp.parameters())
 
-    optimizer = torch.optim.AdamW(params, lr=LR, weight_decay=WEIGHT_DECAY)
+    # Base model optimizer (minimises task + consistency)
+    base_opt = torch.optim.AdamW(
+        list(model.parameters()) + ([] if not use_asc else []),
+        lr=LR, weight_decay=WEIGHT_DECAY,
+    )
+    # Warp optimizer — separate, used for gradient ASCENT on consistency loss
+    warp_opt = None
+    if use_asc:
+        warp_opt = torch.optim.AdamW(warp.parameters(), lr=WARP_LR)
 
     task_losses = []
     consist_losses = []
@@ -112,33 +121,50 @@ def run_model(label, use_asc=False):
         if step >= MAX_STEPS:
             break
         batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
-        optimizer.zero_grad()
 
-        # Task loss
+        # ── Task loss: base model minimises next-token prediction ──────
+        base_opt.zero_grad()
         out = model(**batch)
         task_loss = out.loss
 
         if use_asc:
-            # Consistency forward
+            # Get stable hidden states from EMA target
             with torch.no_grad():
-                tgt_out = target(**{k: v for k, v in batch.items() if k != "labels"},
-                                 output_hidden_states=True)
+                tgt_out = target(
+                    **{k: v for k, v in batch.items() if k != "labels"},
+                    output_hidden_states=True,
+                )
                 clean_h = tgt_out.hidden_states[-1]
-            warped_h = warp(clean_h)
+
+            # Warp produces adversarial perturbation (detached from warp graph)
+            warped_h = warp(clean_h).detach()  # detach: base sees fixed warp output
+
+            # Base model minimises consistency on the warped input
             consist_out = model(inputs_embeds=warped_h, labels=batch["labels"])
             consist_loss = consist_out.loss
             total = task_loss + LAMBDA_C * consist_loss
-            # EMA update
-            with torch.no_grad():
-                for po, pt in zip(model.parameters(), target.parameters()):
-                    pt.data.mul_(EMA_DECAY).add_(po.data, alpha=1 - EMA_DECAY)
         else:
             total = task_loss
             consist_loss = torch.tensor(0.0)
 
         total.backward()
-        torch.nn.utils.clip_grad_norm_(params, 1.0)
-        optimizer.step()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        base_opt.step()
+
+        if use_asc:
+            # ── Warp update: MAXIMISE consistency loss (gradient ascent) ──
+            warp_opt.zero_grad()
+            warped_h_adv = warp(clean_h)   # fresh forward, warp graph attached
+            consist_out_adv = model(inputs_embeds=warped_h_adv, labels=batch["labels"])
+            # Negate: ascending on consistency = descending on -consistency
+            (-consist_out_adv.loss).backward()
+            torch.nn.utils.clip_grad_norm_(warp.parameters(), 1.0)
+            warp_opt.step()
+
+            # EMA update
+            with torch.no_grad():
+                for po, pt in zip(model.parameters(), target.parameters()):
+                    pt.data.mul_(EMA_DECAY).add_(po.data, alpha=1 - EMA_DECAY)
 
         tl = float(task_loss.item())
         cl = float(consist_loss.item())
@@ -235,7 +261,7 @@ ax2.set_ylabel("Loss")
 ax2.legend()
 ax2.grid(True, alpha=0.4)
 
-plt.suptitle(f"ASC vs Baseline -- {BACKBONE} -- {MAX_STEPS} steps -- CPU", fontsize=11)
+plt.suptitle(f"ASC (min-max) vs Baseline -- {BACKBONE} -- {MAX_STEPS} steps -- CPU", fontsize=11)
 plt.tight_layout()
 plt.savefig("asc_vs_baseline.png", dpi=150)
 print("\nPlot saved -> asc_vs_baseline.png")
