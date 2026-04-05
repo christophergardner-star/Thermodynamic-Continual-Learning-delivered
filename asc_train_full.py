@@ -124,17 +124,22 @@ def main():
     print(f"  Warp params:      {summary['warp_params']:,} ({summary['warp_pct']}% of base)")
     print(f"  Total trainable:  {summary['total_trainable']:,}\n")
 
-    # ── Optimizer ─────────────────────────────────────────────────────
-    optimizer = torch.optim.AdamW(
+    # ── Optimizers (min-max: base minimises, warp maximises consist loss) ──
+    total_steps = len(loader) * args.epochs
+    if args.max_steps:
+        total_steps = min(total_steps, args.max_steps)
+
+    base_optimizer = torch.optim.AdamW(
         model.parameters_trainable(),
         lr=args.lr,
         weight_decay=0.1,
     )
-    total_steps = len(loader) * args.epochs
-    if args.max_steps:
-        total_steps = min(total_steps, args.max_steps)
+    warp_optimizer = torch.optim.AdamW(
+        model.warp.parameters(),
+        lr=args.lr * 3,   # warp LR slightly higher to keep adversary active
+    )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=total_steps
+        base_optimizer, T_max=total_steps
     )
 
     # ── Training ──────────────────────────────────────────────────────
@@ -155,17 +160,22 @@ def main():
             batch = {k: v.to(device) for k, v in batch.items()
                      if isinstance(v, torch.Tensor)}
 
-            optimizer.zero_grad()
-
+            # ── Base model step (minimise task + consistency) ──────────
+            base_optimizer.zero_grad()
             task_loss, consist_loss = model(**batch)
             total_loss = task_loss + args.lambda_c * consist_loss
-
             total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters_trainable(), max_norm=1.0
-            )
-            optimizer.step()
+            torch.nn.utils.clip_grad_norm_(model.parameters_trainable(), 1.0)
+            base_optimizer.step()
             scheduler.step()
+
+            # ── Warp step (maximise consistency — gradient ascent) ─────
+            warp_optimizer.zero_grad()
+            warp_loss = model.warp_ascent_loss(**batch)
+            (-warp_loss).backward()
+            torch.nn.utils.clip_grad_norm_(model.warp.parameters(), 1.0)
+            warp_optimizer.step()
+
             model.update_target()
 
             step += 1

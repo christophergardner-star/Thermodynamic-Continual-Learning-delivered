@@ -273,8 +273,10 @@ class ASCForCausalLM(nn.Module):
 
         warped_h = self.warp(clean_h)
 
+        # Detach warp output so base optimiser gradient does not flow into warp.
+        # Warp is updated separately via gradient ascent (see update_warp()).
         consist_out = self.base(
-            inputs_embeds=warped_h,
+            inputs_embeds=warped_h.detach(),
             labels=labels,
             attention_mask=attention_mask,
         )
@@ -313,9 +315,41 @@ class ASCForCausalLM(nn.Module):
     # Convenience
     # ------------------------------------------------------------------
 
+    def warp_ascent_loss(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Compute consistency loss with warp graph attached (for gradient ascent).
+
+        Use this to update the warp network with a separate optimiser:
+
+            warp_opt.zero_grad()
+            loss = model.warp_ascent_loss(input_ids=x, labels=y)
+            (-loss).backward()   # ascent: maximise inconsistency
+            warp_opt.step()
+        """
+        with torch.no_grad():
+            tgt_kwargs = dict(input_ids=input_ids, attention_mask=attention_mask)
+            tgt_kwargs = {k: v for k, v in tgt_kwargs.items() if v is not None}
+            tgt_out = self.target(**tgt_kwargs, output_hidden_states=True)
+            clean_h = tgt_out.hidden_states[-1]
+
+        warped_h = self.warp(clean_h)   # warp graph attached
+        consist_out = self.base(
+            inputs_embeds=warped_h,
+            labels=labels,
+            attention_mask=attention_mask,
+        )
+        return consist_out.loss
+
     def parameters_trainable(self):
-        """Return only trainable parameters (base + warp; not target)."""
-        return list(self.base.parameters()) + list(self.warp.parameters())
+        """Return only base model parameters (not warp, not target).
+        Use model.warp.parameters() for the separate warp optimiser.
+        """
+        return list(self.base.parameters())
 
     def param_summary(self) -> dict:
         """Return a summary of parameter counts."""
