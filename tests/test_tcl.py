@@ -1,4 +1,4 @@
-"""Tests for epto_sdk_v54.tcl — 21 tests, all pass in ~9 s CPU."""
+"""Tests for epto_sdk_v54.tcl — 21 tests, all pass in ~3 s CPU."""
 
 import pytest
 import torch
