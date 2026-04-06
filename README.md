@@ -1,6 +1,6 @@
 # Thermodynamic Continual Learning Delivered (ASC-TAR + TCL)
 
-This repository now contains a coherent research stack built around two core methods:
+This repository contains a coherent research stack built around two core methods:
 
 - `ASC`: Adversarial Self-Consistency for causal language models
 - `TCL`: Thermodynamic Continual Learning for catastrophic-forgetting control
