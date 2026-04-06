@@ -1,227 +1,192 @@
-# ASC Model Family + Thermodynamic Continual Learning
+# Thermodynamic Continual Learning Delivered
 
-Two novel ML systems by Christopher Gardner (April 2026).
+This repository now contains a coherent research stack built around two core methods:
 
----
+- `ASC`: Adversarial Self-Consistency for causal language models
+- `TCL`: Thermodynamic Continual Learning for catastrophic-forgetting control
 
-## ASC — Adversarial Self-Consistency Model Family
+Around those core methods, the repo also includes the intended local coding and researcher workflow:
 
-A new training paradigm that learns invariant causal representations
-through latent adversarial consistency. Works with any causal transformer
-backbone. The ASC-specific components add <1% parameter overhead.
+- coding-backbone ASC fine-tuning for DeepSeek Coder and Qwen2.5-Coder
+- local corpus preparation and lightweight coding evaluation
+- local serving helpers for Continue / OpenAI-compatible clients
+- `Cruxy`, a researcher loop that stores traces and classifies claims as fact, measured result, inference, or hypothesis
 
-### Architecture
+## Repository Contract
 
-```
-Input Tokens
-     |
-Base Transformer (GPT-2 / Llama-style blocks)
-     |
-Last Hidden States H
-     |-- Task Head (LM Head) --> next-token loss
-     |
-     +-- LatentWarp MLP (NEW, ~0.1-0.5% of params)
-              |
-         Warped Hidden States H'
-              |
-         Consistency Forward (same base, frozen EMA target)
-              |
-         Consistency Loss
-```
+- The research primitives are the root modules: [`asc_model.py`](./asc_model.py) and [`tcl.py`](./tcl.py).
+- The coding stack is the root script surface around those primitives.
+- The researcher stack is also root-level and intentionally lightweight.
+- This is not the `EPTO_-` package repo. No `epto_sdk_v54` package tree is required here.
 
-**Total loss = task_loss + lambda * consistency_loss**
+## Model Families
 
-### Model Family
+### ASC standalone family
 
-| Model    | Params | Backbone     | H100 training estimate |
-|----------|--------|--------------|------------------------|
-| ASC-124M | 124M   | gpt2         | 1-2 days               |
-| ASC-355M | 355M   | gpt2-medium  | 3-5 days               |
-| ASC-774M | 774M   | gpt2-large   | 1 week                 |
-| ASC-1.5B | 1.5B   | gpt2-xl      | 2 weeks                |
-| ASC-7B   | 7B     | Llama/Mistral| 4-8 weeks              |
+Named presets exposed by `ASCConfig.for_size(...)`:
 
-### Install
+| Size | Backbone |
+|---|---|
+| `124M` | `gpt2` |
+| `355M` | `gpt2-medium` |
+| `774M` | `gpt2-large` |
+| `1558M` | `gpt2-xl` |
 
-```bash
-pip install torch transformers datasets accelerate tqdm matplotlib pytest
-```
+For offline smoke tests, ASC also supports a tiny random GPT-2 backbone via
+`base_model_name="__tiny_gpt2__"`.
 
-### Quick Start
+### Coding fine-tune backbones
 
-```python
-from asc_model import ASCConfig, ASCForCausalLM
+The coding fine-tune entrypoints are:
 
-# Build ASC-124M
-config = ASCConfig.for_size("124M")
-model = ASCForCausalLM(config)
-print(model.param_summary())
-# {'base_params': 124439808, 'warp_params': 394496, 'warp_pct': 0.317, ...}
+- [`coding_asc_finetune.py`](./coding_asc_finetune.py)
+- [`deepseek_asc_finetune.py`](./deepseek_asc_finetune.py)
 
-# Training step
-model.train()
-task_loss, consist_loss = model(input_ids=x, labels=y)
-total = task_loss + 0.3 * consist_loss
-total.backward()
-optimizer.step()
-model.update_target()   # EMA update after every step
+Supported preset registry:
 
-# Inference (consistency path auto-disabled in eval mode)
-model.eval()
-logits = model(input_ids=x).logits
+| Preset | HF ID |
+|---|---|
+| `1.3b` | `deepseek-ai/deepseek-coder-1.3b-base` |
+| `6.7b` | `deepseek-ai/deepseek-coder-6.7b-base` |
+| `33b` | `deepseek-ai/deepseek-coder-33b-base` |
+| `1.3b-instruct` | `deepseek-ai/deepseek-coder-1.3b-instruct` |
+| `6.7b-instruct` | `deepseek-ai/deepseek-coder-6.7b-instruct` |
+| `33b-instruct` | `deepseek-ai/deepseek-coder-33b-instruct` |
+| `qwen-1.5b` | `Qwen/Qwen2.5-Coder-1.5B` |
+| `qwen-7b` | `Qwen/Qwen2.5-Coder-7B` |
+| `qwen-14b` | `Qwen/Qwen2.5-Coder-14B` |
+| `qwen-32b` | `Qwen/Qwen2.5-Coder-32B` |
+| `qwen-1.5b-instruct` | `Qwen/Qwen2.5-Coder-1.5B-Instruct` |
+| `qwen-7b-instruct` | `Qwen/Qwen2.5-Coder-7B-Instruct` |
+| `qwen-14b-instruct` | `Qwen/Qwen2.5-Coder-14B-Instruct` |
+| `qwen-32b-instruct` | `Qwen/Qwen2.5-Coder-32B-Instruct` |
 
-# Save / load
-model.save("my_asc_124m")
-model2 = ASCForCausalLM.load("my_asc_124m")
-```
+## Core Methods
 
-### Training Scripts
+### ASC
 
-Full GPU run (any size):
-```bash
-python asc_train_full.py --size 124M --dataset wikitext-2-raw-v1
-python asc_train_full.py --size 355M --dataset wikitext-103-raw-v1 --batch_size 16
-```
+ASC wraps a causal LM backbone with:
 
-Multi-GPU (H100 cluster):
-```bash
-torchrun --nproc_per_node=4 asc_train_full.py --size 1B --batch_size 16
-```
+- a small `LatentWarp` MLP
+- a frozen EMA target model
+- dual training losses: task loss + consistency loss
 
-CPU smoke run (50 steps, ~10 min, validated):
-```bash
-python asc_train_cpu.py
-```
+The main model class is [`ASCForCausalLM`](./asc_model.py).
 
-**Validated CPU result:** distilgpt2, 50 steps, WikiText-2,
-avg PPL 134 -> 112, consistency loss stable ~7.1.
+### TCL
 
-### Capabilities
+TCL tracks per-parameter gradient-energy EMAs during each task and stores task checkpoints plus normalized importance maps. Later tasks apply an elastic penalty to reduce forgetting.
 
-**Validated (confirmed by tests and CPU runs):**
-- Dual objective training: task loss + consistency loss, correct gradient flow
-- LatentWarp gradients confirmed end-to-end
-- EMA target mathematically correct, never updated by backprop
-- Save/load roundtrip: identical logits
-- Task loss decreases over training steps
-- Consistency loss stable under adversarial perturbation (avg ~7.1 on WikiText-2)
-- 54/54 unit tests pass CPU
+The main types are:
 
-**Projected (scaling law simulations — not yet validated at scale):**
+- `ThermalImportance`
+- `ThermalMemory`
+- `ThermalCheckpoint`
+- `TCLRegularizer`
+- `TCLTrainer`
 
-| Metric | Standard 1B | ASC-1B (projected) |
-|--------|-------------|---------------------|
-| WikiText-103 PPL | ~8.4 | ~4.5 |
-| GSM8K accuracy | ~82% | ~94% |
-| Compute to match baseline | 1× | ~5–10× less |
+All are defined in [`tcl.py`](./tcl.py).
 
-> These are mathematical extrapolations, not measured results.
-> Real large-scale runs are required to validate them.
+## Coding Stack
 
-**By design (structural properties of the training objective):**
-- Forces invariant representations under latent perturbations
-- Reduces reliance on spurious surface correlations
-- EMA target provides stable self-distillation signal
-- Scales to any backbone size — LatentWarp stays <1% of params
-
-### ASC Key Parameters
-
-| Parameter         | Default | Effect |
-|-------------------|---------|--------|
-| `warp_dim`        | 256     | LatentWarp bottleneck. 64-512 depending on model size. |
-| `consistency_lambda` | 0.3  | Consistency loss weight. Start 0.1-0.5. |
-| `ema_decay`       | 0.995   | Target model EMA. Higher = slower target updates. |
-| `warp_init_scale` | 0.05    | Initial warp magnitude. Keep small for training stability. |
-
----
-
-## TCL — Thermodynamic Continual Learning
-
-Prevents catastrophic forgetting by tracking which weights were "hot"
-(actively learned) during each task, then applying elastic protection on
-subsequent tasks. Supports reannealing so frozen knowledge softens over
-long task sequences — unlike EWC which freezes importance permanently.
-
-### Quick Start
-
-```python
-from tcl import ThermalImportance, ThermalMemory, TCLRegularizer
-
-memory = ThermalMemory(max_tasks=10, anneal_rate=0.9999)
-
-# Task 0
-importance = ThermalImportance(model, ema_beta=0.99)
-for x, y in task0_loader:
-    loss = criterion(model(x), y)
-    loss.backward()
-    importance.accumulate(model)   # after backward, before step
-    optimizer.step()
-    optimizer.zero_grad()
-memory.commit(model, importance, task_id=0)
-
-# Task 1 (with forgetting protection)
-importance = ThermalImportance(model, ema_beta=0.99)
-regularizer = TCLRegularizer(memory, lambda_tcl=1.0)
-for x, y in task1_loader:
-    optimizer.zero_grad()
-    loss = criterion(model(x), y)
-    loss.backward()
-    importance.accumulate(model)
-    regularizer.penalty(model).backward()
-    optimizer.step()
-    memory.anneal_all()
-memory.commit(model, importance, task_id=1)
-```
-
-### TCL vs EWC
-
-| | EWC | TCL |
-|---|---|---|
-| Importance signal | One-shot Fisher diagonal at task end | Continuous EMA of gradient energy throughout task |
-| Frozen? | Permanently | No — reannealing decays importance over time |
-| Memory | One snapshot per task | Ring buffer (configurable max_tasks) |
-| Optimizer | Any | Any |
-
-### TCL Key Parameters
-
-| Parameter     | Default | Effect |
-|---------------|---------|--------|
-| `lambda_tcl`  | 1.0     | Elastic penalty strength. Start 0.5-5.0. |
-| `ema_beta`    | 0.99    | Importance EMA smoothing. |
-| `anneal_rate` | 1.0     | Per-step importance decay (0.9999 = ~10% drop/1000 steps). |
-| `task_decay`  | 1.0     | Older tasks weighted less. |
-| `max_tasks`   | 10      | Ring buffer size. |
-
----
-
-## Tests
+### Prepare a corpus
 
 ```bash
-pytest tests/ -v
+python stack_data_prep.py --inputs ./my_code_dir --output ./data/corpus.jsonl
 ```
 
-| Suite | Tests | Time |
-|-------|-------|------|
-| `test_asc_model.py` | 19/19 | ~5 min CPU |
-| `test_asc_smoke.py` | 14/14 | 6.5s CPU |
-| `test_tcl.py` | 21/21 | 8.4s CPU |
-| **Total** | **54/54** | **~6 min** |
+### Smoke-train ASC on a tiny offline backbone
 
----
+```bash
+python coding_asc_finetune.py --model tiny --dataset synthetic --max_steps 2
+```
+
+### Dry-run a Qwen coding job
+
+```bash
+python coding_asc_finetune.py --model qwen-14b --dataset synthetic --dry_run
+```
+
+### Summarize coding benchmark predictions
+
+```bash
+python eval_coding.py --predictions_jsonl ./predictions.jsonl -k 1
+```
+
+### Print Continue config or status payload
+
+```bash
+python serve_local.py --print_continue
+python serve_local.py --print_status --workspace ./coding_ai_out/qwen2.5-coder-14b
+```
+
+## Researcher Stack
+
+### Run the Cruxy loop
+
+```bash
+python researcher_agent.py --db research_db.sqlite --session smoke --dry_run
+```
+
+### Export strong traces for later training
+
+```bash
+python self_train.py --db research_db.sqlite --output research_traces.jsonl --min_score 0.5
+```
+
+### Blend researcher traces into a corpus
+
+```bash
+python build_researcher_dataset.py --db research_db.sqlite --output ./data/researcher_corpus.jsonl
+```
+
+## Validation
+
+Current validated surface:
+
+- ASC core model tests
+- ASC CPU smoke tests
+- TCL unit tests
+- coding stack surface tests
+- researcher stack tests
+
+Run the suite with:
+
+```bash
+python -m pytest tests -q
+```
+
+Current expected count:
+
+- `64` tests
+
+Important boundary:
+
+- The ASC/TCL core is tested directly.
+- The coding and researcher layers are currently lightweight local orchestration surfaces, not large-scale benchmark claims.
+- Large-scale DeepSeek/Qwen training results are not claimed by this README unless you run them yourself.
 
 ## Files
 
 | File | Purpose |
-|------|---------|
-| `asc_model.py` | ASCConfig + ASCForCausalLM (full model class) |
-| `asc_train_full.py` | Full training script, all sizes, H100-ready |
-| `asc_train_cpu.py` | CPU smoke run (validated, 50 steps) |
-| `asc_train.py` | Original Colab-style training script |
-| `tcl.py` | TCL continual learning module |
-| `tests/` | 54 tests across both systems |
-
----
+|---|---|
+| [`asc_model.py`](./asc_model.py) | ASC config and model |
+| [`asc_train.py`](./asc_train.py) | original ASC training script |
+| [`asc_train_cpu.py`](./asc_train_cpu.py) | CPU ASC smoke run |
+| [`asc_train_full.py`](./asc_train_full.py) | full ASC training script |
+| [`asc_vs_baseline.py`](./asc_vs_baseline.py) | ASC baseline comparison |
+| [`tcl.py`](./tcl.py) | thermodynamic continual learning |
+| [`coding_asc_finetune.py`](./coding_asc_finetune.py) | canonical coding fine-tune entrypoint |
+| [`deepseek_asc_finetune.py`](./deepseek_asc_finetune.py) | coding fine-tune implementation with DeepSeek/Qwen registry |
+| [`stack_data_prep.py`](./stack_data_prep.py) | local corpus preparation |
+| [`eval_coding.py`](./eval_coding.py) | coding eval helpers |
+| [`serve_local.py`](./serve_local.py) | local serving helpers and status payload builder |
+| [`research_database.py`](./research_database.py) | persistent research trace store |
+| [`researcher_agent.py`](./researcher_agent.py) | Cruxy research loop |
+| [`self_train.py`](./self_train.py) | export high-quality research traces |
+| [`build_researcher_dataset.py`](./build_researcher_dataset.py) | build researcher corpus |
+| [`docs/research_status_panel.html`](./docs/research_status_panel.html) | simple status-panel source |
 
 ## Author
 
-Christopher Gardner — April 2026
+Christopher Gardner

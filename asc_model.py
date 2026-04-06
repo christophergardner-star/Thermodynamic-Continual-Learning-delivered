@@ -1,57 +1,36 @@
 """
-asc_model.py -- ASC (Adversarial Self-Consistency) Model Family
-===============================================================
+ASC model family.
 
-A training paradigm that learns invariant representations through
-latent adversarial consistency. Any causal transformer backbone +
-a small LatentWarp head + an EMA target model.
+ASC wraps a causal language model backbone with:
+- a small LatentWarp MLP
+- a frozen EMA target model
+- a dual training objective: task loss + consistency loss
 
-Model family
-------------
-  ASC-124M  -- gpt2           (124M params)
-  ASC-355M  -- gpt2-medium    (355M params)
-  ASC-1B    -- gpt2-large + custom config (~1B)
-  ASC-7B    -- use Llama/Mistral 7B backbone
+Named size presets map to GPT-2 family checkpoints:
+- ASC-124M -> gpt2
+- ASC-355M -> gpt2-medium
+- ASC-774M -> gpt2-large
+- ASC-1558M -> gpt2-xl
 
-Key new components (all else is standard transformer):
-  LatentWarp  -- 2-layer MLP, ~0.1-0.5% of total params
-  Target      -- frozen EMA copy of the base model
-  Dual loss   -- task (causal LM) + consistency (warped latents)
-
-Usage
------
-    from asc_model import ASCConfig, ASCForCausalLM
-
-    config = ASCConfig.for_size("124M")
-    model = ASCForCausalLM(config)
-
-    # training step
-    task_loss, consist_loss = model(input_ids=x, labels=y)
-    total = task_loss + 0.3 * consist_loss
-    total.backward()
-    optimizer.step()
-    model.update_target()
-
-    # inference (consistency path disabled)
-    model.eval()
-    logits = model(input_ids=x)
+For tests and offline smoke runs, ASC also supports a tiny random backbone via
+`base_model_name="__tiny_gpt2__"`.
 """
 
 from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
+    GPT2Config,
+    GPT2LMHeadModel,
     PretrainedConfig,
-    PreTrainedModel,
 )
-from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +77,7 @@ class ASCConfig(PretrainedConfig):
         warp_init_scale: float = 0.05,
         consistency_lambda: float = 0.3,
         ema_decay: float = 0.995,
+        backbone_config_overrides: Optional[Dict[str, int]] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -106,6 +86,7 @@ class ASCConfig(PretrainedConfig):
         self.warp_init_scale = warp_init_scale
         self.consistency_lambda = consistency_lambda
         self.ema_decay = ema_decay
+        self.backbone_config_overrides = backbone_config_overrides or {}
 
     @classmethod
     def for_size(cls, size: str, **kwargs) -> "ASCConfig":
@@ -196,7 +177,7 @@ class ASCForCausalLM(nn.Module):
         self.config = config
 
         # Backbone (online model — trained)
-        self.base = AutoModelForCausalLM.from_pretrained(config.base_model_name)
+        self.base = self._build_backbone(config)
         hidden_dim = self.base.config.hidden_size
 
         # LatentWarp (ASC-specific; tiny relative to backbone)
@@ -211,6 +192,22 @@ class ASCForCausalLM(nn.Module):
         self.target.eval()
         for p in self.target.parameters():
             p.requires_grad = False
+
+    @staticmethod
+    def _build_backbone(config: ASCConfig):
+        if config.base_model_name == "__tiny_gpt2__":
+            tiny_cfg = GPT2Config(
+                vocab_size=config.backbone_config_overrides.get("vocab_size", 256),
+                n_positions=config.backbone_config_overrides.get("n_positions", 64),
+                n_ctx=config.backbone_config_overrides.get("n_ctx", 64),
+                n_embd=config.backbone_config_overrides.get("n_embd", 64),
+                n_layer=config.backbone_config_overrides.get("n_layer", 2),
+                n_head=config.backbone_config_overrides.get("n_head", 4),
+                bos_token_id=0,
+                eos_token_id=1,
+            )
+            return GPT2LMHeadModel(tiny_cfg)
+        return AutoModelForCausalLM.from_pretrained(config.base_model_name)
 
     # ------------------------------------------------------------------
     # Forward
@@ -346,8 +343,10 @@ class ASCForCausalLM(nn.Module):
         return consist_out.loss
 
     def parameters_trainable(self):
-        """Return only base model parameters (not warp, not target).
-        Use model.warp.parameters() for the separate warp optimiser.
+        """Return only base-model parameters for the main optimizer.
+
+        The warp network is updated separately via `warp_ascent_loss()`.
+        The EMA target model is always frozen.
         """
         return list(self.base.parameters())
 

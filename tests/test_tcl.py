@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from epto_sdk_v54.tcl import (
+from tcl import (
     ThermalImportance,
     ThermalMemory,
     TCLRegularizer,

@@ -47,7 +47,7 @@ Key differences from EWC
 
 Usage
 -----
-    from epto_sdk_v54.tcl import ThermalImportance, ThermalMemory, TCLRegularizer
+    from tcl import ThermalImportance, ThermalMemory, TCLRegularizer
 
     memory = ThermalMemory(max_tasks=5)
 

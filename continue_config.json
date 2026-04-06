@@ -1,0 +1,19 @@
+{
+  "models": [
+    {
+      "title": "Local Coding AI",
+      "provider": "openai",
+      "model": "local-coding-ai",
+      "apiBase": "http://localhost:8000/v1",
+      "apiKey": "local"
+    },
+    {
+      "title": "Cruxy Researcher",
+      "provider": "openai",
+      "model": "local-coding-ai",
+      "apiBase": "http://localhost:8000/v1",
+      "apiKey": "local",
+      "systemMessage": "Separate facts, measured results, inferences, and hypotheses."
+    }
+  ]
+}
