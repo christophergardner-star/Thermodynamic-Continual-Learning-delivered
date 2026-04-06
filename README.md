@@ -11,6 +11,7 @@ Around those core methods, the repo also includes the intended local coding and 
 - local corpus preparation and lightweight coding evaluation
 - local serving helpers for Continue / OpenAI-compatible clients
 - `Cruxy`, a researcher loop that stores traces and classifies claims as fact, measured result, inference, or hypothesis
+- `TAR`, a TCL-Autonomous Researcher foundation with typed policy JSON, fail-fast thermodynamic governance, atomic recovery state, and a local operator interface
 
 ## Repository Contract
 
@@ -140,6 +141,107 @@ python self_train.py --db research_db.sqlite --output research_traces.jsonl --mi
 python build_researcher_dataset.py --db research_db.sqlite --output ./data/researcher_corpus.jsonl
 ```
 
+## TAR Lab
+
+The repository now includes a TAR foundation layer for running a safer autonomous lab loop around TCL/ASC experiments.
+
+Current TAR surface:
+
+- tri-role planning hierarchy: Director, Strategist, Scout
+- thermodynamic governor with `E`, `sigma`, `rho`, `||grad||`, activation-space `D_PR`, and equilibrium gating
+- atomic persistence via `tar_state/recovery.json` and `tar_state/knowledge_graph.json`
+- `logs/thermo_metrics.jsonl` and `logs/activity_audit.log`
+- dual-stream data preparation into `tar_state/data` with anchor and research manifests
+- local Chroma-backed vector memory with self-correction notes and trial retrieval
+- live research ingestion from arXiv plus optional RSS feeds
+- verification runs with seed sweeps, ablations, and calibration / ECE summaries
+- formal breakthrough reports with novelty, stability, calibration, and supporting research memory
+- Docker command composition with target caps of `40GB` RAM, `12` CPU cores, `1` GPU, automatically clamped to the Docker engine's actual limits
+- NVIDIA power/thermal preparation through `nvidia-smi -pl` and `nvidia-smi -gtt`
+- direct CLI, local socket control server, Streamlit sidecar, typed chat mode, and dry-run coverage
+- OpenAI-compatible local LLM wiring for Director, Strategist, and Scout with schema-repair retries
+- mounted training payload execution through `python -m tar_lab.train_template`
+- stateless activation telemetry in [`tar_lab/thermoobserver.py`](./tar_lab/thermoobserver.py)
+- optional wake-word voice control through [`tar_lab/voice.py`](./tar_lab/voice.py)
+
+Primary entrypoints:
+
+```bash
+python tar_cli.py --direct --dry-run --json
+python tar_cli.py --direct --status
+python tar_cli.py --direct --check-regime
+python tar_cli.py --direct --chat --message "Analyze the current stability" --json
+python tar_cli.py --direct --ingest-research --topic "current ai problems" --json
+python tar_cli.py --direct --verify-last-trial --json
+python tar_cli.py --direct --breakthrough-report --json
+python tar_cli.py --direct --live-docker-test --json
+python tar_cli.py --serve
+streamlit run dashboard.py
+streamlit run tar_dashboard.py
+```
+
+If Docker is installed but not visible on `PATH`, TAR also honors:
+
+```bash
+set TAR_DOCKER_BIN=C:\path\to\docker.exe
+```
+
+TAR also honors:
+
+```bash
+set TAR_CPU_LIMIT=8
+set TAR_MEMORY_LIMIT_GB=6
+set TAR_GPU_INDEX=0
+```
+
+`tar_cli.py` defaults `--workspace` to the repository directory, so invoking it by full path works from outside the repo.
+
+Local hierarchy configuration:
+
+```bash
+set TAR_LLM_BASE_URL=http://localhost:8000/v1
+set TAR_DIRECTOR_MODEL=your-70b-model
+set TAR_STRATEGIST_MODEL=your-30b-model
+set TAR_SCOUT_MODEL=your-14b-model
+set TAR_GPU_INDEX=1
+```
+
+Per-role overrides are also supported:
+
+```bash
+set TAR_DIRECTOR_BASE_URL=http://localhost:11434/v1
+set TAR_DIRECTOR_API_KEY=local
+```
+
+Control commands:
+
+```bash
+python tar_cli.py --direct --pivot --force --json
+python tar_cli.py --direct --explain --json
+python tar_cli.py --direct --panic --json
+python tar_cli.py --direct --chat --listen --wake-word lab --json
+```
+
+Dry-run scope:
+
+- validates the policy JSON contracts
+- composes the Docker launch command without requiring Docker
+- exercises recovery and knowledge-graph persistence
+- prepares `/data/anchor` and `/data/research` manifests for the payload
+- indexes metric, knowledge-graph, and self-correction history into the vector vault
+- drives the fail-fast governor on mock thermodynamic data, including `D_PR` and equilibrium state
+- verifies Pivot-Force after repeated fail-fast outcomes
+
+Live Docker smoke path:
+
+- pulls `pytorch/pytorch:latest`
+- mounts the repository into `/workspace`
+- mounts `tar_state/data` into `/data`
+- bootstraps the minimal payload dependency set inside the container and executes `python -m tar_lab.train_template`
+- applies the TAR runtime caps and GPU selection through the Docker runner
+- probes GPU visibility with `nvidia-smi -L` before the payload launch
+- writes thermodynamic metrics to `/workspace/logs/thermo_metrics.jsonl`
+
 ## Validation
 
 Current validated surface:
@@ -149,6 +251,7 @@ Current validated surface:
 - TCL unit tests
 - coding stack surface tests
 - researcher stack tests
+- TAR dry-run, live Docker path, memory, research-ingest, verification, and breakthrough-report tests
 
 Run the suite with:
 
@@ -158,7 +261,7 @@ python -m pytest tests -q
 
 Current expected count:
 
-- `64` tests
+- `93` tests
 
 Important boundary:
 
@@ -186,6 +289,15 @@ Important boundary:
 | [`self_train.py`](./self_train.py) | export high-quality research traces |
 | [`build_researcher_dataset.py`](./build_researcher_dataset.py) | build researcher corpus |
 | [`docs/research_status_panel.html`](./docs/research_status_panel.html) | simple status-panel source |
+| [`tar_cli.py`](./tar_cli.py) | TAR command and control CLI |
+| [`TCL_Orchestrator.py`](./TCL_Orchestrator.py) | TAR orchestration wrapper |
+| [`dashboard.py`](./dashboard.py) | TAR Streamlit sidecar |
+| [`tar_dashboard.py`](./tar_dashboard.py) | TAR Streamlit sidecar alias with regime telemetry |
+| [`tar_lab/`](./tar_lab) | TAR schemas, governor, state, hierarchy, control, and hardware adapters |
+| [`tar_lab/train_template.py`](./tar_lab/train_template.py) | mounted container payload for live TAR runs |
+| [`tar_lab/thermoobserver.py`](./tar_lab/thermoobserver.py) | activation telemetry, participation-ratio `D_PR`, and equilibrium tracking |
+| [`tar_lab/data_manager.py`](./tar_lab/data_manager.py) | TAR dual-stream dataset preparation and sharding |
+| [`tar_lab/memory/`](./tar_lab/memory) | TAR vector memory and background indexing support |
 
 ## Author
 

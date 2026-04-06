@@ -8,3 +8,11 @@ pytest
 vllm
 peft
 bitsandbytes
+pydantic
+streamlit
+docker
+faster-whisper
+openai
+chromadb
+sounddevice
+soundfile
