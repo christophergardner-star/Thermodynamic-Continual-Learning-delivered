@@ -1,4 +1,4 @@
-# Thermodynamic Continual Learning Delivered
+# Thermodynamic Continual Learning Delivered (ASC-TAR)
 
 This repository now contains a coherent research stack built around two core methods:
 
