@@ -19,6 +19,7 @@ datasets = status.get("datasets", {})
 memory = status.get("memory", {})
 regime = status.get("regime", {})
 runtime = status.get("runtime", {})
+sandbox_policy = runtime.get("sandbox_policy", {})
 latest_breakthrough = status.get("latest_breakthrough_report")
 latest_claim_verdict = status.get("latest_claim_verdict")
 latest_research_decision = status.get("latest_research_decision")
@@ -27,6 +28,9 @@ latest_problem_execution = status.get("latest_problem_execution")
 latest_problem_schedule = status.get("latest_problem_schedule")
 endpoints = status.get("endpoints", [])
 role_assignments = status.get("role_assignments", [])
+healthy_endpoints = [item for item in endpoints if (item.get("health") or {}).get("ok")]
+failed_endpoints = [item for item in endpoints if item.get("status") == "failed"]
+trusted_endpoints = [item for item in endpoints if item.get("trust_remote_code")]
 
 st.title("TAR Sidecar")
 
@@ -43,11 +47,15 @@ reg_col3.metric("Regime", regime.get("regime", "unknown"))
 bench_col1, bench_col2, bench_col3 = st.columns(3)
 bench_col1.metric("Benchmark", status.get("benchmark_name") or "n/a")
 bench_col2.metric("Benchmark Tier", status.get("benchmark_tier", "n/a"))
-bench_col3.metric("Canonical Comparable", status.get("canonical_comparable", False))
+bench_col3.metric("Benchmark Alignment", status.get("benchmark_alignment", "n/a"))
 
 bench_meta_col1, bench_meta_col2 = st.columns(2)
 bench_meta_col1.caption(f"Actual Benchmark Tiers: {', '.join(status.get('actual_benchmark_tiers', [])) or 'n/a'}")
-bench_meta_col2.caption(f"Benchmark Profiles: {len(status.get('frontier', {}).get('benchmark_profiles', {}))}")
+bench_meta_col2.caption(f"Truth Statuses: {', '.join(status.get('benchmark_truth_statuses', [])) or 'n/a'}")
+
+bench_meta_col3, bench_meta_col4 = st.columns(2)
+bench_meta_col3.caption(f"Canonical Comparable: {status.get('canonical_comparable', False)}")
+bench_meta_col4.caption(f"Benchmark Profiles: {len(status.get('frontier', {}).get('benchmark_profiles', {}))}")
 
 intel_col1, intel_col2, intel_col3, intel_col4, intel_col5, intel_col6 = st.columns(6)
 intel_col1.metric("Research Docs", status.get("research_documents", 0))
@@ -63,15 +71,21 @@ runtime_col2.metric("Active Leases", len(runtime.get("active_leases", [])))
 runtime_col3.metric("Retry Waiting", len(runtime.get("retry_waiting", [])))
 runtime_col4.metric("Alerts", len(runtime.get("alerts", [])))
 
-runtime_meta_col1, runtime_meta_col2, runtime_meta_col3 = st.columns(3)
+runtime_meta_col1, runtime_meta_col2, runtime_meta_col3, runtime_meta_col4 = st.columns(4)
 runtime_meta_col1.caption(f"Image Tag: {status.get('image_tag') or 'n/a'}")
 runtime_meta_col2.caption(f"Manifest Hash: {status.get('manifest_hash') or 'n/a'}")
 runtime_meta_col3.caption(f"Sandbox Mode: {status.get('safe_execution_mode') or 'n/a'}")
+runtime_meta_col4.caption(f"Sandbox Profile: {sandbox_policy.get('profile') or status.get('sandbox_profile') or 'n/a'}")
 
 agent_col1, agent_col2, agent_col3 = st.columns(3)
 agent_col1.metric("Endpoints", len(endpoints))
 agent_col2.metric("Role Assignments", len(role_assignments))
 agent_col3.metric("Claim Verdicts", status.get("claim_verdicts", 0))
+
+endpoint_col1, endpoint_col2, endpoint_col3 = st.columns(3)
+endpoint_col1.metric("Healthy Endpoints", len(healthy_endpoints))
+endpoint_col2.metric("Failed Endpoints", len(failed_endpoints))
+endpoint_col3.metric("Remote-Code Trusted", len(trusted_endpoints))
 
 st.subheader("Thermodynamic State")
 if metrics:
@@ -99,6 +113,9 @@ st.json(regime)
 
 st.subheader("Runtime")
 st.json(runtime)
+
+st.subheader("Sandbox Policy")
+st.json(sandbox_policy)
 
 info_col1, info_col2 = st.columns(2)
 with info_col1:

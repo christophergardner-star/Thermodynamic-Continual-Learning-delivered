@@ -1,341 +1,439 @@
-# Frontier Implementation Roadmap
+# Post-Audit Remediation Roadmap
 
-This roadmap converts the current TAR/ASC stack into a scientifically honest,
-reproducible, frontier-grade research system. The milestone order is strict:
-later milestones assume the acceptance criteria of earlier milestones have been
-met.
+This is the authoritative roadmap after the full-system audit. Workstreams 1-7
+are considered closed at the roadmap level. This document governs the
+remediation phase required to bring the current stack from "implemented" to
+"scientifically and operationally trustworthy."
 
-## Milestone Order
+## Program Basis
 
-1. Workstream 1: Scientific Contract Cleanup
-2. Workstream 2: Statistical Payload Validity
-3. Workstream 3: Real Data and Backend Provenance
-4. Workstream 4: Literature and Retrieval Stack
-5. Workstream 5: Canonical Benchmark Harnesses
-6. Workstream 6: Runtime, Reproducibility, and Safety
-7. Workstream 7: Inference Bridge and Research-Agent Discipline
+The estimates and sequencing below assume:
 
-## Workstream 1: Scientific Contract Cleanup
+- one primary developer
+- laptop-first implementation and test closure
+- workstation / RunPod used only for final scale validation in `WS16`
+- "done" includes code, tests, docs, and operator-surface truthfulness
 
-### Goal
+Every remediation workstream closes only when:
 
-Stop the repository from presenting scientifically invalid paths as canonical.
+- the code path is fixed
+- the failure is covered by regression tests
+- CLI / dashboard / reports reflect the new truth
+- laptop-safe validation passes first
+- workstation / RunPod is used for scale confirmation, not correctness excuses
 
-### File-by-file targets
+## Current State
 
-- `asc_train.py`
-  Quarantine legacy script and fail fast with a scientific-validity error.
-- `asc_train_cpu.py`
-  Quarantine legacy script and fail fast with a scientific-validity error.
-- `asc_train_full.py`
-  Declare as the canonical ASC training path in docs and CLI references.
-- `deepseek_asc_finetune.py`
-  Mark as experimental and print runtime warnings about masking, device
-  placement, and scaling limits.
-- `README.md`
-  Point only to scientifically valid public entrypoints.
-- `docs/implementation_roadmap.md`
-  Serve as the authoritative execution roadmap for the remaining workstreams.
+- `Workstreams 1-7`: closed at the roadmap level
+- post-audit remediation required: `WS8-WS16`
 
-### Acceptance criteria
+## Milestone Table
 
-- Invalid ASC entrypoints cannot be run without an explicit scientific-validity
-  failure.
-- Public documentation names one canonical ASC trainer.
-- Experimental paths are explicitly labeled as such in both code and docs.
+| WS | Title | Priority | Depends On | Est. Effort | Why It Matters | Hard Acceptance Gate |
+| --- | --- | --- | --- | --- | --- | --- |
+| `WS8` | Vault Migration And Memory Integrity | `P0` | none | `2-4 days` | Fixes broken operator commands and restores TAR usability | `--status`, `--dry-run`, and `--study-problem` no longer crash on embedder mismatch; migration/rebuild path is explicit and tested |
+| `WS11` | Claim Verdict Integrity | `P0` | none | `1-2 days` | Stops incorrect research verdicts from borrowing unrelated comparability state | verdicts are trial-local, benchmark-local, deterministic, and regression-tested |
+| `WS12` | Reproducibility Hardening | `P0` | none | `1-2 days` | Prevents "locked" environments from drifting silently | no bare package names in locked manifests; manifest generation fails closed if versions are missing |
+| `WS9` | Benchmark Truthfulness And Canonical Alignment | `P1` | `WS8`, `WS12` recommended | `4-7 days` | Aligns benchmark labels with actual executors | every canonical benchmark either has a real executor or is downgraded/refused; reports are externally honest |
+| `WS10` | QML Canonical Closure | `P1` | `WS9` | `2-4 days` | Closes the strongest canonical/proxy contradiction | no canonical QML path uses `analytic_proxy`; missing quantum stack causes refusal |
+| `WS13` | Runtime Sandbox Tightening | `P1` | `WS12` | `2-3 days` | Brings runtime writes in line with the stated safety model | production runs use read-only source mounts plus explicit artifact dirs; tests prove write-scope enforcement |
+| `WS14` | Inference Safety And Observability | `P2` | `WS12` | `2-3 days` | Makes endpoint failures diagnosable and safer | endpoint logs retained, health failures surfaced, `trust_remote_code` explicit or removed |
+| `WS15` | Test Suite Gap Closure | `P0` continuous, final gate | `WS8-WS14` | `2-4 days` | Prevents audit-class failures from recurring | every audited defect has a regression test that fails pre-fix and passes post-fix |
+| `WS16` | Workstation / RunPod Validation | `P0` final sign-off | `WS8-WS15` | `3-6 days` | Confirms fixes survive real scale and real hardware | canonical runs, endpoint lifecycle, scheduler endurance, and claim integrity all validated on real infra |
 
-### Tests
+## Critical Path
 
-- Subprocess test that `asc_train.py` fails with a scientific-validity message.
-- Subprocess test that `asc_train_cpu.py` fails with a scientific-validity
-  message.
-- Subprocess test that `deepseek_asc_finetune.py --dry_run` prints an
-  experimental warning.
+1. `WS8`
+2. `WS11`
+3. `WS12`
+4. `WS9`
+5. `WS10`
+6. `WS13`
+7. `WS14`
+8. `WS15`
+9. `WS16`
 
-## Workstream 2: Statistical Payload Validity
+## Detailed Workstream Breakdown
 
-### Goal
+### `WS8`: Vault Migration And Memory Integrity
 
-Make TAR's default payload scientifically defensible instead of toy-valid.
+**Purpose**
 
-### File-by-file targets
+Repair the broken operator surface caused by vector-store and embedder
+incompatibility.
 
-- `tar_lab/train_template.py`
-  Replace one-batch anchor and calibration estimates with multi-batch rolling
-  estimators and confidence intervals. Add checkpoint resume and explicit split
-  handling.
-- `tar_lab/governor.py`
-  Consume rolling windows instead of single-step snapshots.
-- `tar_lab/verification.py`
-  Base verification on sample windows and confidence bounds, not one minibatch.
-- `tar_lab/schemas.py`
-  Add statistical summary fields for means, variances, windows, and confidence
-  intervals.
-- `tar_lab/orchestrator.py`
-  Promote the default payload from `__tiny_gpt2__` to a small but real research
-  baseline and record statistical provenance in reports.
-- `tests/test_tar_foundation.py`
-  Add tests for rolling metrics, resume behavior, and split-aware payload
-  reporting.
+**Deliverables**
 
-### Acceptance criteria
+- vector-store versioning
+- embedder identity and dimension persistence
+- mismatch detection before Chroma upsert/query
+- safe migrate / rebuild / quarantine flow
+- operator-safe repair messaging
 
-- Default TAR runs report confidence intervals for calibration and `D_PR`.
-- The governor makes decisions on rolling windows.
-- Payload resumes correctly from checkpoints.
-- Reports explicitly state train/val/test split usage.
+**Main files**
 
-### Tests
-
-- Unit tests for rolling `D_PR` and calibration estimators.
-- Resume test that continues from a saved payload checkpoint.
-- Integration test confirming governor action changes only after windowed
-  threshold breach.
-
-## Workstream 3: Real Data and Backend Provenance
-
-### Goal
-
-Replace silent fallback science with explicit data regimes and real backend
-   routing.
-
-### File-by-file targets
-
-- `tar_lab/data_manager.py`
-  Introduce explicit modes: `offline_fallback`, `cached_real`,
-  `download_real`. Remove silent tokenizer fallback from research-facing runs.
-- `tar_lab/experiment_backends.py`
-  Expand real backend adapters for ASC text, coding ASC, CV, RL, graph ML, QML,
-  and generic supervised training.
-- `tar_lab/orchestrator.py`
-  Record backend, corpus, tokenizer, and data mode in every trial report.
-- `tar_lab/schemas.py`
-  Add provenance fields for dataset, tokenizer, cache mode, and backend.
-- `tar_lab/train_template.py`
-  Refuse ambiguous fallback mode unless a run is explicitly tagged as plumbing.
-- `README.md`
-  Document the data-mode contract.
-
-### Acceptance criteria
-
-- Every run report names the exact corpus, tokenizer, backend, and data mode.
-- Silent fallback is gone from research-facing runs.
-- All named backends have explicit registry entries.
-
-### Tests
-
-- Data-mode tests for each regime.
-- Provenance serialization tests.
-- Payload failure test when a research run requests silent fallback behavior.
-
-## Workstream 4: Literature and Retrieval Stack
-
-### Goal
-
-Build a paper-grade evidence layer that can support literature-grounded planning.
-
-### File-by-file targets
-
-- `tar_lab/literature_engine.py`
-  Add page rendering fallback, OCR over rendered pages, claim spans with page
-  references, figure-caption linking, and citation graph extraction.
 - `tar_lab/memory/vault.py`
-  Make semantic embeddings the default, add hybrid dense/lexical retrieval,
-  reranking, structured claim indexing, contradiction tracking, and evidence
-  clustering.
-- `tar_lab/research_ingest.py`
-  Preserve source provenance and ingest richer paper metadata.
+- `tar_lab/orchestrator.py`
 - `tar_lab/state.py`
-  Persist citation graphs, claim spans, and contradiction clusters.
-- `tar_lab/hierarchy.py`
-  Force recommendations to cite underlying source spans.
-- `tests/test_tar_foundation.py`
-  Add retrieval-grounding tests and citation-span persistence tests.
+- `tar_cli.py`
 
-### Acceptance criteria
+**Tests**
 
-- Every recommendation can cite source passages or claim spans.
-- Scanned PDFs can be ingested through page rendering + OCR.
-- Retrieval quality is no longer dependent on hash embeddings by default.
+- embedder mismatch recovery
+- stale collection migration
+- idempotent sync after migration
 
-### Tests
+**Exit**
 
-- PDF ingestion tests with rendered-page fallback.
-- Claim/citation graph roundtrip tests.
-- Retrieval ranking tests on known scientific query sets.
+- live commands are usable again on this laptop
 
-## Workstream 5: Canonical Benchmark Harnesses
+### `WS11`: Claim Verdict Integrity
 
-### Goal
+**Purpose**
 
-Replace proxies with named, comparable benchmark suites.
+Make claim acceptance strictly trial-local and evidence-local.
 
-### File-by-file targets
+**Deliverables**
+
+- verdict inputs bound to exact trial/problem execution
+- canonical comparability sourced only from that execution
+- verdict provenance links
+
+**Main files**
+
+- `tar_lab/orchestrator.py`
+- `tar_lab/verification.py`
+- `tar_lab/schemas.py`
+- `tar_lab/state.py`
+
+**Tests**
+
+- unrelated later studies do not alter an earlier verdict
+- verdict provenance must include trial and benchmark references
+
+**Exit**
+
+- claim acceptance is machine-local, not global-state-local
+
+### `WS12`: Reproducibility Hardening
+
+**Purpose**
+
+Make locked environments actually locked.
+
+**Deliverables**
+
+- strict dependency pinning
+- hard failure when version metadata is missing
+- reproducibility completeness becomes trustworthy
+
+**Main files**
+
+- `tar_lab/reproducibility.py`
+- `tar_lab/docker_runner.py`
+- `tar_lab/schemas.py`
+
+**Tests**
+
+- unpinned package rejection
+- stable manifest hashing
+
+**Exit**
+
+- "locked" means fully pinned or refused
+
+### `WS9`: Benchmark Truthfulness And Canonical Alignment
+
+**Purpose**
+
+Stop canonical benchmark names from overstating what the executor actually runs.
+
+**Deliverables**
+
+- benchmark truth table across all domains
+- benchmark relabeling or executor upgrades
+- canonical comparability tied to true executors only
+
+**Main files**
 
 - `tar_lab/science_exec.py`
-  Wire canonical suites for NLP, CV, RL, graph ML, QML, and generic ML.
-- `science_profiles/*.json`
-  Map each profile to named benchmark suites and dataset contracts.
+- `tar_lab/science_profiles.py`
+- `science_profiles/`
 - `tar_lab/problem_runner.py`
-  Enforce benchmark-specific execution contracts and artifact capture.
-- `tar_lab/schemas.py`
-  Add benchmark provenance and version fields.
-- `README.md`
-  Document named benchmark coverage and what is still out of scope.
 
-### Acceptance criteria
+**Tests**
 
-- Every domain profile maps to named benchmark suites.
-- Results are comparable to published literature, not just internal proxies.
-- Reports record benchmark versions and dataset provenance.
+- benchmark ID/executor consistency
+- canonical refusal when a real suite is unavailable
 
-### Tests
+**Exit**
 
-- Benchmark smoke tests for each domain adapter.
-- Artifact-format tests for saved benchmark outputs.
-- Provenance tests for suite name, dataset version, and split coverage.
+- no domain overclaims canonical status
 
-## Workstream 6: Runtime, Reproducibility, and Safety
+### `WS10`: QML Canonical Closure
 
-### Goal
+**Purpose**
 
-Make the lab durable, reproducible, and bounded under failure.
+Finish the quantum path so no benchmark labeled canonical falls back to analytic
+proxy behavior.
 
-### File-by-file targets
+**Deliverables**
 
-- `tar_lab/docker_runner.py`
-  Remove runtime package mutation and use locked images only.
-- `tar_lab/reproducibility.py`
-  Produce image manifests, dependency lockfiles, and environment hashes.
-- `tar_lab/scheduler.py`
-  Add retries, backoff, and lease-aware job execution.
-- `tar_lab/runtime_daemon.py`
-  Add heartbeat ownership, orphan recovery, and alert hooks.
-- `tar_lab/safe_exec.py`
-  Restrict generated-code execution to Docker-only sandboxed runs with explicit
-  mount and network policy.
-- `researcher_agent.py`
-  Remove any host-side raw Python execution path.
+- real PennyLane/Qiskit-backed canonical noise benchmark
+- no analytic proxy in canonical QML
 
-### Acceptance criteria
+**Main files**
 
-- Any run is reproducible from a manifest and locked environment.
-- Runtime failures are bounded, logged, and recoverable.
-- No autonomous code executes unsandboxed on the host.
+- `tar_lab/science_exec.py`
+- `science_profiles/quantum_ml.json`
 
-### Tests
+**Tests**
 
-- Manifest/hash reproducibility tests.
-- Scheduler retry/backoff tests.
-- Stale-job recovery tests.
-- Sandbox policy tests for allowed mounts and blocked host execution.
+- canonical QML selects the real backend
+- missing quantum deps cause refusal
 
-## Workstream 7: Inference Bridge and Research-Agent Discipline
+**Exit**
 
-### Goal
+- QML canonical path is scientifically honest
 
-Turn TAR from a smart shell into a disciplined evidence-driven research
-operator.
+### `WS13`: Runtime Sandbox Tightening
 
-### File-by-file targets
+**Purpose**
 
-- `tar_lab/inference_bridge.py`
-  Add endpoint lifecycle, health checks, and role-aware model assignment.
-- `serve_local.py`
-  Support managed local serving contracts and health endpoints.
+Bring actual runtime mounts and write surfaces into line with the documented
+safety model.
+
+**Deliverables**
+
+- read-only source mounts by default
+- explicit writable artifact mounts
+- visible mount policy in runtime status
+
+**Main files**
+
 - `tar_lab/hierarchy.py`
-  Replace heuristic planning with evidence-grounded hypothesis generation and
-  contradiction-aware updates.
-- `tar_lab/orchestrator.py`
-  Enforce research claim acceptance rules before promotion.
-- `tar_lab/schemas.py`
-  Add claim-acceptance thresholds and evidence gating structures.
-- `README.md`
-  Document the research claim contract.
+- `tar_lab/docker_runner.py`
+- `tar_lab/safe_exec.py`
 
-### Acceptance criteria
+**Tests**
 
-- Role endpoints are discoverable, health-checked, and lifecycle-managed.
-- Director/Strategist/Scout planning is grounded in evidence and contradiction
-  checks.
-- Breakthrough claims require minimum seed count, ablation gap, calibration
-  threshold, and literature support.
+- writes outside artifact dirs fail
+- dev mode vs production mode is explicit
 
-### Tests
+**Exit**
 
-- Endpoint registry and health-check tests.
-- Planning tests that fail when evidence is missing.
-- Claim-acceptance tests for seeds, ablations, calibration, and literature
-  support.
+- runtime safety claims match actual mount behavior
 
-## Unified Test Plan
+### `WS14`: Inference Safety And Observability
 
-### Scientific-math tests
+**Purpose**
 
-- ASC min-max correctness
-- rolling `D_PR`
-- rolling calibration / ECE
-- equilibrium-gate activation
-- quenching detection
-- seed variance and ablation thresholds
+Harden the managed endpoint layer so failures are diagnosable and remote-code
+risk is explicit.
 
-### Data and provenance tests
+**Deliverables**
 
-- dataset mode selection
-- tokenizer provenance capture
-- benchmark provenance capture
-- report serialization and persistence
+- endpoint log capture
+- structured health/failure records
+- reduced or explicitly controlled `trust_remote_code`
 
-### Literature and retrieval tests
+**Main files**
 
-- PDF ingestion
-- OCR fallback
-- claim span extraction
-- citation graph extraction
-- contradiction clustering
-- dense + lexical retrieval ranking
+- `serve_local.py`
+- `tar_lab/inference_bridge.py`
+- `tar_cli.py`
+- `dashboard.py`
 
-### Runtime and safety tests
+**Tests**
 
-- locked-image execution
-- scheduler retries/backoff
-- stale-job cleanup
-- heartbeat ownership
-- sandbox policy enforcement
+- failing endpoint retains logs
+- health transitions are persisted and visible
 
-### End-to-end system tests
+**Exit**
 
-- ASC canonical run
-- TAR payload run
-- problem-study run
-- benchmark execution run
-- literature-grounded recommendation run
+- inference failures are diagnosable, not silent
 
-## What We Build First This Week
+### `WS15`: Test Suite Gap Closure
 
-1. Workstream 1 in full
-2. Workstream 2 statistical payload validity
-3. Workstream 3 explicit data modes and provenance
-4. The first half of Workstream 4:
-   semantic retrieval defaults
-   citation-span persistence
-   rendered-page OCR fallback
+**Purpose**
 
-## What Comes Later
+Bring the tests up to the actual failure modes surfaced by the audit.
 
-- Full canonical benchmark expansion across all domains
-- lease-aware long-run runtime service and alerting
-- complete locked-image pipeline for all backend families
-- first-class inference lifecycle and claim-acceptance gates
-- deeper literature contradiction reasoning and evidence clustering
+**Deliverables**
 
-## Exit Standard
+- audit-regression suite
+- explicit red-team style cases
 
-The stack is considered fixed only when:
+**Main files**
 
-- default runs are scientifically honest
-- outputs are benchmark-comparable
-- literature grounding is traceable
-- retrieval is semantically strong
-- runtime is reproducible
-- autonomy is evidence-constrained
+- `tests/`
+
+**Tests to add**
+
+- vector-store migration
+- benchmark truthfulness
+- verdict locality
+- manifest pinning
+- sandbox write restrictions
+- endpoint observability
+
+**Exit**
+
+- the current audit findings become permanent regression coverage
+
+### `WS16`: Workstation / RunPod Validation
+
+**Purpose**
+
+Confirm that the corrected stack holds up under real hardware, real models, and
+real workload scale.
+
+**Deliverables**
+
+- real-hardware validation report
+- canonical benchmark execution evidence
+- endpoint lifecycle endurance
+- scheduler endurance
+
+**Environment**
+
+- workstation / RunPod
+
+**Exit**
+
+- final deployment decision backed by real-scale evidence
+
+## Suggested Sprinting
+
+### Sprint A
+
+- `WS8`
+- `WS11`
+- `WS12`
+
+**Goal**
+
+Restore correctness of the operator surface, verdict integrity, and locked
+manifests.
+
+### Sprint B
+
+- `WS9`
+- `WS10`
+
+**Goal**
+
+Make benchmark claims scientifically honest.
+
+### Sprint C
+
+- `WS13`
+- `WS14`
+- `WS15`
+
+**Goal**
+
+Harden runtime safety and close the regression gap.
+
+### Sprint D
+
+- `WS16`
+
+**Goal**
+
+Real-world validation and final sign-off.
+
+## Estimated Total Effort
+
+- laptop remediation: `15-29 focused engineering days`
+- workstation / RunPod validation: `3-6 days`
+- total program estimate: `18-35 days`
+
+## Go / No-Go Gates
+
+- after `WS8-WS12`: operator correctness gate
+- after `WS9-WS10`: scientific honesty gate
+- after `WS13-WS15`: infrastructure confidence gate
+- after `WS16`: deployment gate
+
+## Sign-off Standard
+
+The remediation program is complete only when:
+
+- live operator commands work reliably again
+- canonical benchmark claims match actual execution
+- reproducibility fails closed instead of drifting
+- claim acceptance is trial-local and evidence-bound
+- runtime write scope is materially constrained
+- inference endpoints are diagnosable and safer
+- workstation validation confirms the repaired stack under real conditions
+
+## Post-WS16 Follow-On Backlog
+
+The following items are intentionally out of the current remediation critical
+path, but they are explicitly retained for the next roadmap phase after `WS16`.
+They were raised as open design questions during the audit and should be
+treated as first-class future work, not informal notes.
+
+### Candidate `WS17`: Autonomous Portfolio Control And Evidence Budgeting
+
+**Purpose**
+
+Add a true research-portfolio controller so TAR can decide how long to stay on a
+problem, when to pause it, when to escalate falsification effort, and when to
+switch to another queued problem under explicit evidence and utility rules.
+
+**Questions saved for this workstream**
+
+- Is there a per-problem time budget or evidence budget?
+- What explicit stopping criteria determine when TAR should put a problem down?
+- How should TAR prioritize among multiple open problems?
+- Should TAR automatically switch to the next problem when expected information
+  gain or priority is higher?
+- Should TAR hold meta-tests or micro-experiments specifically to challenge its
+  own claims before promotion?
+- How should falsification pressure, replication effort, and benchmark cost be
+  balanced against exploration speed?
+
+**Expected design themes**
+
+- per-problem wall-clock and compute budgets
+- evidence-budget accounting
+- explicit stop / continue / retry / pivot decisions
+- portfolio scheduling beyond simple queue priority
+- automatic escalation from heuristic planning to targeted falsification tests
+- meta-experiment generation for truth-proving
+- expected-information-gain or uncertainty-reduction based prioritization
+
+**Closure standard**
+
+This future workstream closes only when TAR can honestly say:
+
+- why it stayed on a problem
+- why it stopped
+- why it switched
+- what evidence budget it spent
+- what falsification or replication tests it ran before accepting a claim
+
+### Deferred Extension: Academic Writing Handoff
+
+This is a separate future extension and is not part of the current remediation
+sequence.
+
+**Intent**
+
+Once TAR is producing credible, verification-backed findings, it should be able
+to hand structured evidence, results, provenance, and contradictions to a
+writer subsystem that can produce publication-grade academic drafts.
+
+**Constraint**
+
+This must remain downstream of:
+
+- benchmark honesty
+- verdict integrity
+- reproducibility integrity
+- workstation-scale validation
+
+The writer should consume verified findings; it should not be used to create the
+appearance of rigor ahead of the actual evidence base.

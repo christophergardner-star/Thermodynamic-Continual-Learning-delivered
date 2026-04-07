@@ -10,7 +10,7 @@ from threading import Event, Thread
 from time import sleep
 from typing import Any, Iterable, Optional
 
-from tar_lab.errors import ScientificValidityError
+from tar_lab.errors import MemoryIntegrityError, MemoryRebuildRequiredError, ScientificValidityError
 from tar_lab.schemas import (
     BibliographyEntry,
     BreakthroughReport,
@@ -21,6 +21,7 @@ from tar_lab.schemas import (
     KnowledgeGraphEntry,
     KnowledgeGraphState,
     LiteratureCapabilityReport,
+    MemoryStoreManifest,
     MemorySearchHit,
     PaperArtifact,
     ProblemExecutionReport,
@@ -28,6 +29,7 @@ from tar_lab.schemas import (
     ResearchDocument,
     SelfCorrectionNote,
     VerificationReport,
+    utc_now_iso,
 )
 from tar_lab.state import TARStateStore
 
@@ -43,6 +45,8 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 DEFAULT_EMBEDDER_MODEL = "BAAI/bge-small-en-v1.5"
+MEMORY_SCHEMA_VERSION = 1
+LEGACY_COLLECTION_NAME = "lab_history"
 
 
 class LexicalProjectionEmbedder:
@@ -54,6 +58,10 @@ class LexicalProjectionEmbedder:
         self.model_name = "lexical-semantic-fallback"
         self._index = {char: idx for idx, char in enumerate(self._alphabet)}
         self._dim = len(self._alphabet) * len(self._alphabet)
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
 
     def embed(self, text: str) -> list[float]:
         normalized = re.sub(r"[^a-z0-9]+", " ", text.lower())
@@ -75,6 +83,7 @@ class SemanticEmbedder:
             raise RuntimeError("sentence-transformers is not installed")
         self.model_name = model_name
         self.model = self._load_model(model_name, allow_download=allow_download)
+        self._dimension: Optional[int] = None
 
     def _load_model(self, model_name: str, *, allow_download: bool):
         kwargs = {"device": "cpu"}
@@ -90,6 +99,12 @@ class SemanticEmbedder:
         if hasattr(vector, "tolist"):
             vector = vector.tolist()
         return [float(item) for item in vector]
+
+    @property
+    def dimension(self) -> int:
+        if self._dimension is None:
+            self._dimension = len(self.embed("vector dimension probe"))
+        return self._dimension
 
 
 class ScientificReranker:
@@ -153,28 +168,153 @@ class VectorVault:
         self.db_dir = self.store.state_dir / "memory"
         self.db_dir.mkdir(parents=True, exist_ok=True)
         self.client = chromadb.PersistentClient(path=str(self.db_dir))
-        self.collection = self.client.get_or_create_collection(
-            name="lab_history",
-            metadata={"space": "cosine"},
-        )
         self.claim_clusters_path = self.db_dir / "claim_clusters.json"
         self.claim_conflicts_path = self.db_dir / "claim_conflicts.json"
         self.embedder = self._resolve_embedder()
         self.embedder_name = getattr(self.embedder, "model_name", DEFAULT_EMBEDDER_MODEL)
+        self.embedding_dim = self._embedding_dimension(self.embedder)
         self.reranker = ScientificReranker()
         self.reranker_name = self.reranker.name
+        self.memory_manifest = self._resolve_memory_manifest()
+        self.collection = self._bind_collection(self.memory_manifest.collection_name)
 
     def stats(self) -> dict[str, Any]:
+        manifest = self.memory_manifest
         return {
             "documents": self.collection.count(),
             "path": str(self.db_dir),
+            "collection_name": manifest.collection_name,
+            "schema_version": manifest.schema_version,
+            "fingerprint": manifest.fingerprint,
             "embedder": self.embedder_name,
+            "embedding_dim": self.embedding_dim,
             "semantic_research_ready": getattr(self, "semantic_ready", False),
             "reranker": self.reranker_name,
             "reranker_ready": True,
             "claim_clusters": len(self._load_claim_clusters()),
             "claim_conflicts": len(self._load_claim_conflicts()),
+            "state": manifest.state,
+            "rebuild_required": manifest.state in {"rebuild_required", "rebuilding"},
+            "last_rebuild_at": manifest.last_rebuild_at,
+            "last_error": manifest.last_error,
+            "retired_collections": list(manifest.retired_collection_names),
         }
+
+    def _list_collection_names(self) -> list[str]:
+        rows = self.client.list_collections()
+        names: list[str] = []
+        for item in rows:
+            if isinstance(item, str):
+                names.append(item)
+            else:
+                name = getattr(item, "name", None)
+                if name:
+                    names.append(str(name))
+        return sorted(set(names))
+
+    def _embedding_dimension(self, embedder: Any) -> int:
+        dimension = getattr(embedder, "dimension", None)
+        if isinstance(dimension, int) and dimension > 0:
+            return dimension
+        vector = embedder.embed("vector dimension probe")
+        return max(1, len(vector))
+
+    def _collection_fingerprint(self) -> str:
+        payload = f"{MEMORY_SCHEMA_VERSION}|{self.embedder_name}|{self.embedding_dim}"
+        return blake2b(payload.encode("utf-8"), digest_size=8).hexdigest()
+
+    def _collection_name(self, fingerprint: str) -> str:
+        return f"lab_history__{fingerprint}"
+
+    def _bind_collection(self, collection_name: str):
+        return self.client.get_or_create_collection(
+            name=collection_name,
+            metadata={"space": "cosine"},
+        )
+
+    def _save_memory_manifest(self, manifest: MemoryStoreManifest) -> MemoryStoreManifest:
+        try:
+            self.store.save_memory_manifest(manifest)
+        except PermissionError:
+            stored = self.store.load_memory_manifest()
+            if stored is not None:
+                self.memory_manifest = stored
+                return stored
+            raise
+        stored = self.store.load_memory_manifest()
+        self.memory_manifest = stored if stored is not None else manifest
+        return self.memory_manifest
+
+    def _resolve_memory_manifest(self) -> MemoryStoreManifest:
+        fingerprint = self._collection_fingerprint()
+        collection_name = self._collection_name(fingerprint)
+        existing = self.store.load_memory_manifest()
+        collection_names = self._list_collection_names()
+        retired = set(existing.retired_collection_names if existing is not None else [])
+
+        if existing is not None and existing.fingerprint == fingerprint:
+            state = existing.state
+            if existing.collection_name not in collection_names:
+                state = "rebuild_required"
+            manifest = existing.model_copy(
+                update={
+                    "collection_name": existing.collection_name,
+                    "embedder_name": self.embedder_name,
+                    "embedding_dim": self.embedding_dim,
+                    "semantic_research_ready": getattr(self, "semantic_ready", False),
+                    "state": state,
+                }
+            )
+            return self._save_memory_manifest(manifest)
+
+        if existing is not None:
+            retired.add(existing.collection_name)
+        if LEGACY_COLLECTION_NAME in collection_names and LEGACY_COLLECTION_NAME != collection_name:
+            retired.add(LEGACY_COLLECTION_NAME)
+
+        manifest = MemoryStoreManifest(
+            fingerprint=fingerprint,
+            collection_name=collection_name,
+            embedder_name=self.embedder_name,
+            embedding_dim=self.embedding_dim,
+            semantic_research_ready=getattr(self, "semantic_ready", False),
+            state="rebuild_required",
+            retired_collection_names=sorted(retired),
+        )
+        return self._save_memory_manifest(manifest)
+
+    def begin_rebuild(self) -> None:
+        if self.memory_manifest.state == "rebuilding":
+            return
+        self._save_memory_manifest(
+            self.memory_manifest.model_copy(
+                update={
+                    "state": "rebuilding",
+                    "last_error": None,
+                }
+            )
+        )
+
+    def complete_rebuild(self) -> None:
+        self._save_memory_manifest(
+            self.memory_manifest.model_copy(
+                update={
+                    "state": "healthy",
+                    "last_rebuild_at": utc_now_iso(),
+                    "last_error": None,
+                }
+            )
+        )
+
+    def mark_degraded(self, message: str) -> None:
+        self._save_memory_manifest(
+            self.memory_manifest.model_copy(
+                update={
+                    "state": "degraded",
+                    "last_error": message,
+                }
+            )
+        )
 
     def index_metric(self, metric: GovernorMetrics) -> None:
         document_id = f"metric:{metric.trial_id}:{metric.step}"
@@ -486,12 +626,21 @@ class VectorVault:
         )
 
     def _upsert(self, document_id: str, document: str, metadata: dict[str, Any]) -> None:
-        self.collection.upsert(
-            ids=[document_id],
-            documents=[document],
-            metadatas=[metadata],
-            embeddings=[self.embedder.embed(document)],
-        )
+        try:
+            self.collection.upsert(
+                ids=[document_id],
+                documents=[document],
+                metadatas=[metadata],
+                embeddings=[self.embedder.embed(document)],
+            )
+        except Exception as exc:  # pragma: no cover - backend-specific failure path
+            message = (
+                "TAR vector memory collection is incompatible with the active embedder. "
+                f"collection={self.memory_manifest.collection_name} "
+                f"embedder={self.embedder_name} dim={self.embedding_dim}: {exc}"
+            )
+            self.mark_degraded(message)
+            raise MemoryIntegrityError(message) from exc
 
     def _resolve_embedder(self) -> Any:
         model_name = os.environ.get("TAR_EMBEDDER_MODEL", DEFAULT_EMBEDDER_MODEL).strip() or DEFAULT_EMBEDDER_MODEL
@@ -820,60 +969,71 @@ class MemoryIndexer:
             self._thread = None
 
     def sync_once(self) -> None:
-        metrics_path = self.store.metrics_log_path
-        if metrics_path.exists():
-            current_mtime = metrics_path.stat().st_mtime
-            if self._metrics_mtime != current_mtime:
-                for metric in self.store.iter_metrics():
-                    self.vault.index_metric(metric)
-                self._metrics_mtime = current_mtime
+        if self.vault.memory_manifest.state in {"rebuild_required", "degraded"}:
+            self.vault.begin_rebuild()
+        try:
+            metrics_path = self.store.metrics_log_path
+            if metrics_path.exists():
+                current_mtime = metrics_path.stat().st_mtime
+                if self._metrics_mtime != current_mtime:
+                    for metric in self.store.iter_metrics():
+                        self.vault.index_metric(metric)
+                    self._metrics_mtime = current_mtime
 
-        graph_path = self.store.knowledge_graph_path
-        if graph_path.exists():
-            current_mtime = graph_path.stat().st_mtime
-            if self._graph_mtime != current_mtime:
-                self.vault.index_knowledge_graph(self.store.load_knowledge_graph())
-                self._graph_mtime = current_mtime
+            graph_path = self.store.knowledge_graph_path
+            if graph_path.exists():
+                current_mtime = graph_path.stat().st_mtime
+                if self._graph_mtime != current_mtime:
+                    self.vault.index_knowledge_graph(self.store.load_knowledge_graph())
+                    self._graph_mtime = current_mtime
 
-        research_path = self.store.research_intel_path
-        if research_path.exists():
-            current_mtime = research_path.stat().st_mtime
-            if self._research_mtime != current_mtime:
-                for document in self.store.iter_research_documents():
-                    self.vault.index_research_document(document)
-                self._research_mtime = current_mtime
+            research_path = self.store.research_intel_path
+            if research_path.exists():
+                current_mtime = research_path.stat().st_mtime
+                if self._research_mtime != current_mtime:
+                    for document in self.store.iter_research_documents():
+                        self.vault.index_research_document(document)
+                    self._research_mtime = current_mtime
 
-        verification_path = self.store.verification_reports_path
-        if verification_path.exists():
-            current_mtime = verification_path.stat().st_mtime
-            if self._verification_mtime != current_mtime:
-                for report in self.store.iter_verification_reports():
-                    self.vault.index_verification_report(report)
-                self._verification_mtime = current_mtime
+            verification_path = self.store.verification_reports_path
+            if verification_path.exists():
+                current_mtime = verification_path.stat().st_mtime
+                if self._verification_mtime != current_mtime:
+                    for report in self.store.iter_verification_reports():
+                        self.vault.index_verification_report(report)
+                    self._verification_mtime = current_mtime
 
-        breakthrough_path = self.store.breakthrough_reports_path
-        if breakthrough_path.exists():
-            current_mtime = breakthrough_path.stat().st_mtime
-            if self._breakthrough_mtime != current_mtime:
-                for report in self.store.iter_breakthrough_reports():
-                    self.vault.index_breakthrough_report(report)
-                self._breakthrough_mtime = current_mtime
+            breakthrough_path = self.store.breakthrough_reports_path
+            if breakthrough_path.exists():
+                current_mtime = breakthrough_path.stat().st_mtime
+                if self._breakthrough_mtime != current_mtime:
+                    for report in self.store.iter_breakthrough_reports():
+                        self.vault.index_breakthrough_report(report)
+                    self._breakthrough_mtime = current_mtime
 
-        problem_studies_path = self.store.problem_studies_path
-        if problem_studies_path.exists():
-            current_mtime = problem_studies_path.stat().st_mtime
-            if self._problem_studies_mtime != current_mtime:
-                for report in self.store.iter_problem_studies():
-                    self.vault.index_problem_study(report)
-                self._problem_studies_mtime = current_mtime
+            problem_studies_path = self.store.problem_studies_path
+            if problem_studies_path.exists():
+                current_mtime = problem_studies_path.stat().st_mtime
+                if self._problem_studies_mtime != current_mtime:
+                    for report in self.store.iter_problem_studies():
+                        self.vault.index_problem_study(report)
+                    self._problem_studies_mtime = current_mtime
 
-        problem_executions_path = self.store.problem_executions_path
-        if problem_executions_path.exists():
-            current_mtime = problem_executions_path.stat().st_mtime
-            if self._problem_executions_mtime != current_mtime:
-                for report in self.store.iter_problem_executions():
-                    self.vault.index_problem_execution(report)
-                self._problem_executions_mtime = current_mtime
+            problem_executions_path = self.store.problem_executions_path
+            if problem_executions_path.exists():
+                current_mtime = problem_executions_path.stat().st_mtime
+                if self._problem_executions_mtime != current_mtime:
+                    for report in self.store.iter_problem_executions():
+                        self.vault.index_problem_execution(report)
+                    self._problem_executions_mtime = current_mtime
+        except MemoryIntegrityError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive sync boundary
+            message = f"Vector memory sync failed: {exc}"
+            self.vault.mark_degraded(message)
+            raise MemoryIntegrityError(message) from exc
+        else:
+            self.vault.complete_rebuild()
 
     def _worker(self) -> None:
         while not self._stop.is_set():

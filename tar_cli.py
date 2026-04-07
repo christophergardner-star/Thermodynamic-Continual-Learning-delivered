@@ -39,6 +39,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", dest="model_path")
     parser.add_argument("--backend-name", default="transformers", dest="backend_name")
     parser.add_argument("--role-name", default="assistant", dest="role_name")
+    parser.add_argument("--trust-remote-code", action="store_true", dest="trust_remote_code")
+    parser.add_argument("--no-trust-remote-code", action="store_false", dest="trust_remote_code")
+    parser.set_defaults(trust_remote_code=None)
     parser.add_argument("--wait-for-health", action="store_true", dest="wait_for_health")
     parser.add_argument("--build-env", action="store_true", dest="build_env")
     parser.add_argument("--use-docker", action="store_true", dest="use_docker")
@@ -123,7 +126,10 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
     if args.verify_last_trial:
         return orchestrator.verify_last_trial(trial_id=args.trial_id).model_dump(mode="json")
     if args.breakthrough_report:
-        return orchestrator.breakthrough_report(trial_id=args.trial_id).model_dump(mode="json")
+        return orchestrator.breakthrough_report(
+            trial_id=args.trial_id,
+            problem_id=args.problem_id,
+        ).model_dump(mode="json")
     if args.resolve_problem:
         return orchestrator.resolve_problem(
             args.problem or args.message or "",
@@ -200,6 +206,7 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
             model_path=args.model_path or "",
             backend=args.backend_name,
             role=args.role_name,
+            trust_remote_code=args.trust_remote_code,
         ).model_dump(mode="json")
     if args.list_checkpoints:
         return {"checkpoints": [item.model_dump(mode="json") for item in orchestrator.list_checkpoints()]}
@@ -209,6 +216,7 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
             host=args.host,
             port=args.port,
             role=args.role_name,
+            trust_remote_code=args.trust_remote_code,
         ).model_dump(mode="json")
     if args.list_endpoints:
         return {"endpoints": [item.model_dump(mode="json") for item in orchestrator.list_endpoints()]}
@@ -218,12 +226,17 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
             host=args.host,
             port=args.port,
             role=args.role_name,
+            trust_remote_code=args.trust_remote_code,
             wait_for_health=args.wait_for_health,
         ).model_dump(mode="json")
     if args.stop_endpoint:
         return orchestrator.stop_endpoint(args.endpoint_name or "").model_dump(mode="json")
     if args.restart_endpoint:
-        return orchestrator.restart_endpoint(args.endpoint_name or "", wait_for_health=args.wait_for_health).model_dump(mode="json")
+        return orchestrator.restart_endpoint(
+            args.endpoint_name or "",
+            trust_remote_code=args.trust_remote_code,
+            wait_for_health=args.wait_for_health,
+        ).model_dump(mode="json")
     if args.endpoint_health:
         return orchestrator.endpoint_health(args.endpoint_name or "")
     if args.assign_role:
@@ -235,7 +248,10 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
     if args.claim_policy:
         return orchestrator.claim_policy()
     if args.claim_verdict:
-        return orchestrator.claim_verdict(trial_id=args.trial_id).model_dump(mode="json")
+        return orchestrator.claim_verdict(
+            trial_id=args.trial_id,
+            problem_id=args.problem_id,
+        ).model_dump(mode="json")
     if args.research_decision_log:
         return orchestrator.research_decision_log(count=args.max_results)
     if args.chat:
@@ -253,6 +269,7 @@ def _render_status(payload: Dict[str, Any]) -> str:
     recovery = payload["recovery"]
     last = payload["last_three_metrics"][-1] if payload["last_three_metrics"] else {}
     gpu = payload.get("gpu", {})
+    memory = payload.get("memory", {})
     lines = [
         f"Trial ID: {recovery.get('trial_id') or 'none'}",
         f"Status: {recovery.get('status')}",
@@ -266,7 +283,12 @@ def _render_status(payload: Dict[str, Any]) -> str:
         f"Image Tag: {payload.get('image_tag', 'n/a')}",
         f"Reproducibility Complete: {payload.get('reproducibility_complete', False)}",
         f"Manifest Hash: {payload.get('manifest_hash', 'n/a')}",
+        f"Unresolved Dependencies: {payload.get('unresolved_dependency_count', 0)}",
         f"Sandbox Mode: {payload.get('safe_execution_mode', 'n/a')}",
+        f"Sandbox Profile: {payload.get('sandbox_profile', 'n/a')}",
+        f"Sandbox Dev Override: {payload.get('sandbox_dev_override_active', False)}",
+        f"Read-Only Mounts: {', '.join(payload.get('sandbox_read_only_mounts', [])) or 'n/a'}",
+        f"Writable Mounts: {', '.join(payload.get('sandbox_writable_mounts', [])) or 'n/a'}",
         f"Alert Count: {payload.get('alerts', 0)}",
         f"Endpoints: {len(payload.get('endpoints', []))}",
         f"Role Assignments: {len(payload.get('role_assignments', []))}",
@@ -274,7 +296,13 @@ def _render_status(payload: Dict[str, Any]) -> str:
         f"Benchmark: {payload.get('benchmark_name') or ', '.join(payload.get('benchmark_ids', [])) or 'n/a'}",
         f"Benchmark Tier: {payload.get('benchmark_tier', 'n/a')}",
         f"Benchmark Actual Tier(s): {', '.join(payload.get('actual_benchmark_tiers', [])) or 'n/a'}",
+        f"Benchmark Truth: {', '.join(payload.get('benchmark_truth_statuses', [])) or 'n/a'}",
+        f"Benchmark Alignment: {payload.get('benchmark_alignment', 'n/a')}",
         f"Canonical Comparable: {payload.get('canonical_comparable', 'n/a')}",
+        f"Memory State: {memory.get('state', 'unknown')}",
+        f"Memory Collection: {memory.get('collection_name', 'n/a')}",
+        f"Memory Embedder: {memory.get('embedder', 'n/a')}",
+        f"Memory Dim: {memory.get('embedding_dim', 'n/a')}",
         f"E: {last.get('energy_e', 'n/a')}",
         f"sigma: {last.get('entropy_sigma', 'n/a')}",
         f"rho: {last.get('drift_rho', 'n/a')}",
@@ -284,6 +312,93 @@ def _render_status(payload: Dict[str, Any]) -> str:
         f"Eq frac: {last.get('equilibrium_fraction', 'n/a')}",
         f"GPU Temp C: {gpu.get('temperature_c', 'n/a')}",
         f"GPU Power W: {gpu.get('power_w', 'n/a')}",
+    ]
+    if payload.get("memory_warning"):
+        lines.append(f"Memory Warning: {payload['memory_warning']}")
+    if payload.get("lock_incomplete_reason"):
+        lines.append(f"Lock Warning: {payload['lock_incomplete_reason']}")
+    return "\n".join(lines)
+
+
+def _render_sandbox_policy(payload: Dict[str, Any]) -> str:
+    lines = [
+        f"Sandbox Mode: {payload.get('mode', 'n/a')}",
+        f"Sandbox Profile: {payload.get('profile', 'n/a')}",
+        f"Dev Override Active: {payload.get('dev_override_active', False)}",
+        f"Network Policy: {payload.get('network_policy', 'n/a')}",
+        f"Workspace Root: {payload.get('workspace_root', 'n/a')}",
+        f"Artifact Dir: {payload.get('artifact_dir', 'n/a')}",
+        f"Read-Only Mounts: {', '.join(payload.get('read_only_mounts', [])) or 'n/a'}",
+        f"Writable Mounts: {', '.join(payload.get('writable_mounts', [])) or 'n/a'}",
+        f"Allowed Mounts: {', '.join(payload.get('allowed_mounts', [])) or 'n/a'}",
+    ]
+    return "\n".join(lines)
+
+
+def _render_runtime_status(payload: Dict[str, Any]) -> str:
+    sandbox = payload.get("sandbox_policy", {})
+    lines = [
+        f"Sandbox Mode: {payload.get('safe_execution_mode', 'n/a')}",
+        f"Sandbox Profile: {sandbox.get('profile', 'n/a')}",
+        f"Dev Override Active: {sandbox.get('dev_override_active', False)}",
+        f"Payload Image: {payload.get('payload_image', 'n/a')}",
+        f"Manifest Hash: {payload.get('manifest_hash', 'n/a')}",
+        f"Reproducibility Complete: {payload.get('reproducibility_complete', False)}",
+        f"Read-Only Mounts: {', '.join(sandbox.get('read_only_mounts', [])) or 'n/a'}",
+        f"Writable Mounts: {', '.join(sandbox.get('writable_mounts', [])) or 'n/a'}",
+        f"Active Leases: {len(payload.get('active_leases', []))}",
+        f"Retry Waiting: {len(payload.get('retry_waiting', []))}",
+        f"Terminal Failures: {len(payload.get('terminal_failures', []))}",
+        f"Alert Count: {len(payload.get('alerts', []))}",
+    ]
+    if payload.get("lock_incomplete_reason"):
+        lines.append(f"Lock Warning: {payload['lock_incomplete_reason']}")
+    return "\n".join(lines)
+
+
+def _render_endpoint_record(endpoint: Dict[str, Any]) -> str:
+    health = endpoint.get("health") or {}
+    lines = [
+        f"Endpoint: {endpoint.get('endpoint_name', 'n/a')}",
+        f"Status: {endpoint.get('status', 'n/a')}",
+        f"Role: {endpoint.get('role', 'n/a')}",
+        f"Checkpoint: {endpoint.get('checkpoint_name', 'n/a')}",
+        f"Backend: {endpoint.get('backend', 'n/a')}",
+        f"Base URL: {endpoint.get('base_url', 'n/a')}",
+        f"Trust Remote Code: {endpoint.get('trust_remote_code', False)}",
+        f"Process PID: {endpoint.get('process_pid', 'n/a')}",
+        f"Last Health: {health.get('status', 'n/a')} at {endpoint.get('last_health_at', 'n/a')}",
+        f"Last Error: {endpoint.get('last_error', 'n/a')}",
+        f"Stdout Log: {endpoint.get('stdout_log_path', 'n/a')}",
+        f"Stderr Log: {endpoint.get('stderr_log_path', 'n/a')}",
+        f"Manifest: {endpoint.get('manifest_path', 'n/a')}",
+    ]
+    return "\n".join(lines)
+
+
+def _render_endpoint_list(payload: Dict[str, Any]) -> str:
+    endpoints = payload.get("endpoints", [])
+    if not endpoints:
+        return "No managed inference endpoints registered."
+    return "\n\n".join(_render_endpoint_record(endpoint) for endpoint in endpoints)
+
+
+def _render_endpoint_health(payload: Dict[str, Any]) -> str:
+    endpoint = payload.get("endpoint", {})
+    health = payload.get("health", {})
+    lines = [
+        f"Endpoint: {endpoint.get('endpoint_name', 'n/a')}",
+        f"Status: {endpoint.get('status', 'n/a')}",
+        f"Health: {health.get('status', 'n/a')}",
+        f"Healthy: {health.get('ok', False)}",
+        f"Backend: {health.get('backend', endpoint.get('backend', 'n/a'))}",
+        f"Model: {health.get('model_id', 'n/a')}",
+        f"Role: {health.get('role', endpoint.get('role', 'n/a'))}",
+        f"Trust Remote Code: {health.get('trust_remote_code', endpoint.get('trust_remote_code', False))}",
+        f"Detail: {health.get('detail', endpoint.get('last_error', 'n/a'))}",
+        f"Checked At: {health.get('checked_at', endpoint.get('last_health_at', 'n/a'))}",
+        f"Stdout Log: {endpoint.get('stdout_log_path', 'n/a')}",
+        f"Stderr Log: {endpoint.get('stderr_log_path', 'n/a')}",
     ]
     return "\n".join(lines)
 
@@ -387,7 +502,7 @@ def main() -> int:
             elif args.breakthrough_report:
                 response = send_command(
                     "breakthrough_report",
-                    payload={"trial_id": args.trial_id},
+                    payload={"trial_id": args.trial_id, "problem_id": args.problem_id},
                     host=args.host,
                     port=args.port,
                 )
@@ -539,6 +654,7 @@ def main() -> int:
                         "model_path": args.model_path or "",
                         "backend": args.backend_name,
                         "role": args.role_name,
+                        "trust_remote_code": args.trust_remote_code,
                     },
                     host=args.host,
                     port=args.port,
@@ -548,7 +664,13 @@ def main() -> int:
             elif args.build_inference_endpoint:
                 response = send_command(
                     "build_inference_endpoint",
-                    payload={"name": args.checkpoint_name or "", "host": args.host, "port": args.port, "role": args.role_name},
+                    payload={
+                        "name": args.checkpoint_name or "",
+                        "host": args.host,
+                        "port": args.port,
+                        "role": args.role_name,
+                        "trust_remote_code": args.trust_remote_code,
+                    },
                     host=args.host,
                     port=args.port,
                 )
@@ -562,6 +684,7 @@ def main() -> int:
                         "host": args.host,
                         "port": args.port,
                         "role": args.role_name,
+                        "trust_remote_code": args.trust_remote_code,
                         "wait_for_health": args.wait_for_health,
                     },
                     host=args.host,
@@ -577,7 +700,11 @@ def main() -> int:
             elif args.restart_endpoint:
                 response = send_command(
                     "restart_endpoint",
-                    payload={"endpoint_name": args.endpoint_name or "", "wait_for_health": args.wait_for_health},
+                    payload={
+                        "endpoint_name": args.endpoint_name or "",
+                        "trust_remote_code": args.trust_remote_code,
+                        "wait_for_health": args.wait_for_health,
+                    },
                     host=args.host,
                     port=args.port,
                 )
@@ -604,7 +731,7 @@ def main() -> int:
             elif args.claim_verdict:
                 response = send_command(
                     "claim_verdict",
-                    payload={"trial_id": args.trial_id},
+                    payload={"trial_id": args.trial_id, "problem_id": args.problem_id},
                     host=args.host,
                     port=args.port,
                 )
@@ -636,6 +763,14 @@ def main() -> int:
             print(json.dumps(payload, indent=2))
         elif args.status:
             print(_render_status(payload))
+        elif args.runtime_status:
+            print(_render_runtime_status(payload))
+        elif args.sandbox_policy:
+            print(_render_sandbox_policy(payload))
+        elif args.list_endpoints:
+            print(_render_endpoint_list(payload))
+        elif args.endpoint_health:
+            print(_render_endpoint_health(payload))
         elif args.check_regime:
             print(_render_regime(payload))
         elif args.ingest_research:

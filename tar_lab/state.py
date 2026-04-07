@@ -14,6 +14,7 @@ from tar_lab.schemas import (
     EndpointRecord,
     EndpointRegistryState,
     ImageManifest,
+    MemoryStoreManifest,
     GovernorMetrics,
     KnowledgeGraphEntry,
     KnowledgeGraphState,
@@ -56,7 +57,9 @@ class TARStateStore:
         self.problem_executions_path = self.state_dir / "problem_executions.jsonl"
         self.problem_schedule_path = self.state_dir / "problem_schedule.json"
         self.endpoint_registry_path = self.state_dir / "inference_endpoints.json"
+        self.endpoints_dir = self.state_dir / "endpoints"
         self.role_assignments_path = self.state_dir / "role_assignments.json"
+        self.memory_manifest_path = self.state_dir / "memory_manifest.json"
         self.alerts_path = self.state_dir / "alerts.jsonl"
         self.runtime_heartbeat_path = self.state_dir / "runtime_heartbeat.json"
         self.manifests_dir = self.state_dir / "manifests"
@@ -67,6 +70,7 @@ class TARStateStore:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.policies_dir.mkdir(parents=True, exist_ok=True)
         self.manifests_dir.mkdir(parents=True, exist_ok=True)
+        self.endpoints_dir.mkdir(parents=True, exist_ok=True)
 
     def _atomic_write_text(self, path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -218,9 +222,23 @@ class TARStateStore:
                 rows.append(ResearchDecisionRecord.model_validate_json(line))
         return rows
 
-    def latest_research_decision(self) -> Optional[ResearchDecisionRecord]:
+    def latest_research_decision(
+        self,
+        *,
+        mode: Optional[str] = None,
+        trial_id: Optional[str] = None,
+        problem_id: Optional[str] = None,
+    ) -> Optional[ResearchDecisionRecord]:
         rows = list(self.iter_research_decisions())
-        return rows[-1] if rows else None
+        for record in reversed(rows):
+            if mode is not None and record.mode != mode:
+                continue
+            if trial_id is not None and record.trial_id != trial_id:
+                continue
+            if problem_id is not None and record.problem_id != problem_id:
+                continue
+            return record
+        return None
 
     def append_problem_study(self, report: ProblemStudyReport) -> None:
         with self.problem_studies_path.open("a", encoding="utf-8") as handle:
@@ -240,6 +258,30 @@ class TARStateStore:
                         environment["execution_report_path"] = str(
                             Path(study_plan_path).with_name("execution_report.json")
                         )
+                hypotheses = payload.get("hypotheses")
+                if isinstance(hypotheses, list) and hypotheses and all(isinstance(item, str) for item in hypotheses):
+                    evidence_bundle = payload.get("evidence_bundle") or {}
+                    evidence_bundle_id = (
+                        evidence_bundle.get("bundle_id")
+                        if isinstance(evidence_bundle, dict) and evidence_bundle.get("bundle_id")
+                        else f"legacy-evidence-{payload.get('problem_id', 'unknown')}"
+                    )
+                    payload["hypotheses"] = [
+                        {
+                            "hypothesis_id": f"legacy-hypothesis-{idx}",
+                            "problem": payload.get("problem", ""),
+                            "hypothesis": text,
+                            "rationale": "Migrated from legacy problem-study record.",
+                            "confidence": float(payload.get("resolution_confidence", 0.0) or 0.0),
+                            "evidence_bundle_id": evidence_bundle_id,
+                            "supporting_document_ids": list(payload.get("cited_research_ids", [])),
+                            "supporting_claim_ids": [],
+                            "contradiction_review_id": None,
+                            "proposed_benchmark_ids": list(payload.get("benchmark_ids", [])),
+                            "unresolved_assumptions": [],
+                        }
+                        for idx, text in enumerate(hypotheses, start=1)
+                    ]
                 rows.append(ProblemStudyReport.model_validate(payload))
         return rows
 
@@ -275,6 +317,16 @@ class TARStateStore:
         path = self.manifests_dir / f"image-{manifest.hash_sha256[:16]}.json"
         self._atomic_write_json(path, manifest.model_dump(mode="json"))
         return path
+
+    def load_memory_manifest(self) -> Optional[MemoryStoreManifest]:
+        if not self.memory_manifest_path.exists():
+            return None
+        return MemoryStoreManifest.model_validate_json(self.memory_manifest_path.read_text(encoding="utf-8"))
+
+    def save_memory_manifest(self, manifest: MemoryStoreManifest) -> Path:
+        updated = manifest.model_copy(update={"updated_at": _utc_now()})
+        self._atomic_write_json(self.memory_manifest_path, updated.model_dump(mode="json"))
+        return self.memory_manifest_path
 
     def iter_problem_executions(self) -> Iterable[ProblemExecutionReport]:
         if not self.problem_executions_path.exists():
@@ -353,6 +405,20 @@ class TARStateStore:
             if entry.endpoint_name == endpoint_name:
                 return entry
         return None
+
+    def endpoint_runtime_dir(self, endpoint_name: str) -> Path:
+        path = self.endpoints_dir / endpoint_name
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def endpoint_manifest_path(self, endpoint_name: str) -> Path:
+        return self.endpoint_runtime_dir(endpoint_name) / "endpoint_manifest.json"
+
+    def endpoint_stdout_log_path(self, endpoint_name: str) -> Path:
+        return self.endpoint_runtime_dir(endpoint_name) / "stdout.log"
+
+    def endpoint_stderr_log_path(self, endpoint_name: str) -> Path:
+        return self.endpoint_runtime_dir(endpoint_name) / "stderr.log"
 
     def load_role_assignments(self) -> RoleAssignmentState:
         if not self.role_assignments_path.exists():
@@ -462,6 +528,7 @@ class TARStateStore:
         latest_research_decision = self.latest_research_decision()
         latest_problem_study = self.latest_problem_study()
         latest_problem_execution = self.latest_problem_execution()
+        memory_manifest = self.load_memory_manifest()
         schedules = list(self.iter_problem_schedules())
         alerts = list(self.iter_alerts())
         return {
@@ -480,6 +547,7 @@ class TARStateStore:
             "latest_problem_study": latest_problem_study.model_dump(mode="json") if latest_problem_study else None,
             "problem_executions": len(list(self.iter_problem_executions())),
             "latest_problem_execution": latest_problem_execution.model_dump(mode="json") if latest_problem_execution else None,
+            "memory_manifest": memory_manifest.model_dump(mode="json") if memory_manifest else None,
             "problem_schedules": len(schedules),
             "active_problem_schedules": len([item for item in schedules if item.status in {"scheduled", "leased", "running", "retry_wait"}]),
             "latest_problem_schedule": schedules[-1].model_dump(mode="json") if schedules else None,

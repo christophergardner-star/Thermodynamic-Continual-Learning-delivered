@@ -85,20 +85,23 @@ class InferenceBridge:
         host: str = "127.0.0.1",
         port: int = 8000,
         role: Optional[str] = None,
+        trust_remote_code: Optional[bool] = None,
     ) -> InferenceEndpointPlan:
         checkpoint = self.get(name)
         resolved_role = str(role or checkpoint.role).strip().lower()
         if resolved_role not in VALID_ROLES:
             raise ValueError(f"Unsupported endpoint role: {resolved_role}")
         endpoint_name = f"{resolved_role}-{name}"
+        resolved_trust_remote_code = self._resolve_trust_remote_code(checkpoint, trust_remote_code)
         env = {
             "TAR_ENDPOINT_NAME": endpoint_name,
             "TAR_ENDPOINT_ROLE": resolved_role,
             "TAR_ENDPOINT_MODEL": checkpoint.name,
+            "TAR_ENDPOINT_TRUST_REMOTE_CODE": "1" if resolved_trust_remote_code else "0",
         }
         command = [
             sys.executable,
-            str(self.store.workspace / "serve_local.py"),
+            str(self._serve_local_path()),
             "--backend",
             checkpoint.backend,
             "--model",
@@ -112,7 +115,10 @@ class InferenceBridge:
             "--served-model-name",
             checkpoint.name,
         ]
-        return InferenceEndpointPlan(
+        if resolved_trust_remote_code:
+            command.append("--trust-remote-code")
+        manifest_path = self.store.endpoint_manifest_path(endpoint_name)
+        plan = InferenceEndpointPlan(
             checkpoint=checkpoint,
             host=host,
             port=port,
@@ -121,7 +127,11 @@ class InferenceBridge:
             env=env,
             endpoint_name=endpoint_name,
             role=resolved_role,  # type: ignore[arg-type]
+            trust_remote_code=resolved_trust_remote_code,
+            manifest_path=str(manifest_path),
         )
+        manifest_path.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+        return plan
 
     def list_endpoints(self) -> list[EndpointRecord]:
         return self.store.list_endpoints()
@@ -139,22 +149,74 @@ class InferenceBridge:
         host: str = "127.0.0.1",
         port: int = 8000,
         role: Optional[str] = None,
+        trust_remote_code: Optional[bool] = None,
         wait_for_health: bool = False,
         startup_timeout_s: float = 5.0,
     ) -> EndpointRecord:
-        plan = self.build_endpoint(name, host=host, port=port, role=role)
+        plan = self.build_endpoint(
+            name,
+            host=host,
+            port=port,
+            role=role,
+            trust_remote_code=trust_remote_code,
+        )
         existing = self.store.get_endpoint(plan.endpoint_name or "")
         if existing is not None and existing.status == "running":
             return self.refresh_endpoint_health(existing.endpoint_name)
         env = dict(os.environ)
         env.update(plan.env)
-        process = subprocess.Popen(
-            plan.command,
-            cwd=self.store.workspace,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        stdout_log_path = self.store.endpoint_stdout_log_path(plan.endpoint_name or name)
+        stderr_log_path = self.store.endpoint_stderr_log_path(plan.endpoint_name or name)
+        stdout_handle = stdout_log_path.open("a", encoding="utf-8")
+        stderr_handle = stderr_log_path.open("a", encoding="utf-8")
+        try:
+            process = subprocess.Popen(
+                plan.command,
+                cwd=self.store.workspace,
+                env=env,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+            )
+        except Exception as exc:
+            stdout_handle.close()
+            stderr_handle.write(f"Endpoint launch failed: {exc}\n")
+            stderr_handle.close()
+            health = EndpointHealth(
+                endpoint_name=plan.endpoint_name or name,
+                status="failed",
+                ok=False,
+                detail=str(exc),
+                model_id=plan.checkpoint.name,
+                backend=plan.checkpoint.backend,
+                role=plan.role,
+                trust_remote_code=plan.trust_remote_code,
+            )
+            record = EndpointRecord(
+                endpoint_name=plan.endpoint_name or name,
+                checkpoint_name=plan.checkpoint.name,
+                role=plan.role or plan.checkpoint.role,
+                host=plan.host,
+                port=plan.port,
+                backend=plan.checkpoint.backend,
+                base_url=plan.base_url,
+                command=plan.command,
+                env=plan.env,
+                status="failed",
+                process_pid=None,
+                started_at=self._now(),
+                last_error=str(exc),
+                last_health_at=health.checked_at,
+                manifest_path=plan.manifest_path,
+                stdout_log_path=str(stdout_log_path),
+                stderr_log_path=str(stderr_log_path),
+                trust_remote_code=plan.trust_remote_code,
+                health=health,
+            )
+            self.store.upsert_endpoint(record)
+            return record
+        finally:
+            stdout_handle.close()
+            stderr_handle.close()
         self._processes[plan.endpoint_name or name] = process
         record = EndpointRecord(
             endpoint_name=plan.endpoint_name or name,
@@ -169,6 +231,10 @@ class InferenceBridge:
             status="starting",
             process_pid=process.pid,
             started_at=self._now(),
+            manifest_path=plan.manifest_path,
+            stdout_log_path=str(stdout_log_path),
+            stderr_log_path=str(stderr_log_path),
+            trust_remote_code=plan.trust_remote_code,
         )
         self.store.upsert_endpoint(record)
         if wait_for_health:
@@ -178,6 +244,31 @@ class InferenceBridge:
                 if refreshed.health is not None and refreshed.health.ok:
                     return refreshed
                 time.sleep(0.25)
+            refreshed = self.refresh_endpoint_health(record.endpoint_name)
+            timeout_detail = f"Endpoint did not become healthy within {startup_timeout_s:.1f}s."
+            failure_detail = (
+                f"{timeout_detail} Last health detail: {refreshed.last_error}"
+                if refreshed.last_error
+                else timeout_detail
+            )
+            proc = self._processes.get(record.endpoint_name)
+            try:
+                if proc is not None and proc.poll() is None:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+            except Exception:
+                pass
+            self._processes.pop(record.endpoint_name, None)
+            failed = refreshed.model_copy(
+                update={
+                    "status": "failed",
+                    "last_error": failure_detail,
+                    "process_pid": None,
+                    "stopped_at": self._now(),
+                }
+            )
+            self.store.upsert_endpoint(failed)
+            return failed
         return self.refresh_endpoint_health(record.endpoint_name)
 
     def stop_endpoint(self, endpoint_name: str) -> EndpointRecord:
@@ -198,12 +289,15 @@ class InferenceBridge:
                 "status": "stopped",
                 "process_pid": None,
                 "stopped_at": self._now(),
+                "last_health_at": self._now(),
                 "health": EndpointHealth(
                     endpoint_name=record.endpoint_name,
                     status="stopped",
                     ok=False,
                     detail="endpoint stopped",
                     backend=record.backend,
+                    role=record.role,
+                    trust_remote_code=record.trust_remote_code,
                 ),
             }
         )
@@ -215,6 +309,7 @@ class InferenceBridge:
         self,
         endpoint_name: str,
         *,
+        trust_remote_code: Optional[bool] = None,
         wait_for_health: bool = False,
         startup_timeout_s: float = 5.0,
     ) -> EndpointRecord:
@@ -224,6 +319,7 @@ class InferenceBridge:
             host=record.host,
             port=record.port,
             role=record.role,
+            trust_remote_code=trust_remote_code,
             wait_for_health=wait_for_health,
             startup_timeout_s=startup_timeout_s,
         )
@@ -234,7 +330,14 @@ class InferenceBridge:
         status = "running" if health.ok else ("failed" if record.status == "running" else record.status)
         if record.process_pid and not self._pid_alive(record.process_pid):
             status = "failed" if health.status != "stopped" else "stopped"
-        updated = record.model_copy(update={"health": health, "status": status, "last_error": None if health.ok else health.detail})
+        updated = record.model_copy(
+            update={
+                "health": health,
+                "status": status,
+                "last_error": None if health.ok else health.detail,
+                "last_health_at": health.checked_at,
+            }
+        )
         self.store.upsert_endpoint(updated)
         return updated
 
@@ -254,22 +357,30 @@ class InferenceBridge:
                     detail=payload.get("detail"),
                     model_id=payload.get("model"),
                     backend=payload.get("backend"),
+                    role=payload.get("role"),
+                    trust_remote_code=payload.get("trust_remote_code", record.trust_remote_code),
                 )
         except URLError as exc:
+            detail = self._failure_detail(str(exc.reason), record.stderr_log_path)
             return EndpointHealth(
                 endpoint_name=endpoint_name,
-                status="unhealthy" if record.status != "stopped" else "stopped",
+                status="failed" if (record.process_pid and not self._pid_alive(record.process_pid) and record.status != "stopped") else ("unhealthy" if record.status != "stopped" else "stopped"),
                 ok=False,
-                detail=str(exc.reason),
+                detail=detail,
                 backend=record.backend,
+                role=record.role,
+                trust_remote_code=record.trust_remote_code,
             )
         except Exception as exc:
+            detail = self._failure_detail(str(exc), record.stderr_log_path)
             return EndpointHealth(
                 endpoint_name=endpoint_name,
                 status="failed",
                 ok=False,
-                detail=str(exc),
+                detail=detail,
                 backend=record.backend,
+                role=record.role,
+                trust_remote_code=record.trust_remote_code,
             )
 
     def assign_role(
@@ -316,3 +427,40 @@ class InferenceBridge:
             return True
         except OSError:
             return False
+
+    @staticmethod
+    def _resolve_trust_remote_code(checkpoint: CheckpointRecord, override: Optional[bool]) -> bool:
+        if override is not None:
+            return bool(override)
+        raw = checkpoint.metadata.get("trust_remote_code")
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, str):
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
+    @staticmethod
+    def _tail_log(path: Optional[str], max_chars: int = 400) -> Optional[str]:
+        if not path:
+            return None
+        log_path = Path(path)
+        if not log_path.exists():
+            return None
+        text = log_path.read_text(encoding="utf-8", errors="replace").strip()
+        if not text:
+            return None
+        return text[-max_chars:]
+
+    @classmethod
+    def _failure_detail(cls, message: str, stderr_log_path: Optional[str]) -> str:
+        tail = cls._tail_log(stderr_log_path)
+        if not tail:
+            return message
+        condensed = " ".join(line.strip() for line in tail.splitlines() if line.strip())
+        if not condensed:
+            return message
+        return f"{message}. stderr tail: {condensed}"
+
+    @staticmethod
+    def _serve_local_path() -> Path:
+        return Path(__file__).resolve().parents[1] / "serve_local.py"

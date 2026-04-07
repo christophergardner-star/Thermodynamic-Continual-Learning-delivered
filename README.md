@@ -23,8 +23,13 @@ quarantined entrypoints.
 - Experimental coding ASC path: [`deepseek_asc_finetune.py`](./deepseek_asc_finetune.py)
 - Quarantined legacy ASC scripts: [`asc_train.py`](./asc_train.py) and [`asc_train_cpu.py`](./asc_train_cpu.py)
 
-The formal execution roadmap for the remaining frontier work is in
+The formal post-audit remediation roadmap is in
 [`docs/implementation_roadmap.md`](./docs/implementation_roadmap.md).
+
+Locked reproducibility means every required dependency is pinned to an exact
+version. If TAR cannot resolve a required package version locally, it now
+refuses the lock and records the unresolved dependency instead of emitting a
+best-effort manifest.
 
 ## Repository Contract
 
@@ -191,7 +196,7 @@ Current TAR surface:
 - problem-domain routing through locked science profiles for quantum ML, RL, CV, NLP, graph ML, deep learning, and general ML
 - reproducible science-environment bundle generation with Dockerfile, requirements profile, and study-plan artifacts
 - benchmark-backed problem-study execution for generic ML, deep learning, computer vision, graph ML, NLP, reinforcement learning, and quantum ML
-- canonical local benchmark adapters where available: sklearn breast-cancer and digits suites, NetworkX Karate Club, cached SQuAD retrieval slices, plus PennyLane execution when installed
+- truthful benchmark adapters where available: sklearn breast-cancer and digits suites, NetworkX Karate Club, and PennyLane-backed QML depth/init/noise execution when installed; named canonical suites that are not yet executor-aligned remain registered but are refused rather than overstated
 - persistent long-run problem scheduling with queued study runs, repeat intervals, and single-cycle scheduler execution
 - locked payload and science-environment manifests with dependency hashes, source-tree fingerprints, and run-manifest hashes under `tar_state/manifests`
 - no runtime package mutation in the main payload path: Docker runs now require locked image and run manifests
@@ -201,7 +206,7 @@ Current TAR surface:
 - NVIDIA power/thermal preparation through `nvidia-smi -pl` and `nvidia-smi -gtt`
 - direct CLI, local socket control server, Streamlit sidecar, typed chat mode, and dry-run coverage
 - OpenAI-compatible local LLM wiring for Director, Strategist, and Scout with schema-repair retries
-- managed inference endpoints with checkpoint registry, start/stop/restart lifecycle, health checks, and explicit role assignment for `director`, `strategist`, `scout`, and `assistant`
+- managed inference endpoints with checkpoint registry, start/stop/restart lifecycle, retained stdout/stderr logs under `tar_state/endpoints/<endpoint_name>/`, health checks, explicit role assignment for `director`, `strategist`, `scout`, and `assistant`, and explicit `trust_remote_code` policy instead of silent defaults
 - evidence-grounded research planning with typed evidence bundles, contradiction reviews, and hypothesis records persisted into TAR state
 - machine-readable claim-acceptance policy with verdict classes `accepted`, `provisional`, `rejected`, `insufficient_evidence`, and `contradicted`
 - research decision logging so operator-facing chat and study flows retain evidence traces, confidence, contradictions, and selected next actions
@@ -246,11 +251,11 @@ python tar_cli.py --direct --cancel-job --schedule-id <schedule_id> --json
 python tar_cli.py --direct --sandbox-policy --json
 python tar_cli.py --direct --ingest-papers --paper-path C:\path\to\paper.pdf --json
 python tar_cli.py --direct --register-checkpoint --checkpoint-name asc-local --model-path C:\path\to\checkpoint --json
-python tar_cli.py --direct --build-inference-endpoint --checkpoint-name asc-local --role director --json
+python tar_cli.py --direct --build-inference-endpoint --checkpoint-name asc-local --role director --trust-remote-code --json
 python tar_cli.py --direct --list-checkpoints --json
 python tar_cli.py --direct --list-endpoints --json
 python tar_cli.py --direct --start-endpoint --checkpoint-name asc-local --role assistant --wait-for-health --json
-python tar_cli.py --direct --endpoint-health --endpoint-name assistant-asc-local --json
+python tar_cli.py --direct --endpoint-health --endpoint-name assistant-asc-local
 python tar_cli.py --direct --assign-role --role strategist --checkpoint-name asc-local --json
 python tar_cli.py --direct --claim-policy --json
 python tar_cli.py --direct --claim-verdict --trial-id <trial_id> --json
@@ -266,6 +271,7 @@ Workstream 7 operator contract:
 - research chat and problem-study flows now carry evidence traces, contradiction warnings, and typed hypotheses instead of heuristic-only summaries
 - breakthrough promotion is now coupled to explicit claim-verdict policy rather than a soft narrative summary alone
 - endpoint health, role assignment, latest claim verdict, and recent research decisions are surfaced in both CLI status and the Streamlit dashboard
+- managed endpoint records now persist trust policy, manifest path, and stdout/stderr log paths so failed starts are diagnosable without rerunning them
 
 If Docker is installed but not visible on `PATH`, TAR also honors:
 
@@ -286,7 +292,9 @@ Workstream 6 runtime contract:
 - payload and science runs are expected to execute from locked image and run manifests
 - runtime scheduling now uses leases, bounded retries, backoff, stale-run cleanup, and alert records
 - autonomous code execution is sandboxed through Docker only; TAR no longer treats host-Python fallback as a valid runtime path
-- `--status`, `--runtime-status`, and the dashboard now surface image identity, manifest hash, alert count, lease state, and sandbox mode
+- production runtime mounts are now read-only by default for `/workspace`, with explicit writable paths limited to `/workspace/tar_runs`, `/workspace/logs`, and `/workspace/anchors`
+- science-bundle Docker runs now mount the repository read-only and grant write access only to the bundle artifact directory
+- `--status`, `--runtime-status`, `--sandbox-policy`, and the dashboard now surface image identity, manifest hash, sandbox profile, read-only mounts, writable mounts, alert count, and lease state
 
 To control TAR's data-grounding policy:
 
@@ -323,8 +331,8 @@ Benchmark contract:
 
 - `smoke`: laptop-safe proxy or reduced local benchmark paths for plumbing and rapid validation
 - `validation`: real named local or cached benchmark slices that preserve benchmark identity without claiming external comparability
-- `canonical`: named external benchmark suites that refuse proxy fallback and only run when dependencies and data are available
-- status, study plans, and execution reports now surface benchmark IDs, benchmark names, requested tier, actual executed tiers, and canonical comparability
+- `canonical`: named external benchmark suites that only count as literature-comparable when the executor is benchmark-aligned; otherwise TAR marks them unsupported and refuses the run
+- status, study plans, and execution reports now surface benchmark IDs, benchmark names, requested tier, actual executed tiers, benchmark truth status, benchmark alignment, and canonical comparability
 - `--canonical-only --no-proxy-benchmarks` enforces strict refusal semantics rather than silent downgrade
 
 Local hierarchy configuration:
@@ -366,8 +374,9 @@ Dry-run scope:
 Live Docker smoke path:
 
 - pulls `pytorch/pytorch:latest`
-- mounts the repository into `/workspace`
-- mounts `tar_state/data` into `/data`
+- mounts the repository into `/workspace` as read-only
+- mounts `tar_state/data` into `/data` as read-only
+- mounts `/workspace/tar_runs`, `/workspace/logs`, and `/workspace/anchors` as the only writable payload paths
 - bootstraps the minimal payload dependency set inside the container and executes `python -m tar_lab.train_template`
 - applies the TAR runtime caps and GPU selection through the Docker runner
 - probes GPU visibility with `nvidia-smi -L` before the payload launch
@@ -387,7 +396,7 @@ Benchmark-backed domain executors:
 - `deep_learning`: tiny supervised optimization and scaling probes with real loss, accuracy, calibration, gradient, and representation-rank metrics
 - `natural_language_processing`: grounded retrieval QA plus length-generalization evaluation with real ROUGE, hallucination, perplexity, and calibration signals
 - `reinforcement_learning`: policy-gradient exploration and offline-to-online transfer probes with real return, entropy, sample-efficiency, and seed-variance signals
-- `quantum_ml`: PennyLane-backed or analytic barren-plateau probes
+- `quantum_ml`: PennyLane-backed canonical depth, initialization, and noisy-trainability probes, with analytic stand-ins reserved for explicit smoke-only paths
 
 ## Validation
 
@@ -437,7 +446,7 @@ Important boundary:
 | [`researcher_agent.py`](./researcher_agent.py) | Cruxy research loop |
 | [`self_train.py`](./self_train.py) | export high-quality research traces |
 | [`build_researcher_dataset.py`](./build_researcher_dataset.py) | build researcher corpus |
-| [`docs/implementation_roadmap.md`](./docs/implementation_roadmap.md) | formal implementation roadmap for the frontier workstreams |
+| [`docs/implementation_roadmap.md`](./docs/implementation_roadmap.md) | formal post-audit remediation roadmap (`WS8-WS16`) |
 | [`docs/research_status_panel.html`](./docs/research_status_panel.html) | simple status-panel source |
 | [`tar_cli.py`](./tar_cli.py) | TAR command and control CLI |
 | [`TCL_Orchestrator.py`](./TCL_Orchestrator.py) | TAR orchestration wrapper |

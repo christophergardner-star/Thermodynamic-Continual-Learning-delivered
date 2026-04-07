@@ -185,6 +185,35 @@ def _stable_id(prefix: str, payload: str) -> str:
     return f"{prefix}-{digest}"
 
 
+def _payload_runtime_spec(workspace: str, trial_id: str, strategy_family: str) -> RuntimeSpec:
+    store = TARStateStore(workspace)
+    logs_dir = store.workspace / "logs"
+    anchors_dir = store.workspace / "anchors"
+    trial_dir = store.workspace / "tar_runs" / trial_id
+    for path in (logs_dir, anchors_dir, trial_dir):
+        path.mkdir(parents=True, exist_ok=True)
+
+    return RuntimeSpec(
+        image=os.environ.get("TAR_DOCKER_IMAGE", "pytorch/pytorch:latest"),
+        gpu_index=int(os.environ.get("TAR_GPU_INDEX", "0")),
+        env={
+            "TAR_TRIAL_ID": trial_id,
+            "TAR_STRATEGY_FAMILY": strategy_family,
+        },
+        volumes={
+            str(logs_dir): "/workspace/logs",
+            str(anchors_dir): "/workspace/anchors",
+            str(store.workspace / "tar_runs"): "/workspace/tar_runs",
+        },
+        read_only_volumes={
+            str(store.workspace): "/workspace",
+            str(store.data_dir): "/data",
+        },
+        sandbox_profile="production",
+        allowed_writable_mounts=["/workspace/tar_runs", "/workspace/logs", "/workspace/anchors"],
+    )
+
+
 def _build_contradiction_review(prompt: str, traces: List[EvidenceTrace]) -> Optional[ContradictionReview]:
     conflicting_document_ids: list[str] = []
     conflicting_claim_ids: list[str] = []
@@ -645,18 +674,7 @@ class RuleScout:
         store = TARStateStore(workspace)
         payload_config_path = str(store.workspace / "tar_runs" / plan.trial_id / "config.json")
         container_config_path = f"/workspace/tar_runs/{plan.trial_id}/config.json"
-        runtime = RuntimeSpec(
-            image=os.environ.get("TAR_DOCKER_IMAGE", "pytorch/pytorch:latest"),
-            gpu_index=int(os.environ.get("TAR_GPU_INDEX", "0")),
-            env={
-                "TAR_TRIAL_ID": plan.trial_id,
-                "TAR_STRATEGY_FAMILY": plan.strategy_family,
-            },
-            volumes={
-                workspace: "/workspace",
-                str(store.data_dir): "/data",
-            },
-        )
+        runtime = _payload_runtime_spec(workspace, plan.trial_id, plan.strategy_family)
         command = [
             "python",
             "-m",
@@ -828,19 +846,12 @@ class TriModelHierarchy:
             user_prompt=scout_prompt,
         )
 
-        runtime = RuntimeSpec(
-            image=scout_draft.image,
-            gpu_index=int(os.environ.get("TAR_GPU_INDEX", "0")),
-            power_limit_w=scout_draft.power_limit_w,
-            gpu_target_temp_c=scout_draft.gpu_target_temp_c,
-            env={
-                "TAR_TRIAL_ID": trial_id,
-                "TAR_STRATEGY_FAMILY": plan.strategy_family,
-            },
-            volumes={
-                workspace: "/workspace",
-                str(TARStateStore(workspace).data_dir): "/data",
-            },
+        runtime = _payload_runtime_spec(workspace, trial_id, plan.strategy_family).model_copy(
+            update={
+                "image": scout_draft.image,
+                "power_limit_w": scout_draft.power_limit_w,
+                "gpu_target_temp_c": scout_draft.gpu_target_temp_c,
+            }
         )
         command = [
             "python",

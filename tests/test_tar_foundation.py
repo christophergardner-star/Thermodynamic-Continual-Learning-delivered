@@ -156,6 +156,10 @@ def test_docker_command_carries_resource_caps():
             assert "12" in command
             assert "--gpus" in command
             assert "device=0" in command
+            assert f"{tmp}:/workspace:ro" in command
+            assert f"{Path(tmp) / 'logs'}:/workspace/logs" in command
+            assert f"{Path(tmp) / 'tar_runs'}:/workspace/tar_runs" in command
+            assert f"{Path(tmp) / 'anchors'}:/workspace/anchors" in command
         finally:
             orchestrator.shutdown()
 
@@ -203,8 +207,11 @@ def test_docker_command_carries_runtime_manifests():
         image_manifest_path="/workspace/tar_state/manifests/image.json",
         run_manifest_path="/workspace/tar_state/manifests/run.json",
         env={"TAR_TRIAL_ID": "trial-1"},
-        volumes={"/host/workspace": "/workspace"},
-        read_only_volumes={"/host/manifests": "/manifests"},
+        volumes={"/host/tar_runs": "/workspace/tar_runs"},
+        read_only_volumes={
+            "/host/workspace": "/workspace",
+            "/host/manifests": "/manifests",
+        },
     )
     command = DockerRunner(docker_bin="docker").compose_runtime_command(
         runtime=runtime,
@@ -215,6 +222,7 @@ def test_docker_command_carries_runtime_manifests():
     assert "none" in command
     assert "TAR_IMAGE_MANIFEST=/workspace/tar_state/manifests/image.json" in command
     assert "TAR_RUN_MANIFEST=/workspace/tar_state/manifests/run.json" in command
+    assert "/host/workspace:/workspace:ro" in command
     assert "/host/manifests:/manifests:ro" in command
 
 
@@ -357,6 +365,8 @@ def test_problem_research_engine_writes_environment_bundle():
         assert Path(bundle.requirements_path).exists()
         assert "pennylane" in Path(bundle.requirements_path).read_text(encoding="utf-8").lower()
         assert bundle.install_policy == "profile_locked_only"
+        assert f"{Path(tmp)}:/workspace:ro" in bundle.run_command
+        assert any(str(Path(tmp) / "tar_state" / "science_envs") in item and "/workspace/tar_state/science_envs/" in item for item in bundle.run_command)
 
 
 def test_orchestrator_study_problem_persists_and_indexes():
@@ -844,7 +854,9 @@ def test_live_hierarchy_builds_bundle_from_llm_outputs():
         assert plan.hyperparameters["steps"] == 9
         assert task.command[:4] == ["python", "-m", "tar_lab.train_template", "--config"]
         assert task.runtime.image == "pytorch/pytorch:latest"
-        assert task.runtime.volumes[str(store.data_dir)] == "/data"
+        assert task.runtime.read_only_volumes[str(store.data_dir)] == "/data"
+        assert task.runtime.read_only_volumes[str(store.workspace)] == "/workspace"
+        assert task.runtime.volumes[str(store.workspace / "tar_runs")] == "/workspace/tar_runs"
 
 
 def test_data_manager_prepares_dual_stream_manifests():
@@ -1156,6 +1168,8 @@ def test_status_rendering_makes_control_vs_research_explicit():
         "benchmark_name": "Smoke Grounded QA Probe",
         "benchmark_tier": "smoke",
         "actual_benchmark_tiers": ["smoke"],
+        "benchmark_truth_statuses": ["smoke_only"],
+        "benchmark_alignment": "aligned",
         "canonical_comparable": False,
     }
     rendered = tar_cli._render_status(payload)
@@ -1166,6 +1180,34 @@ def test_status_rendering_makes_control_vs_research_explicit():
     assert "Benchmark: Smoke Grounded QA Probe" in rendered
     assert "Benchmark Tier: smoke" in rendered
     assert "Benchmark Actual Tier(s): smoke" in rendered
+    assert "Benchmark Truth: smoke_only" in rendered
+    assert "Benchmark Alignment: aligned" in rendered
+    assert "Sandbox Profile: n/a" in rendered
+
+
+def test_status_renderer_surfaces_memory_and_lock_warnings():
+    payload = {
+        "recovery": {"trial_id": "trial-2", "status": "failed", "consecutive_fail_fast": 1},
+        "last_three_metrics": [],
+        "gpu": {},
+        "memory": {
+            "state": "degraded",
+            "collection_name": "lab_history__broken",
+            "embedder": "lexical-semantic-fallback",
+            "embedding_dim": 1369,
+        },
+        "memory_warning": "memory manifest mismatch",
+        "lock_incomplete_reason": "Missing pinned dependency versions: peft",
+        "unresolved_dependency_count": 1,
+        "safe_execution_mode": "docker_container_only",
+        "sandbox_profile": "production",
+        "sandbox_read_only_mounts": ["/workspace"],
+        "sandbox_writable_mounts": ["/workspace/tar_runs"],
+    }
+    rendered = tar_cli._render_status(payload)
+    assert "Memory Warning: memory manifest mismatch" in rendered
+    assert "Lock Warning: Missing pinned dependency versions: peft" in rendered
+    assert "Memory State: degraded" in rendered
 
 
 def test_orchestrator_status_surfaces_benchmark_identity():
@@ -1183,8 +1225,24 @@ def test_orchestrator_status_surfaces_benchmark_identity():
             assert study.benchmark_names
             assert status["benchmark_ids"] == study.benchmark_ids
             assert status["benchmark_names"] == study.benchmark_names
+            assert status["benchmark_truth_statuses"] == study.benchmark_truth_statuses
+            assert status["benchmark_alignment"] == study.benchmark_alignment
             assert status["actual_benchmark_tiers"] == study.actual_benchmark_tiers
             assert status["benchmark_name"] == study.benchmark_names[0]
+        finally:
+            orchestrator.shutdown()
+
+
+def test_benchmark_status_surfaces_refusal_reason_for_unsupported_canonical():
+    with tempfile.TemporaryDirectory() as tmp:
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            payload = orchestrator.benchmark_status(profile_id="natural_language_processing", tier="canonical")
+            benchmarks = payload["benchmarks"]
+            suite = next(item for item in benchmarks if item["spec"]["benchmark_id"] == "beir_fiqa_canonical")
+            assert suite["spec"]["truth_status"] == "unsupported"
+            assert suite["availability"]["canonical_ready"] is False
+            assert "must be refused" in (suite["availability"]["reason"] or "")
         finally:
             orchestrator.shutdown()
 
@@ -1238,6 +1296,9 @@ def test_inference_bridge_registers_checkpoint_and_builds_endpoint():
         assert endpoint.base_url.endswith(":8100/v1")
         assert "serve_local.py" in " ".join(endpoint.command)
         assert endpoint.role == "director"
+        assert endpoint.manifest_path is not None
+        assert Path(endpoint.manifest_path).exists()
+        assert endpoint.trust_remote_code is False
 
 
 def test_frontier_status_reports_new_foundations():
@@ -1251,5 +1312,98 @@ def test_frontier_status_reports_new_foundations():
             assert frontier.reranker == "scientific-hybrid-reranker"
             assert frontier.literature_capabilities is not None
             assert frontier.claim_policy is not None
+        finally:
+            orchestrator.shutdown()
+
+
+def test_endpoint_health_renderer_surfaces_logs_and_trust_policy():
+    payload = {
+        "endpoint": {
+            "endpoint_name": "assistant-asc-local",
+            "status": "failed",
+            "role": "assistant",
+            "backend": "transformers",
+            "trust_remote_code": True,
+            "last_error": "startup failed",
+            "stdout_log_path": "C:/tmp/stdout.log",
+            "stderr_log_path": "C:/tmp/stderr.log",
+        },
+        "health": {
+            "status": "failed",
+            "ok": False,
+            "backend": "transformers",
+            "model_id": "asc-local",
+            "role": "assistant",
+            "trust_remote_code": True,
+            "detail": "stderr tail: missing dependency",
+            "checked_at": "2026-04-07T18:00:00Z",
+        },
+    }
+    rendered = tar_cli._render_endpoint_health(payload)
+    assert "Trust Remote Code: True" in rendered
+    assert "Stdout Log: C:/tmp/stdout.log" in rendered
+    assert "Stderr Log: C:/tmp/stderr.log" in rendered
+
+
+def test_endpoint_list_renderer_surfaces_record_details():
+    payload = {
+        "endpoints": [
+            {
+                "endpoint_name": "assistant-asc-local",
+                "status": "running",
+                "role": "assistant",
+                "checkpoint_name": "asc-local",
+                "backend": "transformers",
+                "base_url": "http://127.0.0.1:8801/v1",
+                "trust_remote_code": False,
+                "process_pid": 1234,
+                "last_error": None,
+                "last_health_at": "2026-04-07T18:00:00Z",
+                "stdout_log_path": "C:/tmp/stdout.log",
+                "stderr_log_path": "C:/tmp/stderr.log",
+                "manifest_path": "C:/tmp/endpoint_manifest.json",
+                "health": {"status": "healthy"},
+            }
+        ]
+    }
+    rendered = tar_cli._render_endpoint_list(payload)
+    assert "Endpoint: assistant-asc-local" in rendered
+    assert "Trust Remote Code: False" in rendered
+    assert "Manifest: C:/tmp/endpoint_manifest.json" in rendered
+
+
+def test_runtime_status_renderer_surfaces_lock_warning():
+    payload = {
+        "safe_execution_mode": "docker_container_only",
+        "payload_image": "tar-payload:locked",
+        "manifest_hash": "abc123",
+        "reproducibility_complete": False,
+        "lock_incomplete_reason": "Missing pinned dependency versions: peft",
+        "active_leases": [],
+        "retry_waiting": [],
+        "terminal_failures": [],
+        "alerts": [],
+        "sandbox_policy": {
+            "profile": "production",
+            "dev_override_active": False,
+            "read_only_mounts": ["/workspace"],
+            "writable_mounts": ["/workspace/tar_runs"],
+        },
+    }
+    rendered = tar_cli._render_runtime_status(payload)
+    assert "Sandbox Profile: production" in rendered
+    assert "Lock Warning: Missing pinned dependency versions: peft" in rendered
+
+
+def test_runtime_status_surfaces_sandbox_mount_policy():
+    with tempfile.TemporaryDirectory() as tmp:
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            runtime = orchestrator.runtime_status()
+            sandbox = runtime["sandbox_policy"]
+            assert sandbox["profile"] == "production"
+            assert "/workspace" in sandbox["read_only_mounts"]
+            assert "/workspace/tar_runs" in sandbox["writable_mounts"]
+            assert sandbox["dev_override_active"] is False
         finally:
             orchestrator.shutdown()

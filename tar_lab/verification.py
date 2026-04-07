@@ -136,12 +136,25 @@ class VerificationRunner:
         verification: VerificationReport,
         *,
         supporting_research_ids: Optional[List[str]] = None,
+        supporting_evidence_ids: Optional[List[str]] = None,
         contradiction_review: Optional[ContradictionReview] = None,
         canonical_comparable: bool = False,
+        verification_report_trial_id: Optional[str] = None,
+        benchmark_problem_id: Optional[str] = None,
+        benchmark_execution_created_at: Optional[str] = None,
+        benchmark_execution_mode: Optional[str] = None,
+        supporting_benchmark_ids: Optional[List[str]] = None,
+        supporting_benchmark_names: Optional[List[str]] = None,
+        evidence_bundle_id: Optional[str] = None,
+        canonical_comparability_source: str = "none",
+        verdict_inputs_complete: bool = True,
+        linkage_status: str = "none",
+        linkage_note: Optional[str] = None,
         policy: Optional[ClaimAcceptancePolicy] = None,
     ) -> ClaimVerdict:
         policy = policy or ClaimAcceptancePolicy()
         support_ids = supporting_research_ids or []
+        evidence_ids = supporting_evidence_ids or []
         rationale: list[str] = []
 
         enough_seeds = verification.seed_variance.num_runs >= policy.min_seed_runs
@@ -156,6 +169,15 @@ class VerificationRunner:
         contradictions = contradiction_review.contradiction_count if contradiction_review is not None else 0
         contradiction_clear = contradictions <= policy.max_allowed_contradictions
         canonical_ok = (not policy.require_canonical_benchmark) or canonical_comparable
+
+        if linkage_status == "exact":
+            rationale.append("claim verdict is bound to explicit trial-local evidence")
+        elif linkage_status == "none":
+            rationale.append("no benchmark execution was linked to this claim review")
+        else:
+            rationale.append("claim review linkage is ambiguous")
+        if linkage_note:
+            rationale.append(linkage_note)
 
         if enough_seeds:
             rationale.append(f"seed count {verification.seed_variance.num_runs} meets policy")
@@ -188,6 +210,8 @@ class VerificationRunner:
 
         if not contradiction_clear:
             status = "contradicted"
+        elif not verdict_inputs_complete or linkage_status == "ambiguous":
+            status = "insufficient_evidence"
         elif not enough_seeds or not enough_support:
             status = "insufficient_evidence"
         elif stable_loss and stable_dimensionality and calibrated and strong_ablation and canonical_ok:
@@ -205,13 +229,26 @@ class VerificationRunner:
         return ClaimVerdict(
             verdict_id=f"claim-{verification.trial_id}",
             trial_id=verification.trial_id,
+            decision_scope="trial_local",
             status=status,  # type: ignore[arg-type]
             rationale=rationale,
             policy=policy,
             supporting_research_ids=list(dict.fromkeys(support_ids)),
+            supporting_evidence_ids=list(dict.fromkeys(evidence_ids)),
+            verification_report_trial_id=verification_report_trial_id or verification.trial_id,
+            benchmark_problem_id=benchmark_problem_id,
+            benchmark_execution_created_at=benchmark_execution_created_at,
+            benchmark_execution_mode=benchmark_execution_mode,
+            supporting_benchmark_ids=list(dict.fromkeys(supporting_benchmark_ids or [])),
+            supporting_benchmark_names=list(dict.fromkeys(supporting_benchmark_names or [])),
+            evidence_bundle_id=evidence_bundle_id,
+            canonical_comparability_source=canonical_comparability_source,  # type: ignore[arg-type]
+            verdict_inputs_complete=verdict_inputs_complete,
+            linkage_status=linkage_status,  # type: ignore[arg-type]
+            linkage_note=linkage_note,
             contradiction_review=contradiction_review,
             canonical_benchmark_required=policy.require_canonical_benchmark,
-            canonical_benchmark_satisfied=canonical_ok,
+            canonical_benchmark_satisfied=canonical_comparable,
             confidence=confidence,
         )
 

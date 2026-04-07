@@ -59,6 +59,8 @@ def build_endpoint_manifest(args: argparse.Namespace) -> dict:
         "port": args.port,
         "role": args.role,
         "served_model_name": args.served_model_name,
+        "workspace": str(Path(args.workspace).resolve()),
+        "trust_remote_code": bool(args.trust_remote_code),
     }
 
 
@@ -73,6 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workspace", default=".")
     parser.add_argument("--role", default="assistant")
     parser.add_argument("--served-model-name", default="local-coding-ai", dest="served_model_name")
+    parser.add_argument("--trust-remote-code", action="store_true", dest="trust_remote_code")
     parser.add_argument("--print_continue", action="store_true")
     parser.add_argument("--print_status", action="store_true")
     parser.add_argument("--print_manifest", action="store_true")
@@ -107,10 +110,10 @@ def _serve_transformers(args: argparse.Namespace) -> int:
         return 1
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=bool(args.trust_remote_code))
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(args.model, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(args.model, trust_remote_code=bool(args.trust_remote_code))
     model.to(device)
     model.eval()
     served_model_name = args.served_model_name
@@ -126,7 +129,15 @@ def _serve_transformers(args: argparse.Namespace) -> int:
 
         def do_GET(self) -> None:  # noqa: N802
             if self.path == "/health":
-                self._json({"ok": True, "backend": "transformers", "model": served_model_name, "role": args.role})
+                self._json(
+                    {
+                        "ok": True,
+                        "backend": "transformers",
+                        "model": served_model_name,
+                        "role": args.role,
+                        "trust_remote_code": bool(args.trust_remote_code),
+                    }
+                )
                 return
             if self.path == "/v1/models":
                 self._json(
@@ -216,7 +227,16 @@ def _serve_mock(args: argparse.Namespace) -> int:
 
         def do_GET(self) -> None:  # noqa: N802
             if self.path == "/health":
-                self._json({"ok": True, "backend": "mock", "model": served_model_name, "role": args.role, "detail": "mock endpoint"})
+                self._json(
+                    {
+                        "ok": True,
+                        "backend": "mock",
+                        "model": served_model_name,
+                        "role": args.role,
+                        "detail": "mock endpoint",
+                        "trust_remote_code": bool(args.trust_remote_code),
+                    }
+                )
                 return
             if self.path == "/v1/models":
                 self._json(
@@ -292,8 +312,9 @@ def main() -> int:
             str(args.tensor_parallel),
             "--served-model-name",
             args.served_model_name,
-            "--trust-remote-code",
         ]
+        if args.trust_remote_code:
+            cmd.append("--trust-remote-code")
         raise SystemExit(subprocess.call(cmd))
 
     return _serve_transformers(args)

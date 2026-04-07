@@ -10,16 +10,13 @@
     {"name": "numpy"},
     {"name": "scipy"},
     {"name": "pennylane"},
-    {"name": "qiskit"},
-    {"name": "jax"},
-    {"name": "optax"},
     {"name": "autoray"},
     {"name": "networkx"},
     {"name": "sympy"},
     {"name": "matplotlib"}
   ],
   "apt_packages": ["git"],
-  "validation_imports": ["numpy", "pennylane", "qiskit", "jax", "optax", "autoray", "networkx", "sympy"],
+  "validation_imports": ["numpy", "pennylane"],
   "benchmark_targets": ["gradient_norm_variance", "barren_plateau_slope", "trainability_gap", "shot_noise_robustness", "seed_variance"],
   "benchmark_suites": [
     {
@@ -54,7 +51,7 @@
       "dataset_or_env": "pennylane:qml_barren_plateau_suite",
       "metric_protocol": ["gradient_norm_variance", "barren_plateau_slope", "trainability_gap"],
       "canonical_comparable": true,
-      "required_imports": ["numpy", "pennylane", "qiskit"],
+      "required_imports": ["numpy", "pennylane"],
       "requires_download": false,
       "proxy_allowed": false
     },
@@ -90,19 +87,31 @@
       "dataset_or_env": "pennylane:qml_initialization_suite",
       "metric_protocol": ["gradient_norm_variance", "seed_variance"],
       "canonical_comparable": true,
-      "required_imports": ["numpy", "pennylane", "qiskit"],
+      "required_imports": ["numpy", "pennylane"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "qml_noise_validation",
+      "family": "noise_trainability_ablation",
+      "name": "PennyLane Noise Validation",
+      "tier": "validation",
+      "dataset_or_env": "pennylane:default_mixed_validation",
+      "metric_protocol": ["shot_noise_robustness", "gradient_norm_variance", "trainability_gap"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "pennylane"],
       "requires_download": false,
       "proxy_allowed": false
     },
     {
       "benchmark_id": "qml_noise_canonical",
       "family": "noise_trainability_ablation",
-      "name": "Qiskit Noise Trainability Benchmark",
+      "name": "PennyLane Noise Trainability Benchmark",
       "tier": "canonical",
-      "dataset_or_env": "qiskit:aer_noise_suite",
+      "dataset_or_env": "pennylane:default_mixed_noise_suite",
       "metric_protocol": ["shot_noise_robustness", "gradient_norm_variance", "trainability_gap"],
       "canonical_comparable": true,
-      "required_imports": ["numpy", "pennylane", "qiskit"],
+      "required_imports": ["numpy", "pennylane"],
       "requires_download": false,
       "proxy_allowed": false
     }
@@ -136,7 +145,7 @@
       "benchmark": "noise_trainability_ablation",
       "benchmark_family": "noise_trainability_ablation",
       "metrics": ["shot_noise_robustness", "gradient_norm_variance", "trainability_gap"],
-      "parameter_grid": {"shots": [128, 512, 2048], "noise_level": [0.0, 0.01, 0.05]},
+      "parameter_grid": {"shots": [128, 512], "noise_level": [0.0, 0.01, 0.05], "qubits": [3], "ansatz_depth": [3], "init_scale": [0.05], "seed": [7, 18]},
       "success_criteria": ["trainability remains bounded under moderate shot noise"]
     }
   ],

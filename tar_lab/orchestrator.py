@@ -11,7 +11,7 @@ import torch
 
 from tar_lab.data_manager import DataManager
 from tar_lab.docker_runner import DockerRunner
-from tar_lab.errors import ScientificValidityError
+from tar_lab.errors import MemoryIntegrityError, ReproducibilityLockError, ScientificValidityError
 from tar_lab.experiment_backends import ExperimentBackendRegistry
 from tar_lab.governor import ThermodynamicGovernor
 from tar_lab.hardware import NvidiaSMI
@@ -160,13 +160,27 @@ class TAROrchestrator:
         )
         return bundle
 
-    def _sync_memory(self) -> None:
-        if self.memory_indexer is not None:
+    def _sync_memory(self) -> bool:
+        if self.memory_indexer is None:
+            return False
+        try:
             self.memory_indexer.sync_once()
+            self.memory_error = None
+            return True
+        except MemoryIntegrityError as exc:
+            if self.vault is not None:
+                self.vault.mark_degraded(str(exc))
+            self.memory_error = str(exc)
+            return False
+        except Exception as exc:  # pragma: no cover - defensive boundary
+            if self.vault is not None:
+                self.vault.mark_degraded(str(exc))
+            self.memory_error = str(exc)
+            return False
 
     def _retrieve_strategy_hits(self, metrics: Optional[list[GovernorMetrics]] = None) -> list[Any]:
-        self._sync_memory()
-        if self.vault is None:
+        synced = self._sync_memory()
+        if self.vault is None or not synced:
             return []
         return self.vault.search_similar_trials(metrics or self.store.tail_metrics(3))
 
@@ -189,7 +203,10 @@ class TAROrchestrator:
         payload_path = self.store.write_payload_config(payload)
         payload_env = self.prepare_payload_environment()
         if payload_env.image_manifest is None or payload_env.run_manifest is None:
-            raise RuntimeError("Locked payload environment was not prepared correctly.")
+            raise ReproducibilityLockError(
+                payload_env.lock_incomplete_reason
+                or "Locked payload environment was not prepared correctly."
+            )
         if task.payload_config_path != str(payload_path):
             task = task.model_copy(update={"payload_config_path": str(payload_path)})
         task = task.model_copy(
@@ -293,6 +310,8 @@ class TAROrchestrator:
                 "image_tag": report.image_tag,
                 "build_status": report.build_status,
                 "manifest_hash": report.run_manifest.hash_sha256 if report.run_manifest is not None else None,
+                "unresolved_dependencies": report.unresolved_packages,
+                "lock_incomplete_reason": report.lock_incomplete_reason,
             },
         )
         return report
@@ -305,6 +324,15 @@ class TAROrchestrator:
         else:
             payload_env = self.payload_environment.load()
             manifest = payload_env.run_manifest if payload_env is not None else None
+            if manifest is None and payload_env is not None:
+                return {
+                    "manifest_found": False,
+                    "image_tag": payload_env.image_tag,
+                    "reproducibility_complete": payload_env.reproducibility_complete,
+                    "unresolved_packages": payload_env.unresolved_packages,
+                    "lock_incomplete_reason": payload_env.lock_incomplete_reason,
+                    "packages": payload_env.packages,
+                }
         if manifest is None:
             raise RuntimeError("Manifest not found.")
         return manifest.model_dump(mode="json")
@@ -316,6 +344,7 @@ class TAROrchestrator:
         schedules = list(self.store.iter_problem_schedules())
         heartbeat = self.runtime_daemon.load_heartbeat()
         payload_env = self.payload_environment.load()
+        sandbox_policy = self.sandbox_policy()
         return {
             "heartbeat": heartbeat.model_dump(mode="json") if heartbeat is not None else None,
             "active_leases": [item.model_dump(mode="json") for item in schedules if item.status in {"leased", "running"}],
@@ -323,10 +352,13 @@ class TAROrchestrator:
             "terminal_failures": [item.model_dump(mode="json") for item in schedules if item.status == "failed_terminal"],
             "alerts": [item.model_dump(mode="json") for item in self.store.latest_alerts(20)],
             "safe_execution_mode": self.safe_execution_mode,
-            "sandbox_policy": self.sandbox_policy(),
+            "sandbox_policy": sandbox_policy,
             "payload_image": payload_env.image_tag if payload_env is not None else None,
             "manifest_hash": payload_env.run_manifest.hash_sha256 if payload_env and payload_env.run_manifest else None,
             "reproducibility_complete": bool(payload_env is not None and payload_env.reproducibility_complete),
+            "unresolved_dependency_count": len(payload_env.unresolved_packages) if payload_env is not None else 0,
+            "unresolved_dependencies": list(payload_env.unresolved_packages) if payload_env is not None else [],
+            "lock_incomplete_reason": payload_env.lock_incomplete_reason if payload_env is not None else None,
         }
 
     def list_experiment_backends(self) -> list[dict[str, Any]]:
@@ -354,10 +386,77 @@ class TAROrchestrator:
 
     def sandbox_policy(self) -> dict[str, Any]:
         policy = self.payload_environment.default_sandbox_policy(artifact_dir="/workspace/tar_runs")
-        return policy.model_dump(mode="json")
+        payload = policy.model_dump(mode="json")
+        payload["dev_override_active"] = policy.profile == "dev_override"
+        payload["read_only_mount_count"] = len(policy.read_only_mounts)
+        payload["writable_mount_count"] = len(policy.writable_mounts)
+        return payload
 
     def _claim_policy(self) -> ClaimAcceptancePolicy:
         return self.inference_bridge.default_claim_policy()
+
+    def _claim_review_query(self, trial_id: str, verification: VerificationReport) -> str:
+        return (
+            f"claim review {trial_id} thermodynamic calibration dimensionality "
+            f"control_score={verification.control_score:.4f} "
+            f"verification={verification.verdict}"
+        )
+
+    def _resolve_claim_benchmark_context(self, problem_id: Optional[str]) -> Dict[str, Any]:
+        context: Dict[str, Any] = {
+            "benchmark_problem_id": problem_id,
+            "benchmark_execution_created_at": None,
+            "benchmark_execution_mode": None,
+            "supporting_benchmark_ids": [],
+            "supporting_benchmark_names": [],
+            "canonical_comparable": False,
+            "canonical_comparability_source": "none",
+            "verdict_inputs_complete": True,
+            "linkage_status": "none",
+            "linkage_note": "No benchmark problem was linked to this claim review.",
+        }
+        if not problem_id:
+            return context
+
+        execution = self.store.latest_problem_execution(problem_id)
+        if execution is not None:
+            context.update(
+                {
+                    "benchmark_execution_created_at": execution.executed_at,
+                    "benchmark_execution_mode": execution.execution_mode,
+                    "supporting_benchmark_ids": list(execution.benchmark_ids),
+                    "supporting_benchmark_names": list(execution.benchmark_names),
+                    "canonical_comparable": execution.canonical_comparable,
+                    "canonical_comparability_source": "problem_execution",
+                    "verdict_inputs_complete": True,
+                    "linkage_status": "exact",
+                    "linkage_note": f"Benchmark evidence is bound to problem execution {execution.problem_id}.",
+                }
+            )
+            return context
+
+        study = self.store.latest_problem_study(problem_id)
+        if study is not None:
+            context.update(
+                {
+                    "supporting_benchmark_ids": list(study.benchmark_ids),
+                    "supporting_benchmark_names": list(study.benchmark_names),
+                    "canonical_comparable": study.canonical_comparable,
+                    "canonical_comparability_source": "problem_study",
+                    "verdict_inputs_complete": True,
+                    "linkage_status": "exact",
+                    "linkage_note": f"Benchmark evidence is bound to problem study {study.problem_id}.",
+                }
+            )
+            return context
+
+        context.update(
+            {
+                "verdict_inputs_complete": False,
+                "linkage_note": f"No problem study or execution exists for problem_id={problem_id}.",
+            }
+        )
+        return context
 
     def _build_research_decision(
         self,
@@ -368,6 +467,8 @@ class TAROrchestrator:
         selected_action: str,
         claim_verdict: Optional[ClaimVerdict] = None,
         mode: str = "research_chat",
+        trial_id: Optional[str] = None,
+        problem_id: Optional[str] = None,
     ) -> ResearchDecisionRecord:
         import hashlib
 
@@ -379,6 +480,8 @@ class TAROrchestrator:
             decision_id=f"decision-{digest}",
             prompt=prompt,
             mode=mode,  # type: ignore[arg-type]
+            trial_id=trial_id,
+            problem_id=problem_id,
             evidence_bundle=evidence_bundle,
             hypotheses=hypotheses,
             selected_action=selected_action,
@@ -395,12 +498,17 @@ class TAROrchestrator:
         model_path: str,
         backend: str = "transformers",
         role: str = "assistant",
+        trust_remote_code: Optional[bool] = None,
     ) -> CheckpointRecord:
+        metadata = {}
+        if trust_remote_code is not None:
+            metadata["trust_remote_code"] = bool(trust_remote_code)
         record = self.inference_bridge.register_checkpoint(
             name=name,
             model_path=model_path,
             backend=backend,
             role=role,
+            metadata=metadata,
         )
         self.store.append_audit_event(
             "inference",
@@ -419,8 +527,15 @@ class TAROrchestrator:
         host: str = "127.0.0.1",
         port: int = 8000,
         role: Optional[str] = None,
+        trust_remote_code: Optional[bool] = None,
     ) -> InferenceEndpointPlan:
-        plan = self.inference_bridge.build_endpoint(name=name, host=host, port=port, role=role)
+        plan = self.inference_bridge.build_endpoint(
+            name=name,
+            host=host,
+            port=port,
+            role=role,
+            trust_remote_code=trust_remote_code,
+        )
         self.store.append_audit_event(
             "inference",
             "build_endpoint",
@@ -438,6 +553,7 @@ class TAROrchestrator:
         host: str = "127.0.0.1",
         port: int = 8000,
         role: Optional[str] = None,
+        trust_remote_code: Optional[bool] = None,
         wait_for_health: bool = False,
     ) -> EndpointRecord:
         record = self.inference_bridge.start_endpoint(
@@ -445,6 +561,7 @@ class TAROrchestrator:
             host=host,
             port=port,
             role=role,
+            trust_remote_code=trust_remote_code,
             wait_for_health=wait_for_health,
         )
         self.store.append_audit_event("inference", "start_endpoint", record.model_dump(mode="json"))
@@ -455,8 +572,18 @@ class TAROrchestrator:
         self.store.append_audit_event("inference", "stop_endpoint", record.model_dump(mode="json"))
         return record
 
-    def restart_endpoint(self, endpoint_name: str, *, wait_for_health: bool = False) -> EndpointRecord:
-        record = self.inference_bridge.restart_endpoint(endpoint_name, wait_for_health=wait_for_health)
+    def restart_endpoint(
+        self,
+        endpoint_name: str,
+        *,
+        trust_remote_code: Optional[bool] = None,
+        wait_for_health: bool = False,
+    ) -> EndpointRecord:
+        record = self.inference_bridge.restart_endpoint(
+            endpoint_name,
+            trust_remote_code=trust_remote_code,
+            wait_for_health=wait_for_health,
+        )
         self.store.append_audit_event("inference", "restart_endpoint", record.model_dump(mode="json"))
         return record
 
@@ -695,6 +822,7 @@ class TAROrchestrator:
             hypotheses=report.hypotheses,
             selected_action=report.next_action,
             mode="problem_study",
+            problem_id=report.problem_id,
         )
         self.store.append_research_decision(decision)
         if self.vault is not None:
@@ -1211,31 +1339,69 @@ class TAROrchestrator:
         self._sync_memory()
         return report
 
-    def claim_verdict(self, trial_id: Optional[str] = None) -> ClaimVerdict:
+    def _claim_review_query(
+        self,
+        *,
+        trial_id: str,
+        verification: VerificationReport,
+        problem_id: Optional[str] = None,
+    ) -> str:
+        query = (
+            f"claim review trial {trial_id} "
+            f"verdict {verification.verdict} "
+            "thermodynamic calibration dimensionality"
+        )
+        if problem_id:
+            query += f" benchmark problem {problem_id}"
+        return query
+
+    def claim_verdict(
+        self,
+        trial_id: Optional[str] = None,
+        problem_id: Optional[str] = None,
+    ) -> ClaimVerdict:
         resolved_trial_id = trial_id or self.store.load_recovery().trial_id
         if not resolved_trial_id:
             raise RuntimeError("No trial is available for claim review.")
         verification = self.store.latest_verification_report(resolved_trial_id)
         if verification is None:
             verification = self.verify_last_trial(resolved_trial_id)
-        latest_problem_execution = self.store.latest_problem_execution()
-        latest_problem_study = self.store.latest_problem_study()
-        canonical_comparable = False
-        if latest_problem_execution is not None:
-            canonical_comparable = latest_problem_execution.canonical_comparable
-        elif latest_problem_study is not None:
-            canonical_comparable = latest_problem_study.canonical_comparable
-        query = f"claim review {resolved_trial_id} thermodynamic calibration dimensionality"
+        benchmark_context = self._resolve_claim_benchmark_context(problem_id)
+        query = self._claim_review_query(
+            trial_id=resolved_trial_id,
+            verification=verification,
+            problem_id=problem_id,
+        )
         try:
-            research_hits = self.vault.search(query, n_results=5, require_research_grade=True) if self.vault is not None else []
+            research_hits = (
+                self.vault.search(query, n_results=5, require_research_grade=True)
+                if self.vault is not None
+                else []
+            )
         except Exception:
             research_hits = []
         evidence_bundle = build_evidence_bundle(query, research_hits)
+        supporting_research_ids = [
+            hit.document_id for hit in research_hits if hit.document_id.startswith("research:")
+        ]
+        supporting_evidence_ids = [hit.document_id for hit in research_hits]
         verdict = self.verification_runner.assess_claim(
             verification,
-            supporting_research_ids=[hit.document_id for hit in research_hits],
+            supporting_research_ids=supporting_research_ids,
+            supporting_evidence_ids=supporting_evidence_ids,
             contradiction_review=evidence_bundle.contradiction_review,
-            canonical_comparable=canonical_comparable,
+            canonical_comparable=benchmark_context["canonical_comparable"],
+            verification_report_trial_id=verification.trial_id,
+            benchmark_problem_id=benchmark_context["benchmark_problem_id"],
+            benchmark_execution_created_at=benchmark_context["benchmark_execution_created_at"],
+            benchmark_execution_mode=benchmark_context["benchmark_execution_mode"],
+            supporting_benchmark_ids=benchmark_context["supporting_benchmark_ids"],
+            supporting_benchmark_names=benchmark_context["supporting_benchmark_names"],
+            evidence_bundle_id=evidence_bundle.bundle_id,
+            canonical_comparability_source=benchmark_context["canonical_comparability_source"],
+            verdict_inputs_complete=benchmark_context["verdict_inputs_complete"],
+            linkage_status=benchmark_context["linkage_status"],
+            linkage_note=benchmark_context["linkage_note"],
             policy=self._claim_policy(),
         )
         self.store.append_claim_verdict(verdict)
@@ -1247,12 +1413,18 @@ class TAROrchestrator:
                 selected_action="claim_review",
                 claim_verdict=verdict,
                 mode="claim_review",
+                trial_id=resolved_trial_id,
+                problem_id=problem_id,
             )
         )
         self.store.append_audit_event("verification", "claim_verdict", verdict.model_dump(mode="json"))
         return verdict
 
-    def breakthrough_report(self, trial_id: Optional[str] = None) -> BreakthroughReport:
+    def breakthrough_report(
+        self,
+        trial_id: Optional[str] = None,
+        problem_id: Optional[str] = None,
+    ) -> BreakthroughReport:
         resolved_trial_id = trial_id or self.store.load_recovery().trial_id
         if not resolved_trial_id:
             raise RuntimeError("No trial is available for breakthrough analysis.")
@@ -1270,7 +1442,7 @@ class TAROrchestrator:
                 f" sigma={latest_metric.entropy_sigma:.4f}"
             )
         research_hits = self.vault.search(query, n_results=5, kind="research") if self.vault is not None else []
-        claim_verdict = self.claim_verdict(resolved_trial_id)
+        claim_verdict = self.claim_verdict(resolved_trial_id, problem_id=problem_id)
         report = self.verification_runner.build_breakthrough_report(
             verification,
             supporting_research_ids=[hit.document_id for hit in research_hits],
@@ -1431,10 +1603,18 @@ class TAROrchestrator:
             else "unknown"
         )
         payload_env = self.payload_environment.load()
+        sandbox_policy = self.sandbox_policy()
         payload["image_tag"] = payload_env.image_tag if payload_env is not None else None
         payload["reproducibility_complete"] = bool(payload_env is not None and payload_env.reproducibility_complete)
         payload["manifest_hash"] = payload_env.run_manifest.hash_sha256 if payload_env and payload_env.run_manifest else None
+        payload["unresolved_dependency_count"] = len(payload_env.unresolved_packages) if payload_env is not None else 0
+        payload["unresolved_dependencies"] = list(payload_env.unresolved_packages) if payload_env is not None else []
+        payload["lock_incomplete_reason"] = payload_env.lock_incomplete_reason if payload_env is not None else None
         payload["safe_execution_mode"] = self.safe_execution_mode
+        payload["sandbox_profile"] = sandbox_policy.get("profile", "production")
+        payload["sandbox_read_only_mounts"] = list(sandbox_policy.get("read_only_mounts", []))
+        payload["sandbox_writable_mounts"] = list(sandbox_policy.get("writable_mounts", []))
+        payload["sandbox_dev_override_active"] = bool(sandbox_policy.get("dev_override_active", False))
         payload["alerts"] = len(list(self.store.iter_alerts()))
         payload["endpoints"] = [item.model_dump(mode="json") for item in self.inference_bridge.list_endpoints()]
         payload["role_assignments"] = [item.model_dump(mode="json") for item in self.inference_bridge.list_role_assignments()]
@@ -1458,6 +1638,11 @@ class TAROrchestrator:
             if latest_problem_execution is not None
             else (latest_problem_study.actual_benchmark_tiers if latest_problem_study is not None else [])
         )
+        benchmark_truth_statuses = (
+            latest_problem_execution.benchmark_truth_statuses
+            if latest_problem_execution is not None
+            else (latest_problem_study.benchmark_truth_statuses if latest_problem_study is not None else [])
+        )
         payload["benchmark_tier"] = (
             latest_problem_execution.benchmark_tier
             if latest_problem_execution is not None
@@ -1466,6 +1651,12 @@ class TAROrchestrator:
         payload["benchmark_ids"] = benchmark_ids
         payload["benchmark_names"] = benchmark_names
         payload["actual_benchmark_tiers"] = actual_benchmark_tiers
+        payload["benchmark_truth_statuses"] = benchmark_truth_statuses
+        payload["benchmark_alignment"] = (
+            latest_problem_execution.benchmark_alignment
+            if latest_problem_execution is not None
+            else (latest_problem_study.benchmark_alignment if latest_problem_study is not None else "aligned")
+        )
         payload["benchmark_name"] = benchmark_names[0] if benchmark_names else None
         payload["canonical_comparable"] = (
             latest_problem_execution.canonical_comparable
@@ -1473,6 +1664,9 @@ class TAROrchestrator:
             else (latest_problem_study.canonical_comparable if latest_problem_study is not None else False)
         )
         payload["memory"] = self.vault.stats() if self.vault is not None else {"error": self.memory_error}
+        if self.memory_error:
+            payload["memory"]["error"] = self.memory_error
+        payload["memory_warning"] = self.memory_error
         payload["regime"] = self.check_regime()
         payload["frontier"] = self.frontier_status().model_dump(mode="json")
         payload["runtime"] = self.runtime_status()
@@ -1559,6 +1753,7 @@ class TAROrchestrator:
                     evidence_bundle=evidence_bundle,
                     hypotheses=hypotheses,
                     selected_action=study.next_action,
+                    problem_id=study.problem_id,
                 )
             )
             self.store.append_audit_event(
@@ -1614,6 +1809,7 @@ class TAROrchestrator:
                     hypotheses=response.hypotheses,
                     selected_action="director_chat_response",
                     claim_verdict=response.claim_verdict,
+                    trial_id=response.claim_verdict.trial_id if response.claim_verdict is not None else None,
                 )
             )
         return response

@@ -26,10 +26,12 @@ class SandboxedPythonExecutor:
         if network_policy == "profile_required":
             policy = SandboxPolicy(
                 mode="docker_only",
+                profile="production",
                 network_policy="profile_required",
                 cpu_limit=cpu_limit,
                 memory_limit_gb=memory_limit_gb,
                 timeout_s=timeout_s,
+                workspace_root="/sandbox",
             )
             return SandboxExecutionReport(
                 ok=False,
@@ -46,18 +48,24 @@ class SandboxedPythonExecutor:
             script_path.write_text(code, encoding="utf-8")
             policy = SandboxPolicy(
                 mode="docker_only",
+                profile="production",
                 network_policy=network_policy,  # type: ignore[arg-type]
-                allowed_mounts=[str(tmp_path)],
-                writable_mounts=[str(tmp_path)],
+                allowed_mounts=["/sandbox"],
+                read_only_mounts=[],
+                writable_mounts=["/sandbox"],
                 cpu_limit=cpu_limit,
                 memory_limit_gb=memory_limit_gb,
                 timeout_s=timeout_s,
-                artifact_dir=str(tmp_path),
+                artifact_dir="/sandbox",
+                workspace_root="/sandbox",
             )
             command = [
                 self.docker_bin,
                 "run",
                 "--rm",
+                "--read-only",
+                "--tmpfs",
+                "/tmp",
                 "--network",
                 "none" if network_policy in {"off", "restricted"} else "bridge",
                 "--cpus",

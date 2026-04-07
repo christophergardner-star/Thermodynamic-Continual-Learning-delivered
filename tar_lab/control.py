@@ -48,6 +48,7 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
         elif request.command == "breakthrough_report":
             payload = orchestrator.breakthrough_report(
                 trial_id=request.payload.get("trial_id"),
+                problem_id=request.payload.get("problem_id"),
             ).model_dump(mode="json")
         elif request.command == "resolve_problem":
             payload = orchestrator.resolve_problem(
@@ -141,6 +142,7 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
                 model_path=str(request.payload.get("model_path", "")),
                 backend=str(request.payload.get("backend", "transformers")),
                 role=str(request.payload.get("role", "assistant")),
+                trust_remote_code=request.payload.get("trust_remote_code"),
             ).model_dump(mode="json")
         elif request.command == "list_checkpoints":
             payload = {"checkpoints": [item.model_dump(mode="json") for item in orchestrator.list_checkpoints()]}
@@ -150,6 +152,7 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
                 host=str(request.payload.get("host", DEFAULT_HOST)),
                 port=int(request.payload.get("port", 8000)),
                 role=request.payload.get("role"),
+                trust_remote_code=request.payload.get("trust_remote_code"),
             ).model_dump(mode="json")
         elif request.command == "list_endpoints":
             payload = {"endpoints": [item.model_dump(mode="json") for item in orchestrator.list_endpoints()]}
@@ -159,6 +162,7 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
                 host=str(request.payload.get("host", DEFAULT_HOST)),
                 port=int(request.payload.get("port", 8000)),
                 role=request.payload.get("role"),
+                trust_remote_code=request.payload.get("trust_remote_code"),
                 wait_for_health=bool(request.payload.get("wait_for_health", False)),
             ).model_dump(mode="json")
         elif request.command == "stop_endpoint":
@@ -166,6 +170,7 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
         elif request.command == "restart_endpoint":
             payload = orchestrator.restart_endpoint(
                 str(request.payload.get("endpoint_name", "")),
+                trust_remote_code=request.payload.get("trust_remote_code"),
                 wait_for_health=bool(request.payload.get("wait_for_health", False)),
             ).model_dump(mode="json")
         elif request.command == "endpoint_health":
@@ -179,7 +184,10 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
         elif request.command == "claim_policy":
             payload = orchestrator.claim_policy()
         elif request.command == "claim_verdict":
-            payload = orchestrator.claim_verdict(request.payload.get("trial_id")).model_dump(mode="json")
+            payload = orchestrator.claim_verdict(
+                trial_id=request.payload.get("trial_id"),
+                problem_id=request.payload.get("problem_id"),
+            ).model_dump(mode="json")
         elif request.command == "research_decision_log":
             payload = orchestrator.research_decision_log(count=int(request.payload.get("count", 20)))
         else:  # pragma: no cover

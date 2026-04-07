@@ -12,6 +12,7 @@ from tar_lab.schemas import (
     BenchmarkAvailability,
     BenchmarkSpec,
     BenchmarkTier,
+    BenchmarkTruthStatus,
     HypothesisRecord,
     ProblemExperimentPlan,
     ProblemResolutionReport,
@@ -31,6 +32,88 @@ def _utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+BENCHMARK_TRUTH_OVERRIDES: dict[str, dict[str, BenchmarkTruthStatus]] = {
+    "generic_ml": {
+        "openml_cc18_classification": "unsupported",
+        "openml_adult_calibration": "unsupported",
+    },
+    "deep_learning": {
+        "cifar10_optimizer_canonical": "unsupported",
+        "cifar10_scaling_canonical": "unsupported",
+    },
+    "natural_language_processing": {
+        "beir_fiqa_canonical": "unsupported",
+        "longbench_narrativeqa_canonical": "unsupported",
+        "cnn_dailymail_summarization": "unsupported",
+    },
+    "computer_vision": {
+        "cifar10_c_corruption": "unsupported",
+        "imagenette_transfer_canonical": "unsupported",
+    },
+    "reinforcement_learning": {
+        "minari_cartpole_exploration": "unsupported",
+        "minari_offline_online_transfer": "unsupported",
+    },
+    "graph_ml": {
+        "cora_depth_canonical": "unsupported",
+        "roman_empire_heterophily_canonical": "unsupported",
+    },
+    "quantum_ml": {
+        "pennylane_barren_plateau_canonical": "canonical_ready",
+        "pennylane_init_canonical": "canonical_ready",
+        "qml_noise_canonical": "canonical_ready",
+    },
+}
+
+
+def _default_truth_status(suite: BenchmarkSpec) -> BenchmarkTruthStatus:
+    if suite.tier == "smoke":
+        return "smoke_only"
+    if suite.tier == "validation":
+        return "validation_only"
+    return "unsupported"
+
+
+def _benchmark_truth_status(profile_id: str, suite: BenchmarkSpec) -> BenchmarkTruthStatus:
+    return BENCHMARK_TRUTH_OVERRIDES.get(profile_id, {}).get(suite.benchmark_id, _default_truth_status(suite))
+
+
+def _truth_status_note(profile_id: str, suite: BenchmarkSpec, truth_status: BenchmarkTruthStatus) -> str | None:
+    if truth_status == "canonical_ready":
+        return None
+    if suite.tier == "canonical":
+        return (
+            f"Benchmark '{suite.benchmark_id}' remains registered for planning, but the current {profile_id} executor "
+            "is not yet aligned to the named canonical benchmark and must refuse publication-grade claims."
+        )
+    if truth_status == "validation_only":
+        return f"Benchmark '{suite.benchmark_id}' is validation-grade on the current executor."
+    if truth_status == "smoke_only":
+        return f"Benchmark '{suite.benchmark_id}' is a smoke-only probe and not literature comparable."
+    return None
+
+
+def _plan_alignment(
+    requested_tier: BenchmarkTier,
+    executed_tier: BenchmarkTier,
+    truth_status: BenchmarkTruthStatus,
+) -> str:
+    if truth_status == "unsupported":
+        return "refused"
+    if requested_tier != executed_tier:
+        return "downgraded"
+    return "aligned"
+
+
+def _aggregate_alignment(values: Iterable[str]) -> str:
+    unique = {value for value in values if value}
+    if not unique:
+        return "aligned"
+    if len(unique) == 1:
+        return next(iter(unique))
+    return "mixed"
+
+
 class ScienceProfileRegistry:
     def __init__(self, workspace: str = "."):
         self.workspace = Path(workspace).resolve()
@@ -48,7 +131,24 @@ class ScienceProfileRegistry:
         profiles: List[ScienceProfile] = []
         for path in sorted(self.profile_dir.glob("*.json")):
             payload = json.loads(path.read_text(encoding="utf-8"))
-            profiles.append(ScienceProfile.model_validate(payload))
+            profile = ScienceProfile.model_validate(payload)
+            normalized_suites: list[BenchmarkSpec] = []
+            for suite in profile.benchmark_suites:
+                truth_status = _benchmark_truth_status(profile.profile_id, suite)
+                notes = list(suite.notes)
+                truth_note = _truth_status_note(profile.profile_id, suite, truth_status)
+                if truth_note and truth_note not in notes:
+                    notes.append(truth_note)
+                normalized_suites.append(
+                    suite.model_copy(
+                        update={
+                            "truth_status": truth_status,
+                            "canonical_comparable": bool(truth_status == "canonical_ready" and suite.tier == "canonical"),
+                            "notes": notes,
+                        }
+                    )
+                )
+            profiles.append(profile.model_copy(update={"benchmark_suites": normalized_suites}))
         if not profiles:
             raise RuntimeError("No science profiles were found")
         return profiles
@@ -119,7 +219,9 @@ class ScienceProfileRegistry:
                 reason = "dataset download not enabled"
         else:
             dataset_ready = True
-        canonical_ready = imports_ready and dataset_ready and suite.canonical_comparable
+        canonical_ready = imports_ready and dataset_ready and suite.truth_status == "canonical_ready"
+        if suite.truth_status == "unsupported":
+            reason = "registered benchmark is not yet executor-aligned and must be refused"
         if reason is None and not imports_ready:
             reason = "missing imports"
         if reason is None and not dataset_ready:
@@ -129,6 +231,7 @@ class ScienceProfileRegistry:
         return BenchmarkAvailability(
             benchmark_id=suite.benchmark_id,
             tier=suite.tier,
+            truth_status=suite.truth_status,
             imports_ready=imports_ready,
             dataset_ready=dataset_ready,
             canonical_ready=canonical_ready,
@@ -278,12 +381,15 @@ class ProblemResearchEngine:
             str(dockerfile_path),
             str(bundle_dir),
         ]
+        bundle_mount = f"/workspace/{bundle_dir.relative_to(self.workspace).as_posix()}"
         run_command = [
             "docker",
             "run",
             "--rm",
             "-v",
-            f"{self.workspace}:/workspace",
+            f"{self.workspace}:/workspace:ro",
+            "-v",
+            f"{bundle_dir}:{bundle_mount}",
             "-w",
             "/workspace",
             image_tag,
@@ -369,9 +475,18 @@ class ProblemResearchEngine:
                     hypothesis=template.hypothesis,
                     benchmark=template.benchmark,
                     benchmark_tier=benchmark_tier,
+                    requested_benchmark_tier=benchmark_tier,
+                    executed_benchmark_tier=suite.tier,
+                    benchmark_truth_status=suite.truth_status,
+                    benchmark_alignment=_plan_alignment(benchmark_tier, suite.tier, suite.truth_status),  # type: ignore[arg-type]
                     benchmark_spec=suite,
                     benchmark_availability=suite_availability,
-                    canonical_comparable=bool(suite.canonical_comparable and benchmark_tier == "canonical"),
+                    canonical_comparable=bool(
+                        suite.truth_status == "canonical_ready"
+                        and suite.tier == "canonical"
+                        and benchmark_tier == "canonical"
+                        and suite_availability.canonical_ready
+                    ),
                     metrics=template.metrics,
                     parameter_grid=template.parameter_grid,
                     success_criteria=template.success_criteria,
@@ -381,6 +496,8 @@ class ProblemResearchEngine:
         benchmark_ids = [item.benchmark_spec.benchmark_id for item in experiments if item.benchmark_spec is not None]
         benchmark_names = [item.benchmark_spec.name for item in experiments if item.benchmark_spec is not None]
         actual_benchmark_tiers = [item.benchmark_spec.tier for item in experiments if item.benchmark_spec is not None]
+        benchmark_truth_statuses = [item.benchmark_truth_status for item in experiments]
+        benchmark_alignment = _aggregate_alignment(item.benchmark_alignment for item in experiments)
         for hypothesis in hypotheses:
             hypothesis.proposed_benchmark_ids = benchmark_ids[:3]
         payload = {
@@ -401,6 +518,8 @@ class ProblemResearchEngine:
             "benchmark_ids": benchmark_ids,
             "benchmark_names": benchmark_names,
             "actual_benchmark_tiers": actual_benchmark_tiers,
+            "benchmark_truth_statuses": benchmark_truth_statuses,
+            "benchmark_alignment": benchmark_alignment,
             "benchmark_availability": [item.model_dump(mode="json") for item in availability],
             "metric_hooks": profile.metric_hooks,
             "cited_research_ids": list(research_ids),

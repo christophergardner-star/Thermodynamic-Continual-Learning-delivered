@@ -76,6 +76,10 @@ class RuntimeSpec(StrictModel):
     env: Dict[str, str] = Field(default_factory=dict)
     volumes: Dict[str, str] = Field(default_factory=dict)
     read_only_volumes: Dict[str, str] = Field(default_factory=dict)
+    sandbox_profile: Literal["production", "dev_override"] = "production"
+    allowed_writable_mounts: List[str] = Field(
+        default_factory=lambda: ["/workspace/tar_runs", "/workspace/logs", "/workspace/anchors"]
+    )
     network_policy: Literal["default", "none", "restricted"] = "none"
     image_locked: bool = False
     image_manifest_path: Optional[str] = None
@@ -96,10 +100,15 @@ DataPurity = Literal["fallback", "cached_real", "download_real", "local_real", "
 RunIntent = Literal["control", "plumbing", "research"]
 BackendStatus = Literal["executable", "scaffold"]
 BenchmarkTier = Literal["smoke", "validation", "canonical"]
+BenchmarkTruthStatus = Literal["canonical_ready", "validation_only", "smoke_only", "unsupported"]
+BenchmarkAlignment = Literal["aligned", "downgraded", "refused", "mixed"]
 ScheduleStatus = Literal["scheduled", "leased", "running", "retry_wait", "completed", "failed_terminal", "cancelled"]
 AlertSeverity = Literal["info", "warning", "error", "critical"]
 SandboxExecutionMode = Literal["docker_only"]
 SandboxNetworkPolicy = Literal["off", "restricted", "profile_required"]
+SandboxProfile = Literal["production", "dev_override"]
+MemoryStoreHealth = Literal["healthy", "rebuild_required", "rebuilding", "degraded"]
+DependencyResolutionStatus = Literal["pinned", "missing_version", "optional_missing"]
 
 
 class DatasetSourceConfig(StrictModel):
@@ -389,6 +398,7 @@ class BenchmarkSpec(StrictModel):
     family: str
     name: str
     tier: BenchmarkTier = "validation"
+    truth_status: BenchmarkTruthStatus = "unsupported"
     dataset_or_env: str
     metric_protocol: List[str] = Field(default_factory=list)
     canonical_comparable: bool = False
@@ -401,6 +411,7 @@ class BenchmarkSpec(StrictModel):
 class BenchmarkAvailability(StrictModel):
     benchmark_id: str
     tier: BenchmarkTier = "validation"
+    truth_status: BenchmarkTruthStatus = "unsupported"
     imports_ready: bool = False
     dataset_ready: bool = False
     canonical_ready: bool = False
@@ -447,6 +458,10 @@ class ProblemExperimentPlan(StrictModel):
     hypothesis: str
     benchmark: str
     benchmark_tier: BenchmarkTier = "validation"
+    requested_benchmark_tier: BenchmarkTier = "validation"
+    executed_benchmark_tier: BenchmarkTier = "validation"
+    benchmark_truth_status: BenchmarkTruthStatus = "unsupported"
+    benchmark_alignment: BenchmarkAlignment = "aligned"
     benchmark_spec: Optional[BenchmarkSpec] = None
     benchmark_availability: Optional[BenchmarkAvailability] = None
     canonical_comparable: bool = False
@@ -481,6 +496,9 @@ class ScienceEnvironmentBundle(StrictModel):
     image_manifest: Optional[ImageManifest] = None
     run_manifest: Optional[RunManifest] = None
     reproducibility_complete: bool = False
+    locked_packages: List[str] = Field(default_factory=list)
+    unresolved_packages: List[str] = Field(default_factory=list)
+    lock_incomplete_reason: Optional[str] = None
     sandbox_policy: Optional[SandboxPolicy] = None
     install_policy: Literal["profile_locked_only"] = "profile_locked_only"
     build_status: Literal["not_requested", "dry_run", "built", "failed"] = "not_requested"
@@ -505,6 +523,8 @@ class ProblemStudyReport(StrictModel):
     benchmark_ids: List[str] = Field(default_factory=list)
     benchmark_names: List[str] = Field(default_factory=list)
     actual_benchmark_tiers: List[BenchmarkTier] = Field(default_factory=list)
+    benchmark_truth_statuses: List[BenchmarkTruthStatus] = Field(default_factory=list)
+    benchmark_alignment: BenchmarkAlignment = "aligned"
     benchmark_availability: List[BenchmarkAvailability] = Field(default_factory=list)
     metric_hooks: List[str] = Field(default_factory=list)
     cited_research_ids: List[str] = Field(default_factory=list)
@@ -525,6 +545,10 @@ class ProblemExperimentResult(StrictModel):
     benchmark_id: Optional[str] = None
     benchmark_name: Optional[str] = None
     benchmark_tier: BenchmarkTier = "validation"
+    requested_benchmark_tier: BenchmarkTier = "validation"
+    executed_benchmark_tier: BenchmarkTier = "validation"
+    benchmark_truth_status: BenchmarkTruthStatus = "unsupported"
+    benchmark_alignment: BenchmarkAlignment = "aligned"
     dataset_or_env: Optional[str] = None
     canonical_comparable: bool = False
     provenance_complete: bool = False
@@ -549,6 +573,8 @@ class ProblemExecutionReport(StrictModel):
     benchmark_ids: List[str] = Field(default_factory=list)
     benchmark_names: List[str] = Field(default_factory=list)
     actual_benchmark_tiers: List[BenchmarkTier] = Field(default_factory=list)
+    benchmark_truth_statuses: List[BenchmarkTruthStatus] = Field(default_factory=list)
+    benchmark_alignment: BenchmarkAlignment = "aligned"
     execution_mode: Literal["local_python", "docker_bundle"]
     imports_ok: List[str] = Field(default_factory=list)
     imports_failed: List[Dict[str, str]] = Field(default_factory=list)
@@ -727,6 +753,8 @@ class ResearchDecisionRecord(StrictModel):
     created_at: str = Field(default_factory=utc_now_iso)
     prompt: str
     mode: Literal["research_chat", "problem_study", "claim_review"] = "research_chat"
+    trial_id: Optional[str] = None
+    problem_id: Optional[str] = None
     evidence_bundle: EvidenceBundle
     hypotheses: List[HypothesisRecord] = Field(default_factory=list)
     selected_action: str
@@ -740,10 +768,23 @@ class ClaimVerdict(StrictModel):
     verdict_id: str
     trial_id: str
     created_at: str = Field(default_factory=utc_now_iso)
+    decision_scope: Literal["trial_local"] = "trial_local"
     status: Literal["accepted", "provisional", "rejected", "insufficient_evidence", "contradicted"]
     rationale: List[str] = Field(default_factory=list)
     policy: ClaimAcceptancePolicy
     supporting_research_ids: List[str] = Field(default_factory=list)
+    supporting_evidence_ids: List[str] = Field(default_factory=list)
+    verification_report_trial_id: str
+    benchmark_problem_id: Optional[str] = None
+    benchmark_execution_created_at: Optional[str] = None
+    benchmark_execution_mode: Optional[str] = None
+    supporting_benchmark_ids: List[str] = Field(default_factory=list)
+    supporting_benchmark_names: List[str] = Field(default_factory=list)
+    evidence_bundle_id: Optional[str] = None
+    canonical_comparability_source: Literal["problem_execution", "problem_study", "none", "ambiguous"] = "none"
+    verdict_inputs_complete: bool = False
+    linkage_status: Literal["exact", "none", "ambiguous"] = "none"
+    linkage_note: Optional[str] = None
     contradiction_review: Optional[ContradictionReview] = None
     canonical_benchmark_required: bool = False
     canonical_benchmark_satisfied: bool = False
@@ -1043,11 +1084,24 @@ class PaperIngestReport(StrictModel):
     capability_report: Optional[LiteratureCapabilityReport] = None
 
 
+class DependencyPackageRecord(StrictModel):
+    requested_spec: str
+    normalized_name: str
+    resolved_spec: Optional[str] = None
+    version: Optional[str] = None
+    required: bool = True
+    resolution_status: DependencyResolutionStatus = "pinned"
+
+
 class DependencyLockManifest(StrictModel):
     manifest_version: Literal["tar.repro.v1"] = "tar.repro.v1"
     lock_id: str
     requirements_path: str
     packages: List[str] = Field(default_factory=list)
+    package_records: List[DependencyPackageRecord] = Field(default_factory=list)
+    unresolved_packages: List[str] = Field(default_factory=list)
+    fully_pinned: bool = False
+    lock_incomplete_reason: Optional[str] = None
     hash_sha256: str
 
 
@@ -1071,12 +1125,13 @@ class ImageManifest(StrictModel):
     dependency_lock: DependencyLockManifest
     environment_fingerprint: EnvironmentFingerprint
     hash_sha256: str
-    locked: bool = True
+    locked: bool = False
     build_status: Literal["not_requested", "dry_run", "built", "failed"] = "not_requested"
 
 
 class SandboxPolicy(StrictModel):
     mode: SandboxExecutionMode = "docker_only"
+    profile: SandboxProfile = "production"
     network_policy: SandboxNetworkPolicy = "off"
     allowed_mounts: List[str] = Field(default_factory=list)
     read_only_mounts: List[str] = Field(default_factory=list)
@@ -1085,6 +1140,7 @@ class SandboxPolicy(StrictModel):
     memory_limit_gb: int = Field(default=1, ge=1)
     timeout_s: int = Field(default=30, ge=1)
     artifact_dir: Optional[str] = None
+    workspace_root: Optional[str] = None
 
 
 class ExecutionArtifact(StrictModel):
@@ -1118,6 +1174,24 @@ class RunManifest(StrictModel):
     created_at: str = Field(default_factory=utc_now_iso)
     hash_sha256: str
     reproducibility_complete: bool = False
+    unresolved_packages: List[str] = Field(default_factory=list)
+    lock_incomplete_reason: Optional[str] = None
+
+
+class MemoryStoreManifest(StrictModel):
+    manifest_version: Literal["tar.memory.v1"] = "tar.memory.v1"
+    schema_version: int = Field(default=1, ge=1)
+    fingerprint: str
+    collection_name: str
+    embedder_name: str
+    embedding_dim: int = Field(ge=1)
+    semantic_research_ready: bool = False
+    state: MemoryStoreHealth = "rebuild_required"
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+    last_rebuild_at: Optional[str] = None
+    last_error: Optional[str] = None
+    retired_collection_names: List[str] = Field(default_factory=list)
 
 
 class PayloadEnvironmentReport(StrictModel):
@@ -1128,6 +1202,9 @@ class PayloadEnvironmentReport(StrictModel):
     build_command: List[str] = Field(default_factory=list)
     build_status: Literal["not_requested", "dry_run", "built", "failed"] = "not_requested"
     packages: List[str] = Field(default_factory=list)
+    package_records: List[DependencyPackageRecord] = Field(default_factory=list)
+    unresolved_packages: List[str] = Field(default_factory=list)
+    lock_incomplete_reason: Optional[str] = None
     image_manifest: Optional[ImageManifest] = None
     run_manifest: Optional[RunManifest] = None
     reproducibility_complete: bool = False
@@ -1195,6 +1272,8 @@ class EndpointHealth(StrictModel):
     detail: Optional[str] = None
     model_id: Optional[str] = None
     backend: Optional[str] = None
+    role: Optional[Literal["assistant", "director", "strategist", "scout"]] = None
+    trust_remote_code: Optional[bool] = None
 
 
 class EndpointRecord(StrictModel):
@@ -1212,6 +1291,11 @@ class EndpointRecord(StrictModel):
     started_at: Optional[str] = None
     stopped_at: Optional[str] = None
     last_error: Optional[str] = None
+    last_health_at: Optional[str] = None
+    manifest_path: Optional[str] = None
+    stdout_log_path: Optional[str] = None
+    stderr_log_path: Optional[str] = None
+    trust_remote_code: bool = False
     health: Optional[EndpointHealth] = None
 
 
@@ -1240,6 +1324,8 @@ class InferenceEndpointPlan(StrictModel):
     env: Dict[str, str] = Field(default_factory=dict)
     endpoint_name: Optional[str] = None
     role: Optional[Literal["assistant", "director", "strategist", "scout"]] = None
+    trust_remote_code: bool = False
+    manifest_path: Optional[str] = None
 
 
 class FrontierStatus(StrictModel):

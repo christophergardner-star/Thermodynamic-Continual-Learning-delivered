@@ -9,6 +9,7 @@ from pathlib import Path
 from shutil import which
 from typing import List, Optional
 
+from tar_lab.errors import ReproducibilityLockError
 from tar_lab.schemas import PayloadEnvironmentReport, RuntimeSpec, ScienceEnvironmentBundle, ScoutTask
 
 try:
@@ -190,6 +191,7 @@ class DockerRunner:
         container_command: List[str],
         container_name: str,
     ) -> List[str]:
+        self._validate_runtime_mounts(runtime)
         full_command = [
             self.docker_bin,
             "run",
@@ -211,10 +213,10 @@ class DockerRunner:
             full_command.extend(["-e", f"TAR_IMAGE_MANIFEST={runtime.image_manifest_path}"])
         if runtime.run_manifest_path:
             full_command.extend(["-e", f"TAR_RUN_MANIFEST={runtime.run_manifest_path}"])
-        for host_path, container_path in sorted(runtime.volumes.items()):
-            full_command.extend(["-v", f"{host_path}:{container_path}"])
         for host_path, container_path in sorted(runtime.read_only_volumes.items()):
             full_command.extend(["-v", f"{host_path}:{container_path}:ro"])
+        for host_path, container_path in sorted(runtime.volumes.items()):
+            full_command.extend(["-v", f"{host_path}:{container_path}"])
         for key, value in sorted(runtime.env.items()):
             full_command.extend(["-e", f"{key}={value}"])
         full_command.append(runtime.image)
@@ -242,6 +244,18 @@ class DockerRunner:
         bundle: ScienceEnvironmentBundle,
         dry_run: bool = False,
     ) -> BuildResult:
+        if not bundle.reproducibility_complete or bundle.image_manifest is None or not bundle.image_manifest.locked:
+            return BuildResult(
+                mode="subprocess",
+                command=self.compose_build_command(
+                    bundle.docker_image_tag,
+                    bundle.dockerfile_path,
+                    bundle.build_context_path,
+                ),
+                image_tag=bundle.docker_image_tag,
+                returncode=1,
+                stderr=bundle.lock_incomplete_reason or "Science environment is not fully pinned.",
+            )
         command = self.compose_build_command(
             bundle.docker_image_tag,
             bundle.dockerfile_path,
@@ -266,8 +280,18 @@ class DockerRunner:
         report: PayloadEnvironmentReport,
         dry_run: bool = False,
     ) -> BuildResult:
-        if report.image_manifest is None:
-            raise RuntimeError("Locked payload image manifest is required before building.")
+        if not report.reproducibility_complete or report.image_manifest is None or not report.image_manifest.locked:
+            return BuildResult(
+                mode="subprocess",
+                command=self.compose_build_command(
+                    report.image_tag,
+                    report.dockerfile_path,
+                    str(Path(report.dockerfile_path).parent),
+                ),
+                image_tag=report.image_tag,
+                returncode=1,
+                stderr=report.lock_incomplete_reason or "Payload environment is not fully pinned.",
+            )
         command = self._normalize_docker_command(report.image_manifest.build_command)
         if dry_run:
             return BuildResult(mode="dry_run", command=command, image_tag=report.image_tag)
@@ -290,7 +314,7 @@ class DockerRunner:
             return CommandResult(
                 command=list(bundle.run_command),
                 returncode=1,
-                stderr="Science environment is not reproducibility-locked.",
+                stderr=bundle.lock_incomplete_reason or "Science environment is not reproducibility-locked.",
             )
         command = self._normalize_docker_command(bundle.run_command)
         if dry_run:
@@ -468,14 +492,14 @@ class DockerRunner:
             commands.append(kill_cmd)
         return commands
 
-    @staticmethod
-    def _docker_volume_bindings(runtime: RuntimeSpec) -> dict[str, dict[str, str]]:
-        bindings = {
-            host: {"bind": container, "mode": "rw"}
-            for host, container in runtime.volumes.items()
-        }
+    @classmethod
+    def _docker_volume_bindings(cls, runtime: RuntimeSpec) -> dict[str, dict[str, str]]:
+        cls._validate_runtime_mounts(runtime)
+        bindings: dict[str, dict[str, str]] = {}
         for host, container in runtime.read_only_volumes.items():
             bindings[host] = {"bind": container, "mode": "ro"}
+        for host, container in runtime.volumes.items():
+            bindings[host] = {"bind": container, "mode": "rw"}
         return bindings
 
     @staticmethod
@@ -499,4 +523,37 @@ class DockerRunner:
     @staticmethod
     def _require_locked_runtime(runtime: RuntimeSpec) -> None:
         if not runtime.image_locked or not runtime.image_manifest_path or not runtime.run_manifest_path:
-            raise RuntimeError("Docker execution requires locked image and run manifests in Workstream 6.")
+            raise ReproducibilityLockError(
+                "Docker execution requires locked image and run manifests with fully pinned dependencies."
+            )
+
+    @classmethod
+    def _validate_runtime_mounts(cls, runtime: RuntimeSpec) -> None:
+        if runtime.sandbox_profile == "dev_override":
+            return
+        writable_mounts = list(runtime.volumes.values())
+        if any(container_path == "/workspace" for container_path in writable_mounts):
+            raise RuntimeError(
+                "Production runtime cannot mount /workspace read-write; use explicit artifact mounts or dev_override."
+            )
+        invalid = [
+            container_path
+            for container_path in writable_mounts
+            if not cls._path_allowed(container_path, runtime.allowed_writable_mounts)
+        ]
+        if invalid:
+            allowed = ", ".join(runtime.allowed_writable_mounts) or "none"
+            bad = ", ".join(sorted(invalid))
+            raise RuntimeError(
+                f"Production runtime writable mounts must stay within explicit artifact paths. "
+                f"Allowed: {allowed}. Invalid: {bad}."
+            )
+
+    @staticmethod
+    def _path_allowed(container_path: str, allowed_mounts: List[str]) -> bool:
+        normalized = container_path.rstrip("/")
+        for allowed in allowed_mounts:
+            base = allowed.rstrip("/")
+            if normalized == base or normalized.startswith(base + "/"):
+                return True
+        return False

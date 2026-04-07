@@ -29,7 +29,14 @@ except ImportError:  # pragma: no cover - optional dependency
     DownloadConfig = None  # type: ignore[assignment]
     hf_load_dataset = None  # type: ignore[assignment]
 
-from tar_lab.schemas import BenchmarkAvailability, BenchmarkSpec, BenchmarkTier, ProblemExecutionReport, ProblemExperimentResult
+from tar_lab.schemas import (
+    BenchmarkAvailability,
+    BenchmarkSpec,
+    BenchmarkTier,
+    BenchmarkTruthStatus,
+    ProblemExecutionReport,
+    ProblemExperimentResult,
+)
 from tar_lab.thermoobserver import compute_participation_ratio
 
 
@@ -52,11 +59,18 @@ def _benchmark_tier(payload: dict[str, Any], experiment: dict[str, Any]) -> Benc
 def _benchmark_spec(experiment: dict[str, Any]) -> BenchmarkSpec:
     payload = experiment.get("benchmark_spec") or {}
     if not payload:
+        tier = _benchmark_tier({}, experiment)
+        truth_status: BenchmarkTruthStatus = "unsupported"
+        if tier == "smoke":
+            truth_status = "smoke_only"
+        elif tier == "validation":
+            truth_status = "validation_only"
         return BenchmarkSpec(
             benchmark_id=str(experiment.get("benchmark", "unknown")),
             family=str(experiment.get("benchmark", "unknown")),
             name=str(experiment.get("name", "Unnamed Benchmark")),
-            tier=_benchmark_tier({}, experiment),
+            tier=tier,
+            truth_status=truth_status,
             dataset_or_env="unknown",
             metric_protocol=list(experiment.get("metrics", [])),
             canonical_comparable=False,
@@ -72,12 +86,36 @@ def _benchmark_availability(experiment: dict[str, Any]) -> BenchmarkAvailability
         return BenchmarkAvailability(
             benchmark_id=spec.benchmark_id,
             tier=spec.tier,
+            truth_status=spec.truth_status,
             imports_ready=True,
             dataset_ready=spec.tier == "smoke",
             canonical_ready=False,
             reason="availability metadata missing",
         )
     return BenchmarkAvailability.model_validate(payload)
+
+
+def _result_alignment(
+    *,
+    requested_tier: BenchmarkTier,
+    executed_tier: BenchmarkTier,
+    truth_status: BenchmarkTruthStatus,
+    status: str,
+) -> str:
+    if truth_status == "unsupported" or (requested_tier == "canonical" and status == "failed"):
+        return "refused"
+    if requested_tier != executed_tier:
+        return "downgraded"
+    return "aligned"
+
+
+def _aggregate_alignment(values: Sequence[str]) -> str:
+    unique = {value for value in values if value}
+    if not unique:
+        return "aligned"
+    if len(unique) == 1:
+        return next(iter(unique))
+    return "mixed"
 
 
 def _benchmark_gate(
@@ -89,13 +127,34 @@ def _benchmark_gate(
     tier = _benchmark_tier(payload, experiment)
     canonical_only = bool(payload.get("canonical_only", False))
     no_proxy = bool(payload.get("no_proxy_benchmarks", False))
-    proxy_requested = spec.proxy_allowed and spec.tier == "smoke"
+    proxy_requested = spec.proxy_allowed and spec.truth_status == "smoke_only"
+
+    if spec.truth_status == "unsupported":
+        return (
+            _make_result(
+                experiment,
+                requested_tier=tier,
+                spec=spec,
+                availability=availability,
+                execution_mode="truth_refusal",
+                status="failed",
+                metrics={},
+                notes=[
+                    availability.reason or "The registered benchmark is not yet aligned to a truthful executor.",
+                    "TAR refuses to present this named benchmark as a valid run until the executor is repaired.",
+                ],
+                proxy_benchmark_used=False,
+            ),
+            spec,
+            availability,
+        )
 
     if tier == "canonical":
-        if spec.tier != "canonical" or not availability.canonical_ready:
+        if spec.tier != "canonical" or spec.truth_status != "canonical_ready" or not availability.canonical_ready:
             return (
                 _make_result(
                     experiment,
+                    requested_tier=tier,
                     spec=spec,
                     availability=availability,
                     execution_mode="canonical_refusal",
@@ -114,6 +173,7 @@ def _benchmark_gate(
         return (
             _make_result(
                 experiment,
+                requested_tier=tier,
                 spec=spec,
                 availability=availability,
                 execution_mode="proxy_refusal",
@@ -129,6 +189,7 @@ def _benchmark_gate(
         return (
             _make_result(
                 experiment,
+                requested_tier=tier,
                 spec=spec,
                 availability=availability,
                 execution_mode="dependency_failure",
@@ -144,6 +205,7 @@ def _benchmark_gate(
         return (
             _make_result(
                 experiment,
+                requested_tier=tier,
                 spec=spec,
                 availability=availability,
                 execution_mode="benchmark_unavailable",
@@ -161,6 +223,7 @@ def _benchmark_gate(
 def _make_result(
     experiment: dict[str, Any],
     *,
+    requested_tier: BenchmarkTier,
     spec: BenchmarkSpec,
     availability: BenchmarkAvailability,
     execution_mode: str,
@@ -177,8 +240,24 @@ def _make_result(
         benchmark_id=spec.benchmark_id,
         benchmark_name=spec.name,
         benchmark_tier=spec.tier,
+        requested_benchmark_tier=requested_tier,
+        executed_benchmark_tier=spec.tier,
+        benchmark_truth_status=spec.truth_status,
+        benchmark_alignment=_result_alignment(
+            requested_tier=requested_tier,
+            executed_tier=spec.tier,
+            truth_status=spec.truth_status,
+            status=status,
+        ),
         dataset_or_env=spec.dataset_or_env,
-        canonical_comparable=bool(spec.canonical_comparable and spec.tier == "canonical" and availability.canonical_ready and not proxy_benchmark_used and status == "completed"),
+        canonical_comparable=bool(
+            spec.truth_status == "canonical_ready"
+            and spec.tier == "canonical"
+            and requested_tier == "canonical"
+            and availability.canonical_ready
+            and not proxy_benchmark_used
+            and status == "completed"
+        ),
         provenance_complete=availability.imports_ready and availability.dataset_ready and spec.dataset_or_env != "unknown",
         proxy_benchmark_used=proxy_benchmark_used,
         execution_mode=execution_mode,
@@ -213,6 +292,8 @@ def execute_study_payload(payload: dict[str, Any], artifact_path: Path) -> Probl
             benchmark_ids=[],
             benchmark_names=[],
             actual_benchmark_tiers=[],
+            benchmark_truth_statuses=[],
+            benchmark_alignment="refused",
             execution_mode="local_python",
             imports_ok=imports_ok,
             imports_failed=imports_failed,
@@ -258,6 +339,8 @@ def execute_study_payload(payload: dict[str, Any], artifact_path: Path) -> Probl
     )
     benchmark_ids = [item.benchmark_id for item in experiments if item.benchmark_id]
     actual_benchmark_tiers = [item.benchmark_tier for item in experiments]
+    benchmark_truth_statuses = [item.benchmark_truth_status for item in experiments]
+    benchmark_alignment = _aggregate_alignment([item.benchmark_alignment for item in experiments])
     completed = [item for item in experiments if item.status == "completed"]
     report = ProblemExecutionReport(
         problem_id=str(payload.get("problem_id")),
@@ -275,6 +358,8 @@ def execute_study_payload(payload: dict[str, Any], artifact_path: Path) -> Probl
         benchmark_ids=benchmark_ids,
         benchmark_names=[item.benchmark_name for item in experiments if item.benchmark_name],
         actual_benchmark_tiers=actual_benchmark_tiers,
+        benchmark_truth_statuses=benchmark_truth_statuses,
+        benchmark_alignment=benchmark_alignment,  # type: ignore[arg-type]
         execution_mode="local_python",
         imports_ok=imports_ok,
         imports_failed=imports_failed,
@@ -303,6 +388,7 @@ def _execute_generic_domain(payload: dict[str, Any]) -> tuple[list[ProblemExperi
         experiments.append(
             _make_result(
                 experiment,
+                requested_tier=_benchmark_tier(payload, experiment),
                 spec=spec,
                 availability=availability,
                 execution_mode="generic_scaffold",
@@ -344,6 +430,7 @@ def _execute_deep_learning(payload: dict[str, Any]) -> tuple[list[ProblemExperim
         experiments.append(
             _make_result(
                 experiment,
+                requested_tier=_benchmark_tier(payload, experiment),
                 spec=spec,
                 availability=availability,
                 execution_mode=execution_mode,
@@ -382,6 +469,7 @@ def _execute_natural_language_processing(payload: dict[str, Any]) -> tuple[list[
         experiments.append(
             _make_result(
                 experiment,
+                requested_tier=_benchmark_tier(payload, experiment),
                 spec=spec,
                 availability=availability,
                 execution_mode=execution_mode,
@@ -420,6 +508,7 @@ def _execute_reinforcement_learning(payload: dict[str, Any]) -> tuple[list[Probl
         experiments.append(
             _make_result(
                 experiment,
+                requested_tier=_benchmark_tier(payload, experiment),
                 spec=spec,
                 availability=availability,
                 execution_mode=execution_mode,
@@ -458,6 +547,7 @@ def _execute_computer_vision(payload: dict[str, Any]) -> tuple[list[ProblemExper
         experiments.append(
             _make_result(
                 experiment,
+                requested_tier=_benchmark_tier(payload, experiment),
                 spec=spec,
                 availability=availability,
                 execution_mode=execution_mode,
@@ -496,6 +586,7 @@ def _execute_graph_ml(payload: dict[str, Any]) -> tuple[list[ProblemExperimentRe
         experiments.append(
             _make_result(
                 experiment,
+                requested_tier=_benchmark_tier(payload, experiment),
                 spec=spec,
                 availability=availability,
                 execution_mode=execution_mode,
@@ -534,6 +625,7 @@ def _execute_generic_ml(payload: dict[str, Any]) -> tuple[list[ProblemExperiment
         experiments.append(
             _make_result(
                 experiment,
+                requested_tier=_benchmark_tier(payload, experiment),
                 spec=spec,
                 availability=availability,
                 execution_mode=execution_mode,
@@ -1915,15 +2007,7 @@ def _evaluate_bandit_policy(logits: np.ndarray, reward_probs: np.ndarray, rng: n
 
 def _execute_quantum_ml(payload: dict[str, Any]) -> tuple[list[ProblemExperimentResult], list[str]]:
     experiments: list[ProblemExperimentResult] = []
-    use_pennylane = False
-    try:
-        import pennylane as qml  # type: ignore
-        from pennylane import numpy as pnp  # type: ignore
-
-        use_pennylane = True
-    except Exception:  # pragma: no cover - dependency dependent
-        qml = None  # type: ignore[assignment]
-        pnp = None  # type: ignore[assignment]
+    runtime = _load_quantum_runtime()
 
     for experiment in payload.get("experiments", []):
         gated, spec, availability = _benchmark_gate(payload, experiment)
@@ -1931,18 +2015,51 @@ def _execute_quantum_ml(payload: dict[str, Any]) -> tuple[list[ProblemExperiment
             experiments.append(gated)
             continue
         template_id = experiment["template_id"]
+        requested_tier = _benchmark_tier(payload, experiment)
         try:
-            if use_pennylane and template_id in {"ansatz_depth_sweep", "initialization_variance"}:
-                metrics = _run_quantum_with_pennylane(qml, pnp, experiment)
+            if template_id in {"ansatz_depth_sweep", "initialization_variance"} and runtime["pennylane_ready"]:
+                metrics, settings_note = _run_quantum_with_pennylane(runtime["qml"], runtime["pnp"], experiment)
                 mode = "pennylane_backend"
-                notes = ["Executed with PennyLane default.qubit backend."]
-            else:
+                notes = [
+                    "Executed with PennyLane default.qubit backend.",
+                    settings_note,
+                ]
+            elif template_id == "noise_shot_ablation" and runtime["noise_ready"]:
+                metrics, settings_note = _run_quantum_noise_with_pennylane(runtime["qml"], experiment)
+                mode = "pennylane_noise_backend"
+                notes = [
+                    "Executed with PennyLane default.mixed backend under finite-shot noisy simulation.",
+                    settings_note,
+                ]
+            elif requested_tier == "smoke" and spec.proxy_allowed:
                 metrics = _run_quantum_proxy(experiment)
                 mode = "analytic_proxy"
-                notes = ["Executed with analytic proxy metrics; install/build the quantum profile to run with PennyLane."]
+                notes = [
+                    "Executed with analytic proxy metrics on the explicit smoke path.",
+                    "Canonical and validation QML tiers require a real PennyLane backend and will refuse instead of downgrading.",
+                ]
+            else:
+                experiments.append(
+                    _make_result(
+                        experiment,
+                        requested_tier=requested_tier,
+                        spec=spec,
+                        availability=availability,
+                        execution_mode="dependency_failure",
+                        status="failed",
+                        metrics={},
+                        notes=[
+                            _quantum_runtime_reason(runtime, template_id),
+                            "Canonical and validation QML paths refuse proxy fallback.",
+                        ],
+                        proxy_benchmark_used=False,
+                    )
+                )
+                continue
             experiments.append(
                 _make_result(
                     experiment,
+                    requested_tier=requested_tier,
                     spec=spec,
                     availability=availability,
                     execution_mode=mode,
@@ -1956,9 +2073,10 @@ def _execute_quantum_ml(payload: dict[str, Any]) -> tuple[list[ProblemExperiment
             experiments.append(
                 _make_result(
                     experiment,
+                    requested_tier=requested_tier,
                     spec=spec,
                     availability=availability,
-                    execution_mode="dependency_failure" if not use_pennylane else "analytic_proxy",
+                    execution_mode="dependency_failure",
                     status="failed",
                     metrics={},
                     notes=[str(exc)],
@@ -2024,38 +2142,131 @@ def _run_quantum_proxy(experiment: dict[str, Any]) -> dict[str, float]:
     return {"gradient_norm_variance": 0.0}
 
 
-def _run_quantum_with_pennylane(qml: Any, pnp: Any, experiment: dict[str, Any]) -> dict[str, float]:
+def _load_quantum_runtime() -> dict[str, Any]:
+    runtime = {
+        "qml": None,
+        "pnp": None,
+        "pennylane_ready": False,
+        "noise_ready": False,
+        "reason": "PennyLane is not installed.",
+        "noise_reason": "PennyLane default.mixed noise backend is unavailable.",
+    }
+    try:
+        import pennylane as qml  # type: ignore
+        from pennylane import numpy as pnp  # type: ignore
+    except Exception as exc:  # pragma: no cover - dependency dependent
+        runtime["reason"] = f"PennyLane import failed: {exc}"
+        runtime["noise_reason"] = runtime["reason"]
+        return runtime
+
+    runtime["qml"] = qml
+    runtime["pnp"] = pnp
+    try:
+        qml.device("default.qubit", wires=2)
+        runtime["pennylane_ready"] = True
+        runtime["reason"] = "PennyLane default.qubit is available."
+    except Exception as exc:  # pragma: no cover - dependency dependent
+        runtime["reason"] = f"PennyLane default.qubit backend unavailable: {exc}"
+
+    try:
+        qml.device("default.mixed", wires=2, shots=64)
+        _ = qml.DepolarizingChannel
+        runtime["noise_ready"] = True
+        runtime["noise_reason"] = "PennyLane default.mixed is available."
+    except Exception as exc:  # pragma: no cover - dependency dependent
+        runtime["noise_reason"] = f"PennyLane default.mixed backend unavailable: {exc}"
+    return runtime
+
+
+def _quantum_runtime_reason(runtime: dict[str, Any], template_id: str) -> str:
+    if template_id == "noise_shot_ablation":
+        return str(runtime.get("noise_reason") or runtime.get("reason") or "Quantum noise backend unavailable.")
+    return str(runtime.get("reason") or "Quantum backend unavailable.")
+
+
+def _run_quantum_with_pennylane(qml: Any, pnp: Any, experiment: dict[str, Any]) -> tuple[dict[str, float], str]:
     grid = experiment.get("parameter_grid", {})
     if experiment["template_id"] == "ansatz_depth_sweep":
         depths = [int(x) for x in grid.get("ansatz_depth", [2, 4, 8])]
         qubits = [int(x) for x in grid.get("qubits", [4])]
+        init_scale = float(grid.get("init_scale", [0.05])[0] if isinstance(grid.get("init_scale", [0.05]), list) else grid.get("init_scale", 0.05))
+        seeds = [int(x) for x in grid.get("seed", [7, 18])]
         pairs: list[tuple[int, float]] = []
         for depth in depths:
             variances = []
             for qubit_count in qubits:
-                variances.append(_estimate_gradient_variance(qml, pnp, qubit_count, depth, init_scale=0.05, seeds=[7, 18]))
+                variances.append(_estimate_gradient_variance(qml, pnp, qubit_count, depth, init_scale=init_scale, seeds=seeds))
             pairs.append((depth, statistics.mean(variances)))
         slope = _log_slope(pairs)
         trainability_gap = pairs[0][1] / max(pairs[-1][1], 1e-12)
-        return {
-            "gradient_norm_variance": round(statistics.mean(value for _, value in pairs), 6),
-            "barren_plateau_slope": round(slope, 6),
-            "trainability_gap": round(trainability_gap, 6),
-        }
+        return (
+            {
+                "gradient_norm_variance": round(statistics.mean(value for _, value in pairs), 6),
+                "barren_plateau_slope": round(slope, 6),
+                "trainability_gap": round(trainability_gap, 6),
+            },
+            f"backend=pennylane:default.qubit qubits={qubits} ansatz_depth={depths} init_scale={init_scale} seeds={seeds}.",
+        )
 
     if experiment["template_id"] == "initialization_variance":
         init_scales = [float(x) for x in grid.get("init_scale", [0.01, 0.05, 0.1])]
         seeds = [int(x) for x in grid.get("seed", [7, 18, 29])]
+        qubits = int(grid.get("qubits", [4])[0] if isinstance(grid.get("qubits", [4]), list) else grid.get("qubits", 4))
+        depth = int(grid.get("ansatz_depth", [4])[0] if isinstance(grid.get("ansatz_depth", [4]), list) else grid.get("ansatz_depth", 4))
         values = [
-            _estimate_gradient_variance(qml, pnp, 4, 4, init_scale=scale, seeds=seeds[:2])
+            _estimate_gradient_variance(qml, pnp, qubits, depth, init_scale=scale, seeds=seeds)
             for scale in init_scales
         ]
-        return {
-            "gradient_norm_variance": round(statistics.mean(values), 6),
-            "seed_variance": round(statistics.pstdev(values), 6),
-        }
+        return (
+            {
+                "gradient_norm_variance": round(statistics.mean(values), 6),
+                "seed_variance": round(statistics.pstdev(values), 6),
+            },
+            f"backend=pennylane:default.qubit qubits={qubits} ansatz_depth={depth} init_scale={init_scales} seeds={seeds}.",
+        )
 
-    return _run_quantum_proxy(experiment)
+    return _run_quantum_proxy(experiment), "backend=analytic_proxy."
+
+
+def _run_quantum_noise_with_pennylane(qml: Any, experiment: dict[str, Any]) -> tuple[dict[str, float], str]:
+    grid = experiment.get("parameter_grid", {})
+    shots = [int(x) for x in grid.get("shots", [128, 512])]
+    noise_levels = [float(x) for x in grid.get("noise_level", [0.0, 0.01, 0.05])]
+    qubits = int(grid.get("qubits", [3])[0] if isinstance(grid.get("qubits", [3]), list) else grid.get("qubits", 3))
+    depth = int(grid.get("ansatz_depth", [3])[0] if isinstance(grid.get("ansatz_depth", [3]), list) else grid.get("ansatz_depth", 3))
+    init_scale = float(grid.get("init_scale", [0.05])[0] if isinstance(grid.get("init_scale", [0.05]), list) else grid.get("init_scale", 0.05))
+    seeds = [int(x) for x in grid.get("seed", [7, 18])]
+
+    config_variances: list[tuple[int, float, float]] = []
+    for shot in shots:
+        for noise_level in noise_levels:
+            variance = _estimate_noisy_gradient_variance(
+                qml,
+                qubits=qubits,
+                depth=depth,
+                init_scale=init_scale,
+                seeds=seeds,
+                shots=shot,
+                noise_level=noise_level,
+            )
+            config_variances.append((shot, noise_level, variance))
+
+    baseline_candidates = [value for shot, noise, value in config_variances if shot == max(shots) and noise == min(noise_levels)]
+    baseline = max(max(baseline_candidates, default=0.0), 1e-12)
+    normalized = [min(1.0, max(0.0, value / baseline)) for _, _, value in config_variances]
+    min_variance = min(value for _, _, value in config_variances)
+    return (
+        {
+            "shot_noise_robustness": round(statistics.mean(normalized), 6),
+            "gradient_norm_variance": round(statistics.mean(value for _, _, value in config_variances), 6),
+            "trainability_gap": round(baseline / max(min_variance, 1e-12), 6),
+        },
+        (
+            "backend=pennylane:default.mixed "
+            f"qubits={qubits} ansatz_depth={depth} init_scale={init_scale} "
+            f"shots={shots} noise_level={noise_levels} seeds={seeds}."
+        ),
+    )
 
 
 def _estimate_gradient_variance(qml: Any, pnp: Any, qubits: int, depth: int, init_scale: float, seeds: List[int]) -> float:
@@ -2083,6 +2294,55 @@ def _estimate_gradient_variance(qml: Any, pnp: Any, qubits: int, depth: int, ini
         grads = qml.grad(cost)(weights)
         flat = np.asarray(grads).reshape(-1)
         gradient_values.append(float(np.var(flat)))
+    return max(1e-12, statistics.mean(gradient_values))
+
+
+def _estimate_noisy_gradient_variance(
+    qml: Any,
+    *,
+    qubits: int,
+    depth: int,
+    init_scale: float,
+    seeds: List[int],
+    shots: int,
+    noise_level: float,
+) -> float:
+    dev = qml.device("default.mixed", wires=qubits, shots=shots)
+
+    @qml.qnode(dev)
+    def circuit(params):
+        for layer in range(depth):
+            for wire in range(qubits):
+                qml.RY(float(params[layer, wire]), wires=wire)
+                if noise_level > 0.0:
+                    qml.DepolarizingChannel(noise_level, wires=wire)
+            for wire in range(qubits - 1):
+                qml.CNOT(wires=[wire, wire + 1])
+                if noise_level > 0.0:
+                    qml.DepolarizingChannel(noise_level, wires=wire + 1)
+            if qubits > 1:
+                qml.CNOT(wires=[qubits - 1, 0])
+                if noise_level > 0.0:
+                    qml.DepolarizingChannel(noise_level, wires=0)
+        return qml.expval(qml.PauliZ(0))
+
+    def evaluate(params: np.ndarray) -> float:
+        return float(circuit(params))
+
+    epsilon = 1e-2
+    gradient_values: list[float] = []
+    for seed in seeds:
+        rng = np.random.default_rng(seed)
+        params = rng.normal(loc=0.0, scale=init_scale, size=(depth, qubits))
+        grads: list[float] = []
+        for layer in range(depth):
+            for wire in range(qubits):
+                plus = np.array(params, copy=True)
+                minus = np.array(params, copy=True)
+                plus[layer, wire] += epsilon
+                minus[layer, wire] -= epsilon
+                grads.append((evaluate(plus) - evaluate(minus)) / (2.0 * epsilon))
+        gradient_values.append(float(np.var(np.asarray(grads, dtype=np.float64))))
     return max(1e-12, statistics.mean(gradient_values))
 
 
