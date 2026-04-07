@@ -1,0 +1,117 @@
+{
+  "profile_id": "graph_ml",
+  "domain": "graph_ml",
+  "summary": "Graph machine-learning environment for message passing, heterophily, link prediction, and graph-structure ablations.",
+  "keywords": ["graph", "gnn", "message passing", "heterophily", "link prediction", "graph neural network", "molecule"],
+  "base_image": "pytorch/pytorch:latest",
+  "python_version": "3.10",
+  "cuda_support": "optional",
+  "pip_packages": [
+    {"name": "numpy"},
+    {"name": "scipy"},
+    {"name": "networkx"},
+    {"name": "sympy"},
+    {"name": "pandas"}
+  ],
+  "apt_packages": ["git"],
+  "validation_imports": ["numpy", "torch"],
+  "benchmark_targets": ["node_accuracy", "link_auroc", "oversmoothing_gap", "seed_variance"],
+  "benchmark_suites": [
+    {
+      "benchmark_id": "graph_depth_smoke",
+      "family": "depth_sweep",
+      "name": "Smoke Graph Depth Sweep",
+      "tier": "smoke",
+      "dataset_or_env": "local:synthetic_graph_probe",
+      "metric_protocol": ["node_accuracy", "oversmoothing_gap", "representation_dimensionality"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": true
+    },
+    {
+      "benchmark_id": "karate_depth_validation",
+      "family": "depth_sweep",
+      "name": "Karate Club Depth Validation",
+      "tier": "validation",
+      "dataset_or_env": "networkx:karate_club_graph",
+      "metric_protocol": ["node_accuracy", "oversmoothing_gap", "representation_dimensionality"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch", "networkx"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "cora_depth_canonical",
+      "family": "depth_sweep",
+      "name": "Cora Depth Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "external:cora",
+      "metric_protocol": ["node_accuracy", "oversmoothing_gap", "representation_dimensionality"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "torch", "networkx"],
+      "requires_download": true,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "graph_heterophily_smoke",
+      "family": "heterophily_control",
+      "name": "Smoke Heterophily Control",
+      "tier": "smoke",
+      "dataset_or_env": "local:heterophily_probe",
+      "metric_protocol": ["node_accuracy", "seed_variance"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": true
+    },
+    {
+      "benchmark_id": "karate_heterophily_validation",
+      "family": "heterophily_control",
+      "name": "Karate Club Heterophily Validation",
+      "tier": "validation",
+      "dataset_or_env": "networkx:karate_club_graph",
+      "metric_protocol": ["node_accuracy", "seed_variance"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch", "networkx"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "roman_empire_heterophily_canonical",
+      "family": "heterophily_control",
+      "name": "Roman Empire Heterophily Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "external:roman_empire",
+      "metric_protocol": ["node_accuracy", "seed_variance"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "torch", "networkx"],
+      "requires_download": true,
+      "proxy_allowed": false
+    }
+  ],
+  "metric_hooks": ["loss", "seed_variance", "representation_dimensionality", "oversmoothing_gap"],
+  "experiment_templates": [
+    {
+      "template_id": "depth_oversmoothing",
+      "name": "Depth and Oversmoothing",
+      "hypothesis": "The phenomenon follows graph-depth oversmoothing rather than optimizer instability.",
+      "benchmark": "depth_sweep",
+      "benchmark_family": "depth_sweep",
+      "metrics": ["node_accuracy", "oversmoothing_gap", "representation_dimensionality"],
+      "parameter_grid": {"layers": [2, 4, 8, 16]},
+      "success_criteria": ["performance remains stable deeper into the stack"]
+    },
+    {
+      "template_id": "heterophily_ablation",
+      "name": "Heterophily Ablation",
+      "hypothesis": "The effect is driven by heterophily mismatch and can be isolated with graph rewiring.",
+      "benchmark": "heterophily_control",
+      "benchmark_family": "heterophily_control",
+      "metrics": ["node_accuracy", "seed_variance"],
+      "parameter_grid": {"rewiring": ["off", "knn", "attention"], "normalization": ["batch", "pairnorm"]},
+      "success_criteria": ["heterophily-sensitive metrics improve"]
+    }
+  ],
+  "safety_rules": ["locked_profile_only", "no_host_installs", "container_only_resolution"]
+}

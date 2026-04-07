@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import hashlib
 from typing import Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -10,8 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from tar_lab.schemas import (
     DatasetChangeProposal,
     DirectorPolicy,
+    EvidenceTrace,
+    EvidenceBundle,
     GovernorMetrics,
     GovernorThresholds,
+    HypothesisRecord,
     LabChatResponse,
     LocalLLMConfig,
     MemorySearchHit,
@@ -20,6 +24,8 @@ from tar_lab.schemas import (
     ScoutTask,
     StrategistPlan,
     SelfCorrectionNote,
+    ContradictionReview,
+    ClaimVerdict,
 )
 from tar_lab.state import TARStateStore
 
@@ -122,13 +128,169 @@ def _quantitative_justification(points: List[GovernorMetrics]) -> QuantitativeJu
         entropy_sigma=latest.entropy_sigma,
         drift_rho=latest.drift_rho,
         grad_norm=latest.grad_norm,
+        regime_rho=latest.regime_rho,
         effective_dimensionality=latest.effective_dimensionality,
+        effective_dimensionality_std_err=latest.effective_dimensionality_std_err,
         equilibrium_fraction=latest.equilibrium_fraction,
         energy_slope=energy_slope,
         entropy_slope=entropy_slope,
         drift_slope=drift_slope,
         dimensionality_slope=dimensionality_slope,
     )
+
+
+def _evidence_traces_from_hits(hits: List[MemorySearchHit]) -> List[EvidenceTrace]:
+    traces: list[EvidenceTrace] = []
+    for hit in hits[:3]:
+        metadata = hit.metadata or {}
+        raw_trace = metadata.get("evidence_trace")
+        if isinstance(raw_trace, dict):
+            try:
+                traces.append(EvidenceTrace.model_validate(raw_trace))
+                continue
+            except Exception:
+                pass
+        contradictions = metadata.get("contradictory_claims") or []
+        contradiction_summary = [
+            f"{item.get('left_claim_id')} vs {item.get('right_claim_id')}: {item.get('reason')}"
+            for item in contradictions[:3]
+            if isinstance(item, dict)
+        ]
+        citation_entry_ids = metadata.get("citation_entry_ids") or []
+        bibliography_entry_id = metadata.get("bibliography_entry_id")
+        if bibliography_entry_id and bibliography_entry_id not in citation_entry_ids:
+            citation_entry_ids = [bibliography_entry_id, *citation_entry_ids]
+        traces.append(
+            EvidenceTrace(
+                document_id=hit.document_id,
+                kind=str(metadata.get("kind", "memory")),
+                paper_id=metadata.get("paper_id"),
+                paper_title=metadata.get("paper_title"),
+                claim_id=metadata.get("claim_id"),
+                section_id=metadata.get("section_id"),
+                page_number=metadata.get("page_number") if isinstance(metadata.get("page_number"), int) and metadata.get("page_number") != -1 else None,
+                score=hit.score,
+                source_path=metadata.get("source_path"),
+                excerpt=str(metadata.get("source_excerpt") or hit.document[:320]),
+                bibliography_entry_ids=[str(item) for item in citation_entry_ids if item],
+                contradiction_count=len(contradictions),
+                contradiction_summary=contradiction_summary,
+            )
+        )
+    return traces
+
+
+def _stable_id(prefix: str, payload: str) -> str:
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}-{digest}"
+
+
+def _build_contradiction_review(prompt: str, traces: List[EvidenceTrace]) -> Optional[ContradictionReview]:
+    conflicting_document_ids: list[str] = []
+    conflicting_claim_ids: list[str] = []
+    summaries: list[str] = []
+    for trace in traces:
+        if trace.contradiction_count <= 0:
+            continue
+        conflicting_document_ids.append(trace.document_id)
+        if trace.claim_id:
+            conflicting_claim_ids.append(trace.claim_id)
+        summaries.extend(trace.contradiction_summary[:2])
+    if not conflicting_document_ids:
+        return None
+    contradiction_count = len(summaries) if summaries else len(conflicting_document_ids)
+    if contradiction_count >= 3:
+        severity = "high"
+    elif contradiction_count == 2:
+        severity = "medium"
+    else:
+        severity = "low"
+    return ContradictionReview(
+        review_id=_stable_id("contradiction", prompt + "|" + "|".join(sorted(conflicting_document_ids))),
+        query=prompt,
+        conflicting_document_ids=sorted(set(conflicting_document_ids)),
+        conflicting_claim_ids=sorted(set(conflicting_claim_ids)),
+        contradiction_count=contradiction_count,
+        summary=" ; ".join(summaries[:4]) or "Retrieved evidence contains materially conflicting claims.",
+        recommended_resolution=(
+            "Run an experiment that discriminates between the conflicting claims and treat any current conclusion as provisional."
+        ),
+        severity=severity,  # type: ignore[arg-type]
+    )
+
+
+def build_evidence_bundle(query: str, hits: List[MemorySearchHit]) -> EvidenceBundle:
+    traces = _evidence_traces_from_hits(hits)
+    contradiction_review = _build_contradiction_review(query, traces)
+    supporting_document_ids = [trace.document_id for trace in traces]
+    supporting_claim_ids = [trace.claim_id for trace in traces if trace.claim_id]
+    confidence = min(1.0, 0.2 + (0.15 * len(traces)) - (0.1 if contradiction_review else 0.0))
+    notes = []
+    if not traces:
+        notes.append("No evidence traces were retrieved.")
+    if contradiction_review is not None:
+        notes.append("Contradictory evidence is present and must be resolved before claiming success.")
+    return EvidenceBundle(
+        bundle_id=_stable_id("evidence", query + "|" + "|".join(supporting_document_ids)),
+        query=query,
+        traces=traces,
+        supporting_document_ids=supporting_document_ids,
+        supporting_claim_ids=supporting_claim_ids,
+        contradiction_review=contradiction_review,
+        confidence=max(0.0, round(confidence, 6)),
+        notes=notes,
+    )
+
+
+def build_hypotheses(
+    problem: str,
+    evidence_bundle: EvidenceBundle,
+    *,
+    benchmark_ids: Optional[List[str]] = None,
+) -> List[HypothesisRecord]:
+    benchmark_ids = benchmark_ids or []
+    traces = evidence_bundle.traces
+    if not traces:
+        return [
+            HypothesisRecord(
+                hypothesis_id=_stable_id("hypothesis", problem + "|fallback"),
+                problem=problem,
+                hypothesis="Evidence is insufficient; the next step is to ingest higher-quality literature and benchmark evidence.",
+                rationale="No traceable evidence was available in memory.",
+                confidence=0.15,
+                evidence_bundle_id=evidence_bundle.bundle_id,
+                proposed_benchmark_ids=benchmark_ids[:2],
+                unresolved_assumptions=["The current evidence base is too weak to support a scientific claim."],
+            )
+        ]
+    first = traces[0]
+    hypothesis_text = (
+        f"The dominant mechanism in '{problem}' is linked to evidence from "
+        f"{first.paper_title or first.document_id}, and should be tested against the current benchmark plan."
+    )
+    unresolved = []
+    if evidence_bundle.contradiction_review is not None:
+        unresolved.append("Contradictory literature remains unresolved.")
+    if first.page_number is None:
+        unresolved.append("Some evidence lacks page-level provenance.")
+    return [
+        HypothesisRecord(
+            hypothesis_id=_stable_id("hypothesis", problem + "|" + first.document_id),
+            problem=problem,
+            hypothesis=hypothesis_text,
+            rationale=(
+                f"Primary evidence trace: {first.paper_title or first.document_id}"
+                f"{f' p.{first.page_number}' if first.page_number is not None else ''}."
+            ),
+            confidence=max(0.0, min(1.0, evidence_bundle.confidence)),
+            evidence_bundle_id=evidence_bundle.bundle_id,
+            supporting_document_ids=evidence_bundle.supporting_document_ids[:4],
+            supporting_claim_ids=evidence_bundle.supporting_claim_ids[:4],
+            contradiction_review_id=evidence_bundle.contradiction_review.review_id if evidence_bundle.contradiction_review else None,
+            proposed_benchmark_ids=benchmark_ids[:3],
+            unresolved_assumptions=unresolved,
+        )
+    ]
 
 
 def _role_config_from_env(role: str) -> Optional[LocalLLMConfig]:
@@ -292,10 +454,14 @@ class RuleDirector:
             for hit in memory_hits
             if hit.metadata.get("trial_id") or hit.metadata.get("document_id") or hit.document_id
         ][:3]
+        evidence_bundle = build_evidence_bundle(prompt, memory_hits)
+        evidence_traces = evidence_bundle.traces
+        hypotheses = build_hypotheses(prompt, evidence_bundle)
         response_text = state_summary
         prompt_lower = prompt.lower()
         if any(term in prompt_lower for term in ("current ai", "ai problems", "research landscape", "frontier")):
             research_hits = [hit for hit in memory_hits if str(hit.metadata.get("kind", "")) == "research"]
+            paper_hits = [hit for hit in memory_hits if str(hit.metadata.get("kind", "")).startswith("paper_")]
             if research_hits:
                 problem_lines = []
                 for hit in research_hits[:3]:
@@ -306,6 +472,25 @@ class RuleDirector:
                     + ". "
                     + state_summary
                 )
+                if evidence_traces:
+                    trace = evidence_traces[0]
+                    if trace.paper_title or trace.page_number:
+                        response_text += (
+                            f" Evidence anchor: {(trace.paper_title or trace.document_id)}"
+                            f"{f' p.{trace.page_number}' if trace.page_number is not None else ''}."
+                        )
+            elif paper_hits:
+                response_text = (
+                    "Paper-grounded research scan: "
+                    + " | ".join(hit.document.split(".")[0].strip() for hit in paper_hits[:3])
+                    + ". "
+                    + state_summary
+                )
+                if evidence_traces:
+                    response_text += " Evidence trace(s): " + " ; ".join(
+                        f"{trace.paper_title or trace.document_id}{f' p.{trace.page_number}' if trace.page_number is not None else ''}"
+                        for trace in evidence_traces[:2]
+                    ) + "."
             else:
                 response_text = f"No research memory is indexed yet. {state_summary}"
         elif "stability" in prompt_lower:
@@ -328,8 +513,13 @@ class RuleDirector:
         return LabChatResponse(
             response_text=response_text,
             state_summary=state_summary,
+            confidence=evidence_bundle.confidence,
             cited_trial_ids=cited_trial_ids,
             retrieved_memories=memory_hits[:3],
+            evidence_traces=evidence_traces,
+            evidence_bundle=evidence_bundle,
+            hypotheses=hypotheses,
+            contradiction_review=evidence_bundle.contradiction_review,
         )
 
     def self_correction(
@@ -681,6 +871,8 @@ class TriModelHierarchy:
         memory_hits: Optional[List[MemorySearchHit]] = None,
     ) -> LabChatResponse:
         memory_hits = memory_hits or []
+        evidence_bundle = build_evidence_bundle(prompt, memory_hits)
+        hypotheses = build_hypotheses(prompt, evidence_bundle)
         if self.director_config is None:
             return self.rule_director.chat(prompt, store=store, memory_hits=memory_hits)
 
@@ -690,20 +882,27 @@ class TriModelHierarchy:
         raw = director.generate(
             system_prompt=(
                 "You are the TAR Director. Return JSON only. Summarize lab state using quantitative language. "
-                "Ground the answer in E, sigma, rho, grad_norm, D_PR, equilibrium state, recovery state, and retrieved memories."
+                "Ground the answer in E, sigma, rho, grad_norm, D_PR, equilibrium state, recovery state, and retrieved memories. "
+                "Acknowledge contradictions explicitly and avoid overclaiming."
             ),
             user_prompt=(
                 f"User intent: {prompt}\n"
                 f"Recovery: {json.dumps(recovery.model_dump(mode='json'), indent=2)}\n"
                 f"Recent metrics: {json.dumps([item.model_dump(mode='json') for item in recent], indent=2)}\n"
-                f"Retrieved memories: {json.dumps([item.model_dump(mode='json') for item in memory_hits], indent=2)}"
+                f"Retrieved memories: {json.dumps([item.model_dump(mode='json') for item in memory_hits], indent=2)}\n"
+                f"Evidence bundle: {json.dumps(evidence_bundle.model_dump(mode='json'), indent=2)}"
             ),
         )
         return LabChatResponse(
             response_text=raw.response_text,
             state_summary=raw.state_summary,
+            confidence=evidence_bundle.confidence,
             cited_trial_ids=raw.cited_trial_ids,
             retrieved_memories=memory_hits[:3],
+            evidence_traces=evidence_bundle.traces,
+            evidence_bundle=evidence_bundle,
+            hypotheses=hypotheses,
+            contradiction_review=evidence_bundle.contradiction_review,
             dataset_change=raw.dataset_change,
         )
 

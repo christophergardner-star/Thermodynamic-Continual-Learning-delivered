@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -46,6 +47,15 @@ MODEL_PRESETS = {
     "qwen-14b-instruct": "Qwen/Qwen2.5-Coder-14B-Instruct",
     "qwen-32b-instruct": "Qwen/Qwen2.5-Coder-32B-Instruct",
 }
+
+
+EXPERIMENTAL_WARNING = (
+    "EXPERIMENTAL WARNING: deepseek_asc_finetune.py is not yet a "
+    "scientifically validated large-model ASC trainer. Masking, device "
+    "placement, distributed scaling, and memory strategy are still incomplete. "
+    "Use asc_train_full.py for the canonical ASC path and treat this script as "
+    "experimental scaffolding."
+)
 
 
 def resolve_model_id(model: Optional[str]) -> str:
@@ -261,6 +271,7 @@ def run_training(args: argparse.Namespace) -> dict:
 
 def main() -> int:
     args = parse_args()
+    print(EXPERIMENTAL_WARNING, file=sys.stderr)
     result = run_training(args)
     print(json.dumps(result["status"], indent=2))
     return 0

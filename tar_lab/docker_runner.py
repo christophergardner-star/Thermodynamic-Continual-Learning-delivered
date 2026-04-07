@@ -3,14 +3,13 @@ from __future__ import annotations
 import json
 import math
 import os
-import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import which
 from typing import List, Optional
 
-from tar_lab.schemas import RuntimeSpec, ScoutTask
+from tar_lab.schemas import PayloadEnvironmentReport, RuntimeSpec, ScienceEnvironmentBundle, ScoutTask
 
 try:
     import docker  # type: ignore
@@ -26,6 +25,24 @@ class LaunchResult:
     returncode: Optional[int] = None
     gpu_visible: Optional[bool] = None
     probe_output: Optional[str] = None
+    stdout: Optional[str] = None
+    stderr: Optional[str] = None
+
+
+@dataclass
+class BuildResult:
+    mode: str
+    command: List[str]
+    image_tag: str
+    returncode: Optional[int] = None
+    stdout: Optional[str] = None
+    stderr: Optional[str] = None
+
+
+@dataclass
+class CommandResult:
+    command: List[str]
+    returncode: Optional[int] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
 
@@ -159,20 +176,13 @@ class DockerRunner:
 
     def compose_command(self, task: ScoutTask) -> List[str]:
         runtime = self.normalize_runtime(task.runtime)
+        self._require_locked_runtime(runtime)
         container_name = self.container_name(task.trial_id)
         return self.compose_runtime_command(
             runtime=runtime,
-            container_command=self.prepare_container_command(task.command),
+            container_command=task.command,
             container_name=container_name,
         )
-
-    @staticmethod
-    def prepare_container_command(container_command: List[str]) -> List[str]:
-        if container_command[:3] == ["python", "-m", "tar_lab.train_template"]:
-            install_cmd = "python -m pip install --quiet pydantic"
-            run_cmd = shlex.join(container_command)
-            return ["sh", "-lc", f"{install_cmd} && {run_cmd}"]
-        return container_command
 
     def compose_runtime_command(
         self,
@@ -192,22 +202,113 @@ class DockerRunner:
             str(runtime.cpu_limit),
             "--gpus",
             f"device={runtime.gpu_index}",
+            "--network",
+            "none" if runtime.network_policy in {"none", "restricted"} else "bridge",
             "-w",
             runtime.working_dir,
         ]
+        if runtime.image_locked and runtime.image_manifest_path:
+            full_command.extend(["-e", f"TAR_IMAGE_MANIFEST={runtime.image_manifest_path}"])
+        if runtime.run_manifest_path:
+            full_command.extend(["-e", f"TAR_RUN_MANIFEST={runtime.run_manifest_path}"])
         for host_path, container_path in sorted(runtime.volumes.items()):
             full_command.extend(["-v", f"{host_path}:{container_path}"])
+        for host_path, container_path in sorted(runtime.read_only_volumes.items()):
+            full_command.extend(["-v", f"{host_path}:{container_path}:ro"])
         for key, value in sorted(runtime.env.items()):
             full_command.extend(["-e", f"{key}={value}"])
         full_command.append(runtime.image)
         full_command.extend(container_command)
         return full_command
 
+    def compose_build_command(
+        self,
+        image_tag: str,
+        dockerfile_path: str,
+        context_path: str,
+    ) -> List[str]:
+        return [
+            self.docker_bin,
+            "build",
+            "-t",
+            image_tag,
+            "-f",
+            dockerfile_path,
+            context_path,
+        ]
+
+    def build_science_environment(
+        self,
+        bundle: ScienceEnvironmentBundle,
+        dry_run: bool = False,
+    ) -> BuildResult:
+        command = self.compose_build_command(
+            bundle.docker_image_tag,
+            bundle.dockerfile_path,
+            bundle.build_context_path,
+        )
+        if bundle.image_manifest is not None:
+            command = self._normalize_docker_command(bundle.image_manifest.build_command)
+        if dry_run:
+            return BuildResult(mode="dry_run", command=command, image_tag=bundle.docker_image_tag)
+        proc = subprocess.run(command, capture_output=True, text=True, check=False)
+        return BuildResult(
+            mode="subprocess",
+            command=command,
+            image_tag=bundle.docker_image_tag,
+            returncode=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+        )
+
+    def build_payload_environment(
+        self,
+        report: PayloadEnvironmentReport,
+        dry_run: bool = False,
+    ) -> BuildResult:
+        if report.image_manifest is None:
+            raise RuntimeError("Locked payload image manifest is required before building.")
+        command = self._normalize_docker_command(report.image_manifest.build_command)
+        if dry_run:
+            return BuildResult(mode="dry_run", command=command, image_tag=report.image_tag)
+        proc = subprocess.run(command, capture_output=True, text=True, check=False)
+        return BuildResult(
+            mode="subprocess",
+            command=command,
+            image_tag=report.image_tag,
+            returncode=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+        )
+
+    def run_science_environment(
+        self,
+        bundle: ScienceEnvironmentBundle,
+        dry_run: bool = False,
+    ) -> CommandResult:
+        if not bundle.reproducibility_complete or bundle.run_manifest is None:
+            return CommandResult(
+                command=list(bundle.run_command),
+                returncode=1,
+                stderr="Science environment is not reproducibility-locked.",
+            )
+        command = self._normalize_docker_command(bundle.run_command)
+        if dry_run:
+            return CommandResult(command=command)
+        proc = subprocess.run(command, capture_output=True, text=True, check=False)
+        return CommandResult(
+            command=command,
+            returncode=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+        )
+
     def container_name(self, trial_id: str) -> str:
         return f"tar-{trial_id}"
 
     def launch(self, task: ScoutTask, dry_run: bool = False) -> LaunchResult:
         runtime = self.normalize_runtime(task.runtime)
+        self._require_locked_runtime(runtime)
         task = task.model_copy(update={"runtime": runtime})
         command = self.compose_command(task)
         name = self.container_name(task.trial_id)
@@ -216,21 +317,19 @@ class DockerRunner:
 
         if docker is not None:
             client = docker.from_env()
-            volumes = {
-                host: {"bind": container, "mode": "rw"}
-                for host, container in runtime.volumes.items()
-            }
-            environment = runtime.env
+            volumes = self._docker_volume_bindings(runtime)
+            environment = self._docker_environment(runtime)
             cpu_quota = int(runtime.cpu_limit * 100000)
             container = client.containers.run(
                 runtime.image,
-                self.prepare_container_command(task.command),
+                task.command,
                 detach=True,
                 remove=True,
                 name=name,
                 working_dir=runtime.working_dir,
                 environment=environment,
                 volumes=volumes,
+                network_mode=self._docker_network_mode(runtime),
                 mem_limit=f"{runtime.memory_limit_gb}g",
                 cpu_quota=cpu_quota,
                 cpu_period=100000,
@@ -258,21 +357,20 @@ class DockerRunner:
 
     def verify_gpu_access(self, runtime: RuntimeSpec) -> tuple[bool, str]:
         runtime = self.normalize_runtime(runtime)
+        self._require_locked_runtime(runtime)
         probe_command = ["nvidia-smi", "-L"]
         if docker is not None:
             client = docker.from_env()
-            volumes = {
-                host: {"bind": container, "mode": "rw"}
-                for host, container in runtime.volumes.items()
-            }
+            volumes = self._docker_volume_bindings(runtime)
             result = client.containers.run(
                 runtime.image,
                 probe_command,
                 detach=False,
                 remove=True,
                 working_dir=runtime.working_dir,
-                environment=runtime.env,
+                environment=self._docker_environment(runtime),
                 volumes=volumes,
+                network_mode=self._docker_network_mode(runtime),
                 mem_limit=f"{runtime.memory_limit_gb}g",
                 nano_cpus=int(runtime.cpu_limit * 1_000_000_000),
                 device_requests=[
@@ -293,6 +391,7 @@ class DockerRunner:
 
     def live_test(self, task: ScoutTask) -> LaunchResult:
         runtime = self.normalize_runtime(task.runtime)
+        self._require_locked_runtime(runtime)
         task = task.model_copy(update={"runtime": runtime})
         name = self.container_name(task.trial_id)
         pull_code = self.pull_image(runtime.image)
@@ -313,21 +412,19 @@ class DockerRunner:
         command = self.compose_command(task)
         if docker is not None:
             client = docker.from_env()
-            volumes = {
-                host: {"bind": container, "mode": "rw"}
-                for host, container in runtime.volumes.items()
-            }
-            environment = runtime.env
+            volumes = self._docker_volume_bindings(runtime)
+            environment = self._docker_environment(runtime)
             nano_cpus = int(runtime.cpu_limit * 1_000_000_000)
             result = client.containers.run(
                 runtime.image,
-                self.prepare_container_command(task.command),
+                task.command,
                 detach=False,
                 remove=True,
                 name=name,
                 working_dir=runtime.working_dir,
                 environment=environment,
                 volumes=volumes,
+                network_mode=self._docker_network_mode(runtime),
                 mem_limit=f"{runtime.memory_limit_gb}g",
                 nano_cpus=nano_cpus,
                 device_requests=[
@@ -370,3 +467,36 @@ class DockerRunner:
             subprocess.run(kill_cmd, capture_output=True, text=True, check=False)
             commands.append(kill_cmd)
         return commands
+
+    @staticmethod
+    def _docker_volume_bindings(runtime: RuntimeSpec) -> dict[str, dict[str, str]]:
+        bindings = {
+            host: {"bind": container, "mode": "rw"}
+            for host, container in runtime.volumes.items()
+        }
+        for host, container in runtime.read_only_volumes.items():
+            bindings[host] = {"bind": container, "mode": "ro"}
+        return bindings
+
+    @staticmethod
+    def _docker_environment(runtime: RuntimeSpec) -> dict[str, str]:
+        env = dict(runtime.env)
+        if runtime.image_locked and runtime.image_manifest_path:
+            env["TAR_IMAGE_MANIFEST"] = runtime.image_manifest_path
+        if runtime.run_manifest_path:
+            env["TAR_RUN_MANIFEST"] = runtime.run_manifest_path
+        return env
+
+    @staticmethod
+    def _docker_network_mode(runtime: RuntimeSpec) -> str:
+        return "none" if runtime.network_policy in {"none", "restricted"} else "bridge"
+
+    def _normalize_docker_command(self, command: List[str]) -> List[str]:
+        if command and Path(command[0]).name.lower().startswith("docker"):
+            return [self.docker_bin, *command[1:]]
+        return list(command)
+
+    @staticmethod
+    def _require_locked_runtime(runtime: RuntimeSpec) -> None:
+        if not runtime.image_locked or not runtime.image_manifest_path or not runtime.run_manifest_path:
+            raise RuntimeError("Docker execution requires locked image and run manifests in Workstream 6.")

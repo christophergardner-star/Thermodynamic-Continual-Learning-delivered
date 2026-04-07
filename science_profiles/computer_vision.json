@@ -1,0 +1,118 @@
+{
+  "profile_id": "computer_vision",
+  "domain": "computer_vision",
+  "summary": "Computer-vision environment for detection, segmentation, classification, robustness, and transfer-learning studies.",
+  "keywords": ["computer vision", "vision", "image", "detection", "segmentation", "cifar", "imagenet", "resnet", "vit"],
+  "base_image": "pytorch/pytorch:latest",
+  "python_version": "3.10",
+  "cuda_support": "optional",
+  "pip_packages": [
+    {"name": "numpy"},
+    {"name": "scipy"},
+    {"name": "matplotlib"},
+    {"name": "opencv-python"},
+    {"name": "Pillow"},
+    {"name": "albumentations"}
+  ],
+  "apt_packages": ["git"],
+  "validation_imports": ["numpy", "torch"],
+  "benchmark_targets": ["top1_accuracy", "mAP", "iou", "corruption_robustness", "calibration_ece"],
+  "benchmark_suites": [
+    {
+      "benchmark_id": "vision_corruption_smoke",
+      "family": "corruption_robustness",
+      "name": "Smoke Corruption Robustness",
+      "tier": "smoke",
+      "dataset_or_env": "local:tiny_vision_corruption_probe",
+      "metric_protocol": ["top1_accuracy", "corruption_robustness", "calibration_ece"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": true
+    },
+    {
+      "benchmark_id": "digits_corruption_validation",
+      "family": "corruption_robustness",
+      "name": "Digits Corruption Validation",
+      "tier": "validation",
+      "dataset_or_env": "sklearn:digits",
+      "metric_protocol": ["top1_accuracy", "corruption_robustness", "calibration_ece"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "cifar10_c_corruption",
+      "family": "corruption_robustness",
+      "name": "CIFAR-10-C Corruption Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "external:cifar10_c",
+      "metric_protocol": ["top1_accuracy", "corruption_robustness", "calibration_ece"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": true,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "vision_transfer_smoke",
+      "family": "transfer_comparison",
+      "name": "Smoke Transfer Comparison",
+      "tier": "smoke",
+      "dataset_or_env": "local:tiny_transfer_probe",
+      "metric_protocol": ["top1_accuracy", "seed_variance"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": true
+    },
+    {
+      "benchmark_id": "digits_transfer_validation",
+      "family": "transfer_comparison",
+      "name": "Digits Transfer Validation",
+      "tier": "validation",
+      "dataset_or_env": "sklearn:digits",
+      "metric_protocol": ["top1_accuracy", "seed_variance"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "imagenette_transfer_canonical",
+      "family": "transfer_comparison",
+      "name": "Imagenette Transfer Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "external:imagenette2-160",
+      "metric_protocol": ["top1_accuracy", "seed_variance"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": true,
+      "proxy_allowed": false
+    }
+  ],
+  "metric_hooks": ["loss", "calibration_ece", "seed_variance", "robustness_gap"],
+  "experiment_templates": [
+    {
+      "template_id": "augmentation_robustness",
+      "name": "Augmentation Robustness",
+      "hypothesis": "The failure mode is sensitive to augmentation and corruption structure rather than core architecture.",
+      "benchmark": "corruption_robustness",
+      "benchmark_family": "corruption_robustness",
+      "metrics": ["top1_accuracy", "corruption_robustness", "calibration_ece"],
+      "parameter_grid": {"augmentation": ["baseline", "randaugment", "mixup"], "severity": [0, 2, 4]},
+      "success_criteria": ["robustness improves without collapsing clean accuracy"]
+    },
+    {
+      "template_id": "backbone_transfer",
+      "name": "Backbone Transfer",
+      "hypothesis": "The phenomenon is backbone-general rather than tied to one convolutional or transformer design.",
+      "benchmark": "transfer_comparison",
+      "benchmark_family": "transfer_comparison",
+      "metrics": ["top1_accuracy", "seed_variance"],
+      "parameter_grid": {"backbone": ["resnet18", "resnet50", "vit_tiny"]},
+      "success_criteria": ["effect survives backbone changes"]
+    }
+  ],
+  "safety_rules": ["locked_profile_only", "no_host_installs", "container_only_resolution"]
+}

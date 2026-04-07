@@ -5,17 +5,15 @@ Cruxy researcher loop for this repo.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
-import subprocess
-import sys
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterable
 
 from cruxy_identity import CRUXY_NAME, CRUXY_SYSTEM_PROMPT
 from research_database import ResearchDatabase, ResearchEntry
+from tar_lab.safe_exec import SandboxedPythonExecutor
 
 
 CLAIM_LABELS = ("fact", "measured_result", "inference", "hypothesis")
@@ -59,21 +57,10 @@ def render_claim_report(claims: list[Claim]) -> str:
 
 
 def run_python(code: str, timeout: int = 10) -> tuple[bool, str]:
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "task.py"
-        path.write_text(code, encoding="utf-8")
-        try:
-            proc = subprocess.run(
-                [sys.executable, str(path)],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return False, "Execution timed out"
-    output = (proc.stdout or "") + (proc.stderr or "")
-    return proc.returncode == 0, output.strip()
+    executor = SandboxedPythonExecutor(workspace=".")
+    report = executor.execute(code, timeout_s=timeout)
+    prefix = f"[execution_mode={report.mode}] "
+    return report.ok, prefix + (report.output if report.ok else (report.error or report.output)).strip()
 
 
 def default_tasks(topics: Iterable[str]) -> list[tuple[str, str]]:
@@ -137,8 +124,18 @@ def main() -> int:
         if task_type == "code":
             code = extract_code_block(response)
             if code:
-                success, output = run_python(code)
+                executor = SandboxedPythonExecutor(workspace=".")
+                exec_report = executor.execute(code, timeout_s=10)
+                success = exec_report.ok
+                output = f"[execution_mode={exec_report.mode}] " + (
+                    exec_report.output if exec_report.ok else (exec_report.error or exec_report.output)
+                ).strip()
                 metadata["execution_output"] = output
+                metadata["execution_image"] = exec_report.image
+                metadata["execution_command"] = exec_report.command
+                metadata["execution_artifacts"] = [artifact.model_dump(mode="json") for artifact in exec_report.artifacts]
+                metadata["execution_sandbox_policy"] = exec_report.sandbox_policy.model_dump(mode="json")
+                metadata["code_hash"] = hashlib.sha256(code.encode("utf-8")).hexdigest()
                 metadata["confidence"] = 1.0 if success else 0.2
             else:
                 metadata["confidence"] = 0.1

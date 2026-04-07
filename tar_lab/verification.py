@@ -9,6 +9,9 @@ from tar_lab.schemas import (
     AblationResult,
     BreakthroughReport,
     CalibrationReport,
+    ClaimAcceptancePolicy,
+    ClaimVerdict,
+    ContradictionReview,
     SeedRunResult,
     SeedVarianceReport,
     TrainingPayloadConfig,
@@ -67,6 +70,7 @@ class VerificationRunner:
         self,
         verification: VerificationReport,
         supporting_research_ids: Optional[List[str]] = None,
+        claim_verdict: Optional[ClaimVerdict] = None,
     ) -> BreakthroughReport:
         control_score = verification.control_score
         stability_score = max(
@@ -124,6 +128,91 @@ class VerificationRunner:
             supporting_research_ids=supporting_research_ids or [],
             rationale=rationale,
             verification=verification,
+            claim_verdict=claim_verdict,
+        )
+
+    def assess_claim(
+        self,
+        verification: VerificationReport,
+        *,
+        supporting_research_ids: Optional[List[str]] = None,
+        contradiction_review: Optional[ContradictionReview] = None,
+        canonical_comparable: bool = False,
+        policy: Optional[ClaimAcceptancePolicy] = None,
+    ) -> ClaimVerdict:
+        policy = policy or ClaimAcceptancePolicy()
+        support_ids = supporting_research_ids or []
+        rationale: list[str] = []
+
+        enough_seeds = verification.seed_variance.num_runs >= policy.min_seed_runs
+        stable_loss = verification.seed_variance.loss_std <= policy.max_seed_loss_std
+        stable_dimensionality = (
+            verification.seed_variance.dimensionality_std <= policy.max_seed_dimensionality_std
+        )
+        calibrated = verification.calibration.ece <= policy.max_calibration_ece
+        ablation_gap = max((abs(item.delta_vs_control) for item in verification.ablations), default=0.0)
+        strong_ablation = ablation_gap >= policy.min_ablation_gap
+        enough_support = len(set(support_ids)) >= policy.min_supporting_sources
+        contradictions = contradiction_review.contradiction_count if contradiction_review is not None else 0
+        contradiction_clear = contradictions <= policy.max_allowed_contradictions
+        canonical_ok = (not policy.require_canonical_benchmark) or canonical_comparable
+
+        if enough_seeds:
+            rationale.append(f"seed count {verification.seed_variance.num_runs} meets policy")
+        else:
+            rationale.append(f"seed count {verification.seed_variance.num_runs} is below policy minimum")
+        if stable_loss and stable_dimensionality:
+            rationale.append("seed variance is within the stability budget")
+        else:
+            rationale.append("seed variance remains too high for a hard claim")
+        if calibrated:
+            rationale.append("calibration is within the acceptable envelope")
+        else:
+            rationale.append("calibration exceeds the claim threshold")
+        if strong_ablation:
+            rationale.append("ablation gap indicates a real mechanism effect")
+        else:
+            rationale.append("ablation gap is too small to isolate the claimed mechanism")
+        if enough_support:
+            rationale.append(f"literature support count {len(set(support_ids))} meets policy")
+        else:
+            rationale.append("literature support is below the minimum evidence floor")
+        if contradiction_clear:
+            rationale.append("no unresolved contradictions remain above policy")
+        else:
+            rationale.append("contradictory evidence remains unresolved")
+        if canonical_ok:
+            rationale.append("benchmark comparability requirement is satisfied")
+        elif policy.require_canonical_benchmark:
+            rationale.append("canonical benchmark comparability is required but not satisfied")
+
+        if not contradiction_clear:
+            status = "contradicted"
+        elif not enough_seeds or not enough_support:
+            status = "insufficient_evidence"
+        elif stable_loss and stable_dimensionality and calibrated and strong_ablation and canonical_ok:
+            status = "accepted"
+        elif verification.verdict in {"verified", "inconclusive"} and calibrated:
+            status = "provisional"
+        else:
+            status = "rejected"
+
+        satisfied = sum(
+            int(flag)
+            for flag in (enough_seeds, stable_loss and stable_dimensionality, calibrated, strong_ablation, enough_support, contradiction_clear, canonical_ok)
+        )
+        confidence = round(min(1.0, satisfied / 7.0), 6)
+        return ClaimVerdict(
+            verdict_id=f"claim-{verification.trial_id}",
+            trial_id=verification.trial_id,
+            status=status,  # type: ignore[arg-type]
+            rationale=rationale,
+            policy=policy,
+            supporting_research_ids=list(dict.fromkeys(support_ids)),
+            contradiction_review=contradiction_review,
+            canonical_benchmark_required=policy.require_canonical_benchmark,
+            canonical_benchmark_satisfied=canonical_ok,
+            confidence=confidence,
         )
 
     def _run_seed_sweeps(self, config: TrainingPayloadConfig, seed_count: int = 3) -> SeedVarianceReport:

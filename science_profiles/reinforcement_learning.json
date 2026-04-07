@@ -1,0 +1,118 @@
+{
+  "profile_id": "reinforcement_learning",
+  "domain": "reinforcement_learning",
+  "summary": "Reinforcement-learning environment for policy optimization, offline RL, exploration, and simulator-driven studies.",
+  "keywords": ["reinforcement learning", "rl", "policy gradient", "ppo", "actor critic", "reward", "trajectory", "mdp"],
+  "base_image": "pytorch/pytorch:latest",
+  "python_version": "3.10",
+  "cuda_support": "optional",
+  "pip_packages": [
+    {"name": "numpy"},
+    {"name": "scipy"},
+    {"name": "gymnasium"},
+    {"name": "stable-baselines3"},
+    {"name": "tensorboard"},
+    {"name": "pandas"}
+  ],
+  "apt_packages": ["git"],
+  "validation_imports": ["numpy"],
+  "benchmark_targets": ["episodic_return", "sample_efficiency", "seed_variance", "policy_entropy"],
+  "benchmark_suites": [
+    {
+      "benchmark_id": "rl_exploration_smoke",
+      "family": "exploration_sweep",
+      "name": "Smoke Exploration Sweep",
+      "tier": "smoke",
+      "dataset_or_env": "local:bandit_policy_probe",
+      "metric_protocol": ["episodic_return", "policy_entropy", "seed_variance"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy"],
+      "requires_download": false,
+      "proxy_allowed": true
+    },
+    {
+      "benchmark_id": "cartpole_exploration_validation",
+      "family": "exploration_sweep",
+      "name": "Gymnasium CartPole Validation",
+      "tier": "validation",
+      "dataset_or_env": "gymnasium:CartPole-v1",
+      "metric_protocol": ["episodic_return", "policy_entropy", "seed_variance"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "minari_cartpole_exploration",
+      "family": "exploration_sweep",
+      "name": "Minari CartPole Exploration Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "minari:cartpole",
+      "metric_protocol": ["episodic_return", "policy_entropy", "seed_variance"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "gymnasium"],
+      "requires_download": true,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "rl_offline_smoke",
+      "family": "offline_online_transfer",
+      "name": "Smoke Offline-to-Online Transfer",
+      "tier": "smoke",
+      "dataset_or_env": "local:offline_rl_probe",
+      "metric_protocol": ["episodic_return", "sample_efficiency"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy"],
+      "requires_download": false,
+      "proxy_allowed": true
+    },
+    {
+      "benchmark_id": "cartpole_offline_validation",
+      "family": "offline_online_transfer",
+      "name": "CartPole Offline Validation",
+      "tier": "validation",
+      "dataset_or_env": "gymnasium:CartPole-v1",
+      "metric_protocol": ["episodic_return", "sample_efficiency"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "minari_offline_online_transfer",
+      "family": "offline_online_transfer",
+      "name": "Minari Offline-to-Online Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "minari:cartpole",
+      "metric_protocol": ["episodic_return", "sample_efficiency"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "gymnasium"],
+      "requires_download": true,
+      "proxy_allowed": false
+    }
+  ],
+  "metric_hooks": ["episodic_return", "policy_entropy", "seed_variance", "loss"],
+  "experiment_templates": [
+    {
+      "template_id": "exploration_ablation",
+      "name": "Exploration Ablation",
+      "hypothesis": "The failure mode is dominated by exploration collapse rather than value-function misspecification.",
+      "benchmark": "exploration_sweep",
+      "benchmark_family": "exploration_sweep",
+      "metrics": ["episodic_return", "policy_entropy", "seed_variance"],
+      "parameter_grid": {"entropy_coef": [0.0, 0.01, 0.05], "algorithm": ["ppo", "a2c"]},
+      "success_criteria": ["return improves with bounded seed variance"]
+    },
+    {
+      "template_id": "offline_online_gap",
+      "name": "Offline-to-Online Gap",
+      "hypothesis": "The gap between offline and online evaluation is exposing the real bottleneck.",
+      "benchmark": "offline_online_transfer",
+      "benchmark_family": "offline_online_transfer",
+      "metrics": ["episodic_return", "sample_efficiency"],
+      "parameter_grid": {"dataset_quality": ["medium", "expert"], "fine_tune_steps": [0, 10000]},
+      "success_criteria": ["online adaptation closes the gap"]
+    }
+  ],
+  "safety_rules": ["locked_profile_only", "no_host_installs", "container_only_resolution"]
+}

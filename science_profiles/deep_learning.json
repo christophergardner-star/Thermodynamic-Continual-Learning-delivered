@@ -1,0 +1,118 @@
+{
+  "profile_id": "deep_learning",
+  "domain": "deep_learning",
+  "summary": "Deep-learning environment for neural architecture, regularization, optimization, and calibration studies.",
+  "keywords": ["deep learning", "neural network", "transformer", "cnn", "backprop", "representation learning", "pretraining"],
+  "base_image": "pytorch/pytorch:latest",
+  "python_version": "3.10",
+  "cuda_support": "optional",
+  "pip_packages": [
+    {"name": "numpy"},
+    {"name": "scipy"},
+    {"name": "matplotlib"},
+    {"name": "pandas"},
+    {"name": "torchmetrics"},
+    {"name": "einops"}
+  ],
+  "apt_packages": ["git"],
+  "validation_imports": ["numpy", "torch"],
+  "benchmark_targets": ["loss", "accuracy", "gradient_norm", "calibration_ece", "representation_dimensionality"],
+  "benchmark_suites": [
+    {
+      "benchmark_id": "optimizer_comparison_smoke",
+      "family": "optimizer_comparison",
+      "name": "Smoke Optimizer Comparison",
+      "tier": "smoke",
+      "dataset_or_env": "local:tiny_classifier_probe",
+      "metric_protocol": ["loss", "accuracy", "gradient_norm"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": true
+    },
+    {
+      "benchmark_id": "digits_optimizer_validation",
+      "family": "optimizer_comparison",
+      "name": "Digits Optimizer Validation",
+      "tier": "validation",
+      "dataset_or_env": "sklearn:digits",
+      "metric_protocol": ["loss", "accuracy", "gradient_norm", "calibration_ece"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "cifar10_optimizer_canonical",
+      "family": "optimizer_comparison",
+      "name": "CIFAR-10 Optimizer Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "huggingface:cifar10",
+      "metric_protocol": ["loss", "accuracy", "gradient_norm", "calibration_ece"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "torch", "datasets"],
+      "requires_download": true,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "scaling_probe_smoke",
+      "family": "scaling_law_probe",
+      "name": "Smoke Scaling Probe",
+      "tier": "smoke",
+      "dataset_or_env": "local:tiny_scaling_probe",
+      "metric_protocol": ["loss", "effective_dimensionality", "calibration_ece"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": true
+    },
+    {
+      "benchmark_id": "digits_scaling_validation",
+      "family": "scaling_law_probe",
+      "name": "Digits Scaling Validation",
+      "tier": "validation",
+      "dataset_or_env": "sklearn:digits",
+      "metric_protocol": ["loss", "effective_dimensionality", "calibration_ece"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "cifar10_scaling_canonical",
+      "family": "scaling_law_probe",
+      "name": "CIFAR-10 Scaling Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "huggingface:cifar10",
+      "metric_protocol": ["loss", "effective_dimensionality", "calibration_ece"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "torch", "datasets"],
+      "requires_download": true,
+      "proxy_allowed": false
+    }
+  ],
+  "metric_hooks": ["loss", "gradient_norm", "calibration_ece", "effective_dimensionality"],
+  "experiment_templates": [
+    {
+      "template_id": "optimizer_ablation",
+      "name": "Optimizer Ablation",
+      "hypothesis": "The target phenomenon is optimizer-sensitive rather than architecture-intrinsic.",
+      "benchmark": "optimizer_comparison",
+      "benchmark_family": "optimizer_comparison",
+      "metrics": ["loss", "accuracy", "gradient_norm"],
+      "parameter_grid": {"optimizer": ["adamw", "sgd", "lion"], "weight_decay": [0.0, 0.01]},
+      "success_criteria": ["the effect remains after optimizer changes"]
+    },
+    {
+      "template_id": "depth_width_scale",
+      "name": "Depth-Width Scaling",
+      "hypothesis": "The failure mode follows a depth or width trend that can be detected under small controlled scaling.",
+      "benchmark": "scaling_law_probe",
+      "benchmark_family": "scaling_law_probe",
+      "metrics": ["loss", "effective_dimensionality", "calibration_ece"],
+      "parameter_grid": {"depth": [4, 8, 12], "width": [128, 256, 512]},
+      "success_criteria": ["metric trends are monotonic enough to extrapolate"]
+    }
+  ],
+  "safety_rules": ["locked_profile_only", "no_host_installs", "container_only_resolution"]
+}

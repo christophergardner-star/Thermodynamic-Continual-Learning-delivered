@@ -14,5 +14,9 @@ docker
 faster-whisper
 openai
 chromadb
+sentence-transformers
+pymupdf
+pdfplumber
+pytesseract
 sounddevice
 soundfile

@@ -32,8 +32,15 @@ class ThermodynamicGovernor:
         gpu_temperature_c: Optional[float] = None,
         gpu_memory_temperature_c: Optional[float] = None,
         gpu_power_w: Optional[float] = None,
+        regime_rho: float = 0.0,
         effective_dimensionality: Optional[float] = None,
+        effective_dimensionality_std_err: float = 0.0,
         dimensionality_ratio: Optional[float] = None,
+        entropy_sigma_std_err: float = 0.0,
+        regime_rho_std_err: float = 0.0,
+        stat_window_size: int = 0,
+        stat_sample_count: int = 0,
+        statistically_ready: bool = False,
         equilibrium_fraction: float = 0.0,
         equilibrium_gate: bool = False,
         training_loss: Optional[float] = None,
@@ -79,8 +86,15 @@ class ThermodynamicGovernor:
             drift_l2=drift_l2,
             drift_rho=drift_rho,
             grad_norm=grad_norm,
+            regime_rho=regime_rho,
             effective_dimensionality=0.0 if effective_dimensionality is None else effective_dimensionality,
+            effective_dimensionality_std_err=effective_dimensionality_std_err,
             dimensionality_ratio=0.0 if dimensionality_ratio is None else dimensionality_ratio,
+            entropy_sigma_std_err=entropy_sigma_std_err,
+            regime_rho_std_err=regime_rho_std_err,
+            stat_window_size=stat_window_size,
+            stat_sample_count=stat_sample_count,
+            statistically_ready=statistically_ready,
             equilibrium_fraction=equilibrium_fraction,
             equilibrium_gate=equilibrium_gate,
             training_loss=training_loss,
@@ -105,7 +119,8 @@ class ThermodynamicGovernor:
         if metrics.grad_norm > limits.max_grad_norm:
             reasons.append("grad_norm_limit")
         if (
-            metrics.dimensionality_ratio > 0.0
+            metrics.statistically_ready
+            and metrics.dimensionality_ratio > 0.0
             and metrics.dimensionality_ratio < limits.min_dimensionality_ratio
             and metrics.training_loss is not None
             and metrics.training_loss <= limits.max_quenching_loss

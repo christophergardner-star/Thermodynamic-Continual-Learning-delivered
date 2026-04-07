@@ -16,6 +16,10 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
     try:
         if request.command == "status":
             payload = orchestrator.status()
+        elif request.command == "frontier_status":
+            payload = orchestrator.frontier_status().model_dump(mode="json")
+        elif request.command == "runtime_status":
+            payload = orchestrator.runtime_status()
         elif request.command == "dry_run":
             payload = orchestrator.run_dry_run(
                 force_fail_fast=bool(request.payload.get("force_fail_fast", False))
@@ -45,6 +49,139 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
             payload = orchestrator.breakthrough_report(
                 trial_id=request.payload.get("trial_id"),
             ).model_dump(mode="json")
+        elif request.command == "resolve_problem":
+            payload = orchestrator.resolve_problem(
+                str(request.payload.get("problem", "")),
+                benchmark_tier=str(request.payload.get("benchmark_tier", "validation")),  # type: ignore[arg-type]
+                requested_benchmark=request.payload.get("benchmark"),
+            ).model_dump(mode="json")
+        elif request.command == "prepare_science_env":
+            payload = orchestrator.prepare_science_environment(
+                problem=str(request.payload.get("problem", "")),
+                build=bool(request.payload.get("build", False)),
+                benchmark_tier=str(request.payload.get("benchmark_tier", "validation")),  # type: ignore[arg-type]
+                requested_benchmark=request.payload.get("benchmark"),
+                canonical_only=bool(request.payload.get("canonical_only", False)),
+                no_proxy_benchmarks=bool(request.payload.get("no_proxy_benchmarks", False)),
+            ).model_dump(mode="json")
+        elif request.command == "study_problem":
+            payload = orchestrator.study_problem(
+                problem=str(request.payload.get("problem", "")),
+                build_env=bool(request.payload.get("build_env", False)),
+                max_results=int(request.payload.get("max_results", 6)),
+                benchmark_tier=str(request.payload.get("benchmark_tier", "validation")),  # type: ignore[arg-type]
+                requested_benchmark=request.payload.get("benchmark"),
+                canonical_only=bool(request.payload.get("canonical_only", False)),
+                no_proxy_benchmarks=bool(request.payload.get("no_proxy_benchmarks", False)),
+            ).model_dump(mode="json")
+        elif request.command == "list_benchmarks":
+            payload = orchestrator.list_benchmarks(
+                profile_id=request.payload.get("profile_id"),
+                tier=request.payload.get("benchmark_tier"),
+            )
+        elif request.command == "benchmark_status":
+            payload = orchestrator.benchmark_status(
+                profile_id=request.payload.get("profile_id"),
+                tier=request.payload.get("benchmark_tier"),
+            )
+        elif request.command == "run_problem_study":
+            payload = orchestrator.run_problem_study(
+                problem_id=request.payload.get("problem_id"),
+                use_docker=bool(request.payload.get("use_docker", False)),
+                build_env=bool(request.payload.get("build_env", False)),
+            ).model_dump(mode="json")
+        elif request.command == "schedule_problem_study":
+            payload = orchestrator.schedule_problem_study(
+                problem_id=request.payload.get("problem_id"),
+                use_docker=bool(request.payload.get("use_docker", False)),
+                build_env=bool(request.payload.get("build_env", False)),
+                run_at=request.payload.get("run_at"),
+                delay_s=int(request.payload.get("delay_s", 0)),
+                repeat_interval_s=request.payload.get("repeat_interval_s"),
+                max_runs=int(request.payload.get("max_runs", 1)),
+                priority=int(request.payload.get("priority", 0)),
+            ).model_dump(mode="json")
+        elif request.command == "scheduler_status":
+            payload = orchestrator.scheduler_status()
+        elif request.command == "run_scheduler_once":
+            payload = orchestrator.run_scheduler_once(
+                max_jobs=int(request.payload.get("max_jobs", 1)),
+            ).model_dump(mode="json")
+        elif request.command == "prepare_payload_env":
+            payload = orchestrator.prepare_payload_environment().model_dump(mode="json")
+        elif request.command == "rebuild_locked_image":
+            payload = orchestrator.rebuild_locked_image().model_dump(mode="json")
+        elif request.command == "show_manifest":
+            payload = orchestrator.show_manifest(
+                manifest_id=request.payload.get("manifest_id"),
+                manifest_path=request.payload.get("manifest_path"),
+            )
+        elif request.command == "ingest_papers":
+            payload = orchestrator.ingest_papers(
+                [str(item) for item in request.payload.get("paths", [])]
+            ).model_dump(mode="json")
+        elif request.command == "list_experiment_backends":
+            payload = {"backends": orchestrator.list_experiment_backends()}
+        elif request.command == "run_runtime_cycle":
+            payload = orchestrator.run_runtime_cycle(
+                max_jobs=int(request.payload.get("max_jobs", 1)),
+                stale_after_s=int(request.payload.get("stale_after_s", 900)),
+            ).model_dump(mode="json")
+        elif request.command == "list_alerts":
+            payload = orchestrator.list_alerts(count=int(request.payload.get("count", 20)))
+        elif request.command == "retry_failed_job":
+            payload = orchestrator.retry_failed_job(str(request.payload.get("schedule_id", ""))).model_dump(mode="json")
+        elif request.command == "cancel_job":
+            payload = orchestrator.cancel_job(str(request.payload.get("schedule_id", ""))).model_dump(mode="json")
+        elif request.command == "sandbox_policy":
+            payload = orchestrator.sandbox_policy()
+        elif request.command == "register_checkpoint":
+            payload = orchestrator.register_checkpoint(
+                name=str(request.payload.get("name", "")),
+                model_path=str(request.payload.get("model_path", "")),
+                backend=str(request.payload.get("backend", "transformers")),
+                role=str(request.payload.get("role", "assistant")),
+            ).model_dump(mode="json")
+        elif request.command == "list_checkpoints":
+            payload = {"checkpoints": [item.model_dump(mode="json") for item in orchestrator.list_checkpoints()]}
+        elif request.command == "build_inference_endpoint":
+            payload = orchestrator.build_inference_endpoint(
+                name=str(request.payload.get("name", "")),
+                host=str(request.payload.get("host", DEFAULT_HOST)),
+                port=int(request.payload.get("port", 8000)),
+                role=request.payload.get("role"),
+            ).model_dump(mode="json")
+        elif request.command == "list_endpoints":
+            payload = {"endpoints": [item.model_dump(mode="json") for item in orchestrator.list_endpoints()]}
+        elif request.command == "start_endpoint":
+            payload = orchestrator.start_endpoint(
+                name=str(request.payload.get("name", "")),
+                host=str(request.payload.get("host", DEFAULT_HOST)),
+                port=int(request.payload.get("port", 8000)),
+                role=request.payload.get("role"),
+                wait_for_health=bool(request.payload.get("wait_for_health", False)),
+            ).model_dump(mode="json")
+        elif request.command == "stop_endpoint":
+            payload = orchestrator.stop_endpoint(str(request.payload.get("endpoint_name", ""))).model_dump(mode="json")
+        elif request.command == "restart_endpoint":
+            payload = orchestrator.restart_endpoint(
+                str(request.payload.get("endpoint_name", "")),
+                wait_for_health=bool(request.payload.get("wait_for_health", False)),
+            ).model_dump(mode="json")
+        elif request.command == "endpoint_health":
+            payload = orchestrator.endpoint_health(str(request.payload.get("endpoint_name", "")))
+        elif request.command == "assign_role":
+            payload = orchestrator.assign_role(
+                role=str(request.payload.get("role", "assistant")),
+                checkpoint_name=str(request.payload.get("checkpoint_name", "")),
+                endpoint_name=request.payload.get("endpoint_name"),
+            ).model_dump(mode="json")
+        elif request.command == "claim_policy":
+            payload = orchestrator.claim_policy()
+        elif request.command == "claim_verdict":
+            payload = orchestrator.claim_verdict(request.payload.get("trial_id")).model_dump(mode="json")
+        elif request.command == "research_decision_log":
+            payload = orchestrator.research_decision_log(count=int(request.payload.get("count", 20)))
         else:  # pragma: no cover
             raise ValueError(f"Unsupported command: {request.command}")
         return ControlResponse(ok=True, command=request.command, payload=payload)

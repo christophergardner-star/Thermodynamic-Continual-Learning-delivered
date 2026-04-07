@@ -1,0 +1,130 @@
+{
+  "profile_id": "natural_language_processing",
+  "domain": "natural_language_processing",
+  "summary": "NLP environment for language-model evaluation, retrieval, alignment, prompting, and sequence-labeling studies.",
+  "keywords": ["nlp", "language model", "llm", "token", "prompt", "translation", "retrieval", "rag", "summarization"],
+  "base_image": "pytorch/pytorch:latest",
+  "python_version": "3.10",
+  "cuda_support": "optional",
+  "pip_packages": [
+    {"name": "numpy"},
+    {"name": "scipy"},
+    {"name": "datasets"},
+    {"name": "evaluate"},
+    {"name": "sentencepiece"},
+    {"name": "sacrebleu"}
+  ],
+  "apt_packages": ["git"],
+  "validation_imports": ["numpy", "torch"],
+  "benchmark_targets": ["perplexity", "bleu", "rouge", "calibration_ece", "hallucination_rate"],
+  "benchmark_suites": [
+    {
+      "benchmark_id": "nlp_qa_smoke",
+      "family": "retrieval_prompt_ablation",
+      "name": "Smoke Grounded QA Probe",
+      "tier": "smoke",
+      "dataset_or_env": "local:grounded_qa_probe",
+      "metric_protocol": ["rouge", "hallucination_rate", "calibration_ece"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": true
+    },
+    {
+      "benchmark_id": "squad_v1_validation",
+      "family": "retrieval_prompt_ablation",
+      "name": "SQuAD-Style Validation Slice",
+      "tier": "validation",
+      "dataset_or_env": "local:squad_style_validation_slice",
+      "metric_protocol": ["exact_match", "f1", "calibration_ece"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "beir_fiqa_canonical",
+      "family": "retrieval_prompt_ablation",
+      "name": "BEIR FiQA Retrieval Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "external:beir_fiqa",
+      "metric_protocol": ["ndcg@10", "recall@10", "hallucination_rate"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "torch", "datasets"],
+      "requires_download": true,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "nlp_long_context_smoke",
+      "family": "sequence_length_sweep",
+      "name": "Smoke Long-Context Probe",
+      "tier": "smoke",
+      "dataset_or_env": "local:sequence_probe",
+      "metric_protocol": ["perplexity", "calibration_ece"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": true
+    },
+    {
+      "benchmark_id": "wikitext_length_validation",
+      "family": "sequence_length_sweep",
+      "name": "WikiText Length Validation Slice",
+      "tier": "validation",
+      "dataset_or_env": "local:wikitext_length_validation_slice",
+      "metric_protocol": ["perplexity", "calibration_ece"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "longbench_narrativeqa_canonical",
+      "family": "sequence_length_sweep",
+      "name": "LongBench NarrativeQA Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "external:longbench_narrativeqa",
+      "metric_protocol": ["rouge", "f1", "calibration_ece"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "torch", "datasets"],
+      "requires_download": true,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "cnn_dailymail_summarization",
+      "family": "summarization_grounding",
+      "name": "CNN/DailyMail Summarization Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "huggingface:cnn_dailymail",
+      "metric_protocol": ["rouge", "faithfulness", "calibration_ece"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "torch", "datasets"],
+      "requires_download": true,
+      "proxy_allowed": false
+    }
+  ],
+  "metric_hooks": ["loss", "perplexity", "calibration_ece", "seed_variance"],
+  "experiment_templates": [
+    {
+      "template_id": "prompt_retrieval_ablation",
+      "name": "Prompt and Retrieval Ablation",
+      "hypothesis": "The failure mode is driven by retrieval and prompt structure rather than model core weights.",
+      "benchmark": "retrieval_prompt_ablation",
+      "benchmark_family": "retrieval_prompt_ablation",
+      "metrics": ["rouge", "hallucination_rate", "calibration_ece"],
+      "parameter_grid": {"retrieval": ["off", "bm25", "dense"], "prompt_style": ["short", "chain_of_thought"]},
+      "success_criteria": ["hallucination_rate drops without collapsing task quality"]
+    },
+    {
+      "template_id": "length_generalization",
+      "name": "Length Generalization",
+      "hypothesis": "The problem emerges under sequence-length pressure rather than average-case prompting.",
+      "benchmark": "sequence_length_sweep",
+      "benchmark_family": "sequence_length_sweep",
+      "metrics": ["perplexity", "calibration_ece"],
+      "parameter_grid": {"sequence_length": [256, 512, 1024]},
+      "success_criteria": ["metric degradation curve becomes flatter"]
+    }
+  ],
+  "safety_rules": ["locked_profile_only", "no_host_installs", "container_only_resolution"]
+}

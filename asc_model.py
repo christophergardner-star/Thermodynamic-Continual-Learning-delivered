@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union, List
 
 import torch
 import torch.nn as nn
@@ -31,6 +31,13 @@ from transformers import (
     GPT2LMHeadModel,
     PretrainedConfig,
 )
+
+try:
+    from peft import LoraConfig, TaskType, get_peft_model  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    LoraConfig = None  # type: ignore[assignment]
+    TaskType = None  # type: ignore[assignment]
+    get_peft_model = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +84,11 @@ class ASCConfig(PretrainedConfig):
         warp_init_scale: float = 0.05,
         consistency_lambda: float = 0.3,
         ema_decay: float = 0.995,
+        adapter_mode: str = "full",
+        lora_r: int = 8,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.05,
+        lora_target_modules: Optional[List[str]] = None,
         backbone_config_overrides: Optional[Dict[str, int]] = None,
         **kwargs,
     ):
@@ -86,6 +98,11 @@ class ASCConfig(PretrainedConfig):
         self.warp_init_scale = warp_init_scale
         self.consistency_lambda = consistency_lambda
         self.ema_decay = ema_decay
+        self.adapter_mode = adapter_mode
+        self.lora_r = lora_r
+        self.lora_alpha = lora_alpha
+        self.lora_dropout = lora_dropout
+        self.lora_target_modules = lora_target_modules or []
         self.backbone_config_overrides = backbone_config_overrides or {}
 
     @classmethod
@@ -207,7 +224,54 @@ class ASCForCausalLM(nn.Module):
                 eos_token_id=1,
             )
             return GPT2LMHeadModel(tiny_cfg)
-        return AutoModelForCausalLM.from_pretrained(config.base_model_name)
+        model = AutoModelForCausalLM.from_pretrained(config.base_model_name)
+        if config.adapter_mode == "lora":
+            model = ASCForCausalLM._apply_lora(model, config)
+        return model
+
+    @staticmethod
+    def _apply_lora(model: nn.Module, config: ASCConfig):
+        if get_peft_model is None or LoraConfig is None or TaskType is None:
+            raise RuntimeError(
+                "peft is required for adapter_mode='lora'. Install peft or set adapter_mode='full'."
+            )
+        target_modules = config.lora_target_modules or ASCForCausalLM._infer_lora_target_modules(model)
+        if not target_modules:
+            raise RuntimeError(
+                "No LoRA target modules were found for this backbone. Provide lora_target_modules explicitly."
+            )
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=config.lora_r,
+            lora_alpha=config.lora_alpha,
+            lora_dropout=config.lora_dropout,
+            bias="none",
+            target_modules=target_modules,
+        )
+        return get_peft_model(model, lora_config)
+
+    @staticmethod
+    def _infer_lora_target_modules(model: nn.Module) -> List[str]:
+        candidates = {
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+            "c_attn",
+            "c_proj",
+            "c_fc",
+        }
+        discovered = set()
+        for name, module in model.named_modules():
+            if not name:
+                continue
+            leaf = name.split(".")[-1]
+            if leaf in candidates:
+                discovered.add(leaf)
+        return sorted(discovered)
 
     # ------------------------------------------------------------------
     # Forward
@@ -348,17 +412,19 @@ class ASCForCausalLM(nn.Module):
         The warp network is updated separately via `warp_ascent_loss()`.
         The EMA target model is always frozen.
         """
-        return list(self.base.parameters())
+        return [param for param in self.base.parameters() if param.requires_grad]
 
     def param_summary(self) -> dict:
         """Return a summary of parameter counts."""
         base_n = sum(p.numel() for p in self.base.parameters())
+        trainable_base_n = sum(p.numel() for p in self.base.parameters() if p.requires_grad)
         warp_n = self.warp.param_count
         return {
             "base_params": base_n,
+            "base_trainable_params": trainable_base_n,
             "warp_params": warp_n,
             "warp_pct": round(100.0 * warp_n / base_n, 3),
-            "total_trainable": base_n + warp_n,
+            "total_trainable": trainable_base_n + warp_n,
             "target_params": sum(p.numel() for p in self.target.parameters()),
         }
 

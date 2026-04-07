@@ -1,0 +1,144 @@
+{
+  "profile_id": "quantum_ml",
+  "domain": "quantum_ml",
+  "summary": "Quantum machine-learning environment for variational circuits, barren plateaus, ansatz design, shot-noise studies, and hybrid quantum-classical optimization.",
+  "keywords": ["quantum", "qml", "barren plateau", "barren landscapes", "variational circuit", "ansatz", "pennylane", "qiskit", "shot noise", "quantum ai"],
+  "base_image": "pytorch/pytorch:latest",
+  "python_version": "3.10",
+  "cuda_support": "none",
+  "pip_packages": [
+    {"name": "numpy"},
+    {"name": "scipy"},
+    {"name": "pennylane"},
+    {"name": "qiskit"},
+    {"name": "jax"},
+    {"name": "optax"},
+    {"name": "autoray"},
+    {"name": "networkx"},
+    {"name": "sympy"},
+    {"name": "matplotlib"}
+  ],
+  "apt_packages": ["git"],
+  "validation_imports": ["numpy", "pennylane", "qiskit", "jax", "optax", "autoray", "networkx", "sympy"],
+  "benchmark_targets": ["gradient_norm_variance", "barren_plateau_slope", "trainability_gap", "shot_noise_robustness", "seed_variance"],
+  "benchmark_suites": [
+    {
+      "benchmark_id": "qml_depth_smoke",
+      "family": "depth_trainability_curve",
+      "name": "Smoke QML Depth Trainability",
+      "tier": "smoke",
+      "dataset_or_env": "local:analytic_qml_probe",
+      "metric_protocol": ["gradient_norm_variance", "barren_plateau_slope", "trainability_gap"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy"],
+      "requires_download": false,
+      "proxy_allowed": true
+    },
+    {
+      "benchmark_id": "pennylane_depth_validation",
+      "family": "depth_trainability_curve",
+      "name": "PennyLane Depth Validation",
+      "tier": "validation",
+      "dataset_or_env": "pennylane:default_qubit",
+      "metric_protocol": ["gradient_norm_variance", "barren_plateau_slope", "trainability_gap"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "pennylane"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "pennylane_barren_plateau_canonical",
+      "family": "depth_trainability_curve",
+      "name": "PennyLane Barren Plateau Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "pennylane:qml_barren_plateau_suite",
+      "metric_protocol": ["gradient_norm_variance", "barren_plateau_slope", "trainability_gap"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "pennylane", "qiskit"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "qml_init_smoke",
+      "family": "initialization_trainability",
+      "name": "Smoke Initialization Trainability",
+      "tier": "smoke",
+      "dataset_or_env": "local:qml_init_probe",
+      "metric_protocol": ["gradient_norm_variance", "seed_variance"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy"],
+      "requires_download": false,
+      "proxy_allowed": true
+    },
+    {
+      "benchmark_id": "pennylane_init_validation",
+      "family": "initialization_trainability",
+      "name": "PennyLane Initialization Validation",
+      "tier": "validation",
+      "dataset_or_env": "pennylane:default_qubit",
+      "metric_protocol": ["gradient_norm_variance", "seed_variance"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "pennylane"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "pennylane_init_canonical",
+      "family": "initialization_trainability",
+      "name": "PennyLane Initialization Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "pennylane:qml_initialization_suite",
+      "metric_protocol": ["gradient_norm_variance", "seed_variance"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "pennylane", "qiskit"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "qml_noise_canonical",
+      "family": "noise_trainability_ablation",
+      "name": "Qiskit Noise Trainability Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "qiskit:aer_noise_suite",
+      "metric_protocol": ["shot_noise_robustness", "gradient_norm_variance", "trainability_gap"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "pennylane", "qiskit"],
+      "requires_download": false,
+      "proxy_allowed": false
+    }
+  ],
+  "metric_hooks": ["gradient_norm_variance", "fisher_trace_proxy", "barren_plateau_slope", "seed_variance"],
+  "experiment_templates": [
+    {
+      "template_id": "ansatz_depth_sweep",
+      "name": "Ansatz Depth Sweep",
+      "hypothesis": "Barren plateau severity grows with ansatz depth and can be delayed by shallower or structured circuits.",
+      "benchmark": "depth_trainability_curve",
+      "benchmark_family": "depth_trainability_curve",
+      "metrics": ["gradient_norm_variance", "barren_plateau_slope", "trainability_gap"],
+      "parameter_grid": {"ansatz_depth": [2, 4, 8, 12], "qubits": [4, 8]},
+      "success_criteria": ["gradient collapse is delayed or flattened over depth"]
+    },
+    {
+      "template_id": "initialization_variance",
+      "name": "Initialization Variance Study",
+      "hypothesis": "Initialization scale and symmetry breaking determine whether the model enters a barren regime.",
+      "benchmark": "initialization_trainability",
+      "benchmark_family": "initialization_trainability",
+      "metrics": ["gradient_norm_variance", "seed_variance"],
+      "parameter_grid": {"init_scale": [0.01, 0.05, 0.1], "seed": [7, 18, 29]},
+      "success_criteria": ["one initialization family avoids immediate gradient collapse"]
+    },
+    {
+      "template_id": "noise_shot_ablation",
+      "name": "Noise and Shot Ablation",
+      "hypothesis": "Noise and finite-shot effects are amplifying the plateau rather than merely masking optimization.",
+      "benchmark": "noise_trainability_ablation",
+      "benchmark_family": "noise_trainability_ablation",
+      "metrics": ["shot_noise_robustness", "gradient_norm_variance", "trainability_gap"],
+      "parameter_grid": {"shots": [128, 512, 2048], "noise_level": [0.0, 0.01, 0.05]},
+      "success_criteria": ["trainability remains bounded under moderate shot noise"]
+    }
+  ],
+  "safety_rules": ["locked_profile_only", "no_host_installs", "container_only_resolution"]
+}

@@ -1,0 +1,119 @@
+{
+  "profile_id": "generic_ml",
+  "domain": "generic_ml",
+  "summary": "General machine-learning environment for supervised learning, representation analysis, and baseline comparison work across computer science.",
+  "keywords": ["machine learning", "ml", "classification", "regression", "optimization", "generalization", "benchmark"],
+  "base_image": "pytorch/pytorch:latest",
+  "python_version": "3.10",
+  "cuda_support": "optional",
+  "pip_packages": [
+    {"name": "numpy"},
+    {"name": "scipy"},
+    {"name": "scikit-learn"},
+    {"name": "pandas"},
+    {"name": "matplotlib"},
+    {"name": "seaborn"}
+  ],
+  "apt_packages": ["git"],
+  "validation_imports": ["numpy", "torch"],
+  "benchmark_targets": ["accuracy", "f1", "auroc", "seed_variance", "calibration_ece"],
+  "benchmark_suites": [
+    {
+      "benchmark_id": "generic_cv_smoke",
+      "family": "cross_validation",
+      "name": "Smoke Tabular Cross Validation",
+      "tier": "smoke",
+      "dataset_or_env": "local:tabular_smoke_probe",
+      "metric_protocol": ["accuracy", "f1", "seed_variance"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": true,
+      "notes": ["Laptop-safe smoke benchmark."]
+    },
+    {
+      "benchmark_id": "breast_cancer_validation",
+      "family": "cross_validation",
+      "name": "Breast Cancer Validation Benchmark",
+      "tier": "validation",
+      "dataset_or_env": "sklearn:breast_cancer",
+      "metric_protocol": ["accuracy", "f1", "seed_variance"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "openml_cc18_classification",
+      "family": "cross_validation",
+      "name": "OpenML CC18 Classification Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "openml:cc18",
+      "metric_protocol": ["accuracy", "f1", "seed_variance"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": true,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "generic_calibration_smoke",
+      "family": "holdout_calibration",
+      "name": "Smoke Holdout Calibration",
+      "tier": "smoke",
+      "dataset_or_env": "local:calibration_smoke_probe",
+      "metric_protocol": ["calibration_ece", "accuracy", "auroc"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": true
+    },
+    {
+      "benchmark_id": "breast_cancer_calibration_validation",
+      "family": "holdout_calibration",
+      "name": "Breast Cancer Calibration Validation",
+      "tier": "validation",
+      "dataset_or_env": "sklearn:breast_cancer",
+      "metric_protocol": ["calibration_ece", "accuracy", "auroc"],
+      "canonical_comparable": false,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": false,
+      "proxy_allowed": false
+    },
+    {
+      "benchmark_id": "openml_adult_calibration",
+      "family": "holdout_calibration",
+      "name": "OpenML Adult Calibration Benchmark",
+      "tier": "canonical",
+      "dataset_or_env": "openml:adult",
+      "metric_protocol": ["calibration_ece", "accuracy", "auroc"],
+      "canonical_comparable": true,
+      "required_imports": ["numpy", "torch"],
+      "requires_download": true,
+      "proxy_allowed": false
+    }
+  ],
+  "metric_hooks": ["loss", "gradient_norm", "calibration_ece", "seed_variance"],
+  "experiment_templates": [
+    {
+      "template_id": "baseline_sweep",
+      "name": "Baseline Sweep",
+      "hypothesis": "A controlled hyperparameter sweep will separate optimization failure from representation failure.",
+      "benchmark": "cross_validation",
+      "benchmark_family": "cross_validation",
+      "metrics": ["accuracy", "f1", "seed_variance"],
+      "parameter_grid": {"learning_rate": [0.001, 0.0003], "batch_size": [32, 64]},
+      "success_criteria": ["seed_variance remains bounded", "one configuration exceeds the current baseline"]
+    },
+    {
+      "template_id": "calibration_check",
+      "name": "Calibration Check",
+      "hypothesis": "Calibration error can reveal overconfidence before headline metrics regress.",
+      "benchmark": "holdout_calibration",
+      "benchmark_family": "holdout_calibration",
+      "metrics": ["calibration_ece", "accuracy", "auroc"],
+      "parameter_grid": {"temperature_scaling": [false, true]},
+      "success_criteria": ["ECE improves without a large accuracy drop"]
+    }
+  ],
+  "safety_rules": ["locked_profile_only", "no_host_installs", "container_only_resolution"]
+}
