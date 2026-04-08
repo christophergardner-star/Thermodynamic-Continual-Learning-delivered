@@ -43,7 +43,9 @@ def _run(command: list[str], *, dry_run: bool) -> None:
     print(f"> {_format_command(command)}")
     if dry_run:
         return
-    subprocess.run(command, check=True)
+    env = dict(os.environ)
+    env.setdefault("PIP_NO_CACHE_DIR", "1")
+    subprocess.run(command, check=True, env=env)
 
 
 def main() -> int:

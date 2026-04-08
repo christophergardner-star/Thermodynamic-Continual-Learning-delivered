@@ -7,7 +7,6 @@ from typing import Any, Dict
 
 from tar_lab.control import DEFAULT_HOST, DEFAULT_PORT, TARControlServer, send_command
 from tar_lab.orchestrator import TAROrchestrator
-from tar_lab.voice import SpeechProcessor
 
 
 def parse_args() -> argparse.Namespace:
@@ -424,6 +423,8 @@ def _resolve_chat_prompt(orchestrator: TAROrchestrator, args: argparse.Namespace
     if args.message:
         return args.message
     if args.voice_file:
+        from tar_lab.voice import SpeechProcessor
+
         processor = SpeechProcessor(
             workspace=orchestrator.workspace,
             wake_word=args.wake_word,
@@ -438,6 +439,8 @@ def _resolve_chat_prompt(orchestrator: TAROrchestrator, args: argparse.Namespace
             raise RuntimeError("No wake-word command was detected in the supplied audio file")
         return prompt
     if args.listen:
+        from tar_lab.voice import SpeechProcessor
+
         processor = SpeechProcessor(
             workspace=orchestrator.workspace,
             wake_word=args.wake_word,
