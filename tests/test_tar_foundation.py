@@ -45,6 +45,9 @@ from tar_lab.thermoobserver import compute_participation_ratio
 from tar_lab.voice import SpeechProcessor
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def test_director_requires_three_points():
     with tempfile.TemporaryDirectory() as tmp:
         store = TARStateStore(tmp)
@@ -342,7 +345,7 @@ def test_research_ingest_indexes_documents():
 
 
 def test_science_profile_registry_routes_quantum_problem():
-    registry = ScienceProfileRegistry("C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered")
+    registry = ScienceProfileRegistry(str(REPO_ROOT))
     report = registry.resolve_problem("Investigate barren plateaus in quantum AI with PennyLane ansatz sweeps")
     assert report.profile_id == "quantum_ml"
     assert report.domain == "quantum_ml"
@@ -352,7 +355,7 @@ def test_science_profile_registry_routes_quantum_problem():
 def test_problem_research_engine_writes_environment_bundle():
     with tempfile.TemporaryDirectory() as tmp:
         profile_dir = Path(tmp) / "science_profiles"
-        source_dir = Path("C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/science_profiles")
+        source_dir = REPO_ROOT / "science_profiles"
         profile_dir.mkdir(parents=True, exist_ok=True)
         for source in source_dir.glob("*.json"):
             (profile_dir / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
@@ -372,7 +375,7 @@ def test_problem_research_engine_writes_environment_bundle():
 def test_orchestrator_study_problem_persists_and_indexes():
     with tempfile.TemporaryDirectory() as tmp:
         profile_dir = Path(tmp) / "science_profiles"
-        source_dir = Path("C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/science_profiles")
+        source_dir = REPO_ROOT / "science_profiles"
         profile_dir.mkdir(parents=True, exist_ok=True)
         for source in source_dir.glob("*.json"):
             (profile_dir / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
@@ -636,7 +639,7 @@ def test_problem_runner_executes_graph_ml_benchmarks(tmp_path: Path):
 def test_orchestrator_run_problem_study_reads_execution_report():
     with tempfile.TemporaryDirectory() as tmp:
         profile_dir = Path(tmp) / "science_profiles"
-        source_dir = Path("C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/science_profiles")
+        source_dir = REPO_ROOT / "science_profiles"
         profile_dir.mkdir(parents=True, exist_ok=True)
         for source in source_dir.glob("*.json"):
             (profile_dir / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
@@ -678,7 +681,7 @@ def test_orchestrator_run_problem_study_reads_execution_report():
 def test_scheduler_reschedules_then_completes_problem_study():
     with tempfile.TemporaryDirectory() as tmp:
         profile_dir = Path(tmp) / "science_profiles"
-        source_dir = Path("C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/science_profiles")
+        source_dir = REPO_ROOT / "science_profiles"
         profile_dir.mkdir(parents=True, exist_ok=True)
         for source in source_dir.glob("*.json"):
             (profile_dir / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
