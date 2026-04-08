@@ -1,22 +1,6 @@
-torch
-transformers
-datasets
-accelerate
-tqdm
-matplotlib
-pytest
-vllm
-peft
+# Linux / GPU-serving bootstrap extras.
+# This includes the base local stack plus GPU-oriented packages.
+-r requirements.txt
+
 bitsandbytes
-pydantic
-streamlit
-docker
-faster-whisper
-openai
-chromadb
-sentence-transformers
-pymupdf
-pdfplumber
-pytesseract
-sounddevice
-soundfile
+vllm

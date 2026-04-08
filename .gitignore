@@ -3,6 +3,7 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.venv/
 logs/
 tar_state/
 tar_runs/

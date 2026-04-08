@@ -395,6 +395,20 @@ switch to another queued problem under explicit evidence and utility rules.
 - How should falsification pressure, replication effort, and benchmark cost be
   balanced against exploration speed?
 
+**Saved output standards**
+
+The following output requirements are also explicitly saved for the post-`WS16`
+phase. They should become part of TAR's reporting contract, not just its
+internal design goals.
+
+- TAR output must make clear whether it has produced a credible finding or only
+  a provisional signal.
+- TAR output must explain and verify findings, showing why a result should be
+  believed and what evidence, checks, or replication support it.
+- TAR output must stay honest when capability is incomplete, explicitly saying
+  when a benchmark, environment, model, or evidence base is not strong enough
+  for a stronger claim.
+
 **Expected design themes**
 
 - per-problem wall-clock and compute budgets

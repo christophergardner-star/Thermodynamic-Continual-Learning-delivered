@@ -1,0 +1,44 @@
+# Convenience bootstrap requirements for local development and validation.
+# These are not TAR's locked runtime manifests; reproducible runs still use the
+# manifest builders under tar_lab/reproducibility.py.
+accelerate
+albumentations
+autoray
+chromadb
+datasets
+docker
+einops
+evaluate
+faster-whisper
+gymnasium
+matplotlib
+networkx
+numpy
+openai
+opencv-python
+pandas
+pdfplumber
+peft
+Pillow
+pennylane
+pydantic
+pypdf
+PyMuPDF
+pytesseract
+pytest
+sacrebleu
+scikit-learn
+scipy
+seaborn
+sentence-transformers
+sentencepiece
+sounddevice
+soundfile
+stable-baselines3
+streamlit
+sympy
+tensorboard
+torch
+torchmetrics
+tqdm
+transformers

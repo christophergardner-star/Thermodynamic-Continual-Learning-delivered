@@ -38,6 +38,47 @@ best-effort manifest.
 - The researcher stack is also root-level and intentionally lightweight.
 - This is not the `EPTO_-` package repo. No `epto_sdk_v54` package tree is required here.
 
+## Local Bootstrap
+
+`git pull` should not auto-run installers. Git does not safely distribute active
+hooks, and TAR should not mutate a machine implicitly just because the repo was
+updated.
+
+Instead, the repo now has a one-command bootstrap path for local setup after
+pull or clone:
+
+```powershell
+python .\bootstrap.py
+```
+
+That creates `.venv` by default, upgrades `pip`, and installs the base local
+stack from [`requirements.txt`](./requirements.txt).
+
+Optional bootstrap modes:
+
+```powershell
+python .\bootstrap.py --platform-extra
+python .\bootstrap.py --gpu
+```
+
+- `--platform-extra` adds optional platform-sensitive packages from
+  [`requirements_platform_extra.txt`](./requirements_platform_extra.txt)
+- `--gpu` installs the GPU-serving stack from
+  [`requirements_gpu.txt`](./requirements_gpu.txt)
+
+If you want to inspect the plan without installing anything:
+
+```powershell
+python .\bootstrap.py --dry-run
+```
+
+Important boundary:
+
+- these requirements files are a convenience install surface for local
+  development and validation
+- TAR's reproducible runtime truth still comes from its locked manifest builders
+  in [`tar_lab/reproducibility.py`](./tar_lab/reproducibility.py)
+
 ## Model Families
 
 ### ASC standalone family

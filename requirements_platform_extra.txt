@@ -1,0 +1,6 @@
+# Optional platform-sensitive extras.
+# Use these when you want the wider science stack on a machine that can support
+# them cleanly.
+jax
+optax
+qiskit
