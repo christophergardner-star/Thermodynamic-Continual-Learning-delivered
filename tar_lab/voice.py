@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover - optional dependency
 try:
     import sounddevice as sd  # type: ignore
     import soundfile as sf  # type: ignore
-except ImportError:  # pragma: no cover - optional dependency
+except (ImportError, OSError):  # pragma: no cover - optional dependency
     sd = None  # type: ignore[assignment]
     sf = None  # type: ignore[assignment]
 
