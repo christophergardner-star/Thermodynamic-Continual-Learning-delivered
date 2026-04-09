@@ -23,6 +23,14 @@ sandbox_policy = runtime.get("sandbox_policy", {})
 latest_breakthrough = status.get("latest_breakthrough_report")
 latest_claim_verdict = status.get("latest_claim_verdict")
 latest_research_decision = status.get("latest_research_decision")
+latest_research_project = status.get("latest_research_project")
+latest_priority_snapshot = status.get("latest_priority_snapshot")
+latest_budget_allocation = status.get("latest_budget_allocation")
+latest_falsification_plan = status.get("latest_falsification_plan")
+latest_portfolio = status.get("latest_portfolio")
+latest_portfolio_decision = status.get("latest_portfolio_decision")
+latest_evidence_debt = status.get("latest_evidence_debt_record")
+latest_project_staleness = status.get("latest_project_staleness_record")
 latest_problem_study = status.get("latest_problem_study")
 latest_problem_execution = status.get("latest_problem_execution")
 latest_problem_schedule = status.get("latest_problem_schedule")
@@ -57,13 +65,21 @@ bench_meta_col3, bench_meta_col4 = st.columns(2)
 bench_meta_col3.caption(f"Canonical Comparable: {status.get('canonical_comparable', False)}")
 bench_meta_col4.caption(f"Benchmark Profiles: {len(status.get('frontier', {}).get('benchmark_profiles', {}))}")
 
-intel_col1, intel_col2, intel_col3, intel_col4, intel_col5, intel_col6 = st.columns(6)
+intel_col1, intel_col2, intel_col3, intel_col4, intel_col5, intel_col6, intel_col7, intel_col8, intel_col9, intel_col10, intel_col11, intel_col12, intel_col13, intel_col14 = st.columns(14)
 intel_col1.metric("Research Docs", status.get("research_documents", 0))
 intel_col2.metric("Verifications", status.get("verification_reports", 0))
 intel_col3.metric("Breakthroughs", status.get("breakthrough_reports", 0))
 intel_col4.metric("Problem Studies", status.get("problem_studies", 0))
 intel_col5.metric("Problem Runs", status.get("problem_executions", 0))
 intel_col6.metric("Schedules", status.get("active_problem_schedules", 0))
+intel_col7.metric("Projects", status.get("research_projects", 0))
+intel_col8.metric("Active Projects", status.get("active_research_projects", 0))
+intel_col9.metric("Priority Snapshots", status.get("prioritization_snapshots", 0))
+intel_col10.metric("Budget Decisions", status.get("budget_allocation_decisions", 0))
+intel_col11.metric("Falsification Plans", status.get("falsification_plans", 0))
+intel_col12.metric("Portfolio Decisions", status.get("portfolio_decisions", 0))
+intel_col13.metric("Evidence Debt", status.get("evidence_debt_records", 0))
+intel_col14.metric("Staleness Records", status.get("project_staleness_records", 0))
 
 runtime_col1, runtime_col2, runtime_col3, runtime_col4 = st.columns(4)
 runtime_col1.metric("Reproducible", status.get("reproducibility_complete", False))
@@ -142,6 +158,54 @@ if latest_research_decision:
     st.json(latest_research_decision)
 else:
     st.info("No research decision logged yet.")
+
+st.subheader("Latest Research Project")
+if latest_research_project:
+    st.json(latest_research_project)
+else:
+    st.info("No research project continuity state recorded yet.")
+
+st.subheader("Latest Priority Snapshot")
+if latest_priority_snapshot:
+    st.json(latest_priority_snapshot)
+else:
+    st.info("No prioritization snapshot recorded yet.")
+
+st.subheader("Latest Budget Allocation")
+if latest_budget_allocation:
+    st.json(latest_budget_allocation)
+else:
+    st.info("No budget allocation decision recorded yet.")
+
+st.subheader("Latest Falsification Plan")
+if latest_falsification_plan:
+    st.json(latest_falsification_plan)
+else:
+    st.info("No falsification plan recorded yet.")
+
+st.subheader("Latest Portfolio")
+if latest_portfolio:
+    st.json(latest_portfolio)
+else:
+    st.info("No portfolio state recorded yet.")
+
+st.subheader("Latest Portfolio Decision")
+if latest_portfolio_decision:
+    st.json(latest_portfolio_decision)
+else:
+    st.info("No portfolio decision recorded yet.")
+
+st.subheader("Latest Evidence Debt")
+if latest_evidence_debt:
+    st.json(latest_evidence_debt)
+else:
+    st.info("No evidence-debt record recorded yet.")
+
+st.subheader("Latest Project Staleness")
+if latest_project_staleness:
+    st.json(latest_project_staleness)
+else:
+    st.info("No project staleness record recorded yet.")
 
 st.subheader("Latest Problem Study")
 if latest_problem_study:

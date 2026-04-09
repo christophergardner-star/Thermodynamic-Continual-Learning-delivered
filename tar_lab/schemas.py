@@ -109,6 +109,74 @@ SandboxNetworkPolicy = Literal["off", "restricted", "profile_required"]
 SandboxProfile = Literal["production", "dev_override"]
 MemoryStoreHealth = Literal["healthy", "rebuild_required", "rebuilding", "degraded"]
 DependencyResolutionStatus = Literal["pinned", "missing_version", "optional_missing"]
+ResearchProjectStatus = Literal["active", "paused", "blocked", "awaiting_human_review", "completed", "abandoned"]
+ResearchThreadStatus = Literal["open", "testing", "falsifying", "supported", "contradicted", "parked", "closed"]
+ResearchActionStatus = Literal["planned", "queued", "running", "completed", "failed", "skipped", "invalidated"]
+ResearchConfidenceState = Literal["unknown", "exploratory", "provisional", "supported", "contradicted"]
+ResearchQuestionStatus = Literal["open", "resolved", "parked"]
+ResearchBudgetPressure = Literal["low", "medium", "high", "exhausted"]
+ResearchPortfolioRecommendation = Literal["continue", "defer", "park", "resume", "escalate", "retire", "complete", "block"]
+ResearchStalenessLevel = Literal["fresh", "watch", "stale", "critical"]
+ResearchActionKind = Literal[
+    "create_problem_study",
+    "run_problem_study",
+    "review_execution_result",
+    "verify_claim",
+    "mechanism_ablation",
+    "replication_check",
+    "seed_variance_check",
+    "contradiction_resolution",
+    "benchmark_stress_probe",
+    "calibration_check",
+    "environment_reproduction_check",
+    "claim_linkage_sanity_check",
+    "await_dependency",
+    "human_review",
+    "custom",
+]
+PrioritizationPolicyMode = Literal["balanced", "falsification_first"]
+FalsificationPlanStatus = Literal["active", "satisfied", "completed", "obsolete", "cancelled"]
+FalsificationTestStatus = Literal["planned", "attached", "running", "completed", "failed", "skipped"]
+FalsificationTriggerType = Literal[
+    "confidence_rising",
+    "contradiction_pressure",
+    "low_replication",
+    "benchmark_pressure",
+    "calibration_weakness",
+    "claim_linkage_gap",
+    "environment_reproduction_risk",
+]
+FalsificationSeverity = Literal["low", "medium", "high", "critical"]
+FalsificationTestKind = Literal[
+    "mechanism_ablation",
+    "replication_check",
+    "seed_variance_check",
+    "contradiction_resolution",
+    "benchmark_stress_probe",
+    "calibration_check",
+    "environment_reproduction_check",
+    "claim_linkage_sanity_check",
+]
+ResearchStopReason = Literal[
+    "budget_exhausted",
+    "evidence_saturated",
+    "contradiction_detected",
+    "dependency_missing",
+    "benchmark_unavailable",
+    "awaiting_human_review",
+    "superseded_by_better_thread",
+    "runtime_failure",
+    "goal_completed",
+    "operator_paused",
+]
+ResearchResumeReason = Literal[
+    "new_budget_allocated",
+    "dependency_restored",
+    "new_evidence_arrived",
+    "scheduled_followup_due",
+    "contradiction_requires_resolution",
+    "human_requested_resume",
+]
 
 
 class DatasetSourceConfig(StrictModel):
@@ -508,6 +576,10 @@ class ScienceEnvironmentBundle(StrictModel):
 
 class ProblemStudyReport(StrictModel):
     problem_id: str
+    project_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    open_question_id: Optional[str] = None
+    next_action_id: Optional[str] = None
     created_at: str = Field(default_factory=utc_now_iso)
     problem: str
     profile_id: str
@@ -562,6 +634,9 @@ class ProblemExperimentResult(StrictModel):
 
 class ProblemExecutionReport(StrictModel):
     problem_id: str
+    project_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    action_id: Optional[str] = None
     executed_at: str = Field(default_factory=utc_now_iso)
     problem: str
     profile_id: str
@@ -599,6 +674,9 @@ class ProblemScheduleEntry(StrictModel):
     schedule_id: str
     created_at: str = Field(default_factory=utc_now_iso)
     problem_id: str
+    project_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    action_id: Optional[str] = None
     problem: str
     profile_id: str
     domain: str
@@ -612,6 +690,8 @@ class ProblemScheduleEntry(StrictModel):
     run_count: int = Field(default=0, ge=0)
     attempt_count: int = Field(default=0, ge=0)
     priority: int = Field(default=0, ge=0)
+    priority_score: Optional[float] = None
+    priority_source: Optional[str] = None
     status: ScheduleStatus = "scheduled"
     retry_policy: RetryPolicy = Field(default_factory=lambda: RetryPolicy())
     retry_after: Optional[str] = None
@@ -755,6 +835,8 @@ class ResearchDecisionRecord(StrictModel):
     mode: Literal["research_chat", "problem_study", "claim_review"] = "research_chat"
     trial_id: Optional[str] = None
     problem_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    action_id: Optional[str] = None
     evidence_bundle: EvidenceBundle
     hypotheses: List[HypothesisRecord] = Field(default_factory=list)
     selected_action: str
@@ -789,6 +871,308 @@ class ClaimVerdict(StrictModel):
     canonical_benchmark_required: bool = False
     canonical_benchmark_satisfied: bool = False
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class ResearchBudgetLedger(StrictModel):
+    wall_clock_minutes_budget: float = Field(default=180.0, ge=0.0)
+    wall_clock_minutes_spent: float = Field(default=0.0, ge=0.0)
+    gpu_hours_budget: float = Field(default=4.0, ge=0.0)
+    gpu_hours_spent: float = Field(default=0.0, ge=0.0)
+    experiment_budget: int = Field(default=6, ge=0)
+    experiments_spent: int = Field(default=0, ge=0)
+    replication_budget: int = Field(default=2, ge=0)
+    replications_spent: int = Field(default=0, ge=0)
+    budget_exhausted: bool = False
+    budget_pressure_level: ResearchBudgetPressure = "low"
+
+
+class PrioritizationPolicy(StrictModel):
+    mode: PrioritizationPolicyMode = "balanced"
+    evidence_gain_weight: float = Field(default=0.35, ge=0.0)
+    falsification_weight: float = Field(default=0.2, ge=0.0)
+    uncertainty_reduction_weight: float = Field(default=0.15, ge=0.0)
+    benchmark_value_weight: float = Field(default=0.1, ge=0.0)
+    replication_value_weight: float = Field(default=0.05, ge=0.0)
+    contradiction_urgency_weight: float = Field(default=0.1, ge=0.0)
+    strategic_priority_weight: float = Field(default=0.1, ge=0.0)
+    dependency_readiness_weight: float = Field(default=0.15, ge=0.0)
+    cost_penalty_weight: float = Field(default=0.25, ge=0.0)
+    budget_pressure_penalty_weight: float = Field(default=0.15, ge=0.0)
+
+
+class ActionScoreBreakdown(StrictModel):
+    expected_evidence_gain: float = Field(default=0.0, ge=0.0, le=1.0)
+    falsification_value: float = Field(default=0.0, ge=0.0, le=1.0)
+    uncertainty_reduction: float = Field(default=0.0, ge=0.0, le=1.0)
+    benchmark_value: float = Field(default=0.0, ge=0.0, le=1.0)
+    replication_value: float = Field(default=0.0, ge=0.0, le=1.0)
+    contradiction_urgency: float = Field(default=0.0, ge=0.0, le=1.0)
+    strategic_priority: float = Field(default=0.0, ge=0.0, le=1.0)
+    dependency_readiness: float = Field(default=0.0, ge=0.0, le=1.0)
+    cost_penalty: float = Field(default=0.0, ge=0.0, le=1.0)
+    budget_pressure_penalty: float = Field(default=0.0, ge=0.0, le=1.0)
+    total_score: float = 0.0
+
+
+class PrioritizedActionCandidate(StrictModel):
+    candidate_id: str
+    project_id: str
+    thread_id: str
+    action_id: str
+    project_title: str
+    domain_profile: str
+    project_status: ResearchProjectStatus
+    action_kind: ResearchActionKind = "custom"
+    action_status: ResearchActionStatus = "planned"
+    action_description: str
+    current_question: Optional[str] = None
+    budget_pressure_level: ResearchBudgetPressure = "low"
+    blocked: bool = False
+    recommended: bool = False
+    score: float = 0.0
+    score_breakdown: ActionScoreBreakdown = Field(default_factory=ActionScoreBreakdown)
+    rationale: List[str] = Field(default_factory=list)
+
+
+class PortfolioPrioritySnapshot(StrictModel):
+    snapshot_id: str
+    created_at: str = Field(default_factory=utc_now_iso)
+    project_id: Optional[str] = None
+    policy: PrioritizationPolicy = Field(default_factory=PrioritizationPolicy)
+    candidate_count: int = Field(default=0, ge=0)
+    active_project_count: int = Field(default=0, ge=0)
+    blocked_project_count: int = Field(default=0, ge=0)
+    selected_project_id: Optional[str] = None
+    selected_action_id: Optional[str] = None
+    candidates: List[PrioritizedActionCandidate] = Field(default_factory=list)
+    notes: List[str] = Field(default_factory=list)
+
+
+class BudgetAllocationDecision(StrictModel):
+    decision_id: str
+    created_at: str = Field(default_factory=utc_now_iso)
+    policy: PrioritizationPolicy = Field(default_factory=PrioritizationPolicy)
+    selected_candidate: Optional[PrioritizedActionCandidate] = None
+    scheduled_job_id: Optional[str] = None
+    schedule_created: bool = False
+    rationale: List[str] = Field(default_factory=list)
+    considered_candidates: List[PrioritizedActionCandidate] = Field(default_factory=list)
+
+
+class ResearchOpenQuestion(StrictModel):
+    question_id: str
+    project_id: str
+    thread_id: str
+    question: str
+    importance: float = Field(default=0.5, ge=0.0, le=1.0)
+    uncertainty_type: str = "unknown"
+    blocking: bool = False
+    status: ResearchQuestionStatus = "open"
+    created_at: str = Field(default_factory=utc_now_iso)
+    resolved_at: Optional[str] = None
+
+
+class ResearchPlannedAction(StrictModel):
+    action_id: str
+    project_id: str
+    thread_id: str
+    action_kind: ResearchActionKind = "custom"
+    description: str
+    estimated_cost: float = Field(default=0.0, ge=0.0)
+    expected_evidence_gain: float = Field(default=0.0, ge=0.0, le=1.0)
+    depends_on: List[str] = Field(default_factory=list)
+    status: ResearchActionStatus = "planned"
+    falsification_plan_id: Optional[str] = None
+    falsification_test_id: Optional[str] = None
+    scheduled_job_id: Optional[str] = None
+    result_refs: List[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
+class FalsificationTrigger(StrictModel):
+    trigger_type: FalsificationTriggerType
+    reason: str
+    severity: FalsificationSeverity = "medium"
+    evidence_refs: List[str] = Field(default_factory=list)
+
+
+class FalsificationCoverage(StrictModel):
+    ablation_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    replication_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    contradiction_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    benchmark_pressure_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    calibration_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    overall_sufficient: bool = False
+
+
+class FalsificationTest(StrictModel):
+    test_id: str
+    plan_id: str
+    project_id: str
+    thread_id: str
+    kind: FalsificationTestKind
+    description: str
+    estimated_cost: float = Field(default=0.0, ge=0.0)
+    expected_falsification_value: float = Field(default=0.0, ge=0.0, le=1.0)
+    depends_on: List[str] = Field(default_factory=list)
+    status: FalsificationTestStatus = "planned"
+    result_summary: Optional[str] = None
+    linked_action_id: Optional[str] = None
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
+class FalsificationPlan(StrictModel):
+    plan_id: str
+    project_id: str
+    thread_id: str
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+    status: FalsificationPlanStatus = "active"
+    trigger_reason: str
+    triggers: List[FalsificationTrigger] = Field(default_factory=list)
+    tests: List[FalsificationTest] = Field(default_factory=list)
+    coverage: FalsificationCoverage = Field(default_factory=FalsificationCoverage)
+    notes: List[str] = Field(default_factory=list)
+
+
+class EvidenceDebtRecord(StrictModel):
+    record_id: str
+    project_id: str
+    created_at: str = Field(default_factory=utc_now_iso)
+    falsification_gap: float = Field(default=0.0, ge=0.0, le=1.0)
+    replication_gap: float = Field(default=0.0, ge=0.0, le=1.0)
+    benchmark_gap: float = Field(default=0.0, ge=0.0, le=1.0)
+    claim_linkage_gap: float = Field(default=0.0, ge=0.0, le=1.0)
+    calibration_gap: float = Field(default=0.0, ge=0.0, le=1.0)
+    overall_debt: float = Field(default=0.0, ge=0.0, le=1.0)
+    promotion_blocked: bool = False
+    rationale: List[str] = Field(default_factory=list)
+
+
+class ProjectStalenessRecord(StrictModel):
+    record_id: str
+    project_id: str
+    created_at: str = Field(default_factory=utc_now_iso)
+    last_progress_at: Optional[str] = None
+    hours_since_progress: float = Field(default=0.0, ge=0.0)
+    staleness_level: ResearchStalenessLevel = "fresh"
+    reason: str = ""
+    resume_candidate: bool = False
+    closure_candidate: bool = False
+
+
+class ProjectPriorityRecord(StrictModel):
+    record_id: str
+    project_id: str
+    created_at: str = Field(default_factory=utc_now_iso)
+    action_id: Optional[str] = None
+    priority_score: float = 0.0
+    strategic_priority: float = Field(default=0.0, ge=0.0, le=1.0)
+    expected_value: float = Field(default=0.0, ge=0.0, le=1.0)
+    evidence_debt: float = Field(default=0.0, ge=0.0, le=1.0)
+    contradiction_pressure: float = Field(default=0.0, ge=0.0, le=1.0)
+    staleness_penalty: float = Field(default=0.0, ge=0.0, le=1.0)
+    budget_pressure: float = Field(default=0.0, ge=0.0, le=1.0)
+    benchmark_readiness: float = Field(default=0.0, ge=0.0, le=1.0)
+    recommended_state: ResearchPortfolioRecommendation = "defer"
+    rationale: List[str] = Field(default_factory=list)
+
+
+class PortfolioHealthSnapshot(StrictModel):
+    created_at: str = Field(default_factory=utc_now_iso)
+    total_projects: int = Field(default=0, ge=0)
+    active_projects: int = Field(default=0, ge=0)
+    paused_projects: int = Field(default=0, ge=0)
+    blocked_projects: int = Field(default=0, ge=0)
+    stale_projects: int = Field(default=0, ge=0)
+    parked_projects: int = Field(default=0, ge=0)
+    completed_projects: int = Field(default=0, ge=0)
+    abandoned_projects: int = Field(default=0, ge=0)
+    resume_candidates: int = Field(default=0, ge=0)
+    promotion_blocked_projects: int = Field(default=0, ge=0)
+    selected_project_id: Optional[str] = None
+
+
+class ResearchPortfolio(StrictModel):
+    portfolio_id: str = "portfolio-main"
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+    active_project_ids: List[str] = Field(default_factory=list)
+    paused_project_ids: List[str] = Field(default_factory=list)
+    blocked_project_ids: List[str] = Field(default_factory=list)
+    stale_project_ids: List[str] = Field(default_factory=list)
+    parked_project_ids: List[str] = Field(default_factory=list)
+    completed_project_ids: List[str] = Field(default_factory=list)
+    abandoned_project_ids: List[str] = Field(default_factory=list)
+    latest_decision_id: Optional[str] = None
+    latest_selected_project_id: Optional[str] = None
+    health_snapshot: PortfolioHealthSnapshot = Field(default_factory=PortfolioHealthSnapshot)
+
+
+class PortfolioDecision(StrictModel):
+    decision_id: str
+    created_at: str = Field(default_factory=utc_now_iso)
+    selected_project_id: Optional[str] = None
+    selected_action_id: Optional[str] = None
+    deferred_project_ids: List[str] = Field(default_factory=list)
+    parked_project_ids: List[str] = Field(default_factory=list)
+    resumed_project_ids: List[str] = Field(default_factory=list)
+    escalated_project_ids: List[str] = Field(default_factory=list)
+    retired_project_ids: List[str] = Field(default_factory=list)
+    rationale: List[str] = Field(default_factory=list)
+    policy_snapshot: Optional[PrioritizationPolicy] = None
+    project_priority_records: List[ProjectPriorityRecord] = Field(default_factory=list)
+
+
+class ResearchResumeSnapshot(StrictModel):
+    project_id: str
+    active_thread_id: Optional[str] = None
+    current_question_id: Optional[str] = None
+    next_action_id: Optional[str] = None
+    latest_evidence_summary: str
+    blockers: List[str] = Field(default_factory=list)
+    budget_remaining_summary: Dict[str, float] = Field(default_factory=dict)
+    captured_at: str = Field(default_factory=utc_now_iso)
+
+
+class ResearchHypothesisThread(StrictModel):
+    thread_id: str
+    project_id: str
+    hypothesis: str
+    status: ResearchThreadStatus = "open"
+    confidence_state: ResearchConfidenceState = "unknown"
+    supporting_evidence_ids: List[str] = Field(default_factory=list)
+    contradicting_evidence_ids: List[str] = Field(default_factory=list)
+    open_question_ids: List[str] = Field(default_factory=list)
+    next_action_id: Optional[str] = None
+    stop_reason: Optional[ResearchStopReason] = None
+    resume_reason: Optional[ResearchResumeReason] = None
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
+class ResearchProject(StrictModel):
+    project_id: str
+    title: str
+    goal: str
+    domain_profile: str
+    status: ResearchProjectStatus = "active"
+    priority: int = Field(default=0, ge=0)
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+    active_thread_id: Optional[str] = None
+    budget_ledger: ResearchBudgetLedger = Field(default_factory=ResearchBudgetLedger)
+    resume_snapshot: Optional[ResearchResumeSnapshot] = None
+    latest_decision_summary: str = ""
+    hypothesis_threads: List[ResearchHypothesisThread] = Field(default_factory=list)
+    open_questions: List[ResearchOpenQuestion] = Field(default_factory=list)
+    planned_actions: List[ResearchPlannedAction] = Field(default_factory=list)
+
+
+class ResearchProjectState(StrictModel):
+    entries: List[ResearchProject] = Field(default_factory=list)
 
 
 class BreakthroughReport(StrictModel):
@@ -1371,6 +1755,24 @@ class ControlRequest(StrictModel):
         "study_problem",
         "run_problem_study",
         "schedule_problem_study",
+        "create_project",
+        "list_projects",
+        "project_status",
+        "pause_project",
+        "resume_project",
+        "next_action",
+        "portfolio_status",
+        "portfolio_review",
+        "portfolio_decide",
+        "rank_actions",
+        "allocate_budget",
+        "prioritization_log",
+        "generate_falsification_plan",
+        "falsification_status",
+        "falsification_log",
+        "stale_projects",
+        "evidence_debt",
+        "resume_candidates",
         "scheduler_status",
         "run_scheduler_once",
         "list_benchmarks",

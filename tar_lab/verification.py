@@ -12,6 +12,7 @@ from tar_lab.schemas import (
     ClaimAcceptancePolicy,
     ClaimVerdict,
     ContradictionReview,
+    FalsificationTrigger,
     SeedRunResult,
     SeedVarianceReport,
     TrainingPayloadConfig,
@@ -251,6 +252,82 @@ class VerificationRunner:
             canonical_benchmark_satisfied=canonical_comparable,
             confidence=confidence,
         )
+
+    def suggest_falsification_triggers(
+        self,
+        verification: VerificationReport,
+        *,
+        contradiction_review: Optional[ContradictionReview] = None,
+        claim_verdict: Optional[ClaimVerdict] = None,
+        canonical_comparable: bool = True,
+    ) -> list[FalsificationTrigger]:
+        triggers: list[FalsificationTrigger] = []
+        if not verification.seed_variance.stable:
+            triggers.append(
+                FalsificationTrigger(
+                    trigger_type="low_replication",
+                    reason="seed variance remains unstable and needs replication pressure",
+                    severity="high",
+                    evidence_refs=[verification.trial_id],
+                )
+            )
+        if verification.seed_variance.num_runs < 3:
+            triggers.append(
+                FalsificationTrigger(
+                    trigger_type="low_replication",
+                    reason="seed count is still below the stronger replication floor",
+                    severity="medium",
+                    evidence_refs=[verification.trial_id],
+                )
+            )
+        if verification.calibration.ece > 0.15:
+            triggers.append(
+                FalsificationTrigger(
+                    trigger_type="calibration_weakness",
+                    reason="calibration exceeds the acceptable ECE envelope",
+                    severity="high",
+                    evidence_refs=[verification.trial_id],
+                )
+            )
+        if contradiction_review is not None and contradiction_review.contradiction_count > 0:
+            triggers.append(
+                FalsificationTrigger(
+                    trigger_type="contradiction_pressure",
+                    reason=contradiction_review.summary or "contradictory evidence remains unresolved",
+                    severity="high" if contradiction_review.severity in {"high", "medium"} else "medium",
+                    evidence_refs=[contradiction_review.review_id, *contradiction_review.conflicting_document_ids],
+                )
+            )
+        if claim_verdict is not None and claim_verdict.status in {"provisional", "accepted"}:
+            triggers.append(
+                FalsificationTrigger(
+                    trigger_type="confidence_rising",
+                    reason=f"claim status {claim_verdict.status} requires explicit adversarial pressure before promotion",
+                    severity="medium" if claim_verdict.status == "provisional" else "high",
+                    evidence_refs=[claim_verdict.verdict_id],
+                )
+            )
+        if claim_verdict is not None and (
+            claim_verdict.linkage_status != "exact" or not claim_verdict.verdict_inputs_complete
+        ):
+            triggers.append(
+                FalsificationTrigger(
+                    trigger_type="claim_linkage_gap",
+                    reason="claim linkage or verdict provenance is incomplete",
+                    severity="high",
+                    evidence_refs=[claim_verdict.verdict_id],
+                )
+            )
+        if not canonical_comparable:
+            triggers.append(
+                FalsificationTrigger(
+                    trigger_type="benchmark_pressure",
+                    reason="benchmark comparability is weak and should face stronger pressure",
+                    severity="medium",
+                    evidence_refs=[verification.trial_id],
+                )
+            )
+        return triggers
 
     def _run_seed_sweeps(self, config: TrainingPayloadConfig, seed_count: int = 3) -> SeedVarianceReport:
         base_seed = int(config.notes.get("seed", 7))

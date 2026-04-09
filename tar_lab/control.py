@@ -68,6 +68,7 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
         elif request.command == "study_problem":
             payload = orchestrator.study_problem(
                 problem=str(request.payload.get("problem", "")),
+                project_id=request.payload.get("project_id"),
                 build_env=bool(request.payload.get("build_env", False)),
                 max_results=int(request.payload.get("max_results", 6)),
                 benchmark_tier=str(request.payload.get("benchmark_tier", "validation")),  # type: ignore[arg-type]
@@ -75,6 +76,93 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
                 canonical_only=bool(request.payload.get("canonical_only", False)),
                 no_proxy_benchmarks=bool(request.payload.get("no_proxy_benchmarks", False)),
             ).model_dump(mode="json")
+        elif request.command == "create_project":
+            project = orchestrator.create_project(
+                problem=str(request.payload.get("problem", "")),
+                benchmark_tier=str(request.payload.get("benchmark_tier", "validation")),  # type: ignore[arg-type]
+                requested_benchmark=request.payload.get("benchmark"),
+            )
+            payload = orchestrator.project_status(project.project_id)
+        elif request.command == "list_projects":
+            payload = orchestrator.list_projects()
+        elif request.command == "project_status":
+            payload = orchestrator.project_status(str(request.payload.get("project_id", "")))
+        elif request.command == "pause_project":
+            project = orchestrator.pause_project(
+                str(request.payload.get("project_id", "")),
+                reason=str(request.payload.get("reason", "operator_paused")),  # type: ignore[arg-type]
+                note=request.payload.get("note"),
+            )
+            payload = orchestrator.project_status(project.project_id)
+        elif request.command == "resume_project":
+            project = orchestrator.resume_project(
+                str(request.payload.get("project_id", "")),
+                reason=str(request.payload.get("reason", "human_requested_resume")),  # type: ignore[arg-type]
+                note=request.payload.get("note"),
+            )
+            payload = orchestrator.project_status(project.project_id)
+        elif request.command == "next_action":
+            payload = orchestrator.next_action(str(request.payload.get("project_id", "")))
+        elif request.command == "portfolio_status":
+            payload = orchestrator.portfolio_status(
+                include_blocked=bool(request.payload.get("include_blocked", True)),
+                limit=int(request.payload.get("limit", 5)),
+                mode=str(request.payload.get("mode", "balanced")),
+            )
+        elif request.command == "portfolio_review":
+            payload = orchestrator.portfolio_review(
+                include_blocked=bool(request.payload.get("include_blocked", True)),
+                limit=int(request.payload.get("limit", 10)),
+                mode=str(request.payload.get("mode", "balanced")),
+            )
+        elif request.command == "portfolio_decide":
+            payload = orchestrator.portfolio_decide(
+                include_blocked=bool(request.payload.get("include_blocked", True)),
+                limit=int(request.payload.get("limit", 10)),
+                mode=str(request.payload.get("mode", "balanced")),
+            )
+        elif request.command == "rank_actions":
+            payload = orchestrator.rank_actions(
+                project_id=request.payload.get("project_id"),
+                include_blocked=bool(request.payload.get("include_blocked", False)),
+                limit=int(request.payload.get("limit", 10)),
+                mode=str(request.payload.get("mode", "balanced")),
+            )
+        elif request.command == "allocate_budget":
+            payload = orchestrator.allocate_budget(
+                project_id=request.payload.get("project_id"),
+                include_blocked=bool(request.payload.get("include_blocked", False)),
+                limit=int(request.payload.get("limit", 10)),
+                mode=str(request.payload.get("mode", "balanced")),
+                schedule_selected=bool(request.payload.get("schedule_selected", False)),
+            )
+        elif request.command == "prioritization_log":
+            payload = orchestrator.prioritization_log(count=int(request.payload.get("count", 20)))
+        elif request.command == "generate_falsification_plan":
+            payload = orchestrator.generate_falsification_plan(
+                str(request.payload.get("project_id", "")),
+                force=bool(request.payload.get("force", False)),
+            )
+        elif request.command == "falsification_status":
+            payload = orchestrator.falsification_status(request.payload.get("project_id"))
+        elif request.command == "falsification_log":
+            payload = orchestrator.falsification_log(count=int(request.payload.get("count", 20)))
+        elif request.command == "stale_projects":
+            payload = orchestrator.stale_projects(
+                limit=int(request.payload.get("limit", 10)),
+                mode=str(request.payload.get("mode", "balanced")),
+            )
+        elif request.command == "evidence_debt":
+            payload = orchestrator.evidence_debt(
+                project_id=request.payload.get("project_id"),
+                limit=int(request.payload.get("limit", 10)),
+                mode=str(request.payload.get("mode", "balanced")),
+            )
+        elif request.command == "resume_candidates":
+            payload = orchestrator.resume_candidates(
+                limit=int(request.payload.get("limit", 10)),
+                mode=str(request.payload.get("mode", "balanced")),
+            )
         elif request.command == "list_benchmarks":
             payload = orchestrator.list_benchmarks(
                 profile_id=request.payload.get("profile_id"),

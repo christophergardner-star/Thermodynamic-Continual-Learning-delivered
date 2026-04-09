@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-results", type=int, default=6, dest="max_results")
     parser.add_argument("--trial-id", dest="trial_id")
     parser.add_argument("--problem-id", dest="problem_id")
+    parser.add_argument("--project-id", dest="project_id")
     parser.add_argument("--schedule-id", dest="schedule_id")
     parser.add_argument("--endpoint-name", dest="endpoint_name")
     parser.add_argument("--profile-id", dest="profile_id")
@@ -33,6 +34,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--benchmark-tier", default="validation", dest="benchmark_tier", choices=["smoke", "validation", "canonical"])
     parser.add_argument("--canonical-only", action="store_true", dest="canonical_only")
     parser.add_argument("--no-proxy-benchmarks", action="store_true", dest="no_proxy_benchmarks")
+    parser.add_argument("--include-blocked", action="store_true", dest="include_blocked")
+    parser.add_argument("--schedule-selected", action="store_true", dest="schedule_selected")
+    parser.add_argument(
+        "--prioritization-mode",
+        default="balanced",
+        dest="prioritization_mode",
+        choices=["balanced", "falsification_first"],
+    )
     parser.add_argument("--paper-path", action="append", dest="paper_paths")
     parser.add_argument("--checkpoint-name", dest="checkpoint_name")
     parser.add_argument("--model-path", dest="model_path")
@@ -49,6 +58,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeat-interval-s", type=int, dest="repeat_interval_s")
     parser.add_argument("--max-runs", type=int, default=1, dest="max_runs")
     parser.add_argument("--priority", type=int, default=0)
+    parser.add_argument(
+        "--pause-reason",
+        default="operator_paused",
+        dest="pause_reason",
+        choices=[
+            "budget_exhausted",
+            "evidence_saturated",
+            "contradiction_detected",
+            "dependency_missing",
+            "benchmark_unavailable",
+            "awaiting_human_review",
+            "superseded_by_better_thread",
+            "runtime_failure",
+            "goal_completed",
+            "operator_paused",
+        ],
+    )
+    parser.add_argument(
+        "--resume-reason",
+        default="human_requested_resume",
+        dest="resume_reason",
+        choices=[
+            "new_budget_allocated",
+            "dependency_restored",
+            "new_evidence_arrived",
+            "scheduled_followup_due",
+            "contradiction_requires_resolution",
+            "human_requested_resume",
+        ],
+    )
     parser.add_argument("--max-jobs", type=int, default=1, dest="max_jobs")
     parser.add_argument("--stale-after-s", type=int, default=900, dest="stale_after_s")
     parser.add_argument("--alert-count", type=int, default=20, dest="alert_count")
@@ -100,6 +139,24 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--claim-policy", action="store_true", dest="claim_policy")
     group.add_argument("--claim-verdict", action="store_true", dest="claim_verdict")
     group.add_argument("--research-decision-log", action="store_true", dest="research_decision_log")
+    group.add_argument("--create-project", action="store_true", dest="create_project")
+    group.add_argument("--list-projects", action="store_true", dest="list_projects")
+    group.add_argument("--project-status", action="store_true", dest="project_status")
+    group.add_argument("--pause-project", action="store_true", dest="pause_project")
+    group.add_argument("--resume-project", action="store_true", dest="resume_project")
+    group.add_argument("--next-action", action="store_true", dest="next_action")
+    group.add_argument("--portfolio-status", action="store_true", dest="portfolio_status")
+    group.add_argument("--portfolio-review", action="store_true", dest="portfolio_review")
+    group.add_argument("--portfolio-decide", action="store_true", dest="portfolio_decide")
+    group.add_argument("--rank-actions", action="store_true", dest="rank_actions")
+    group.add_argument("--allocate-budget", action="store_true", dest="allocate_budget")
+    group.add_argument("--prioritization-log", action="store_true", dest="prioritization_log")
+    group.add_argument("--generate-falsification-plan", action="store_true", dest="generate_falsification_plan")
+    group.add_argument("--falsification-status", action="store_true", dest="falsification_status")
+    group.add_argument("--falsification-log", action="store_true", dest="falsification_log")
+    group.add_argument("--stale-projects", action="store_true", dest="stale_projects")
+    group.add_argument("--evidence-debt", action="store_true", dest="evidence_debt")
+    group.add_argument("--resume-candidates", action="store_true", dest="resume_candidates")
     group.add_argument("--chat", action="store_true")
     group.add_argument("--pivot", action="store_true")
     group.add_argument("--explain", action="store_true")
@@ -147,6 +204,7 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
     if args.study_problem:
         return orchestrator.study_problem(
             problem=args.problem or args.message or "",
+            project_id=args.project_id,
             build_env=args.build_env,
             max_results=args.max_results,
             benchmark_tier=args.benchmark_tier,  # type: ignore[arg-type]
@@ -154,6 +212,84 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
             canonical_only=args.canonical_only,
             no_proxy_benchmarks=args.no_proxy_benchmarks,
         ).model_dump(mode="json")
+    if args.create_project:
+        project = orchestrator.create_project(
+            problem=args.problem or args.message or "",
+            benchmark_tier=args.benchmark_tier,  # type: ignore[arg-type]
+            requested_benchmark=args.benchmark,
+        )
+        return orchestrator.project_status(project.project_id)
+    if args.list_projects:
+        return orchestrator.list_projects()
+    if args.project_status:
+        return orchestrator.project_status(args.project_id or "")
+    if args.pause_project:
+        project = orchestrator.pause_project(
+            args.project_id or "",
+            reason=args.pause_reason,
+            note=args.message,
+        )
+        return orchestrator.project_status(project.project_id)
+    if args.resume_project:
+        project = orchestrator.resume_project(
+            args.project_id or "",
+            reason=args.resume_reason,
+            note=args.message,
+        )
+        return orchestrator.project_status(project.project_id)
+    if args.next_action:
+        return orchestrator.next_action(args.project_id or "")
+    if args.portfolio_status:
+        return orchestrator.portfolio_status(
+            include_blocked=args.include_blocked,
+            limit=args.max_results,
+            mode=args.prioritization_mode,
+        )
+    if args.portfolio_review:
+        return orchestrator.portfolio_review(
+            include_blocked=args.include_blocked,
+            limit=args.max_results,
+            mode=args.prioritization_mode,
+        )
+    if args.portfolio_decide:
+        return orchestrator.portfolio_decide(
+            include_blocked=args.include_blocked,
+            limit=args.max_results,
+            mode=args.prioritization_mode,
+        )
+    if args.rank_actions:
+        return orchestrator.rank_actions(
+            project_id=args.project_id,
+            include_blocked=args.include_blocked,
+            limit=args.max_results,
+            mode=args.prioritization_mode,
+        )
+    if args.allocate_budget:
+        return orchestrator.allocate_budget(
+            project_id=args.project_id,
+            include_blocked=args.include_blocked,
+            limit=args.max_results,
+            mode=args.prioritization_mode,
+            schedule_selected=args.schedule_selected,
+        )
+    if args.prioritization_log:
+        return orchestrator.prioritization_log(count=args.max_results)
+    if args.generate_falsification_plan:
+        return orchestrator.generate_falsification_plan(args.project_id or "", force=args.force)
+    if args.falsification_status:
+        return orchestrator.falsification_status(args.project_id)
+    if args.falsification_log:
+        return orchestrator.falsification_log(count=args.max_results)
+    if args.stale_projects:
+        return orchestrator.stale_projects(limit=args.max_results, mode=args.prioritization_mode)
+    if args.evidence_debt:
+        return orchestrator.evidence_debt(
+            project_id=args.project_id,
+            limit=args.max_results,
+            mode=args.prioritization_mode,
+        )
+    if args.resume_candidates:
+        return orchestrator.resume_candidates(limit=args.max_results, mode=args.prioritization_mode)
     if args.list_benchmarks:
         return orchestrator.list_benchmarks(profile_id=args.profile_id, tier=args.benchmark_tier if args.benchmark_tier else None)  # type: ignore[arg-type]
     if args.benchmark_status:
@@ -291,6 +427,14 @@ def _render_status(payload: Dict[str, Any]) -> str:
         f"Alert Count: {payload.get('alerts', 0)}",
         f"Endpoints: {len(payload.get('endpoints', []))}",
         f"Role Assignments: {len(payload.get('role_assignments', []))}",
+        f"Research Projects: {payload.get('research_projects', 0)}",
+        f"Active Research Projects: {payload.get('active_research_projects', 0)}",
+        f"Prioritization Snapshots: {payload.get('prioritization_snapshots', 0)}",
+        f"Budget Allocation Decisions: {payload.get('budget_allocation_decisions', 0)}",
+        f"Falsification Plans: {payload.get('falsification_plans', 0)}",
+        f"Portfolio Decisions: {payload.get('portfolio_decisions', 0)}",
+        f"Evidence Debt Records: {payload.get('evidence_debt_records', 0)}",
+        f"Staleness Records: {payload.get('project_staleness_records', 0)}",
         f"Latest Claim Verdict: {(payload.get('latest_claim_verdict') or {}).get('status', 'n/a')}",
         f"Benchmark: {payload.get('benchmark_name') or ', '.join(payload.get('benchmark_ids', [])) or 'n/a'}",
         f"Benchmark Tier: {payload.get('benchmark_tier', 'n/a')}",
@@ -316,6 +460,32 @@ def _render_status(payload: Dict[str, Any]) -> str:
         lines.append(f"Memory Warning: {payload['memory_warning']}")
     if payload.get("lock_incomplete_reason"):
         lines.append(f"Lock Warning: {payload['lock_incomplete_reason']}")
+    latest_project = payload.get("latest_research_project") or {}
+    if latest_project:
+        lines.append(f"Latest Project: {latest_project.get('project_id', 'n/a')} ({latest_project.get('status', 'n/a')})")
+    latest_priority = payload.get("latest_priority_snapshot") or {}
+    if latest_priority:
+        lines.append(
+            f"Latest Prioritized Action: {latest_priority.get('selected_action_id', 'n/a')} "
+            f"for project {latest_priority.get('selected_project_id', 'n/a')}"
+        )
+    latest_falsification = payload.get("latest_falsification_plan") or {}
+    if latest_falsification:
+        lines.append(
+            f"Latest Falsification Plan: {latest_falsification.get('plan_id', 'n/a')} "
+            f"for project {latest_falsification.get('project_id', 'n/a')}"
+        )
+    latest_portfolio = payload.get("latest_portfolio") or {}
+    if latest_portfolio:
+        lines.append(
+            f"Latest Portfolio Selected Project: {latest_portfolio.get('latest_selected_project_id', 'n/a')}"
+        )
+    latest_portfolio_decision = payload.get("latest_portfolio_decision") or {}
+    if latest_portfolio_decision:
+        lines.append(
+            f"Latest Portfolio Decision: {latest_portfolio_decision.get('decision_id', 'n/a')} "
+            f"selected {latest_portfolio_decision.get('selected_project_id', 'n/a')}"
+        )
     return "\n".join(lines)
 
 
@@ -416,6 +586,291 @@ def _render_regime(payload: Dict[str, Any]) -> str:
     warning = payload.get("warning")
     if warning:
         lines.append(f"Warning: {warning}")
+    return "\n".join(lines)
+
+
+def _render_project_status(payload: Dict[str, Any]) -> str:
+    project = payload.get("project", {})
+    thread = payload.get("active_thread") or {}
+    question = payload.get("current_question") or {}
+    action = payload.get("next_action") or {}
+    budget = payload.get("budget_remaining") or {}
+    lines = [
+        f"Project: {project.get('title', project.get('project_id', 'n/a'))}",
+        f"Project ID: {project.get('project_id', 'n/a')}",
+        f"Status: {project.get('status', 'n/a')}",
+        f"Domain Profile: {project.get('domain_profile', 'n/a')}",
+        f"Priority: {project.get('priority', 'n/a')}",
+        f"Latest Decision: {project.get('latest_decision_summary', 'n/a')}",
+        f"Active Thread: {thread.get('thread_id', 'n/a')}",
+        f"Thread Status: {thread.get('status', 'n/a')}",
+        f"Confidence State: {thread.get('confidence_state', 'n/a')}",
+        f"Current Question: {question.get('question', 'n/a')}",
+        f"Question Status: {question.get('status', 'n/a')}",
+        f"Next Action: {action.get('description', 'n/a')}",
+        f"Next Action ID: {action.get('action_id', 'n/a')}",
+        f"Next Action Status: {action.get('status', 'n/a')}",
+        f"Budget Remaining: {json.dumps(budget, sort_keys=True)}",
+    ]
+    resume_snapshot = project.get("resume_snapshot") or {}
+    if resume_snapshot:
+        lines.append(f"Resume Snapshot At: {resume_snapshot.get('captured_at', 'n/a')}")
+        blockers = resume_snapshot.get("blockers") or []
+        lines.append(f"Resume Blockers: {', '.join(blockers) or 'n/a'}")
+    if thread.get("stop_reason"):
+        lines.append(f"Stop Reason: {thread.get('stop_reason')}")
+    if thread.get("resume_reason"):
+        lines.append(f"Resume Reason: {thread.get('resume_reason')}")
+    return "\n".join(lines)
+
+
+def _render_project_list(payload: Dict[str, Any]) -> str:
+    projects = payload.get("projects", [])
+    if not projects:
+        return "No research projects recorded."
+    return "\n\n".join(_render_project_status(project) for project in projects)
+
+
+def _render_next_action(payload: Dict[str, Any]) -> str:
+    action = payload.get("next_action") or {}
+    question = payload.get("current_question") or {}
+    return "\n".join(
+        [
+            f"Project ID: {payload.get('project_id', 'n/a')}",
+            f"Project Status: {payload.get('project_status', 'n/a')}",
+            f"Current Question: {question.get('question', 'n/a')}",
+            f"Next Action: {action.get('description', 'n/a')}",
+            f"Action Kind: {action.get('action_kind', 'n/a')}",
+            f"Action Status: {action.get('status', 'n/a')}",
+            f"Estimated Cost: {action.get('estimated_cost', 'n/a')}",
+            f"Expected Evidence Gain: {action.get('expected_evidence_gain', 'n/a')}",
+            f"Budget Remaining: {json.dumps(payload.get('budget_remaining', {}), sort_keys=True)}",
+        ]
+    )
+
+
+def _render_ranked_candidates(candidates: list[Dict[str, Any]]) -> str:
+    if not candidates:
+        return "No prioritized action candidates were available."
+    blocks: list[str] = []
+    for index, candidate in enumerate(candidates, start=1):
+        breakdown = candidate.get("score_breakdown") or {}
+        blocks.append(
+            "\n".join(
+                [
+                    f"{index}. {candidate.get('project_title', 'n/a')} :: {candidate.get('action_description', 'n/a')}",
+                    f"   Score: {candidate.get('score', 'n/a')}",
+                    f"   Recommended: {candidate.get('recommended', False)}",
+                    f"   Project Status: {candidate.get('project_status', 'n/a')}",
+                    f"   Action Kind: {candidate.get('action_kind', 'n/a')}",
+                    f"   Blocked: {candidate.get('blocked', False)}",
+                    f"   Question: {candidate.get('current_question', 'n/a')}",
+                    f"   Breakdown: evidence={breakdown.get('expected_evidence_gain', 'n/a')}, "
+                    f"falsification={breakdown.get('falsification_value', 'n/a')}, "
+                    f"uncertainty={breakdown.get('uncertainty_reduction', 'n/a')}, "
+                    f"cost_penalty={breakdown.get('cost_penalty', 'n/a')}, "
+                    f"budget_penalty={breakdown.get('budget_pressure_penalty', 'n/a')}",
+                ]
+            )
+        )
+    return "\n\n".join(blocks)
+
+
+def _render_portfolio_status(payload: Dict[str, Any]) -> str:
+    counts = payload.get("project_counts") or {}
+    lines = [
+        f"Projects: {counts.get('total', 0)}",
+        f"Active: {counts.get('active', 0)}",
+        f"Blocked: {counts.get('blocked', 0)}",
+        f"Paused: {counts.get('paused', 0)}",
+        "",
+        "Top Candidates:",
+        _render_ranked_candidates(payload.get("top_candidates", [])),
+    ]
+    latest = payload.get("latest_budget_allocation") or {}
+    if latest:
+        lines.extend(
+            [
+                "",
+                f"Latest Allocation Decision: {latest.get('decision_id', 'n/a')}",
+                f"Schedule Created: {latest.get('schedule_created', False)}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _render_budget_allocation(payload: Dict[str, Any]) -> str:
+    candidate = payload.get("selected_candidate") or {}
+    lines = [
+        f"Allocation Decision: {payload.get('decision_id', 'n/a')}",
+        f"Schedule Created: {payload.get('schedule_created', False)}",
+        f"Scheduled Job ID: {payload.get('scheduled_job_id', 'n/a')}",
+        f"Selected Project: {candidate.get('project_title', candidate.get('project_id', 'n/a'))}",
+        f"Selected Action: {candidate.get('action_description', 'n/a')}",
+        f"Selected Score: {candidate.get('score', 'n/a')}",
+        f"Selected Blocked: {candidate.get('blocked', False)}",
+    ]
+    rationale = payload.get("rationale") or []
+    if rationale:
+        lines.append(f"Rationale: {'; '.join(rationale)}")
+    return "\n".join(lines)
+
+
+def _render_prioritization_log(payload: Dict[str, Any]) -> str:
+    snapshots = payload.get("snapshots", [])
+    if not snapshots:
+        return "No prioritization snapshots recorded."
+    lines: list[str] = []
+    for snapshot in snapshots:
+        lines.append(
+            f"{snapshot.get('created_at', 'n/a')} :: selected {snapshot.get('selected_action_id', 'n/a')} "
+            f"for {snapshot.get('selected_project_id', 'n/a')} ({snapshot.get('candidate_count', 0)} candidates)"
+        )
+    return "\n".join(lines)
+
+
+def _render_portfolio_review(payload: Dict[str, Any]) -> str:
+    portfolio = payload.get("portfolio") or {}
+    health = portfolio.get("health_snapshot") or {}
+    lines = [
+        f"Portfolio: {portfolio.get('portfolio_id', 'n/a')}",
+        f"Selected Project: {portfolio.get('latest_selected_project_id', 'n/a')}",
+        f"Active Projects: {len(portfolio.get('active_project_ids', []))}",
+        f"Paused Projects: {len(portfolio.get('paused_project_ids', []))}",
+        f"Blocked Projects: {len(portfolio.get('blocked_project_ids', []))}",
+        f"Stale Projects: {len(portfolio.get('stale_project_ids', []))}",
+        f"Parked Projects: {len(portfolio.get('parked_project_ids', []))}",
+        f"Resume Candidates: {health.get('resume_candidates', 0)}",
+        f"Promotion Blocked: {health.get('promotion_blocked_projects', 0)}",
+        "",
+        "Top Projects:",
+    ]
+    top_projects = payload.get("top_projects", [])
+    if top_projects:
+        for item in top_projects:
+            lines.append(
+                f"- {item.get('project_id', 'n/a')}: score={item.get('priority_score', 'n/a')} "
+                f"state={item.get('recommended_state', 'n/a')} debt={item.get('evidence_debt', 'n/a')}"
+            )
+    else:
+        lines.append("No portfolio priority records available.")
+    return "\n".join(lines)
+
+
+def _render_portfolio_decision(payload: Dict[str, Any]) -> str:
+    decision = payload.get("decision") or {}
+    lines = [
+        f"Portfolio Decision: {decision.get('decision_id', 'n/a')}",
+        f"Selected Project: {decision.get('selected_project_id', 'n/a')}",
+        f"Selected Action: {decision.get('selected_action_id', 'n/a')}",
+        f"Deferred: {', '.join(decision.get('deferred_project_ids', [])) or 'n/a'}",
+        f"Parked: {', '.join(decision.get('parked_project_ids', [])) or 'n/a'}",
+        f"Resumed: {', '.join(decision.get('resumed_project_ids', [])) or 'n/a'}",
+        f"Escalated: {', '.join(decision.get('escalated_project_ids', [])) or 'n/a'}",
+        f"Retired: {', '.join(decision.get('retired_project_ids', [])) or 'n/a'}",
+    ]
+    rationale = decision.get("rationale") or []
+    if rationale:
+        lines.append(f"Rationale: {'; '.join(rationale)}")
+    return "\n".join(lines)
+
+
+def _render_stale_projects(payload: Dict[str, Any]) -> str:
+    rows = payload.get("stale_projects", [])
+    if not rows:
+        return "No stale projects detected."
+    lines = []
+    for item in rows:
+        lines.append(
+            f"{item.get('project_id', 'n/a')} :: level={item.get('staleness_level', 'n/a')} "
+            f"hours={item.get('hours_since_progress', 'n/a')} resume={item.get('resume_candidate', False)} "
+            f"closure={item.get('closure_candidate', False)}"
+        )
+    return "\n".join(lines)
+
+
+def _render_evidence_debt(payload: Dict[str, Any]) -> str:
+    rows = payload.get("records", [])
+    if not rows:
+        return "No evidence debt records available."
+    lines = []
+    for item in rows:
+        lines.append(
+            f"{item.get('project_id', 'n/a')} :: overall={item.get('overall_debt', 'n/a')} "
+            f"blocked={item.get('promotion_blocked', False)} "
+            f"falsification={item.get('falsification_gap', 'n/a')} "
+            f"replication={item.get('replication_gap', 'n/a')} "
+            f"benchmark={item.get('benchmark_gap', 'n/a')}"
+        )
+    return "\n".join(lines)
+
+
+def _render_resume_candidates(payload: Dict[str, Any]) -> str:
+    rows = payload.get("resume_candidates", [])
+    if not rows:
+        return "No resume candidates detected."
+    lines = []
+    for item in rows:
+        staleness = item.get("staleness") or {}
+        priority = item.get("priority") or {}
+        lines.append(
+            f"{staleness.get('project_id', 'n/a')} :: level={staleness.get('staleness_level', 'n/a')} "
+            f"score={priority.get('priority_score', 'n/a')} state={priority.get('recommended_state', 'n/a')}"
+        )
+    return "\n".join(lines)
+
+
+def _render_falsification_plan(payload: Dict[str, Any]) -> str:
+    plan = payload.get("plan") or {}
+    project_payload = payload.get("project") or {}
+    project = project_payload.get("project", project_payload) if isinstance(project_payload, dict) else {}
+    coverage = payload.get("coverage") or plan.get("coverage") or {}
+    pending_tests = payload.get("pending_tests") or plan.get("tests") or []
+    lines = [
+        f"Project: {project.get('title', project.get('project_id', payload.get('project_id', 'n/a')))}",
+        f"Project ID: {project.get('project_id', payload.get('project_id', 'n/a'))}",
+        f"Generated: {payload.get('generated', plan != {})}",
+        f"Plan ID: {plan.get('plan_id', 'n/a')}",
+        f"Plan Status: {plan.get('status', 'n/a')}",
+        f"Trigger Reason: {plan.get('trigger_reason', payload.get('reason', 'n/a'))}",
+        f"Pending Tests: {len(pending_tests)}",
+        f"Coverage: ablation={coverage.get('ablation_coverage', 'n/a')}, "
+        f"replication={coverage.get('replication_coverage', 'n/a')}, "
+        f"contradiction={coverage.get('contradiction_coverage', 'n/a')}, "
+        f"benchmark={coverage.get('benchmark_pressure_coverage', 'n/a')}, "
+        f"calibration={coverage.get('calibration_coverage', 'n/a')}, "
+        f"overall={coverage.get('overall_sufficient', 'n/a')}",
+    ]
+    tests = pending_tests or []
+    if tests:
+        lines.append("Tests:")
+        for test in tests:
+            lines.append(
+                f"- {test.get('kind', 'n/a')}: {test.get('description', 'n/a')} "
+                f"(status={test.get('status', 'n/a')}, falsification_value={test.get('expected_falsification_value', 'n/a')})"
+            )
+    attached_actions = payload.get("attached_actions") or []
+    if attached_actions:
+        lines.append("Attached Actions:")
+        for action in attached_actions:
+            lines.append(
+                f"- {action.get('action_id', 'n/a')}: {action.get('action_kind', 'n/a')} "
+                f"(cost={action.get('estimated_cost', 'n/a')}, evidence_gain={action.get('expected_evidence_gain', 'n/a')})"
+            )
+    return "\n".join(lines)
+
+
+def _render_falsification_log(payload: Dict[str, Any]) -> str:
+    plans = payload.get("plans", [])
+    if not plans:
+        return "No falsification plans recorded."
+    lines: list[str] = []
+    for plan in plans:
+        lines.append(
+            f"{plan.get('created_at', 'n/a')} :: {plan.get('plan_id', 'n/a')} "
+            f"for {plan.get('project_id', 'n/a')} status={plan.get('status', 'n/a')} "
+            f"tests={len(plan.get('tests', []))}"
+        )
     return "\n".join(lines)
 
 
@@ -539,6 +994,7 @@ def main() -> int:
                     "study_problem",
                     payload={
                         "problem": args.problem or args.message or "",
+                        "project_id": args.project_id,
                         "build_env": args.build_env,
                         "max_results": args.max_results,
                         "benchmark_tier": args.benchmark_tier,
@@ -546,6 +1002,166 @@ def main() -> int:
                         "canonical_only": args.canonical_only,
                         "no_proxy_benchmarks": args.no_proxy_benchmarks,
                     },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.create_project:
+                response = send_command(
+                    "create_project",
+                    payload={
+                        "problem": args.problem or args.message or "",
+                        "benchmark_tier": args.benchmark_tier,
+                        "benchmark": args.benchmark,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.list_projects:
+                response = send_command("list_projects", host=args.host, port=args.port)
+            elif args.project_status:
+                response = send_command(
+                    "project_status",
+                    payload={"project_id": args.project_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.pause_project:
+                response = send_command(
+                    "pause_project",
+                    payload={
+                        "project_id": args.project_id or "",
+                        "reason": args.pause_reason,
+                        "note": args.message,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.resume_project:
+                response = send_command(
+                    "resume_project",
+                    payload={
+                        "project_id": args.project_id or "",
+                        "reason": args.resume_reason,
+                        "note": args.message,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.next_action:
+                response = send_command(
+                    "next_action",
+                    payload={"project_id": args.project_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.portfolio_status:
+                response = send_command(
+                    "portfolio_status",
+                    payload={
+                        "include_blocked": args.include_blocked,
+                        "limit": args.max_results,
+                        "mode": args.prioritization_mode,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.portfolio_review:
+                response = send_command(
+                    "portfolio_review",
+                    payload={
+                        "include_blocked": args.include_blocked,
+                        "limit": args.max_results,
+                        "mode": args.prioritization_mode,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.portfolio_decide:
+                response = send_command(
+                    "portfolio_decide",
+                    payload={
+                        "include_blocked": args.include_blocked,
+                        "limit": args.max_results,
+                        "mode": args.prioritization_mode,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.rank_actions:
+                response = send_command(
+                    "rank_actions",
+                    payload={
+                        "project_id": args.project_id,
+                        "include_blocked": args.include_blocked,
+                        "limit": args.max_results,
+                        "mode": args.prioritization_mode,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.allocate_budget:
+                response = send_command(
+                    "allocate_budget",
+                    payload={
+                        "project_id": args.project_id,
+                        "include_blocked": args.include_blocked,
+                        "limit": args.max_results,
+                        "mode": args.prioritization_mode,
+                        "schedule_selected": args.schedule_selected,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.prioritization_log:
+                response = send_command(
+                    "prioritization_log",
+                    payload={"count": args.max_results},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.generate_falsification_plan:
+                response = send_command(
+                    "generate_falsification_plan",
+                    payload={"project_id": args.project_id or "", "force": args.force},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.falsification_status:
+                response = send_command(
+                    "falsification_status",
+                    payload={"project_id": args.project_id},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.falsification_log:
+                response = send_command(
+                    "falsification_log",
+                    payload={"count": args.max_results},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.stale_projects:
+                response = send_command(
+                    "stale_projects",
+                    payload={"limit": args.max_results, "mode": args.prioritization_mode},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.evidence_debt:
+                response = send_command(
+                    "evidence_debt",
+                    payload={
+                        "project_id": args.project_id,
+                        "limit": args.max_results,
+                        "mode": args.prioritization_mode,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.resume_candidates:
+                response = send_command(
+                    "resume_candidates",
+                    payload={"limit": args.max_results, "mode": args.prioritization_mode},
                     host=args.host,
                     port=args.port,
                 )
@@ -774,6 +1390,37 @@ def main() -> int:
             print(_render_endpoint_list(payload))
         elif args.endpoint_health:
             print(_render_endpoint_health(payload))
+        elif args.create_project or args.project_status or args.pause_project or args.resume_project:
+            print(_render_project_status(payload))
+        elif args.list_projects:
+            print(_render_project_list(payload))
+        elif args.next_action:
+            print(_render_next_action(payload))
+        elif args.portfolio_status or args.rank_actions:
+            snapshot_payload = payload.get("snapshot", payload) if args.rank_actions else payload
+            candidates = snapshot_payload.get("candidates", payload.get("top_candidates", []))
+            if args.portfolio_status:
+                print(_render_portfolio_status(payload))
+            else:
+                print(_render_ranked_candidates(candidates))
+        elif args.portfolio_review:
+            print(_render_portfolio_review(payload))
+        elif args.portfolio_decide:
+            print(_render_portfolio_decision(payload))
+        elif args.allocate_budget:
+            print(_render_budget_allocation(payload))
+        elif args.prioritization_log:
+            print(_render_prioritization_log(payload))
+        elif args.generate_falsification_plan or args.falsification_status:
+            print(_render_falsification_plan(payload))
+        elif args.falsification_log:
+            print(_render_falsification_log(payload))
+        elif args.stale_projects:
+            print(_render_stale_projects(payload))
+        elif args.evidence_debt:
+            print(_render_evidence_debt(payload))
+        elif args.resume_candidates:
+            print(_render_resume_candidates(payload))
         elif args.check_regime:
             print(_render_regime(payload))
         elif args.ingest_research:

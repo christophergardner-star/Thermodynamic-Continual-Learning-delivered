@@ -375,6 +375,12 @@ path, but they are explicitly retained for the next roadmap phase after `WS16`.
 They were raised as open design questions during the audit and should be
 treated as first-class future work, not informal notes.
 
+The fuller post-`WS16` strategic direction is locked in here:
+
+- [`docs/post_ws16_strategy_blueprint.md`](./post_ws16_strategy_blueprint.md)
+  detailed next-phase identity, moat, product direction, research direction,
+  build priorities, and non-goals
+
 ### Candidate `WS17`: Autonomous Portfolio Control And Evidence Budgeting
 
 **Purpose**

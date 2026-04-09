@@ -26,15 +26,22 @@ from tar_lab.runtime_daemon import LabRuntimeDaemon
 from tar_lab.scheduler import ProblemStudyScheduler
 from tar_lab.science_profiles import ProblemResearchEngine, ScienceProfileRegistry
 from tar_lab.schemas import (
+    ActionScoreBreakdown,
     AlertRecord,
     BenchmarkTier,
+    BudgetAllocationDecision,
     BreakthroughReport,
     ClaimAcceptancePolicy,
     ClaimVerdict,
     CheckpointRecord,
     ContradictionReview,
     DryRunReport,
+    EvidenceDebtRecord,
     EndpointRecord,
+    FalsificationCoverage,
+    FalsificationPlan,
+    FalsificationTest,
+    FalsificationTrigger,
     FrontierStatus,
     FailureAutopsy,
     GovernorDecision,
@@ -45,11 +52,29 @@ from tar_lab.schemas import (
     LiveDockerTestReport,
     PaperIngestReport,
     PayloadEnvironmentReport,
+    PortfolioDecision,
+    PortfolioHealthSnapshot,
+    PortfolioPrioritySnapshot,
+    PrioritizationPolicy,
+    PrioritizedActionCandidate,
     ProblemExecutionReport,
     ProblemScheduleEntry,
     ProblemResolutionReport,
     ProblemStudyReport,
     PreparedDataBundle,
+    ResearchActionStatus,
+    ResearchBudgetLedger,
+    ResearchPortfolio,
+    ResearchOpenQuestion,
+    ResearchPlannedAction,
+    ResearchProject,
+    ResearchResumeSnapshot,
+    ResearchResumeReason,
+    ResearchStopReason,
+    ResearchThreadStatus,
+    ResearchHypothesisThread,
+    ProjectPriorityRecord,
+    ProjectStalenessRecord,
     ResearchIngestReport,
     ResearchDecisionRecord,
     RecoveryState,
@@ -90,6 +115,7 @@ class TAROrchestrator:
         self.problem_engine = ProblemResearchEngine(workspace, registry=self.profile_registry)
         self.scheduler = ProblemStudyScheduler(self.store, execute_callback=self._execute_scheduled_problem)
         self.runtime_daemon = LabRuntimeDaemon(self.store, self.scheduler)
+        self._continuity_counter = 0
         self.experiment_backends = ExperimentBackendRegistry(workspace)
         self.literature_engine = LiteratureEngine(workspace)
         self.payload_environment = PayloadEnvironmentBuilder(workspace)
@@ -365,6 +391,13 @@ class TAROrchestrator:
         return [item.model_dump(mode="json") for item in self.experiment_backends.list_backends()]
 
     def run_runtime_cycle(self, *, max_jobs: int = 1, stale_after_s: int = 900) -> RuntimeHeartbeat:
+        reprioritized = self._reprioritize_scheduled_jobs()
+        if reprioritized:
+            self.store.append_audit_event(
+                "runtime",
+                "reprioritize_scheduled_jobs",
+                {"updated_schedule_ids": [item.schedule_id for item in reprioritized]},
+            )
         heartbeat = self.runtime_daemon.run_cycle(max_jobs=max_jobs, stale_after_s=stale_after_s)
         self.store.append_audit_event(
             "runtime",
@@ -391,6 +424,1940 @@ class TAROrchestrator:
         payload["read_only_mount_count"] = len(policy.read_only_mounts)
         payload["writable_mount_count"] = len(policy.writable_mounts)
         return payload
+
+    def _project_now(self) -> str:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+    def _continuity_id(self, prefix: str) -> str:
+        self._continuity_counter += 1
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        return f"{prefix}-{stamp}-{self._continuity_counter:06d}"
+
+    def _default_project_budget(self) -> ResearchBudgetLedger:
+        return ResearchBudgetLedger()
+
+    def _budget_remaining_summary(self, ledger: ResearchBudgetLedger) -> dict[str, float]:
+        return {
+            "wall_clock_minutes_remaining": max(0.0, ledger.wall_clock_minutes_budget - ledger.wall_clock_minutes_spent),
+            "gpu_hours_remaining": max(0.0, ledger.gpu_hours_budget - ledger.gpu_hours_spent),
+            "experiments_remaining": float(max(0, ledger.experiment_budget - ledger.experiments_spent)),
+            "replications_remaining": float(max(0, ledger.replication_budget - ledger.replications_spent)),
+        }
+
+    def _classify_budget_pressure(self, ledger: ResearchBudgetLedger) -> tuple[bool, str]:
+        ratios: list[float] = []
+        if ledger.wall_clock_minutes_budget > 0:
+            ratios.append(ledger.wall_clock_minutes_spent / ledger.wall_clock_minutes_budget)
+        if ledger.gpu_hours_budget > 0:
+            ratios.append(ledger.gpu_hours_spent / ledger.gpu_hours_budget)
+        if ledger.experiment_budget > 0:
+            ratios.append(ledger.experiments_spent / ledger.experiment_budget)
+        if ledger.replication_budget > 0:
+            ratios.append(ledger.replications_spent / ledger.replication_budget)
+        max_ratio = max(ratios or [0.0])
+        exhausted = max_ratio >= 1.0
+        if exhausted:
+            return True, "exhausted"
+        if max_ratio >= 0.8:
+            return False, "high"
+        if max_ratio >= 0.5:
+            return False, "medium"
+        return False, "low"
+
+    def _spend_project_budget(
+        self,
+        ledger: ResearchBudgetLedger,
+        *,
+        wall_clock_minutes: float = 0.0,
+        gpu_hours: float = 0.0,
+        experiments: int = 0,
+        replications: int = 0,
+    ) -> ResearchBudgetLedger:
+        updated = ledger.model_copy(
+            update={
+                "wall_clock_minutes_spent": max(0.0, ledger.wall_clock_minutes_spent + max(0.0, wall_clock_minutes)),
+                "gpu_hours_spent": max(0.0, ledger.gpu_hours_spent + max(0.0, gpu_hours)),
+                "experiments_spent": max(0, ledger.experiments_spent + max(0, experiments)),
+                "replications_spent": max(0, ledger.replications_spent + max(0, replications)),
+            }
+        )
+        exhausted, pressure = self._classify_budget_pressure(updated)
+        return updated.model_copy(update={"budget_exhausted": exhausted, "budget_pressure_level": pressure})
+
+    def _project_thread(
+        self,
+        project: ResearchProject,
+        thread_id: Optional[str] = None,
+    ) -> Optional[ResearchHypothesisThread]:
+        target = thread_id or project.active_thread_id
+        if target is None and project.hypothesis_threads:
+            return project.hypothesis_threads[0]
+        for thread in project.hypothesis_threads:
+            if thread.thread_id == target:
+                return thread
+        return None
+
+    def _project_question(
+        self,
+        project: ResearchProject,
+        question_id: Optional[str] = None,
+    ) -> Optional[ResearchOpenQuestion]:
+        target = question_id
+        if target is None:
+            thread = self._project_thread(project)
+            if thread and thread.open_question_ids:
+                target = thread.open_question_ids[-1]
+        if target is None:
+            return None
+        for question in project.open_questions:
+            if question.question_id == target:
+                return question
+        return None
+
+    def _project_action(
+        self,
+        project: ResearchProject,
+        action_id: Optional[str] = None,
+    ) -> Optional[ResearchPlannedAction]:
+        target = action_id
+        if target is None:
+            thread = self._project_thread(project)
+            if thread is not None:
+                target = thread.next_action_id
+        if target is None:
+            return None
+        for action in project.planned_actions:
+            if action.action_id == target:
+                return action
+        return None
+
+    def _replace_project_thread(self, project: ResearchProject, thread: ResearchHypothesisThread) -> ResearchProject:
+        threads = [thread if item.thread_id == thread.thread_id else item for item in project.hypothesis_threads]
+        return project.model_copy(update={"hypothesis_threads": threads})
+
+    def _replace_project_question(self, project: ResearchProject, question: ResearchOpenQuestion) -> ResearchProject:
+        questions = [question if item.question_id == question.question_id else item for item in project.open_questions]
+        return project.model_copy(update={"open_questions": questions})
+
+    def _replace_project_action(self, project: ResearchProject, action: ResearchPlannedAction) -> ResearchProject:
+        actions = [action if item.action_id == action.action_id else item for item in project.planned_actions]
+        return project.model_copy(update={"planned_actions": actions})
+
+    def _invalidate_active_action(self, project: ResearchProject, thread: Optional[ResearchHypothesisThread]) -> ResearchProject:
+        if thread is None or not thread.next_action_id:
+            return project
+        action = self._project_action(project, thread.next_action_id)
+        if action is None or action.status not in {"planned", "queued", "running"}:
+            return project
+        updated_action = action.model_copy(update={"status": "invalidated", "updated_at": self._project_now()})
+        return self._replace_project_action(project, updated_action)
+
+    def _build_resume_snapshot(
+        self,
+        project: ResearchProject,
+        *,
+        latest_evidence_summary: Optional[str] = None,
+        blockers: Optional[list[str]] = None,
+    ) -> ResearchResumeSnapshot:
+        thread = self._project_thread(project)
+        question = self._project_question(project, question_id=thread.open_question_ids[-1] if thread and thread.open_question_ids else None)
+        action = self._project_action(project, action_id=thread.next_action_id if thread else None)
+        return ResearchResumeSnapshot(
+            project_id=project.project_id,
+            active_thread_id=thread.thread_id if thread else None,
+            current_question_id=question.question_id if question else None,
+            next_action_id=action.action_id if action else None,
+            latest_evidence_summary=latest_evidence_summary or project.latest_decision_summary or project.goal,
+            blockers=list(blockers or []),
+            budget_remaining_summary=self._budget_remaining_summary(project.budget_ledger),
+            captured_at=self._project_now(),
+        )
+
+    def _persist_project(
+        self,
+        project: ResearchProject,
+        *,
+        latest_evidence_summary: Optional[str] = None,
+        blockers: Optional[list[str]] = None,
+    ) -> ResearchProject:
+        updated = project.model_copy(
+            update={
+                "updated_at": self._project_now(),
+                "resume_snapshot": self._build_resume_snapshot(
+                    project,
+                    latest_evidence_summary=latest_evidence_summary,
+                    blockers=blockers,
+                ),
+            }
+        )
+        self.store.upsert_research_project(updated)
+        return updated
+
+    def create_project(
+        self,
+        problem: str,
+        *,
+        benchmark_tier: BenchmarkTier = "validation",
+        requested_benchmark: Optional[str] = None,
+    ) -> ResearchProject:
+        resolution = self.resolve_problem(
+            problem,
+            benchmark_tier=benchmark_tier,
+            requested_benchmark=requested_benchmark,
+        )
+        project_id = self._continuity_id("project")
+        thread_id = self._continuity_id("thread")
+        question_id = self._continuity_id("question")
+        action_id = self._continuity_id("action")
+        thread = ResearchHypothesisThread(
+            thread_id=thread_id,
+            project_id=project_id,
+            hypothesis=f"Investigate: {problem}",
+            status="open",
+            confidence_state="exploratory",
+            open_question_ids=[question_id],
+            next_action_id=action_id,
+        )
+        question = ResearchOpenQuestion(
+            question_id=question_id,
+            project_id=project_id,
+            thread_id=thread_id,
+            question=f"What is the strongest next study for '{problem}'?",
+            importance=max(0.25, resolution.confidence),
+            uncertainty_type="problem_formulation",
+            blocking=True,
+            status="open",
+        )
+        action = ResearchPlannedAction(
+            action_id=action_id,
+            project_id=project_id,
+            thread_id=thread_id,
+            action_kind="create_problem_study",
+            description="Create a problem study, evidence bundle, and initial benchmark plan.",
+            estimated_cost=0.2,
+            expected_evidence_gain=max(0.25, resolution.confidence),
+        )
+        project = ResearchProject(
+            project_id=project_id,
+            title=problem,
+            goal=problem,
+            domain_profile=resolution.profile_id,
+            status="active",
+            active_thread_id=thread_id,
+            budget_ledger=self._default_project_budget(),
+            latest_decision_summary=resolution.summary,
+            hypothesis_threads=[thread],
+            open_questions=[question],
+            planned_actions=[action],
+        )
+        project = self._persist_project(project, latest_evidence_summary=resolution.summary)
+        self.store.append_audit_event(
+            "research_projects",
+            "create_project",
+            project.model_dump(mode="json"),
+        )
+        return project
+
+    def list_projects(self) -> dict[str, Any]:
+        projects = sorted(
+            self.store.list_research_projects(),
+            key=lambda item: (item.updated_at, item.created_at, item.project_id),
+            reverse=True,
+        )
+        return {"projects": [self.project_status(item.project_id) for item in projects]}
+
+    def project_status(self, project_id: str) -> dict[str, Any]:
+        project = self.store.get_research_project(project_id)
+        if project is None:
+            raise RuntimeError(f"Unknown project: {project_id}")
+        thread = self._project_thread(project)
+        question = self._project_question(project)
+        action = self._project_action(project)
+        return {
+            "project": project.model_dump(mode="json"),
+            "active_thread": thread.model_dump(mode="json") if thread else None,
+            "current_question": question.model_dump(mode="json") if question else None,
+            "next_action": action.model_dump(mode="json") if action else None,
+            "budget_remaining": self._budget_remaining_summary(project.budget_ledger),
+        }
+
+    def pause_project(
+        self,
+        project_id: str,
+        *,
+        reason: ResearchStopReason = "operator_paused",
+        note: Optional[str] = None,
+    ) -> ResearchProject:
+        project = self.store.get_research_project(project_id)
+        if project is None:
+            raise RuntimeError(f"Unknown project: {project_id}")
+        thread = self._project_thread(project)
+        blockers = [reason]
+        if note:
+            blockers.append(note)
+        updated_project = project.model_copy(
+            update={
+                "status": "blocked" if reason in {"dependency_missing", "benchmark_unavailable", "runtime_failure"} else "paused",
+                "latest_decision_summary": note or f"Project paused because {reason}.",
+            }
+        )
+        if thread is not None:
+            updated_thread = thread.model_copy(
+                update={
+                    "status": "parked",
+                    "stop_reason": reason,
+                    "updated_at": self._project_now(),
+                }
+            )
+            updated_project = self._replace_project_thread(updated_project, updated_thread)
+        updated_project = self._persist_project(updated_project, blockers=blockers)
+        self.store.append_audit_event(
+            "research_projects",
+            "pause_project",
+            {"project_id": project_id, "reason": reason, "note": note},
+        )
+        return updated_project
+
+    def resume_project(
+        self,
+        project_id: str,
+        *,
+        reason: ResearchResumeReason = "human_requested_resume",
+        note: Optional[str] = None,
+    ) -> ResearchProject:
+        project = self.store.get_research_project(project_id)
+        if project is None:
+            raise RuntimeError(f"Unknown project: {project_id}")
+        thread = self._project_thread(project)
+        updated_project = project.model_copy(
+            update={
+                "status": "active",
+                "latest_decision_summary": note or f"Project resumed because {reason}.",
+            }
+        )
+        if thread is not None:
+            updated_thread = thread.model_copy(
+                update={
+                    "status": "open",
+                    "resume_reason": reason,
+                    "updated_at": self._project_now(),
+                }
+            )
+            updated_project = self._replace_project_thread(updated_project, updated_thread)
+        if self._project_action(updated_project) is None and thread is not None:
+            action = ResearchPlannedAction(
+                action_id=self._continuity_id("action"),
+                project_id=updated_project.project_id,
+                thread_id=thread.thread_id,
+                action_kind="custom",
+                description="Reassess the project state and choose the next experiment.",
+                estimated_cost=0.1,
+                expected_evidence_gain=0.25,
+            )
+            updated_thread = (self._project_thread(updated_project, thread.thread_id) or thread).model_copy(
+                update={"next_action_id": action.action_id, "updated_at": self._project_now()}
+            )
+            updated_project = updated_project.model_copy(update={"planned_actions": [*updated_project.planned_actions, action]})
+            updated_project = self._replace_project_thread(updated_project, updated_thread)
+        updated_project = self._persist_project(updated_project)
+        self.store.append_audit_event(
+            "research_projects",
+            "resume_project",
+            {"project_id": project_id, "reason": reason, "note": note},
+        )
+        return updated_project
+
+    def next_action(self, project_id: str) -> dict[str, Any]:
+        project = self.store.get_research_project(project_id)
+        if project is None:
+            raise RuntimeError(f"Unknown project: {project_id}")
+        action = self._project_action(project)
+        question = self._project_question(project)
+        return {
+            "project_id": project.project_id,
+            "project_status": project.status,
+            "current_question": question.model_dump(mode="json") if question else None,
+            "next_action": action.model_dump(mode="json") if action else None,
+            "budget_remaining": self._budget_remaining_summary(project.budget_ledger),
+        }
+
+    def _prioritization_policy(self, *, mode: str = "balanced") -> PrioritizationPolicy:
+        if mode == "falsification_first":
+            return PrioritizationPolicy(
+                mode="falsification_first",
+                evidence_gain_weight=0.3,
+                falsification_weight=0.3,
+                uncertainty_reduction_weight=0.15,
+                benchmark_value_weight=0.08,
+                replication_value_weight=0.05,
+                contradiction_urgency_weight=0.15,
+                strategic_priority_weight=0.08,
+                dependency_readiness_weight=0.15,
+                cost_penalty_weight=0.22,
+                budget_pressure_penalty_weight=0.14,
+            )
+        return PrioritizationPolicy()
+
+    def _prioritization_id(self, prefix: str) -> str:
+        return self._continuity_id(prefix)
+
+    def _budget_pressure_penalty_value(self, ledger: ResearchBudgetLedger) -> float:
+        return {
+            "low": 0.05,
+            "medium": 0.35,
+            "high": 0.7,
+            "exhausted": 1.0,
+        }.get(ledger.budget_pressure_level, 0.1)
+
+    def _cost_penalty_value(self, action: ResearchPlannedAction, ledger: ResearchBudgetLedger) -> float:
+        remaining_experiments = max(1.0, float(ledger.experiment_budget - ledger.experiments_spent))
+        scale = max(0.5, remaining_experiments / 3.0)
+        return min(1.0, action.estimated_cost / scale)
+
+    def _dependency_readiness_value(
+        self,
+        project: ResearchProject,
+        thread: Optional[ResearchHypothesisThread],
+    ) -> float:
+        if project.status == "blocked":
+            return 0.0
+        if thread is None:
+            return 0.25
+        if thread.stop_reason in {"dependency_missing", "benchmark_unavailable"}:
+            return 0.0
+        if thread.stop_reason == "runtime_failure":
+            return 0.25
+        return 1.0
+
+    def _benchmark_value(
+        self,
+        project: ResearchProject,
+        action: ResearchPlannedAction,
+        question: Optional[ResearchOpenQuestion],
+    ) -> float:
+        score = 0.3
+        description = action.description.lower()
+        if action.action_kind == "run_problem_study":
+            score += 0.2
+        if "benchmark" in description or "canonical" in description:
+            score += 0.3
+        if question is not None and question.uncertainty_type in {"execution_gap", "followup_decision"}:
+            score += 0.1
+        if project.status == "blocked":
+            score -= 0.2
+        return max(0.0, min(1.0, score))
+
+    def _falsification_value(
+        self,
+        thread: Optional[ResearchHypothesisThread],
+        action: ResearchPlannedAction,
+        question: Optional[ResearchOpenQuestion],
+    ) -> float:
+        score = 0.1
+        description = action.description.lower()
+        if action.action_kind == "verify_claim":
+            score += 0.7
+        if action.action_kind == "review_execution_result":
+            score += 0.4
+        if any(token in description for token in ("ablation", "falsif", "contradict", "stress", "probe")):
+            score += 0.35
+        if question is not None and question.blocking:
+            score += 0.15
+        if thread is not None and thread.confidence_state in {"provisional", "supported"}:
+            score += 0.1
+        return max(0.0, min(1.0, score))
+
+    def _replication_value(self, action: ResearchPlannedAction) -> float:
+        description = action.description.lower()
+        if any(token in description for token in ("seed", "replicat", "variance", "stability")):
+            return 0.8
+        if action.action_kind in {"verify_claim", "review_execution_result"}:
+            return 0.4
+        return 0.15
+
+    def _contradiction_urgency(self, thread: Optional[ResearchHypothesisThread]) -> float:
+        if thread is None:
+            return 0.0
+        score = min(1.0, len(thread.contradicting_evidence_ids) * 0.4)
+        if thread.status == "contradicted" or thread.confidence_state == "contradicted":
+            score = max(score, 0.9)
+        return score
+
+    def _strategic_priority_value(self, project: ResearchProject) -> float:
+        return max(0.0, min(1.0, 0.25 + (project.priority * 0.15)))
+
+    def _build_action_candidate(
+        self,
+        project: ResearchProject,
+        *,
+        policy: PrioritizationPolicy,
+        action_id: Optional[str] = None,
+    ) -> Optional[PrioritizedActionCandidate]:
+        thread = self._project_thread(project)
+        action = self._project_action(project, action_id=action_id)
+        if thread is None or action is None or action.status not in {"planned", "queued"}:
+            return None
+        question = self._project_question(project, question_id=action.depends_on[0] if action.depends_on else None) or self._project_question(project)
+        dependency_readiness = self._dependency_readiness_value(project, thread)
+        benchmark_value = self._benchmark_value(project, action, question)
+        falsification_value = self._falsification_value(thread, action, question)
+        replication_value = self._replication_value(action)
+        contradiction_urgency = self._contradiction_urgency(thread)
+        strategic_priority = self._strategic_priority_value(project)
+        uncertainty_reduction = min(
+            1.0,
+            (question.importance if question is not None else 0.35) + (0.15 if question is not None and question.blocking else 0.0),
+        )
+        cost_penalty = self._cost_penalty_value(action, project.budget_ledger)
+        budget_pressure_penalty = self._budget_pressure_penalty_value(project.budget_ledger)
+        total_score = round(
+            (
+                (action.expected_evidence_gain * policy.evidence_gain_weight)
+                + (falsification_value * policy.falsification_weight)
+                + (uncertainty_reduction * policy.uncertainty_reduction_weight)
+                + (benchmark_value * policy.benchmark_value_weight)
+                + (replication_value * policy.replication_value_weight)
+                + (contradiction_urgency * policy.contradiction_urgency_weight)
+                + (strategic_priority * policy.strategic_priority_weight)
+                + (dependency_readiness * policy.dependency_readiness_weight)
+                - (cost_penalty * policy.cost_penalty_weight)
+                - (budget_pressure_penalty * policy.budget_pressure_penalty_weight)
+                - (0.4 if project.status == "blocked" else 0.0)
+            ),
+            6,
+        )
+        blocked = dependency_readiness <= 0.0 or project.status == "blocked" or project.budget_ledger.budget_exhausted
+        rationale: list[str] = []
+        if question is not None and question.blocking:
+            rationale.append("blocking question raises uncertainty-reduction value")
+        if action.action_kind in {"verify_claim", "review_execution_result"}:
+            rationale.append("verification-style action increases falsification pressure")
+        if action.estimated_cost <= 0.5:
+            rationale.append("low estimated cost improves evidence-per-budget")
+        if project.budget_ledger.budget_pressure_level in {"high", "exhausted"}:
+            rationale.append("budget pressure penalizes further expensive work")
+        if project.status == "blocked":
+            rationale.append("project is currently blocked and must be deprioritized")
+        return PrioritizedActionCandidate(
+            candidate_id=f"{project.project_id}:{action.action_id}",
+            project_id=project.project_id,
+            thread_id=thread.thread_id,
+            action_id=action.action_id,
+            project_title=project.title,
+            domain_profile=project.domain_profile,
+            project_status=project.status,
+            action_kind=action.action_kind,
+            action_status=action.status,
+            action_description=action.description,
+            current_question=question.question if question is not None else None,
+            budget_pressure_level=project.budget_ledger.budget_pressure_level,
+            blocked=blocked,
+            score=total_score,
+            score_breakdown=ActionScoreBreakdown(
+                expected_evidence_gain=action.expected_evidence_gain,
+                falsification_value=falsification_value,
+                uncertainty_reduction=uncertainty_reduction,
+                benchmark_value=benchmark_value,
+                replication_value=replication_value,
+                contradiction_urgency=contradiction_urgency,
+                strategic_priority=strategic_priority,
+                dependency_readiness=dependency_readiness,
+                cost_penalty=cost_penalty,
+                budget_pressure_penalty=budget_pressure_penalty,
+                total_score=total_score,
+            ),
+            rationale=rationale,
+        )
+
+    def _rank_action_candidates(
+        self,
+        *,
+        project_id: Optional[str] = None,
+        include_blocked: bool = False,
+        limit: int = 10,
+        mode: str = "balanced",
+        persist: bool = False,
+    ) -> PortfolioPrioritySnapshot:
+        policy = self._prioritization_policy(mode=mode)
+        projects = (
+            [self.store.get_research_project(project_id)] if project_id else self.store.list_research_projects()
+        )
+        filtered_projects = [
+            item
+            for item in projects
+            if item is not None and item.status not in {"completed", "abandoned"}
+        ]
+        candidates: list[PrioritizedActionCandidate] = []
+        blocked_project_count = len([item for item in filtered_projects if item.status == "blocked"])
+        active_project_count = len([item for item in filtered_projects if item.status == "active"])
+        for project in filtered_projects:
+            action_ids = [
+                item.action_id
+                for item in project.planned_actions
+                if item.status in {"planned", "queued"}
+            ]
+            if not action_ids:
+                current_action = self._project_action(project)
+                if current_action is not None:
+                    action_ids = [current_action.action_id]
+            for action_id in action_ids:
+                candidate = self._build_action_candidate(project, policy=policy, action_id=action_id)
+                if candidate is None:
+                    continue
+                if candidate.blocked and not include_blocked:
+                    continue
+                candidates.append(candidate)
+        candidates.sort(
+            key=lambda item: (
+                -item.score,
+                -self.store.get_research_project(item.project_id).priority if self.store.get_research_project(item.project_id) else 0,
+                item.project_title,
+                item.action_id,
+            )
+        )
+        candidates = candidates[: max(1, limit)]
+        if candidates:
+            candidates[0] = candidates[0].model_copy(update={"recommended": True})
+        snapshot = PortfolioPrioritySnapshot(
+            snapshot_id=self._prioritization_id("priority"),
+            project_id=project_id,
+            policy=policy,
+            candidate_count=len(candidates),
+            active_project_count=active_project_count,
+            blocked_project_count=blocked_project_count,
+            selected_project_id=candidates[0].project_id if candidates else None,
+            selected_action_id=candidates[0].action_id if candidates else None,
+            candidates=candidates,
+            notes=[
+                "ranked by evidence gain, falsification value, readiness, and cost penalties",
+                "blocked or budget-exhausted work is deprioritized unless explicitly requested",
+            ],
+        )
+        if persist:
+            self.store.append_priority_snapshot(snapshot)
+            self.store.append_audit_event("research_projects", "rank_actions", snapshot.model_dump(mode="json"))
+        return snapshot
+
+    def _latest_project_study(self, project_id: str) -> Optional[ProblemStudyReport]:
+        rows = list(self.store.iter_problem_studies())
+        for report in reversed(rows):
+            if report.project_id == project_id:
+                return report
+        return None
+
+    def _has_active_schedule_for_action(self, action_id: str) -> bool:
+        for entry in self.store.iter_problem_schedules():
+            if entry.action_id == action_id and entry.status in {"scheduled", "leased", "running", "retry_wait"}:
+                return True
+        return False
+
+    def _priority_to_queue_value(self, score: float) -> int:
+        return max(0, min(1000, int(round(max(0.0, score) * 1000))))
+
+    def _reprioritize_scheduled_jobs(self) -> list[ProblemScheduleEntry]:
+        snapshot = self._rank_action_candidates(include_blocked=True, limit=100, persist=False)
+        candidate_map = {(item.project_id, item.action_id): item for item in snapshot.candidates}
+        updated_entries: list[ProblemScheduleEntry] = []
+        for entry in self.store.iter_problem_schedules():
+            if entry.status not in {"scheduled", "retry_wait"} or not entry.project_id or not entry.action_id:
+                continue
+            candidate = candidate_map.get((entry.project_id, entry.action_id))
+            if candidate is None:
+                continue
+            priority = self._priority_to_queue_value(candidate.score)
+            if entry.priority == priority and entry.priority_score == candidate.score and entry.priority_source == "ws18_ranked_action":
+                continue
+            updated = self.store.update_problem_schedule(
+                entry.schedule_id,
+                priority=priority,
+                priority_score=candidate.score,
+                priority_source="ws18_ranked_action",
+            )
+            if updated is not None:
+                updated_entries.append(updated)
+        return updated_entries
+
+    def portfolio_status(self, *, include_blocked: bool = True, limit: int = 5, mode: str = "balanced") -> dict[str, Any]:
+        snapshot = self._rank_action_candidates(
+            include_blocked=include_blocked,
+            limit=limit,
+            mode=mode,
+            persist=False,
+        )
+        return {
+            "project_counts": {
+                "total": len(self.store.list_research_projects()),
+                "active": len([item for item in self.store.list_research_projects() if item.status == "active"]),
+                "blocked": len([item for item in self.store.list_research_projects() if item.status == "blocked"]),
+                "paused": len([item for item in self.store.list_research_projects() if item.status == "paused"]),
+            },
+            "top_candidates": [item.model_dump(mode="json") for item in snapshot.candidates],
+            "policy": snapshot.policy.model_dump(mode="json"),
+            "latest_priority_snapshot": self.store.latest_priority_snapshot().model_dump(mode="json") if self.store.latest_priority_snapshot() else None,
+            "latest_budget_allocation": self.store.latest_budget_allocation().model_dump(mode="json") if self.store.latest_budget_allocation() else None,
+            "latest_portfolio": self.store.load_research_portfolio().model_dump(mode="json"),
+            "latest_portfolio_decision": self.store.latest_portfolio_decision().model_dump(mode="json") if self.store.latest_portfolio_decision() else None,
+        }
+
+    def rank_actions(
+        self,
+        *,
+        project_id: Optional[str] = None,
+        include_blocked: bool = False,
+        limit: int = 10,
+        mode: str = "balanced",
+    ) -> dict[str, Any]:
+        snapshot = self._rank_action_candidates(
+            project_id=project_id,
+            include_blocked=include_blocked,
+            limit=limit,
+            mode=mode,
+            persist=True,
+        )
+        return snapshot.model_dump(mode="json")
+
+    def prioritization_log(self, count: int = 20) -> dict[str, Any]:
+        rows = list(self.store.iter_priority_snapshots())[-count:]
+        return {"snapshots": [item.model_dump(mode="json") for item in rows]}
+
+    def allocate_budget(
+        self,
+        *,
+        project_id: Optional[str] = None,
+        include_blocked: bool = False,
+        limit: int = 10,
+        mode: str = "balanced",
+        schedule_selected: bool = False,
+    ) -> dict[str, Any]:
+        snapshot = self._rank_action_candidates(
+            project_id=project_id,
+            include_blocked=include_blocked,
+            limit=limit,
+            mode=mode,
+            persist=True,
+        )
+        selected = snapshot.candidates[0] if snapshot.candidates else None
+        scheduled_job_id: Optional[str] = None
+        schedule_created = False
+        rationale = ["selected highest-ranked candidate under the current prioritization policy"]
+        if selected is not None and selected.blocked:
+            rationale.append("selected candidate remains blocked and was not scheduled automatically")
+        if selected is not None and schedule_selected and not selected.blocked and selected.action_kind == "run_problem_study":
+            study = self._latest_project_study(selected.project_id)
+            if study is not None and not self._has_active_schedule_for_action(selected.action_id):
+                entry = self.schedule_problem_study(
+                    problem_id=study.problem_id,
+                    priority=self._priority_to_queue_value(selected.score),
+                )
+                scheduled_job_id = entry.schedule_id
+                schedule_created = True
+                rationale.append("created a scheduled study for the selected run_problem_study action")
+            else:
+                rationale.append("selected action was already queued or had no resolvable study to schedule")
+        decision = BudgetAllocationDecision(
+            decision_id=self._prioritization_id("budget"),
+            policy=snapshot.policy,
+            selected_candidate=selected,
+            scheduled_job_id=scheduled_job_id,
+            schedule_created=schedule_created,
+            rationale=rationale,
+            considered_candidates=snapshot.candidates,
+        )
+        self.store.append_budget_allocation(decision)
+        self.store.append_audit_event("research_projects", "allocate_budget", decision.model_dump(mode="json"))
+        return decision.model_dump(mode="json")
+
+    def _latest_project_execution(self, project_id: str) -> Optional[ProblemExecutionReport]:
+        rows = list(self.store.iter_problem_executions())
+        for report in reversed(rows):
+            if report.project_id == project_id:
+                return report
+        return None
+
+    def _related_project_claim_verdict(
+        self,
+        *,
+        project_id: str,
+        problem_id: Optional[str],
+    ) -> Optional[ClaimVerdict]:
+        rows = list(self.store.iter_claim_verdicts())
+        for verdict in reversed(rows):
+            if problem_id is not None and verdict.benchmark_problem_id == problem_id:
+                return verdict
+        return None
+
+    def _dedupe_falsification_triggers(self, triggers: list[FalsificationTrigger]) -> list[FalsificationTrigger]:
+        deduped: list[FalsificationTrigger] = []
+        seen: set[tuple[str, str]] = set()
+        for trigger in triggers:
+            key = (trigger.trigger_type, trigger.reason)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(trigger)
+        return deduped
+
+    def _falsification_plan_id(self) -> str:
+        return self._continuity_id("falsification")
+
+    def _falsification_test_id(self) -> str:
+        return self._continuity_id("falsify-test")
+
+    def _falsification_coverage(self, tests: list[FalsificationTest]) -> FalsificationCoverage:
+        kinds = {test.kind for test in tests}
+        ablation = 1.0 if "mechanism_ablation" in kinds else 0.0
+        replication = 1.0 if {"replication_check", "seed_variance_check"} & kinds else 0.0
+        contradiction = 1.0 if "contradiction_resolution" in kinds else 0.0
+        benchmark = 1.0 if "benchmark_stress_probe" in kinds else 0.0
+        calibration = 1.0 if "calibration_check" in kinds else 0.0
+        overall = ((ablation + replication + contradiction + benchmark + calibration) / 5.0) >= 0.45
+        return FalsificationCoverage(
+            ablation_coverage=ablation,
+            replication_coverage=replication,
+            contradiction_coverage=contradiction,
+            benchmark_pressure_coverage=benchmark,
+            calibration_coverage=calibration,
+            overall_sufficient=overall,
+        )
+
+    def _falsification_tests_from_triggers(
+        self,
+        *,
+        plan_id: str,
+        project: ResearchProject,
+        thread: ResearchHypothesisThread,
+        triggers: list[FalsificationTrigger],
+    ) -> list[FalsificationTest]:
+        tests_by_kind: dict[str, FalsificationTest] = {}
+        for trigger in triggers:
+            kind = {
+                "confidence_rising": "mechanism_ablation",
+                "contradiction_pressure": "contradiction_resolution",
+                "low_replication": "seed_variance_check" if "seed variance" in trigger.reason.lower() else "replication_check",
+                "benchmark_pressure": "benchmark_stress_probe",
+                "calibration_weakness": "calibration_check",
+                "claim_linkage_gap": "claim_linkage_sanity_check",
+                "environment_reproduction_risk": "environment_reproduction_check",
+            }.get(trigger.trigger_type, "mechanism_ablation")
+            description = {
+                "mechanism_ablation": "Ablate the claimed mechanism and confirm the effect degrades materially.",
+                "contradiction_resolution": "Run a targeted contradiction-resolution check against conflicting evidence.",
+                "replication_check": "Replicate the strongest result under an additional controlled rerun.",
+                "seed_variance_check": "Run a seed-variance sweep to test whether the signal is stable.",
+                "benchmark_stress_probe": "Push the result through a stronger benchmark or alignment stress probe.",
+                "calibration_check": "Re-run calibration-focused evaluation before any promotion step.",
+                "claim_linkage_sanity_check": "Audit claim linkage, provenance completeness, and evidence binding.",
+                "environment_reproduction_check": "Repeat the environment reproduction path to rule out runtime-specific artifacts.",
+            }[kind]
+            estimated_cost = {
+                "mechanism_ablation": 0.35,
+                "contradiction_resolution": 0.25,
+                "replication_check": 0.45,
+                "seed_variance_check": 0.5,
+                "benchmark_stress_probe": 0.6,
+                "calibration_check": 0.25,
+                "claim_linkage_sanity_check": 0.15,
+                "environment_reproduction_check": 0.4,
+            }[kind]
+            falsification_value = {
+                "mechanism_ablation": 0.8,
+                "contradiction_resolution": 0.9,
+                "replication_check": 0.75,
+                "seed_variance_check": 0.8,
+                "benchmark_stress_probe": 0.7,
+                "calibration_check": 0.65,
+                "claim_linkage_sanity_check": 0.85,
+                "environment_reproduction_check": 0.55,
+            }[kind]
+            if kind in tests_by_kind:
+                continue
+            tests_by_kind[kind] = FalsificationTest(
+                test_id=self._falsification_test_id(),
+                plan_id=plan_id,
+                project_id=project.project_id,
+                thread_id=thread.thread_id,
+                kind=kind,  # type: ignore[arg-type]
+                description=description,
+                estimated_cost=estimated_cost,
+                expected_falsification_value=falsification_value,
+                depends_on=[],
+                status="planned",
+            )
+        return list(tests_by_kind.values())
+
+    def generate_falsification_plan(
+        self,
+        project_id: str,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        project = self.store.get_research_project(project_id)
+        if project is None:
+            raise RuntimeError(f"Unknown project: {project_id}")
+        if project.status in {"completed", "abandoned"} and not force:
+            raise RuntimeError(f"Project {project_id} is {project.status} and does not accept new falsification plans.")
+        thread = self._project_thread(project)
+        if thread is None:
+            raise RuntimeError(f"Project {project_id} has no active hypothesis thread.")
+
+        existing = self.store.latest_falsification_plan(project_id=project_id, thread_id=thread.thread_id)
+        if (
+            existing is not None
+            and existing.status == "active"
+            and any(test.status in {"planned", "attached", "running"} for test in existing.tests)
+            and not force
+        ):
+            return self.falsification_status(project_id)
+
+        latest_study = self._latest_project_study(project_id)
+        latest_execution = self._latest_project_execution(project_id)
+        problem_id = (
+            latest_execution.problem_id
+            if latest_execution is not None
+            else (latest_study.problem_id if latest_study is not None else None)
+        )
+        claim_verdict = self._related_project_claim_verdict(project_id=project_id, problem_id=problem_id)
+        verification = (
+            self.store.latest_verification_report(claim_verdict.trial_id)
+            if claim_verdict is not None
+            else None
+        )
+        contradiction_review = (
+            claim_verdict.contradiction_review
+            if claim_verdict is not None and claim_verdict.contradiction_review is not None
+            else (latest_study.contradiction_review if latest_study is not None else None)
+        )
+        benchmark_alignment = (
+            latest_execution.benchmark_alignment
+            if latest_execution is not None
+            else (latest_study.benchmark_alignment if latest_study is not None else "aligned")
+        )
+        canonical_comparable = (
+            latest_execution.canonical_comparable
+            if latest_execution is not None
+            else (latest_study.canonical_comparable if latest_study is not None else True)
+        )
+
+        triggers: list[FalsificationTrigger] = []
+        if thread.confidence_state in {"provisional", "supported"} or thread.status in {"supported", "contradicted"}:
+            triggers.append(
+                FalsificationTrigger(
+                    trigger_type="confidence_rising",
+                    reason="thread confidence is rising and now requires adversarial pressure",
+                    severity="high" if thread.confidence_state == "supported" else "medium",
+                    evidence_refs=[thread.thread_id],
+                )
+            )
+        if thread.contradicting_evidence_ids:
+            triggers.append(
+                FalsificationTrigger(
+                    trigger_type="contradiction_pressure",
+                    reason="project thread already carries contradictory evidence that needs direct resolution",
+                    severity="high",
+                    evidence_refs=thread.contradicting_evidence_ids,
+                )
+            )
+        if project.budget_ledger.replications_spent < 1 and thread.confidence_state in {"provisional", "supported"}:
+            triggers.append(
+                FalsificationTrigger(
+                    trigger_type="low_replication",
+                    reason="confidence is rising before sufficient replication pressure has been spent",
+                    severity="medium",
+                    evidence_refs=[project.project_id],
+                )
+            )
+        if benchmark_alignment != "aligned" or not canonical_comparable:
+            triggers.append(
+                FalsificationTrigger(
+                    trigger_type="benchmark_pressure",
+                    reason="benchmark alignment or comparability is still weak",
+                    severity="medium",
+                    evidence_refs=[problem_id] if problem_id else [project.project_id],
+                )
+            )
+        if project.status == "blocked" and thread.stop_reason == "runtime_failure":
+            triggers.append(
+                FalsificationTrigger(
+                    trigger_type="environment_reproduction_risk",
+                    reason="runtime failure suggests environment reproduction should be checked before trusting the result",
+                    severity="medium",
+                    evidence_refs=[project.project_id],
+                )
+            )
+        if verification is not None:
+            triggers.extend(
+                self.verification_runner.suggest_falsification_triggers(
+                    verification,
+                    contradiction_review=contradiction_review,
+                    claim_verdict=claim_verdict,
+                    canonical_comparable=canonical_comparable,
+                )
+            )
+        triggers = self._dedupe_falsification_triggers(triggers)
+        if not triggers and not force:
+            return {
+                "generated": False,
+                "project_id": project_id,
+                "reason": "no_active_falsification_pressure",
+                "plan": None,
+            }
+        if not triggers and force:
+            triggers = [
+                FalsificationTrigger(
+                    trigger_type="confidence_rising",
+                    reason="operator requested an explicit falsification plan",
+                    severity="low",
+                    evidence_refs=[project.project_id],
+                )
+            ]
+
+        plan_id = self._falsification_plan_id()
+        tests = self._falsification_tests_from_triggers(
+            plan_id=plan_id,
+            project=project,
+            thread=thread,
+            triggers=triggers,
+        )
+        question = ResearchOpenQuestion(
+            question_id=self._continuity_id("question"),
+            project_id=project.project_id,
+            thread_id=thread.thread_id,
+            question="Which falsification test is most likely to break the current explanation?",
+            importance=0.85,
+            uncertainty_type="falsification_pressure",
+            blocking=True,
+            status="open",
+        )
+        attached_actions: list[ResearchPlannedAction] = []
+        linked_tests: list[FalsificationTest] = []
+        for test in tests:
+            action = ResearchPlannedAction(
+                action_id=self._continuity_id("action"),
+                project_id=project.project_id,
+                thread_id=thread.thread_id,
+                action_kind=test.kind,  # type: ignore[arg-type]
+                description=f"Falsification: {test.description}",
+                estimated_cost=test.estimated_cost,
+                expected_evidence_gain=test.expected_falsification_value,
+                depends_on=[question.question_id],
+                status="planned",
+                falsification_plan_id=plan_id,
+                falsification_test_id=test.test_id,
+            )
+            attached_actions.append(action)
+            linked_tests.append(
+                test.model_copy(
+                    update={
+                        "depends_on": [question.question_id],
+                        "status": "attached",
+                        "linked_action_id": action.action_id,
+                        "updated_at": self._project_now(),
+                    }
+                )
+            )
+
+        coverage = self._falsification_coverage(linked_tests)
+        plan = FalsificationPlan(
+            plan_id=plan_id,
+            project_id=project.project_id,
+            thread_id=thread.thread_id,
+            status="active",
+            trigger_reason=triggers[0].reason,
+            triggers=triggers,
+            tests=linked_tests,
+            coverage=coverage,
+            notes=[
+                "generated from project continuity, contradiction pressure, and verification signals",
+                "tests are attached back into the project as planned actions for WS18 ranking",
+            ],
+        )
+        updated_thread = thread.model_copy(
+            update={
+                "status": "falsifying",
+                "open_question_ids": [*thread.open_question_ids, question.question_id],
+                "next_action_id": attached_actions[0].action_id if attached_actions else thread.next_action_id,
+                "updated_at": self._project_now(),
+            }
+        )
+        updated_project = project.model_copy(
+            update={
+                "latest_decision_summary": f"Active falsification plan {plan_id} generated with {len(linked_tests)} tests.",
+                "open_questions": [*project.open_questions, question],
+                "planned_actions": [*project.planned_actions, *attached_actions],
+            }
+        )
+        updated_project = self._replace_project_thread(updated_project, updated_thread)
+        updated_project = self._persist_project(
+            updated_project,
+            latest_evidence_summary=updated_project.latest_decision_summary,
+        )
+        self.store.append_falsification_plan(plan)
+        self.store.append_audit_event("research_projects", "generate_falsification_plan", plan.model_dump(mode="json"))
+        return {
+            "generated": True,
+            "project": updated_project.model_dump(mode="json"),
+            "plan": plan.model_dump(mode="json"),
+            "attached_actions": [item.model_dump(mode="json") for item in attached_actions],
+        }
+
+    def falsification_status(self, project_id: Optional[str] = None) -> dict[str, Any]:
+        project = (
+            self.store.get_research_project(project_id)
+            if project_id is not None
+            else self.store.latest_research_project()
+        )
+        if project is None:
+            return {"project": None, "plan": None, "pending_tests": [], "coverage": None}
+        thread = self._project_thread(project)
+        plan = self.store.latest_falsification_plan(
+            project_id=project.project_id,
+            thread_id=thread.thread_id if thread is not None else None,
+        )
+        pending = []
+        if plan is not None:
+            pending = [
+                test.model_dump(mode="json")
+                for test in plan.tests
+                if test.status in {"planned", "attached", "running"}
+            ]
+        return {
+            "project": self.project_status(project.project_id),
+            "plan": plan.model_dump(mode="json") if plan is not None else None,
+            "pending_tests": pending,
+            "coverage": plan.coverage.model_dump(mode="json") if plan is not None else None,
+        }
+
+    def falsification_log(self, count: int = 20) -> dict[str, Any]:
+        rows = list(self.store.iter_falsification_plans())[-count:]
+        return {"plans": [item.model_dump(mode="json") for item in rows]}
+
+    def _parse_timestamp(self, raw: Optional[str]) -> Optional[datetime]:
+        if not raw:
+            return None
+        text = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
+    def _project_last_progress_at(self, project: ResearchProject) -> Optional[str]:
+        return project.updated_at or project.created_at
+
+    def _project_benchmark_readiness(self, project: ResearchProject) -> float:
+        latest_execution = self._latest_project_execution(project.project_id)
+        if latest_execution is not None:
+            if latest_execution.benchmark_alignment == "aligned" and latest_execution.canonical_comparable:
+                return 1.0
+            if latest_execution.benchmark_alignment == "aligned":
+                return 0.7
+            if latest_execution.benchmark_alignment == "downgraded":
+                return 0.35
+            return 0.0
+        latest_study = self._latest_project_study(project.project_id)
+        if latest_study is not None:
+            if latest_study.benchmark_alignment == "aligned" and latest_study.canonical_comparable:
+                return 0.9
+            if latest_study.benchmark_alignment == "aligned":
+                return 0.65
+            if latest_study.benchmark_alignment == "downgraded":
+                return 0.3
+            return 0.0
+        thread = self._project_thread(project)
+        if thread is not None and thread.stop_reason == "benchmark_unavailable":
+            return 0.0
+        return 0.5
+
+    def _compute_evidence_debt(self, project: ResearchProject) -> EvidenceDebtRecord:
+        thread = self._project_thread(project)
+        latest_study = self._latest_project_study(project.project_id)
+        latest_execution = self._latest_project_execution(project.project_id)
+        problem_id = (
+            latest_execution.problem_id
+            if latest_execution is not None
+            else (latest_study.problem_id if latest_study is not None else None)
+        )
+        claim_verdict = self._related_project_claim_verdict(project_id=project.project_id, problem_id=problem_id)
+        verification = (
+            self.store.latest_verification_report(claim_verdict.trial_id)
+            if claim_verdict is not None
+            else None
+        )
+        latest_plan = self.store.latest_falsification_plan(
+            project_id=project.project_id,
+            thread_id=thread.thread_id if thread is not None else None,
+        )
+
+        rationale: list[str] = []
+        falsification_gap = 0.0
+        if thread is not None and thread.confidence_state in {"provisional", "supported"}:
+            if latest_plan is None:
+                falsification_gap = 1.0
+                rationale.append("confidence is rising without an attached falsification plan")
+            elif not latest_plan.coverage.overall_sufficient:
+                falsification_gap = 0.6
+                rationale.append("falsification coverage remains incomplete")
+            else:
+                falsification_gap = 0.1
+
+        replication_gap = 0.0
+        if thread is not None and thread.confidence_state in {"provisional", "supported"}:
+            if project.budget_ledger.replications_spent < 1:
+                replication_gap = 1.0
+                rationale.append("replication pressure has not yet been spent")
+            elif project.budget_ledger.replications_spent < 2:
+                replication_gap = 0.45
+
+        benchmark_gap = 0.0
+        if latest_execution is not None:
+            if latest_execution.benchmark_alignment != "aligned" or not latest_execution.canonical_comparable:
+                benchmark_gap = 0.85
+                rationale.append("execution benchmark alignment is still weak")
+        elif latest_study is not None:
+            if latest_study.benchmark_alignment != "aligned" or not latest_study.canonical_comparable:
+                benchmark_gap = 0.75
+                rationale.append("study benchmark alignment is still weak")
+        elif thread is not None and thread.confidence_state in {"provisional", "supported"}:
+            benchmark_gap = 0.35
+
+        claim_linkage_gap = 0.0
+        if claim_verdict is None:
+            if thread is not None and thread.confidence_state in {"provisional", "supported"}:
+                claim_linkage_gap = 0.3
+                rationale.append("no claim verdict has yet bound the current signal")
+        elif claim_verdict.linkage_status == "exact":
+            claim_linkage_gap = 0.0
+        elif claim_verdict.linkage_status == "ambiguous":
+            claim_linkage_gap = 1.0
+            rationale.append("claim linkage is ambiguous")
+        else:
+            claim_linkage_gap = 0.75
+            rationale.append("claim linkage is incomplete")
+
+        calibration_gap = 0.0
+        if verification is not None:
+            if verification.calibration.ece > 0.15:
+                calibration_gap = 0.8
+                rationale.append("calibration remains outside the acceptable envelope")
+        elif thread is not None and thread.confidence_state in {"provisional", "supported"}:
+            calibration_gap = 0.3
+
+        overall_debt = round(
+            min(
+                1.0,
+                (
+                    falsification_gap
+                    + replication_gap
+                    + benchmark_gap
+                    + claim_linkage_gap
+                    + calibration_gap
+                )
+                / 5.0,
+            ),
+            6,
+        )
+        promotion_blocked = overall_debt >= 0.45 or any(
+            gap >= 0.8
+            for gap in (
+                falsification_gap,
+                replication_gap,
+                benchmark_gap,
+                claim_linkage_gap,
+                calibration_gap,
+            )
+        )
+        if promotion_blocked:
+            rationale.append("promotion should remain blocked until evidence debt is reduced")
+        return EvidenceDebtRecord(
+            record_id=self._continuity_id("debt"),
+            project_id=project.project_id,
+            falsification_gap=falsification_gap,
+            replication_gap=replication_gap,
+            benchmark_gap=benchmark_gap,
+            claim_linkage_gap=claim_linkage_gap,
+            calibration_gap=calibration_gap,
+            overall_debt=overall_debt,
+            promotion_blocked=promotion_blocked,
+            rationale=rationale,
+        )
+
+    def _compute_project_staleness(self, project: ResearchProject) -> ProjectStalenessRecord:
+        thread = self._project_thread(project)
+        last_progress_at = self._project_last_progress_at(project)
+        last_progress = self._parse_timestamp(last_progress_at)
+        hours_since_progress = 0.0
+        if last_progress is not None:
+            hours_since_progress = max(
+                0.0,
+                (datetime.now(timezone.utc) - last_progress.astimezone(timezone.utc)).total_seconds() / 3600.0,
+            )
+        if project.status in {"completed", "abandoned"}:
+            level = "fresh"
+        elif hours_since_progress >= 72.0:
+            level = "critical"
+        elif hours_since_progress >= 24.0:
+            level = "stale"
+        elif hours_since_progress >= 8.0:
+            level = "watch"
+        else:
+            level = "fresh"
+
+        resume_candidate = (
+            project.status in {"paused", "blocked"}
+            and level in {"stale", "critical"}
+            and not project.budget_ledger.budget_exhausted
+            and (thread is None or thread.stop_reason not in {"dependency_missing", "benchmark_unavailable"})
+        )
+        closure_candidate = (
+            project.status in {"paused", "blocked"}
+            and level == "critical"
+            and (
+                project.budget_ledger.budget_exhausted
+                or thread is None
+                or thread.stop_reason in {"goal_completed", "superseded_by_better_thread"}
+            )
+        )
+
+        reason = "project remains fresh"
+        if level == "watch":
+            reason = "project has gone quiet and should be monitored"
+        elif level == "stale":
+            reason = "project has gone stale and should be reviewed for resume or deferral"
+        elif level == "critical":
+            reason = "project has been inactive for too long and needs explicit action"
+        if resume_candidate:
+            reason = "project is stale but resume-worthy under the current budget and dependency state"
+        if closure_candidate:
+            reason = "project has gone critically stale and is a closure candidate"
+
+        return ProjectStalenessRecord(
+            record_id=self._continuity_id("staleness"),
+            project_id=project.project_id,
+            last_progress_at=last_progress_at,
+            hours_since_progress=round(hours_since_progress, 3),
+            staleness_level=level,  # type: ignore[arg-type]
+            reason=reason,
+            resume_candidate=resume_candidate,
+            closure_candidate=closure_candidate,
+        )
+
+    def _recommend_portfolio_state(
+        self,
+        *,
+        project: ResearchProject,
+        thread: Optional[ResearchHypothesisThread],
+        candidate: Optional[PrioritizedActionCandidate],
+        evidence_debt: EvidenceDebtRecord,
+        staleness: ProjectStalenessRecord,
+        priority_score: float,
+    ) -> tuple[str, list[str]]:
+        rationale: list[str] = []
+        falsification_actions = {
+            "mechanism_ablation",
+            "replication_check",
+            "seed_variance_check",
+            "contradiction_resolution",
+            "benchmark_stress_probe",
+            "calibration_check",
+            "environment_reproduction_check",
+            "claim_linkage_sanity_check",
+        }
+        if project.status == "completed":
+            return "complete", ["project goal is already complete"]
+        if project.status == "abandoned":
+            return "retire", ["project has already been abandoned"]
+        if thread is not None and thread.stop_reason in {"dependency_missing", "benchmark_unavailable"}:
+            return "block", [f"project is blocked by {thread.stop_reason}"]
+        if staleness.resume_candidate:
+            rationale.append("project is stale but resume-worthy")
+            return "resume", rationale
+        if staleness.closure_candidate:
+            rationale.append("project is critically stale and should be parked")
+            return "park", rationale
+        if project.budget_ledger.budget_exhausted:
+            rationale.append("budget is exhausted")
+            return "park", rationale
+        if (
+            evidence_debt.promotion_blocked
+            and candidate is not None
+            and candidate.action_kind not in falsification_actions
+            and candidate.score_breakdown.contradiction_urgency >= 0.7
+        ):
+            rationale.append("contradiction pressure is high and promotion is blocked by evidence debt")
+            return "escalate", rationale
+        if project.status in {"paused", "blocked"}:
+            rationale.append("project should remain deferred until explicitly resumed")
+            return "defer", rationale
+        if priority_score >= 0.45:
+            rationale.append("project is currently the strongest continuation candidate")
+            return "continue", rationale
+        rationale.append("project remains below the current portfolio continuation threshold")
+        return "defer", rationale
+
+    def _project_priority_record(
+        self,
+        project: ResearchProject,
+        candidate: Optional[PrioritizedActionCandidate],
+        evidence_debt: EvidenceDebtRecord,
+        staleness: ProjectStalenessRecord,
+    ) -> ProjectPriorityRecord:
+        thread = self._project_thread(project)
+        strategic_priority = min(1.0, max(0.0, float(project.priority) / 5.0))
+        expected_value = 0.0
+        contradiction_pressure = 0.0
+        benchmark_readiness = self._project_benchmark_readiness(project)
+        action_id = None
+        action_kind = None
+        if candidate is not None:
+            expected_value = max(0.0, min(1.0, candidate.score))
+            contradiction_pressure = candidate.score_breakdown.contradiction_urgency
+            benchmark_readiness = max(benchmark_readiness, candidate.score_breakdown.benchmark_value)
+            action_id = candidate.action_id
+            action_kind = candidate.action_kind
+        elif thread is not None:
+            contradiction_pressure = min(1.0, float(len(thread.contradicting_evidence_ids)) * 0.5)
+
+        staleness_penalty = {
+            "fresh": 0.0,
+            "watch": 0.15,
+            "stale": 0.35,
+            "critical": 0.55,
+        }.get(staleness.staleness_level, 0.0)
+        budget_pressure = {
+            "low": 0.05,
+            "medium": 0.35,
+            "high": 0.7,
+            "exhausted": 1.0,
+        }.get(project.budget_ledger.budget_pressure_level, 0.1)
+        debt_penalty_scale = 0.25 if action_kind in {
+            "mechanism_ablation",
+            "replication_check",
+            "seed_variance_check",
+            "contradiction_resolution",
+            "benchmark_stress_probe",
+            "calibration_check",
+            "environment_reproduction_check",
+            "claim_linkage_sanity_check",
+        } else 0.5
+        priority_score = round(
+            max(
+                0.0,
+                expected_value
+                + (0.25 * strategic_priority)
+                + (0.15 * contradiction_pressure)
+                + (0.15 * benchmark_readiness)
+                - (0.2 * staleness_penalty)
+                - (0.2 * budget_pressure)
+                - (evidence_debt.overall_debt * debt_penalty_scale),
+            ),
+            6,
+        )
+        recommended_state, rationale = self._recommend_portfolio_state(
+            project=project,
+            thread=thread,
+            candidate=candidate,
+            evidence_debt=evidence_debt,
+            staleness=staleness,
+            priority_score=priority_score,
+        )
+        if evidence_debt.promotion_blocked:
+            rationale.append("promotion remains blocked by evidence debt")
+        if staleness.staleness_level in {"stale", "critical"}:
+            rationale.append(staleness.reason)
+        return ProjectPriorityRecord(
+            record_id=self._continuity_id("project-priority"),
+            project_id=project.project_id,
+            action_id=action_id,
+            priority_score=priority_score,
+            strategic_priority=strategic_priority,
+            expected_value=expected_value,
+            evidence_debt=evidence_debt.overall_debt,
+            contradiction_pressure=contradiction_pressure,
+            staleness_penalty=staleness_penalty,
+            budget_pressure=budget_pressure,
+            benchmark_readiness=benchmark_readiness,
+            recommended_state=recommended_state,  # type: ignore[arg-type]
+            rationale=rationale,
+        )
+
+    def _evaluate_portfolio(
+        self,
+        *,
+        include_blocked: bool = True,
+        mode: str = "balanced",
+    ) -> tuple[ResearchPortfolio, list[ProjectPriorityRecord], list[EvidenceDebtRecord], list[ProjectStalenessRecord]]:
+        projects = self.store.list_research_projects()
+        ranking = self._rank_action_candidates(
+            include_blocked=include_blocked,
+            limit=max(1, max(10, len(projects) * 6)),
+            mode=mode,
+            persist=False,
+        )
+        best_candidates: dict[str, PrioritizedActionCandidate] = {}
+        for candidate in ranking.candidates:
+            best_candidates.setdefault(candidate.project_id, candidate)
+
+        evidence_debts = [self._compute_evidence_debt(project) for project in projects]
+        evidence_map = {item.project_id: item for item in evidence_debts}
+        stale_records = [self._compute_project_staleness(project) for project in projects]
+        stale_map = {item.project_id: item for item in stale_records}
+        priorities = [
+            self._project_priority_record(
+                project,
+                best_candidates.get(project.project_id),
+                evidence_map[project.project_id],
+                stale_map[project.project_id],
+            )
+            for project in projects
+        ]
+        recommendation_rank = {
+            "continue": 0,
+            "resume": 1,
+            "escalate": 2,
+            "defer": 3,
+            "park": 4,
+            "block": 5,
+            "complete": 6,
+            "retire": 7,
+        }
+        priorities.sort(
+            key=lambda item: (
+                recommendation_rank.get(item.recommended_state, 99),
+                -item.priority_score,
+                item.project_id,
+            )
+        )
+        selected = next(
+            (
+                item.project_id
+                for item in priorities
+                if item.recommended_state in {"continue", "resume"}
+            ),
+            None,
+        )
+        existing_portfolio = self.store.load_research_portfolio()
+        health = PortfolioHealthSnapshot(
+            total_projects=len(projects),
+            active_projects=len([item for item in projects if item.status == "active"]),
+            paused_projects=len([item for item in projects if item.status == "paused"]),
+            blocked_projects=len([item for item in projects if item.status == "blocked"]),
+            stale_projects=len([item for item in stale_records if item.staleness_level in {"stale", "critical"}]),
+            parked_projects=len([item for item in priorities if item.recommended_state == "park"]),
+            completed_projects=len([item for item in projects if item.status == "completed"]),
+            abandoned_projects=len([item for item in projects if item.status == "abandoned"]),
+            resume_candidates=len([item for item in stale_records if item.resume_candidate]),
+            promotion_blocked_projects=len([item for item in evidence_debts if item.promotion_blocked]),
+            selected_project_id=selected,
+        )
+        portfolio = existing_portfolio.model_copy(
+            update={
+                "active_project_ids": [item.project_id for item in projects if item.status == "active"],
+                "paused_project_ids": [item.project_id for item in projects if item.status == "paused"],
+                "blocked_project_ids": [item.project_id for item in projects if item.status == "blocked"],
+                "stale_project_ids": [item.project_id for item in stale_records if item.staleness_level in {"stale", "critical"}],
+                "parked_project_ids": [item.project_id for item in priorities if item.recommended_state == "park"],
+                "completed_project_ids": [item.project_id for item in projects if item.status == "completed"],
+                "abandoned_project_ids": [item.project_id for item in projects if item.status == "abandoned"],
+                "latest_selected_project_id": selected,
+                "health_snapshot": health,
+            }
+        )
+        return portfolio, priorities, evidence_debts, stale_records
+
+    def portfolio_review(
+        self,
+        *,
+        include_blocked: bool = True,
+        limit: int = 10,
+        mode: str = "balanced",
+    ) -> dict[str, Any]:
+        portfolio, priorities, evidence_debts, stale_records = self._evaluate_portfolio(
+            include_blocked=include_blocked,
+            mode=mode,
+        )
+        self.store.save_research_portfolio(portfolio)
+        for record in priorities:
+            self.store.append_project_priority_record(record)
+        for record in evidence_debts:
+            self.store.append_evidence_debt_record(record)
+        for record in stale_records:
+            self.store.append_project_staleness_record(record)
+        self.store.append_audit_event(
+            "research_portfolio",
+            "portfolio_review",
+            {
+                "portfolio_id": portfolio.portfolio_id,
+                "selected_project_id": portfolio.latest_selected_project_id,
+                "priority_records": len(priorities),
+            },
+        )
+        return {
+            "portfolio": portfolio.model_dump(mode="json"),
+            "top_projects": [item.model_dump(mode="json") for item in priorities[: max(1, limit)]],
+            "evidence_debts": [item.model_dump(mode="json") for item in evidence_debts[: max(1, limit)]],
+            "stale_projects": [
+                item.model_dump(mode="json")
+                for item in stale_records
+                if item.staleness_level in {"stale", "critical"}
+            ][: max(1, limit)],
+            "resume_candidates": [
+                item.model_dump(mode="json")
+                for item in stale_records
+                if item.resume_candidate
+            ][: max(1, limit)],
+            "latest_portfolio_decision": self.store.latest_portfolio_decision().model_dump(mode="json")
+            if self.store.latest_portfolio_decision()
+            else None,
+        }
+
+    def stale_projects(self, *, limit: int = 10, mode: str = "balanced") -> dict[str, Any]:
+        _, _, _, stale_records = self._evaluate_portfolio(include_blocked=True, mode=mode)
+        rows = [
+            item.model_dump(mode="json")
+            for item in stale_records
+            if item.staleness_level in {"stale", "critical"}
+        ]
+        rows.sort(key=lambda item: (-item.get("hours_since_progress", 0.0), item.get("project_id", "")))
+        return {"stale_projects": rows[: max(1, limit)]}
+
+    def evidence_debt(
+        self,
+        *,
+        project_id: Optional[str] = None,
+        limit: int = 10,
+        mode: str = "balanced",
+    ) -> dict[str, Any]:
+        _, _, evidence_debts, _ = self._evaluate_portfolio(include_blocked=True, mode=mode)
+        rows = [item for item in evidence_debts if project_id is None or item.project_id == project_id]
+        rows.sort(key=lambda item: (-item.overall_debt, item.project_id))
+        return {"records": [item.model_dump(mode="json") for item in rows[: max(1, limit)]]}
+
+    def resume_candidates(self, *, limit: int = 10, mode: str = "balanced") -> dict[str, Any]:
+        _, priorities, _, stale_records = self._evaluate_portfolio(include_blocked=True, mode=mode)
+        priority_map = {item.project_id: item for item in priorities}
+        rows = []
+        for item in stale_records:
+            if not item.resume_candidate:
+                continue
+            rows.append(
+                {
+                    "staleness": item.model_dump(mode="json"),
+                    "priority": priority_map[item.project_id].model_dump(mode="json")
+                    if item.project_id in priority_map
+                    else None,
+                }
+            )
+        rows.sort(
+            key=lambda item: (
+                -(item["priority"]["priority_score"] if item["priority"] else 0.0),
+                item["staleness"].get("project_id", ""),
+            )
+        )
+        return {"resume_candidates": rows[: max(1, limit)]}
+
+    def portfolio_decide(
+        self,
+        *,
+        include_blocked: bool = True,
+        limit: int = 10,
+        mode: str = "balanced",
+    ) -> dict[str, Any]:
+        portfolio, priorities, evidence_debts, stale_records = self._evaluate_portfolio(
+            include_blocked=include_blocked,
+            mode=mode,
+        )
+        selected_record = next(
+            (item for item in priorities if item.recommended_state in {"continue", "resume"}),
+            None,
+        )
+        decision = PortfolioDecision(
+            decision_id=self._continuity_id("portfolio-decision"),
+            selected_project_id=selected_record.project_id if selected_record is not None else None,
+            selected_action_id=selected_record.action_id if selected_record is not None else None,
+            deferred_project_ids=[item.project_id for item in priorities if item.recommended_state == "defer"],
+            parked_project_ids=[item.project_id for item in priorities if item.recommended_state == "park"],
+            resumed_project_ids=[item.project_id for item in priorities if item.recommended_state == "resume"],
+            escalated_project_ids=[item.project_id for item in priorities if item.recommended_state == "escalate"],
+            retired_project_ids=[item.project_id for item in priorities if item.recommended_state in {"retire", "complete"}],
+            rationale=[
+                "selected the highest-ranked project whose recommended state was continue or resume",
+                "deferred or parked lower-value, blocked, or budget-exhausted projects",
+            ],
+            policy_snapshot=self._prioritization_policy(mode=mode),
+            project_priority_records=priorities,
+        )
+        updated_portfolio = portfolio.model_copy(
+            update={
+                "latest_decision_id": decision.decision_id,
+                "latest_selected_project_id": decision.selected_project_id,
+                "health_snapshot": portfolio.health_snapshot.model_copy(
+                    update={"selected_project_id": decision.selected_project_id}
+                ),
+            }
+        )
+        self.store.save_research_portfolio(updated_portfolio)
+        self.store.append_portfolio_decision(decision)
+        for record in priorities:
+            self.store.append_project_priority_record(record)
+        for record in evidence_debts:
+            self.store.append_evidence_debt_record(record)
+        for record in stale_records:
+            self.store.append_project_staleness_record(record)
+        self.store.append_audit_event(
+            "research_portfolio",
+            "portfolio_decide",
+            {
+                "decision_id": decision.decision_id,
+                "selected_project_id": decision.selected_project_id,
+                "selected_action_id": decision.selected_action_id,
+            },
+        )
+        return {
+            "portfolio": updated_portfolio.model_dump(mode="json"),
+            "decision": decision.model_dump(mode="json"),
+            "top_projects": [item.model_dump(mode="json") for item in priorities[: max(1, limit)]],
+            "evidence_debts": [item.model_dump(mode="json") for item in evidence_debts[: max(1, limit)]],
+            "stale_projects": [
+                item.model_dump(mode="json")
+                for item in stale_records
+                if item.staleness_level in {"stale", "critical"}
+            ][: max(1, limit)],
+        }
+
+    def _attach_project_to_study(
+        self,
+        report: ProblemStudyReport,
+        *,
+        problem: str,
+        resolution: ProblemResolutionReport,
+        evidence_summary: str,
+        project_id: Optional[str] = None,
+        wall_clock_minutes: float = 0.0,
+    ) -> ProblemStudyReport:
+        project = self.store.get_research_project(project_id) if project_id else None
+        if project is None:
+            project = self.create_project(
+                problem,
+                benchmark_tier=report.benchmark_tier,
+                requested_benchmark=report.requested_benchmark,
+            )
+        thread = self._project_thread(project)
+        if thread is None:
+            raise RuntimeError(f"Project {project.project_id} has no active hypothesis thread.")
+        project = self._invalidate_active_action(project, thread)
+        question_id = self._continuity_id("question")
+        action_id = self._continuity_id("action")
+        hypothesis_text = (
+            report.hypotheses[0].hypothesis
+            if report.hypotheses
+            else f"Investigate benchmark-aligned evidence for '{problem}'."
+        )
+        open_question = ResearchOpenQuestion(
+            question_id=question_id,
+            project_id=project.project_id,
+            thread_id=thread.thread_id,
+            question=(
+                report.hypotheses[0].unresolved_assumptions[0]
+                if report.hypotheses and report.hypotheses[0].unresolved_assumptions
+                else f"What execution should TAR run next for '{problem}'?"
+            ),
+            importance=max(0.25, resolution.confidence),
+            uncertainty_type="execution_gap",
+            blocking=False,
+            status="open",
+        )
+        action = ResearchPlannedAction(
+            action_id=action_id,
+            project_id=project.project_id,
+            thread_id=thread.thread_id,
+            action_kind="run_problem_study",
+            description=report.next_action,
+            estimated_cost=1.0,
+            expected_evidence_gain=max(0.25, resolution.confidence),
+            depends_on=[question_id],
+            status="planned",
+        )
+        updated_thread = thread.model_copy(
+            update={
+                "hypothesis": hypothesis_text,
+                "status": "testing" if report.status != "build_failed" else "parked",
+                "confidence_state": "exploratory",
+                "supporting_evidence_ids": sorted(
+                    set(
+                        [
+                            *thread.supporting_evidence_ids,
+                            *(report.cited_research_ids or []),
+                            *(report.retrieved_memory_ids or []),
+                        ]
+                    )
+                ),
+                "contradicting_evidence_ids": sorted(
+                    set(
+                        [
+                            *thread.contradicting_evidence_ids,
+                            *(
+                                (report.contradiction_review.conflicting_document_ids if report.contradiction_review else [])
+                            ),
+                            *(
+                                (report.contradiction_review.conflicting_claim_ids if report.contradiction_review else [])
+                            ),
+                        ]
+                    )
+                ),
+                "open_question_ids": [*thread.open_question_ids, question_id],
+                "next_action_id": action_id,
+                "stop_reason": "runtime_failure" if report.status == "build_failed" else None,
+                "updated_at": self._project_now(),
+            }
+        )
+        updated_project = project.model_copy(
+            update={
+                "status": "blocked" if report.status == "build_failed" else "active",
+                "domain_profile": report.profile_id,
+                "latest_decision_summary": report.next_action,
+                "budget_ledger": self._spend_project_budget(project.budget_ledger, wall_clock_minutes=wall_clock_minutes),
+                "open_questions": [*project.open_questions, open_question],
+                "planned_actions": [*project.planned_actions, action],
+            }
+        )
+        updated_project = self._replace_project_thread(updated_project, updated_thread)
+        updated_project = self._persist_project(
+            updated_project,
+            latest_evidence_summary=evidence_summary,
+            blockers=["build_failed"] if report.status == "build_failed" else [],
+        )
+        return report.model_copy(
+            update={
+                "project_id": updated_project.project_id,
+                "thread_id": updated_thread.thread_id,
+                "open_question_id": open_question.question_id,
+                "next_action_id": action.action_id,
+            }
+        )
+
+    def _update_project_after_schedule(self, entry: ProblemScheduleEntry) -> None:
+        if not entry.project_id or not entry.action_id:
+            return
+        project = self.store.get_research_project(entry.project_id)
+        if project is None:
+            return
+        action = self._project_action(project, entry.action_id)
+        if action is None:
+            return
+        updated_action = action.model_copy(
+            update={
+                "status": "queued",
+                "scheduled_job_id": entry.schedule_id,
+                "updated_at": self._project_now(),
+            }
+        )
+        updated_project = self._replace_project_action(project, updated_action)
+        self._persist_project(updated_project)
+
+    def _update_project_after_execution(
+        self,
+        study: ProblemStudyReport,
+        report: ProblemExecutionReport,
+        *,
+        wall_clock_minutes: float,
+    ) -> ProblemExecutionReport:
+        if not study.project_id:
+            return report
+        project = self.store.get_research_project(study.project_id)
+        if project is None:
+            return report
+        thread = self._project_thread(project, study.thread_id)
+        if thread is None:
+            return report
+        question = self._project_question(project, study.open_question_id)
+        action = self._project_action(project, study.next_action_id)
+        updated_project = project
+        if question is not None and question.status == "open":
+            updated_question = question.model_copy(update={"status": "resolved", "resolved_at": self._project_now()})
+            updated_project = self._replace_project_question(updated_project, updated_question)
+        if action is not None:
+            updated_action = action.model_copy(
+                update={
+                    "status": "completed" if report.status == "completed" else "failed",
+                    "result_refs": [*action.result_refs, report.artifact_path],
+                    "updated_at": self._project_now(),
+                }
+            )
+            updated_project = self._replace_project_action(updated_project, updated_action)
+        next_question = ResearchOpenQuestion(
+            question_id=self._continuity_id("question"),
+            project_id=project.project_id,
+            thread_id=thread.thread_id,
+            question=f"What should TAR do next after execution '{report.problem_id}'?",
+            importance=0.6,
+            uncertainty_type="followup_decision",
+            blocking=report.status != "completed",
+            status="open",
+        )
+        next_action = ResearchPlannedAction(
+            action_id=self._continuity_id("action"),
+            project_id=project.project_id,
+            thread_id=thread.thread_id,
+            action_kind="review_execution_result",
+            description=report.recommended_next_step,
+            estimated_cost=0.5,
+            expected_evidence_gain=0.5,
+            depends_on=[next_question.question_id],
+            status="planned",
+        )
+        updated_thread = thread.model_copy(
+            update={
+                "status": "supported" if report.status == "completed" else ("parked" if report.status in {"dependency_failure", "failed"} else "testing"),
+                "confidence_state": "provisional" if report.status == "completed" else "exploratory",
+                "supporting_evidence_ids": sorted(set([*thread.supporting_evidence_ids, report.artifact_path])),
+                "open_question_ids": [*thread.open_question_ids, next_question.question_id],
+                "next_action_id": next_action.action_id,
+                "stop_reason": (
+                    "dependency_missing"
+                    if report.status == "dependency_failure"
+                    else ("runtime_failure" if report.status == "failed" else None)
+                ),
+                "updated_at": self._project_now(),
+            }
+        )
+        updated_ledger = self._spend_project_budget(
+            updated_project.budget_ledger,
+            wall_clock_minutes=wall_clock_minutes,
+            experiments=1,
+        )
+        project_status = (
+            "blocked"
+            if report.status in {"dependency_failure", "failed"}
+            else ("paused" if updated_ledger.budget_exhausted else "active")
+        )
+        updated_project = updated_project.model_copy(
+            update={
+                "status": project_status,
+                "budget_ledger": updated_ledger,
+                "latest_decision_summary": report.recommended_next_step,
+                "open_questions": [*updated_project.open_questions, next_question],
+                "planned_actions": [*updated_project.planned_actions, next_action],
+            }
+        )
+        updated_project = self._replace_project_thread(updated_project, updated_thread)
+        blockers = []
+        if report.status == "dependency_failure":
+            blockers.append("dependency_missing")
+        elif report.status == "failed":
+            blockers.append("runtime_failure")
+        elif updated_ledger.budget_exhausted:
+            blockers.append("budget_exhausted")
+        updated_project = self._persist_project(
+            updated_project,
+            latest_evidence_summary=report.summary,
+            blockers=blockers,
+        )
+        return report.model_copy(
+            update={
+                "project_id": updated_project.project_id,
+                "thread_id": updated_thread.thread_id,
+                "action_id": report.action_id or study.next_action_id,
+            }
+        )
 
     def _claim_policy(self) -> ClaimAcceptancePolicy:
         return self.inference_bridge.default_claim_policy()
@@ -469,6 +2436,8 @@ class TAROrchestrator:
         mode: str = "research_chat",
         trial_id: Optional[str] = None,
         problem_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        action_id: Optional[str] = None,
     ) -> ResearchDecisionRecord:
         import hashlib
 
@@ -482,6 +2451,8 @@ class TAROrchestrator:
             mode=mode,  # type: ignore[arg-type]
             trial_id=trial_id,
             problem_id=problem_id,
+            thread_id=thread_id,
+            action_id=action_id,
             evidence_bundle=evidence_bundle,
             hypotheses=hypotheses,
             selected_action=selected_action,
@@ -759,11 +2730,13 @@ class TAROrchestrator:
         build_env: bool = False,
         max_results: int = 6,
         *,
+        project_id: Optional[str] = None,
         benchmark_tier: BenchmarkTier = "validation",
         requested_benchmark: Optional[str] = None,
         canonical_only: bool = False,
         no_proxy_benchmarks: bool = False,
     ) -> ProblemStudyReport:
+        started_at = datetime.now(timezone.utc)
         resolution = self.resolve_problem(
             problem,
             benchmark_tier=benchmark_tier,
@@ -815,6 +2788,18 @@ class TAROrchestrator:
         )
         if build_env and bundle.build_status == "failed":
             report = report.model_copy(update={"status": "build_failed"})
+        planning_minutes = max(
+            0.0,
+            (datetime.now(timezone.utc) - started_at).total_seconds() / 60.0,
+        )
+        report = self._attach_project_to_study(
+            report,
+            problem=problem,
+            resolution=resolution,
+            evidence_summary=evidence_bundle.notes[0] if evidence_bundle.notes else resolution.summary,
+            project_id=project_id,
+            wall_clock_minutes=planning_minutes,
+        )
         self.store.append_problem_study(report)
         decision = self._build_research_decision(
             prompt=problem,
@@ -823,6 +2808,8 @@ class TAROrchestrator:
             selected_action=report.next_action,
             mode="problem_study",
             problem_id=report.problem_id,
+            thread_id=report.thread_id,
+            action_id=report.next_action_id,
         )
         self.store.append_research_decision(decision)
         if self.vault is not None:
@@ -862,6 +2849,20 @@ class TAROrchestrator:
         study = self.store.latest_problem_study(problem_id)
         if study is None:
             raise RuntimeError("No problem study is available to schedule.")
+        derived_priority_score: Optional[float] = None
+        priority_source: Optional[str] = None
+        if priority == 0 and study.project_id and study.next_action_id:
+            project = self.store.get_research_project(study.project_id)
+            if project is not None:
+                candidate = self._build_action_candidate(
+                    project,
+                    policy=self._prioritization_policy(),
+                    action_id=study.next_action_id,
+                )
+                if candidate is not None:
+                    derived_priority_score = candidate.score
+                    priority = self._priority_to_queue_value(candidate.score)
+                    priority_source = "ws18_ranked_action"
         entry = self.scheduler.schedule(
             study,
             use_docker=use_docker,
@@ -871,12 +2872,15 @@ class TAROrchestrator:
             repeat_interval_s=repeat_interval_s,
             max_runs=max_runs,
             priority=priority,
+            priority_score=derived_priority_score,
+            priority_source=priority_source,
         )
         self.store.append_audit_event(
             "science",
             "schedule_problem_study",
             entry.model_dump(mode="json"),
         )
+        self._update_project_after_schedule(entry)
         return entry
 
     def scheduler_status(self) -> dict[str, Any]:
@@ -898,6 +2902,7 @@ class TAROrchestrator:
         use_docker: bool = False,
         build_env: bool = False,
     ) -> ProblemExecutionReport:
+        started_at = datetime.now(timezone.utc)
         study = self.store.latest_problem_study(problem_id)
         if study is None:
             raise RuntimeError("No problem study is available to execute.")
@@ -918,6 +2923,9 @@ class TAROrchestrator:
                 if build_result.returncode != 0:
                     report = ProblemExecutionReport(
                         problem_id=study.problem_id,
+                        project_id=study.project_id,
+                        thread_id=study.thread_id,
+                        action_id=study.next_action_id,
                         problem=study.problem,
                         profile_id=study.profile_id,
                         domain=study.domain,
@@ -952,6 +2960,9 @@ class TAROrchestrator:
             if run_result.returncode != 0 and not execution_report_path.exists():
                 report = ProblemExecutionReport(
                     problem_id=study.problem_id,
+                    project_id=study.project_id,
+                    thread_id=study.thread_id,
+                    action_id=study.next_action_id,
                     problem=study.problem,
                     profile_id=study.profile_id,
                     domain=study.domain,
@@ -1008,6 +3019,9 @@ class TAROrchestrator:
             if proc.returncode != 0 and not execution_report_path.exists():
                 report = ProblemExecutionReport(
                     problem_id=study.problem_id,
+                    project_id=study.project_id,
+                    thread_id=study.thread_id,
+                    action_id=study.next_action_id,
                     problem=study.problem,
                     profile_id=study.profile_id,
                     domain=study.domain,
@@ -1044,6 +3058,9 @@ class TAROrchestrator:
         report = ProblemExecutionReport.model_validate_json(execution_report_path.read_text(encoding="utf-8"))
         report = report.model_copy(
             update={
+                "project_id": report.project_id or study.project_id,
+                "thread_id": report.thread_id or study.thread_id,
+                "action_id": report.action_id or study.next_action_id,
                 "execution_mode": "docker_bundle" if use_docker else "local_python",
                 "image_tag": report.image_tag or bundle.docker_image_tag,
                 "manifest_path": report.manifest_path or bundle.run_manifest_path,
@@ -1052,6 +3069,15 @@ class TAROrchestrator:
                 "reproducibility_complete": report.reproducibility_complete or bundle.reproducibility_complete,
                 "sandbox_policy": report.sandbox_policy or bundle.sandbox_policy,
             }
+        )
+        execution_minutes = max(
+            0.0,
+            (datetime.now(timezone.utc) - started_at).total_seconds() / 60.0,
+        )
+        report = self._update_project_after_execution(
+            study,
+            report,
+            wall_clock_minutes=execution_minutes,
         )
         self.store.append_problem_execution(report)
         if self.vault is not None:

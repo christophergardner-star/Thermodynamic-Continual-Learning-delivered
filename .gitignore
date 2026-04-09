@@ -4,7 +4,11 @@ __pycache__/
 *.pyd
 .pytest_cache/
 .venv/
+.tmp_ws14/
+coding_ai_out/
+dataset_artifacts/
 logs/
 tar_state/
 tar_runs/
 anchors/
+training_artifacts/

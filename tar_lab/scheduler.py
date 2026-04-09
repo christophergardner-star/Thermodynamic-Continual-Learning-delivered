@@ -63,6 +63,8 @@ class ProblemStudyScheduler:
         repeat_interval_s: Optional[int] = None,
         max_runs: int = 1,
         priority: int = 0,
+        priority_score: Optional[float] = None,
+        priority_source: Optional[str] = None,
         retry_policy: Optional[RetryPolicy] = None,
     ) -> ProblemScheduleEntry:
         if run_at:
@@ -72,6 +74,9 @@ class ProblemStudyScheduler:
         entry = ProblemScheduleEntry(
             schedule_id=_schedule_id(study.problem_id),
             problem_id=study.problem_id,
+            project_id=study.project_id,
+            thread_id=study.thread_id,
+            action_id=study.next_action_id,
             problem=study.problem,
             profile_id=study.profile_id,
             domain=study.domain,
@@ -83,6 +88,8 @@ class ProblemStudyScheduler:
             repeat_interval_s=repeat_interval_s,
             max_runs=max_runs,
             priority=priority,
+            priority_score=priority_score,
+            priority_source=priority_source,
             retry_policy=retry_policy or RetryPolicy(),
         )
         self.store.append_problem_schedule(entry)

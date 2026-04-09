@@ -7,18 +7,25 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from tar_lab.schemas import (
     AlertRecord,
+    BudgetAllocationDecision,
     BreakthroughReport,
     ClaimVerdict,
     DatasetManifest,
     DirectorPolicy,
+    EvidenceDebtRecord,
     EndpointRecord,
     EndpointRegistryState,
+    FalsificationPlan,
     ImageManifest,
     MemoryStoreManifest,
+    PortfolioDecision,
+    ProjectPriorityRecord,
+    ProjectStalenessRecord,
     GovernorMetrics,
     KnowledgeGraphEntry,
     KnowledgeGraphState,
     ProblemExecutionReport,
+    PortfolioPrioritySnapshot,
     ProblemScheduleEntry,
     ProblemScheduleState,
     ResearchDocument,
@@ -29,6 +36,9 @@ from tar_lab.schemas import (
     RunManifest,
     ScoutTask,
     ProblemStudyReport,
+    ResearchPortfolio,
+    ResearchProject,
+    ResearchProjectState,
     StrategistPlan,
     TrainingPayloadConfig,
     VerificationReport,
@@ -56,6 +66,15 @@ class TARStateStore:
         self.problem_studies_path = self.state_dir / "problem_studies.jsonl"
         self.problem_executions_path = self.state_dir / "problem_executions.jsonl"
         self.problem_schedule_path = self.state_dir / "problem_schedule.json"
+        self.research_projects_path = self.state_dir / "research_projects.json"
+        self.research_portfolio_path = self.state_dir / "research_portfolio.json"
+        self.priority_snapshots_path = self.state_dir / "priority_snapshots.jsonl"
+        self.budget_allocations_path = self.state_dir / "budget_allocations.jsonl"
+        self.falsification_plans_path = self.state_dir / "falsification_plans.jsonl"
+        self.project_priority_records_path = self.state_dir / "project_priority_records.jsonl"
+        self.evidence_debt_records_path = self.state_dir / "evidence_debt_records.jsonl"
+        self.project_staleness_records_path = self.state_dir / "project_staleness_records.jsonl"
+        self.portfolio_decisions_path = self.state_dir / "portfolio_decisions.jsonl"
         self.endpoint_registry_path = self.state_dir / "inference_endpoints.json"
         self.endpoints_dir = self.state_dir / "endpoints"
         self.role_assignments_path = self.state_dir / "role_assignments.json"
@@ -381,6 +400,212 @@ class TARStateStore:
                 return entry
         return None
 
+    def load_research_projects(self) -> ResearchProjectState:
+        if not self.research_projects_path.exists():
+            state = ResearchProjectState()
+            self.save_research_projects(state)
+            return state
+        return ResearchProjectState.model_validate_json(self.research_projects_path.read_text(encoding="utf-8"))
+
+    def save_research_projects(self, state: ResearchProjectState) -> None:
+        self._atomic_write_json(self.research_projects_path, state.model_dump(mode="json"))
+
+    def upsert_research_project(self, project: ResearchProject) -> None:
+        state = self.load_research_projects()
+        entries = [item for item in state.entries if item.project_id != project.project_id]
+        entries.append(project)
+        entries.sort(key=lambda item: (item.updated_at, item.created_at, item.project_id))
+        self.save_research_projects(ResearchProjectState(entries=entries))
+
+    def list_research_projects(self) -> List[ResearchProject]:
+        return self.load_research_projects().entries
+
+    def get_research_project(self, project_id: str) -> Optional[ResearchProject]:
+        for entry in self.list_research_projects():
+            if entry.project_id == project_id:
+                return entry
+        return None
+
+    def latest_research_project(self) -> Optional[ResearchProject]:
+        entries = self.list_research_projects()
+        if not entries:
+            return None
+        return sorted(entries, key=lambda item: (item.updated_at, item.created_at, item.project_id))[-1]
+
+    def update_research_project(self, project_id: str, **updates: Any) -> Optional[ResearchProject]:
+        state = self.load_research_projects()
+        updated_project: Optional[ResearchProject] = None
+        new_entries: List[ResearchProject] = []
+        for entry in state.entries:
+            if entry.project_id == project_id:
+                updated_project = entry.model_copy(update=updates)
+                new_entries.append(updated_project)
+            else:
+                new_entries.append(entry)
+        self.save_research_projects(ResearchProjectState(entries=new_entries))
+        return updated_project
+
+    def load_research_portfolio(self) -> ResearchPortfolio:
+        if not self.research_portfolio_path.exists():
+            portfolio = ResearchPortfolio()
+            self.save_research_portfolio(portfolio)
+            return portfolio
+        return ResearchPortfolio.model_validate_json(self.research_portfolio_path.read_text(encoding="utf-8"))
+
+    def save_research_portfolio(self, portfolio: ResearchPortfolio) -> None:
+        updated = portfolio.model_copy(update={"updated_at": _utc_now()})
+        self._atomic_write_json(self.research_portfolio_path, updated.model_dump(mode="json"))
+
+    def append_project_priority_record(self, record: ProjectPriorityRecord) -> None:
+        with self.project_priority_records_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record.model_dump(mode="json")) + "\n")
+
+    def iter_project_priority_records(self) -> Iterable[ProjectPriorityRecord]:
+        if not self.project_priority_records_path.exists():
+            return []
+        rows: List[ProjectPriorityRecord] = []
+        for line in self.project_priority_records_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(ProjectPriorityRecord.model_validate_json(line))
+        return rows
+
+    def latest_project_priority_record(self, project_id: Optional[str] = None) -> Optional[ProjectPriorityRecord]:
+        rows = list(self.iter_project_priority_records())
+        for record in reversed(rows):
+            if project_id is not None and record.project_id != project_id:
+                continue
+            return record
+        return None
+
+    def append_evidence_debt_record(self, record: EvidenceDebtRecord) -> None:
+        with self.evidence_debt_records_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record.model_dump(mode="json")) + "\n")
+
+    def iter_evidence_debt_records(self) -> Iterable[EvidenceDebtRecord]:
+        if not self.evidence_debt_records_path.exists():
+            return []
+        rows: List[EvidenceDebtRecord] = []
+        for line in self.evidence_debt_records_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(EvidenceDebtRecord.model_validate_json(line))
+        return rows
+
+    def latest_evidence_debt_record(self, project_id: Optional[str] = None) -> Optional[EvidenceDebtRecord]:
+        rows = list(self.iter_evidence_debt_records())
+        for record in reversed(rows):
+            if project_id is not None and record.project_id != project_id:
+                continue
+            return record
+        return None
+
+    def append_project_staleness_record(self, record: ProjectStalenessRecord) -> None:
+        with self.project_staleness_records_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record.model_dump(mode="json")) + "\n")
+
+    def iter_project_staleness_records(self) -> Iterable[ProjectStalenessRecord]:
+        if not self.project_staleness_records_path.exists():
+            return []
+        rows: List[ProjectStalenessRecord] = []
+        for line in self.project_staleness_records_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(ProjectStalenessRecord.model_validate_json(line))
+        return rows
+
+    def latest_project_staleness_record(self, project_id: Optional[str] = None) -> Optional[ProjectStalenessRecord]:
+        rows = list(self.iter_project_staleness_records())
+        for record in reversed(rows):
+            if project_id is not None and record.project_id != project_id:
+                continue
+            return record
+        return None
+
+    def append_portfolio_decision(self, decision: PortfolioDecision) -> None:
+        with self.portfolio_decisions_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(decision.model_dump(mode="json")) + "\n")
+
+    def iter_portfolio_decisions(self) -> Iterable[PortfolioDecision]:
+        if not self.portfolio_decisions_path.exists():
+            return []
+        rows: List[PortfolioDecision] = []
+        for line in self.portfolio_decisions_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(PortfolioDecision.model_validate_json(line))
+        return rows
+
+    def latest_portfolio_decision(self) -> Optional[PortfolioDecision]:
+        rows = list(self.iter_portfolio_decisions())
+        if not rows:
+            return None
+        return rows[-1]
+
+    def append_priority_snapshot(self, snapshot: PortfolioPrioritySnapshot) -> None:
+        with self.priority_snapshots_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(snapshot.model_dump(mode="json")) + "\n")
+
+    def iter_priority_snapshots(self) -> Iterable[PortfolioPrioritySnapshot]:
+        if not self.priority_snapshots_path.exists():
+            return []
+        rows: List[PortfolioPrioritySnapshot] = []
+        for line in self.priority_snapshots_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(PortfolioPrioritySnapshot.model_validate_json(line))
+        return rows
+
+    def latest_priority_snapshot(self, project_id: Optional[str] = None) -> Optional[PortfolioPrioritySnapshot]:
+        rows = list(self.iter_priority_snapshots())
+        for snapshot in reversed(rows):
+            if project_id is not None and snapshot.project_id != project_id:
+                continue
+            return snapshot
+        return None
+
+    def append_budget_allocation(self, decision: BudgetAllocationDecision) -> None:
+        with self.budget_allocations_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(decision.model_dump(mode="json")) + "\n")
+
+    def iter_budget_allocations(self) -> Iterable[BudgetAllocationDecision]:
+        if not self.budget_allocations_path.exists():
+            return []
+        rows: List[BudgetAllocationDecision] = []
+        for line in self.budget_allocations_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(BudgetAllocationDecision.model_validate_json(line))
+        return rows
+
+    def latest_budget_allocation(self) -> Optional[BudgetAllocationDecision]:
+        rows = list(self.iter_budget_allocations())
+        if not rows:
+            return None
+        return rows[-1]
+
+    def append_falsification_plan(self, plan: FalsificationPlan) -> None:
+        with self.falsification_plans_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(plan.model_dump(mode="json")) + "\n")
+
+    def iter_falsification_plans(self) -> Iterable[FalsificationPlan]:
+        if not self.falsification_plans_path.exists():
+            return []
+        rows: List[FalsificationPlan] = []
+        for line in self.falsification_plans_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(FalsificationPlan.model_validate_json(line))
+        return rows
+
+    def latest_falsification_plan(
+        self,
+        *,
+        project_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
+    ) -> Optional[FalsificationPlan]:
+        rows = list(self.iter_falsification_plans())
+        for plan in reversed(rows):
+            if project_id is not None and plan.project_id != project_id:
+                continue
+            if thread_id is not None and plan.thread_id != thread_id:
+                continue
+            return plan
+        return None
+
     def load_endpoint_registry(self) -> EndpointRegistryState:
         if not self.endpoint_registry_path.exists():
             state = EndpointRegistryState()
@@ -528,8 +753,17 @@ class TARStateStore:
         latest_research_decision = self.latest_research_decision()
         latest_problem_study = self.latest_problem_study()
         latest_problem_execution = self.latest_problem_execution()
+        latest_research_project = self.latest_research_project()
+        latest_priority_snapshot = self.latest_priority_snapshot()
+        latest_budget_allocation = self.latest_budget_allocation()
+        latest_falsification_plan = self.latest_falsification_plan()
+        latest_portfolio = self.load_research_portfolio()
+        latest_portfolio_decision = self.latest_portfolio_decision()
+        latest_evidence_debt = self.latest_evidence_debt_record()
+        latest_project_staleness = self.latest_project_staleness_record()
         memory_manifest = self.load_memory_manifest()
         schedules = list(self.iter_problem_schedules())
+        research_projects = self.list_research_projects()
         alerts = list(self.iter_alerts())
         return {
             "recovery": recovery.model_dump(mode="json"),
@@ -547,6 +781,22 @@ class TARStateStore:
             "latest_problem_study": latest_problem_study.model_dump(mode="json") if latest_problem_study else None,
             "problem_executions": len(list(self.iter_problem_executions())),
             "latest_problem_execution": latest_problem_execution.model_dump(mode="json") if latest_problem_execution else None,
+            "research_projects": len(research_projects),
+            "active_research_projects": len([item for item in research_projects if item.status == "active"]),
+            "latest_research_project": latest_research_project.model_dump(mode="json") if latest_research_project else None,
+            "prioritization_snapshots": len(list(self.iter_priority_snapshots())),
+            "latest_priority_snapshot": latest_priority_snapshot.model_dump(mode="json") if latest_priority_snapshot else None,
+            "budget_allocation_decisions": len(list(self.iter_budget_allocations())),
+            "latest_budget_allocation": latest_budget_allocation.model_dump(mode="json") if latest_budget_allocation else None,
+            "falsification_plans": len(list(self.iter_falsification_plans())),
+            "latest_falsification_plan": latest_falsification_plan.model_dump(mode="json") if latest_falsification_plan else None,
+            "latest_portfolio": latest_portfolio.model_dump(mode="json"),
+            "portfolio_decisions": len(list(self.iter_portfolio_decisions())),
+            "latest_portfolio_decision": latest_portfolio_decision.model_dump(mode="json") if latest_portfolio_decision else None,
+            "evidence_debt_records": len(list(self.iter_evidence_debt_records())),
+            "latest_evidence_debt_record": latest_evidence_debt.model_dump(mode="json") if latest_evidence_debt else None,
+            "project_staleness_records": len(list(self.iter_project_staleness_records())),
+            "latest_project_staleness_record": latest_project_staleness.model_dump(mode="json") if latest_project_staleness else None,
             "memory_manifest": memory_manifest.model_dump(mode="json") if memory_manifest else None,
             "problem_schedules": len(schedules),
             "active_problem_schedules": len([item for item in schedules if item.status in {"scheduled", "leased", "running", "retry_wait"}]),
