@@ -12,3 +12,4 @@ tar_state/
 tar_runs/
 anchors/
 training_artifacts/
+eval_artifacts/

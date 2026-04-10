@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from build_tar_master_dataset import build_master_dataset
+from generate_ws23_dataset_campaign import build_campaign_workspace
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -13,11 +14,17 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
     )
 
 
+def _write_json(path: Path, payload: object) -> None:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def test_build_master_dataset_generates_expected_families(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     state_dir = repo_root / "tar_state"
     output_dir = repo_root / "dataset_artifacts" / "tar_master_dataset_v1"
+    manifests_dir = state_dir / "manifests"
     state_dir.mkdir(parents=True)
+    manifests_dir.mkdir(parents=True)
 
     _write_jsonl(
         state_dir / "problem_studies.jsonl",
@@ -68,6 +75,15 @@ def test_build_master_dataset_generates_expected_families(tmp_path: Path) -> Non
                 "imports_ok": ["numpy"],
                 "imports_failed": [{"module": "evaluate", "error": "No module named 'evaluate'"}],
                 "recommended_next_step": "Install dependencies and rerun the study.",
+                "sandbox_policy": {
+                    "mode": "docker_only",
+                    "profile": "production",
+                    "network_policy": "off",
+                    "read_only_mounts": ["/workspace", "/data"],
+                    "writable_mounts": ["/workspace/tar_runs/problem-1/artifacts"],
+                    "artifact_dir": "/workspace/tar_runs/problem-1/artifacts",
+                    "workspace_root": "/workspace",
+                },
             }
         ],
     )
@@ -180,6 +196,70 @@ def test_build_master_dataset_generates_expected_families(tmp_path: Path) -> Non
         ],
     )
     _write_jsonl(
+        state_dir / "claim_verdicts.jsonl",
+        [
+            {
+                "verdict_id": "verdict-1",
+                "trial_id": "trial-1",
+                "status": "provisional",
+                "policy": {
+                    "policy_id": "frontier_claim_policy_v1",
+                    "min_seed_runs": 3,
+                    "max_seed_loss_std": 0.08,
+                    "max_seed_dimensionality_std": 0.75,
+                    "max_calibration_ece": 0.15,
+                    "min_ablation_gap": 0.05,
+                    "min_supporting_sources": 2,
+                    "max_allowed_contradictions": 0,
+                    "require_canonical_benchmark": True,
+                },
+                "verification_report_trial_id": "trial-1",
+                "benchmark_problem_id": "problem-1",
+                "benchmark_execution_mode": "problem_study",
+                "supporting_benchmark_ids": ["beir_fiqa_canonical"],
+                "supporting_benchmark_names": ["BEIR FiQA"],
+                "canonical_comparability_source": "problem_study",
+                "verdict_inputs_complete": False,
+                "linkage_status": "ambiguous",
+                "canonical_benchmark_required": True,
+                "canonical_benchmark_satisfied": False,
+                "confidence": 0.61,
+            }
+        ],
+    )
+    _write_jsonl(
+        state_dir / "evidence_debt_records.jsonl",
+        [
+            {
+                "record_id": "debt-1",
+                "project_id": "project-1",
+                "falsification_gap": 0.6,
+                "replication_gap": 0.5,
+                "benchmark_gap": 0.8,
+                "claim_linkage_gap": 0.4,
+                "calibration_gap": 0.2,
+                "overall_debt": 0.62,
+                "promotion_blocked": True,
+                "rationale": ["Need stronger benchmark and linkage support."],
+            }
+        ],
+    )
+    _write_jsonl(
+        state_dir / "project_staleness_records.jsonl",
+        [
+            {
+                "record_id": "stale-1",
+                "project_id": "project-1",
+                "last_progress_at": "2026-04-01T00:00:00+00:00",
+                "hours_since_progress": 80.0,
+                "staleness_level": "stale",
+                "reason": "pending operator review",
+                "resume_candidate": True,
+                "closure_candidate": False,
+            }
+        ],
+    )
+    _write_jsonl(
         state_dir / "portfolio_decisions.jsonl",
         [
             {
@@ -194,10 +274,67 @@ def test_build_master_dataset_generates_expected_families(tmp_path: Path) -> Non
             }
         ],
     )
+    (state_dir / "inference_endpoints.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "endpoint_name": "assistant-problem-1",
+                        "checkpoint_name": "checkpoint-1",
+                        "role": "assistant",
+                        "host": "127.0.0.1",
+                        "port": 8101,
+                        "backend": "transformers",
+                        "base_url": "http://127.0.0.1:8101",
+                        "status": "failed",
+                        "last_error": "health check timeout after startup",
+                        "last_health_at": "2026-04-10T00:00:00+00:00",
+                        "manifest_path": "<STATE_DIR>/endpoints/assistant-problem-1/endpoint_manifest.json",
+                        "stdout_log_path": "<STATE_DIR>/endpoints/assistant-problem-1/stdout.log",
+                        "stderr_log_path": "<STATE_DIR>/endpoints/assistant-problem-1/stderr.log",
+                        "trust_remote_code": False,
+                        "health": {
+                            "endpoint_name": "assistant-problem-1",
+                            "status": "failed",
+                            "ok": False,
+                            "http_status": 500,
+                            "detail": "startup timeout; inspect stderr tail",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (manifests_dir / "run-problem-1.json").write_text(
+        json.dumps(
+            {
+                "manifest_version": "tar.run.v1",
+                "manifest_id": "run-problem-1",
+                "kind": "science_bundle",
+                "problem_id": "problem-1",
+                "trial_id": "trial-1",
+                "sandbox_policy": {
+                    "mode": "docker_only",
+                    "profile": "production",
+                    "network_policy": "off",
+                    "read_only_mounts": ["/workspace", "/data"],
+                    "writable_mounts": ["/workspace/tar_runs/problem-1/artifacts"],
+                    "artifact_dir": "/workspace/tar_runs/problem-1/artifacts",
+                    "workspace_root": "/workspace",
+                },
+                "reproducibility_complete": False,
+                "unresolved_packages": ["evaluate"],
+                "lock_incomplete_reason": "Dependency lock incomplete.",
+                "image_manifest": {"image_tag": "tar-payload:locked"},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     manifest = build_master_dataset(state_dir, output_dir, version="tar-master-v1")
 
-    assert manifest["records"] >= 8
+    assert manifest["records"] >= 14
     assert (output_dir / "tar_master_dataset.jsonl").exists()
     assert (output_dir / "tar_master_dataset_train.jsonl").exists()
     assert manifest["task_families"]["problem_scoping"] >= 1
@@ -208,6 +345,16 @@ def test_build_master_dataset_generates_expected_families(tmp_path: Path) -> Non
     assert manifest["task_families"]["falsification_planning"] >= 1
     assert manifest["task_families"]["prioritization"] >= 1
     assert manifest["task_families"]["portfolio_governance"] >= 1
+    assert manifest["task_families"]["reproducibility_refusal"] >= 1
+    assert manifest["task_families"]["sandbox_policy_reasoning"] >= 1
+    assert manifest["task_families"]["endpoint_observability_diagnosis"] >= 1
+    assert manifest["task_families"]["portfolio_staleness_recovery"] >= 1
+    assert manifest["task_families"]["claim_lineage_audit"] >= 1
+    assert manifest["task_families"]["evidence_debt_judgement"] >= 1
+    assert manifest["duplicate_examples_removed"] >= 0
+    assert manifest["files"]["master"]["sha256"]
+    assert manifest["split_integrity"]["lineage_safe"] is True
+    assert manifest["source_artifacts"]
 
 
 def test_build_master_dataset_sanitizes_workspace_paths(tmp_path: Path) -> None:
@@ -375,4 +522,90 @@ def test_build_master_dataset_merges_multiple_state_dirs(tmp_path: Path) -> None
     manifest = build_master_dataset([state_a, state_b], output_dir, version="tar-master-v1")
 
     assert manifest["records"] == 1
+    assert manifest["duplicate_examples_removed"] == 1
     assert len((output_dir / "tar_master_dataset.jsonl").read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_build_master_dataset_keeps_project_lineage_in_single_split(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    state_dir = repo_root / "tar_state"
+    output_dir = repo_root / "dataset_artifacts" / "lineage"
+    state_dir.mkdir(parents=True)
+
+    _write_jsonl(
+        state_dir / "problem_studies.jsonl",
+        [
+            {
+                "problem_id": "problem-lineage-1",
+                "project_id": "project-lineage-1",
+                "thread_id": "thread-lineage-1",
+                "problem": "Investigate lineage-safe splitting",
+                "domain": "generic_ml",
+                "profile_id": "generic_ml",
+                "hypotheses": ["Keep all related project examples together."],
+                "experiments": [],
+                "next_action": "Review split provenance.",
+                "status": "planned",
+            }
+        ],
+    )
+    _write_json(
+        state_dir / "research_projects.json",
+        [
+            {
+                "project_id": "project-lineage-1",
+                "title": "lineage_project",
+                "goal": "Investigate lineage-safe splitting",
+                "status": "active",
+                "active_thread_id": "thread-lineage-1",
+                "latest_decision_summary": "Keep related examples together.",
+                "budget_ledger": {"budget_pressure_level": "low"},
+                "resume_snapshot": {
+                    "project_id": "project-lineage-1",
+                    "current_question_id": "question-lineage-1",
+                    "next_action_id": "action-lineage-1",
+                    "blockers": [],
+                    "budget_remaining_summary": {"experiments_remaining": 4},
+                },
+                "planned_actions": [
+                    {"action_id": "action-lineage-1", "description": "Review split provenance.", "status": "planned"}
+                ],
+            }
+        ],
+    )
+    _write_jsonl(
+        state_dir / "evidence_debt_records.jsonl",
+        [
+            {
+                "record_id": "debt-lineage-1",
+                "project_id": "project-lineage-1",
+                "falsification_gap": 0.4,
+                "replication_gap": 0.2,
+                "benchmark_gap": 0.3,
+                "claim_linkage_gap": 0.1,
+                "calibration_gap": 0.1,
+                "overall_debt": 0.35,
+                "promotion_blocked": False,
+            }
+        ],
+    )
+
+    build_master_dataset(state_dir, output_dir, version="tar-master-v1")
+    rows = [
+        json.loads(line)
+        for line in (output_dir / "tar_master_dataset.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    lineage_rows = [row for row in rows if row["lineage_key"] == "project:project-lineage-1"]
+    assert len({row["split"] for row in lineage_rows}) == 1
+
+
+def test_ws23_campaign_generator_produces_private_state_bundle(tmp_path: Path) -> None:
+    workspace = tmp_path / "campaign"
+    summary = build_campaign_workspace(workspace, projects_per_campaign=2, prefix="unit")
+
+    assert summary["projects"] == 12
+    assert (workspace / "tar_state" / "problem_studies.jsonl").exists()
+    assert (workspace / "tar_state" / "claim_verdicts.jsonl").exists()
+    assert (workspace / "tar_state" / "inference_endpoints.json").exists()
+    assert (workspace / "tar_state" / "manifests").exists()

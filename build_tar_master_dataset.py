@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -12,6 +12,23 @@ SYSTEM_PROMPT = (
     "inferences, hypotheses, blockers, and next actions. Stay honest when "
     "benchmark truth, reproducibility, or capability is incomplete."
 )
+
+STATE_ARTIFACT_FILES = [
+    "problem_studies.jsonl",
+    "problem_executions.jsonl",
+    "verification_reports.jsonl",
+    "research_decisions.jsonl",
+    "research_projects.json",
+    "claim_verdicts.jsonl",
+    "falsification_plans.jsonl",
+    "project_priority_records.jsonl",
+    "evidence_debt_records.jsonl",
+    "project_staleness_records.jsonl",
+    "portfolio_decisions.jsonl",
+    "inference_endpoints.json",
+    "recovery.json",
+    "recovery_history.jsonl",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -205,8 +222,56 @@ def _derive_tcl_recovery_action(recovery: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _hash_split(example_id: str) -> str:
-    bucket = int(hashlib.sha256(example_id.encode("utf-8")).hexdigest()[:8], 16) % 100
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _count_nonempty_lines(path: Path) -> int:
+    return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+
+
+def _relative_or_name(path: Path, root: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(root.resolve())).replace("\\", "/")
+    except ValueError:
+        return path.name
+
+
+def _lineage_key(
+    *,
+    project_id: Any = None,
+    thread_id: Any = None,
+    problem_id: Any = None,
+    trial_id: Any = None,
+    endpoint_name: Any = None,
+    manifest_id: Any = None,
+    fallback: Any = None,
+) -> str:
+    if project_id:
+        return f"project:{project_id}"
+    if thread_id:
+        return f"thread:{thread_id}"
+    if problem_id:
+        return f"problem:{problem_id}"
+    if trial_id:
+        return f"trial:{trial_id}"
+    if endpoint_name:
+        return f"endpoint:{endpoint_name}"
+    if manifest_id:
+        return f"manifest:{manifest_id}"
+    return f"source:{fallback or 'unknown'}"
+
+
+def _hash_split(lineage_key: str) -> str:
+    bucket = int(hashlib.sha256(lineage_key.encode("utf-8")).hexdigest()[:8], 16) % 100
     if bucket < 80:
         return "train"
     if bucket < 90:
@@ -261,19 +326,36 @@ def _example_record(
     source_kind: str,
     source_id: str,
     source_file: str,
+    lineage_key: str,
     input_context: dict[str, Any],
     target: dict[str, Any],
     repo_root: Path,
     state_dir: Path,
     tags: Iterable[str] = (),
+    observed: bool = True,
 ) -> dict[str, Any]:
     example_id = f"{task_family}:{task_name}:{source_kind}:{source_id}"
     safe_input = _sanitize_value(input_context, repo_root=repo_root, state_dir=state_dir)
     safe_target = _sanitize_value(target, repo_root=repo_root, state_dir=state_dir)
+    content_hash = _sha256_text(
+        json.dumps(
+            {
+                "task_family": task_family,
+                "task_name": task_name,
+                "source_kind": source_kind,
+                "source_id": source_id,
+                "lineage_key": lineage_key,
+                "input_context": safe_input,
+                "target": safe_target,
+            },
+            sort_keys=True,
+        )
+    )
     return {
         "example_id": example_id,
+        "dedupe_key": example_id,
         "dataset_version": version,
-        "split": _hash_split(example_id),
+        "lineage_key": lineage_key,
         "task_family": task_family,
         "task_name": task_name,
         "source_kind": source_kind,
@@ -288,7 +370,9 @@ def _example_record(
         "provenance": {
             "state_file": source_file,
             "source_id": source_id,
-            "observed": True,
+            "state_root": _relative_or_name(state_dir, repo_root),
+            "observed": observed,
+            "content_hash": content_hash,
         },
     }
 
@@ -297,6 +381,12 @@ def _examples_from_problem_study(
     record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
 ) -> list[dict[str, Any]]:
     problem_id = str(record.get("problem_id") or record.get("problem") or "unknown-problem")
+    lineage = _lineage_key(
+        project_id=record.get("project_id"),
+        thread_id=record.get("thread_id"),
+        problem_id=problem_id,
+        fallback=problem_id,
+    )
     hypotheses = _compact_hypotheses(record.get("hypotheses"))
     experiments = _compact_experiments(record.get("experiments"))
     environment = record.get("environment") if isinstance(record.get("environment"), dict) else {}
@@ -311,6 +401,7 @@ def _examples_from_problem_study(
             source_kind="problem_study",
             source_id=problem_id,
             source_file="problem_studies.jsonl",
+            lineage_key=lineage,
             input_context={
                 "problem": record.get("problem"),
                 "domain": record.get("domain"),
@@ -355,6 +446,7 @@ def _examples_from_problem_study(
                 source_kind="problem_study",
                 source_id=problem_id,
                 source_file="problem_studies.jsonl",
+                lineage_key=lineage,
                 input_context={
                     "problem": record.get("problem"),
                     "benchmark_ids": _ensure_list(record.get("benchmark_ids"))[:5],
@@ -378,6 +470,41 @@ def _examples_from_problem_study(
                 tags=("benchmark_truth",),
             )
         )
+    if (
+        environment
+        and (
+            not bool(environment.get("reproducibility_complete"))
+            or unresolved_packages
+            or environment.get("lock_incomplete_reason")
+        )
+    ):
+        examples.append(
+            _example_record(
+                version=version,
+                task_family="reproducibility_refusal",
+                task_name="study_environment_to_lock_refusal",
+                source_kind="problem_study",
+                source_id=f"{problem_id}:repro",
+                source_file="problem_studies.jsonl",
+                lineage_key=lineage,
+                input_context={
+                    "problem": record.get("problem"),
+                    "requested_benchmark_tier": record.get("benchmark_tier"),
+                    "benchmark_alignment": benchmark_alignment,
+                    "reproducibility_complete": environment.get("reproducibility_complete"),
+                    "unresolved_packages": unresolved_packages,
+                    "lock_incomplete_reason": environment.get("lock_incomplete_reason"),
+                },
+                target={
+                    "should_refuse_promotion": True,
+                    "operator_language": "reproducibility_incomplete_refuse_or_downgrade",
+                    "next_action": record.get("next_action"),
+                },
+                repo_root=repo_root,
+                state_dir=state_dir,
+                tags=("reproducibility", "refusal"),
+            )
+        )
     return examples
 
 
@@ -385,7 +512,13 @@ def _examples_from_problem_execution(
     record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
 ) -> list[dict[str, Any]]:
     problem_id = str(record.get("problem_id") or record.get("problem") or "unknown-problem")
-    return [
+    lineage = _lineage_key(
+        project_id=record.get("project_id"),
+        thread_id=record.get("thread_id"),
+        problem_id=problem_id,
+        fallback=problem_id,
+    )
+    examples = [
         _example_record(
             version=version,
             task_family="execution_diagnosis",
@@ -393,6 +526,7 @@ def _examples_from_problem_execution(
             source_kind="problem_execution",
             source_id=problem_id,
             source_file="problem_executions.jsonl",
+            lineage_key=lineage,
             input_context={
                 "problem": record.get("problem"),
                 "domain": record.get("domain"),
@@ -413,12 +547,55 @@ def _examples_from_problem_execution(
             tags=("runtime", "dependency_diagnosis"),
         )
     ]
+    sandbox_policy = record.get("sandbox_policy") if isinstance(record.get("sandbox_policy"), dict) else {}
+    if sandbox_policy:
+        writable_mounts = _ensure_list(sandbox_policy.get("writable_mounts"))
+        examples.append(
+            _example_record(
+                version=version,
+                task_family="sandbox_policy_reasoning",
+                task_name="execution_report_sandbox_to_write_scope_assessment",
+                source_kind="problem_execution",
+                source_id=f"{problem_id}:sandbox",
+                source_file="problem_executions.jsonl",
+                lineage_key=lineage,
+                input_context={
+                    "problem": record.get("problem"),
+                    "status": record.get("status"),
+                    "execution_mode": record.get("execution_mode"),
+                    "sandbox_mode": sandbox_policy.get("mode"),
+                    "profile": sandbox_policy.get("profile"),
+                    "network_policy": sandbox_policy.get("network_policy"),
+                    "read_only_mounts": _ensure_list(sandbox_policy.get("read_only_mounts"))[:8],
+                    "writable_mounts": writable_mounts[:8],
+                    "artifact_dir": sandbox_policy.get("artifact_dir"),
+                    "workspace_root": sandbox_policy.get("workspace_root"),
+                },
+                target={
+                    "artifact_only_write_scope": bool(sandbox_policy.get("artifact_dir"))
+                    and bool(writable_mounts)
+                    and all(str(item).startswith(str(sandbox_policy.get("artifact_dir"))) for item in writable_mounts),
+                    "network_policy": sandbox_policy.get("network_policy"),
+                    "operator_assessment": (
+                        "sandbox_ok_for_production"
+                        if sandbox_policy.get("profile") == "production"
+                        and sandbox_policy.get("network_policy") == "off"
+                        else "sandbox_requires_operator_review"
+                    ),
+                },
+                repo_root=repo_root,
+                state_dir=state_dir,
+                tags=("sandbox", "runtime", "policy"),
+            )
+        )
+    return examples
 
 
 def _examples_from_verification_report(
     record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
 ) -> list[dict[str, Any]]:
     trial_id = str(record.get("trial_id") or "unknown-trial")
+    lineage = _lineage_key(trial_id=trial_id, fallback=trial_id)
     seed_variance = record.get("seed_variance") if isinstance(record.get("seed_variance"), dict) else {}
     calibration = record.get("calibration") if isinstance(record.get("calibration"), dict) else {}
     ablations = _ensure_list(record.get("ablations"))[:5]
@@ -430,6 +607,7 @@ def _examples_from_verification_report(
             source_kind="verification_report",
             source_id=trial_id,
             source_file="verification_reports.jsonl",
+            lineage_key=lineage,
             input_context={
                 "trial_id": trial_id,
                 "control_score": record.get("control_score"),
@@ -473,6 +651,12 @@ def _examples_from_research_decision(
     record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
 ) -> list[dict[str, Any]]:
     decision_id = str(record.get("decision_id") or "unknown-decision")
+    lineage = _lineage_key(
+        thread_id=record.get("thread_id"),
+        problem_id=record.get("problem_id"),
+        trial_id=record.get("trial_id"),
+        fallback=decision_id,
+    )
     evidence_bundle = record.get("evidence_bundle") if isinstance(record.get("evidence_bundle"), dict) else {}
     traces = _ensure_list(evidence_bundle.get("traces"))[:4]
     hypotheses = _compact_hypotheses(record.get("hypotheses"))
@@ -484,6 +668,7 @@ def _examples_from_research_decision(
             source_kind="research_decision",
             source_id=decision_id,
             source_file="research_decisions.jsonl",
+            lineage_key=lineage,
             input_context={
                 "prompt": record.get("prompt"),
                 "mode": record.get("mode"),
@@ -510,6 +695,7 @@ def _examples_from_research_project(
     record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
 ) -> list[dict[str, Any]]:
     project_id = str(record.get("project_id") or "unknown-project")
+    lineage = _lineage_key(project_id=project_id, fallback=project_id)
     resume_snapshot = record.get("resume_snapshot") if isinstance(record.get("resume_snapshot"), dict) else {}
     budget = record.get("budget_ledger") if isinstance(record.get("budget_ledger"), dict) else {}
     next_action = None
@@ -525,6 +711,7 @@ def _examples_from_research_project(
             source_kind="research_project",
             source_id=project_id,
             source_file="research_projects.json",
+            lineage_key=lineage,
             input_context={
                 "title": record.get("title"),
                 "goal": record.get("goal"),
@@ -552,6 +739,11 @@ def _examples_from_falsification_plan(
     record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
 ) -> list[dict[str, Any]]:
     plan_id = str(record.get("plan_id") or "unknown-plan")
+    lineage = _lineage_key(
+        project_id=record.get("project_id"),
+        thread_id=record.get("thread_id"),
+        fallback=plan_id,
+    )
     coverage = record.get("coverage") if isinstance(record.get("coverage"), dict) else {}
     tests = _ensure_list(record.get("tests"))[:6]
     return [
@@ -562,6 +754,7 @@ def _examples_from_falsification_plan(
             source_kind="falsification_plan",
             source_id=plan_id,
             source_file="falsification_plans.jsonl",
+            lineage_key=lineage,
             input_context={
                 "project_id": record.get("project_id"),
                 "thread_id": record.get("thread_id"),
@@ -593,6 +786,7 @@ def _examples_from_project_priority_record(
     record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
 ) -> list[dict[str, Any]]:
     record_id = str(record.get("record_id") or record.get("project_id") or "unknown-priority")
+    lineage = _lineage_key(project_id=record.get("project_id"), fallback=record_id)
     return [
         _example_record(
             version=version,
@@ -601,6 +795,7 @@ def _examples_from_project_priority_record(
             source_kind="project_priority_record",
             source_id=record_id,
             source_file="project_priority_records.jsonl",
+            lineage_key=lineage,
             input_context={
                 "project_id": record.get("project_id"),
                 "action_id": record.get("action_id"),
@@ -627,6 +822,10 @@ def _examples_from_portfolio_decision(
     record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
 ) -> list[dict[str, Any]]:
     decision_id = str(record.get("decision_id") or "unknown-portfolio-decision")
+    lineage = _lineage_key(
+        project_id=record.get("selected_project_id"),
+        fallback=decision_id,
+    )
     return [
         _example_record(
             version=version,
@@ -635,6 +834,7 @@ def _examples_from_portfolio_decision(
             source_kind="portfolio_decision",
             source_id=decision_id,
             source_file="portfolio_decisions.jsonl",
+            lineage_key=lineage,
             input_context={
                 "selected_project_id": record.get("selected_project_id"),
                 "selected_action_id": record.get("selected_action_id"),
@@ -655,6 +855,314 @@ def _examples_from_portfolio_decision(
     ]
 
 
+def _examples_from_claim_verdict(
+    record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
+) -> list[dict[str, Any]]:
+    verdict_id = str(record.get("verdict_id") or record.get("trial_id") or "unknown-verdict")
+    lineage = _lineage_key(
+        problem_id=record.get("benchmark_problem_id"),
+        trial_id=record.get("trial_id"),
+        fallback=verdict_id,
+    )
+    linkage_status = str(record.get("linkage_status") or "none")
+    canonical_required = bool(record.get("canonical_benchmark_required"))
+    canonical_satisfied = bool(record.get("canonical_benchmark_satisfied"))
+    verdict_status = str(record.get("status") or "insufficient_evidence")
+    lineage_ok = linkage_status == "exact" and bool(record.get("verdict_inputs_complete"))
+    if verdict_status in {"accepted", "provisional"} and canonical_required and not canonical_satisfied:
+        operator_language = "promotion_blocked_missing_canonical_support"
+    elif not lineage_ok:
+        operator_language = "lineage_incomplete_or_ambiguous"
+    elif verdict_status == "contradicted":
+        operator_language = "claim_under_active_contradiction"
+    else:
+        operator_language = "lineage_ready_for_review"
+    return [
+        _example_record(
+            version=version,
+            task_family="claim_lineage_audit",
+            task_name="claim_verdict_to_lineage_audit",
+            source_kind="claim_verdict",
+            source_id=verdict_id,
+            source_file="claim_verdicts.jsonl",
+            lineage_key=lineage,
+            input_context={
+                "trial_id": record.get("trial_id"),
+                "status": verdict_status,
+                "benchmark_problem_id": record.get("benchmark_problem_id"),
+                "benchmark_execution_mode": record.get("benchmark_execution_mode"),
+                "supporting_benchmark_ids": _ensure_list(record.get("supporting_benchmark_ids"))[:6],
+                "supporting_benchmark_names": _ensure_list(record.get("supporting_benchmark_names"))[:6],
+                "linkage_status": linkage_status,
+                "linkage_note": record.get("linkage_note"),
+                "canonical_comparability_source": record.get("canonical_comparability_source"),
+                "verdict_inputs_complete": record.get("verdict_inputs_complete"),
+                "canonical_benchmark_required": canonical_required,
+                "canonical_benchmark_satisfied": canonical_satisfied,
+                "confidence": record.get("confidence"),
+            },
+            target={
+                "lineage_ok": lineage_ok,
+                "canonical_support_ok": (not canonical_required) or canonical_satisfied,
+                "operator_language": operator_language,
+                "recommended_audit_action": (
+                    "review_claim_for_promotion"
+                    if lineage_ok and ((not canonical_required) or canonical_satisfied)
+                    else "hold_claim_and_recheck_lineage"
+                ),
+            },
+            repo_root=repo_root,
+            state_dir=state_dir,
+            tags=("claims", "lineage", "benchmark_truth"),
+        )
+    ]
+
+
+def _examples_from_evidence_debt_record(
+    record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
+) -> list[dict[str, Any]]:
+    record_id = str(record.get("record_id") or record.get("project_id") or "unknown-evidence-debt")
+    lineage = _lineage_key(project_id=record.get("project_id"), fallback=record_id)
+    debt_components = {
+        "falsification_gap": float(record.get("falsification_gap") or 0.0),
+        "replication_gap": float(record.get("replication_gap") or 0.0),
+        "benchmark_gap": float(record.get("benchmark_gap") or 0.0),
+        "claim_linkage_gap": float(record.get("claim_linkage_gap") or 0.0),
+        "calibration_gap": float(record.get("calibration_gap") or 0.0),
+    }
+    ordered_gaps = [
+        key
+        for key, value in sorted(debt_components.items(), key=lambda item: (-item[1], item[0]))
+        if value > 0.0
+    ]
+    overall_debt = float(record.get("overall_debt") or 0.0)
+    promotion_blocked = bool(record.get("promotion_blocked"))
+    return [
+        _example_record(
+            version=version,
+            task_family="evidence_debt_judgement",
+            task_name="evidence_debt_record_to_promotion_gate",
+            source_kind="evidence_debt_record",
+            source_id=record_id,
+            source_file="evidence_debt_records.jsonl",
+            lineage_key=lineage,
+            input_context={
+                "project_id": record.get("project_id"),
+                **debt_components,
+                "overall_debt": overall_debt,
+                "promotion_blocked": promotion_blocked,
+                "rationale": _ensure_list(record.get("rationale"))[:6],
+            },
+            target={
+                "promotion_gate": "blocked" if promotion_blocked else "open",
+                "recommended_state": "defer" if promotion_blocked or overall_debt >= 0.45 else "continue",
+                "primary_gaps": ordered_gaps[:3],
+                "operator_language": (
+                    "under_proved_result_requires_more_evidence"
+                    if promotion_blocked
+                    else "evidence_debt_present_but_not_blocking"
+                ),
+            },
+            repo_root=repo_root,
+            state_dir=state_dir,
+            tags=("evidence", "promotion_gate", "portfolio"),
+        )
+    ]
+
+
+def _examples_from_project_staleness_record(
+    record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
+) -> list[dict[str, Any]]:
+    record_id = str(record.get("record_id") or record.get("project_id") or "unknown-staleness")
+    lineage = _lineage_key(project_id=record.get("project_id"), fallback=record_id)
+    level = str(record.get("staleness_level") or "fresh")
+    resume_candidate = bool(record.get("resume_candidate"))
+    closure_candidate = bool(record.get("closure_candidate"))
+    if closure_candidate:
+        next_action = "consider_retire_or_close"
+    elif resume_candidate:
+        next_action = "surface_for_resume_review"
+    elif level in {"stale", "critical"}:
+        next_action = "inspect_for_blockers_or_reprioritize"
+    else:
+        next_action = "continue_monitoring"
+    return [
+        _example_record(
+            version=version,
+            task_family="portfolio_staleness_recovery",
+            task_name="staleness_record_to_resume_or_retire_action",
+            source_kind="project_staleness_record",
+            source_id=record_id,
+            source_file="project_staleness_records.jsonl",
+            lineage_key=lineage,
+            input_context={
+                "project_id": record.get("project_id"),
+                "last_progress_at": record.get("last_progress_at"),
+                "hours_since_progress": record.get("hours_since_progress"),
+                "staleness_level": level,
+                "reason": record.get("reason"),
+                "resume_candidate": resume_candidate,
+                "closure_candidate": closure_candidate,
+            },
+            target={
+                "recommended_operator_action": next_action,
+                "resume_candidate": resume_candidate,
+                "closure_candidate": closure_candidate,
+                "staleness_level": level,
+            },
+            repo_root=repo_root,
+            state_dir=state_dir,
+            tags=("portfolio", "staleness", "resume"),
+        )
+    ]
+
+
+def _examples_from_endpoint_record(
+    record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
+) -> list[dict[str, Any]]:
+    endpoint_name = str(record.get("endpoint_name") or "unknown-endpoint")
+    lineage = _lineage_key(endpoint_name=endpoint_name, fallback=endpoint_name)
+    health = record.get("health") if isinstance(record.get("health"), dict) else {}
+    inspect_paths = [
+        value
+        for value in (
+            record.get("manifest_path"),
+            record.get("stdout_log_path"),
+            record.get("stderr_log_path"),
+        )
+        if value
+    ]
+    diagnosis = (
+        "failed_endpoint_requires_log_inspection"
+        if record.get("status") == "failed"
+        else "unhealthy_endpoint_requires_health_review"
+        if health and not health.get("ok", False)
+        else "endpoint_observability_ready"
+    )
+    return [
+        _example_record(
+            version=version,
+            task_family="endpoint_observability_diagnosis",
+            task_name="endpoint_record_to_operator_diagnosis",
+            source_kind="endpoint_record",
+            source_id=endpoint_name,
+            source_file="inference_endpoints.json",
+            lineage_key=lineage,
+            input_context={
+                "endpoint_name": endpoint_name,
+                "checkpoint_name": record.get("checkpoint_name"),
+                "role": record.get("role"),
+                "backend": record.get("backend"),
+                "status": record.get("status"),
+                "last_error": record.get("last_error"),
+                "last_health_at": record.get("last_health_at"),
+                "trust_remote_code": record.get("trust_remote_code"),
+                "health": {
+                    "status": health.get("status"),
+                    "ok": health.get("ok"),
+                    "detail": health.get("detail"),
+                    "http_status": health.get("http_status"),
+                },
+                "inspect_paths": inspect_paths,
+            },
+            target={
+                "diagnosis": diagnosis,
+                "restart_recommended": record.get("status") in {"failed", "stopped"} or (health and not health.get("ok", False)),
+                "inspect_paths": inspect_paths,
+                "trust_policy": "remote_code_enabled" if record.get("trust_remote_code") else "remote_code_disabled",
+            },
+            repo_root=repo_root,
+            state_dir=state_dir,
+            tags=("endpoints", "observability", "ops"),
+        )
+    ]
+
+
+def _examples_from_run_manifest(
+    record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path, source_file: str
+) -> list[dict[str, Any]]:
+    manifest_id = str(record.get("manifest_id") or "unknown-manifest")
+    lineage = _lineage_key(
+        problem_id=record.get("problem_id"),
+        trial_id=record.get("trial_id"),
+        manifest_id=manifest_id,
+        fallback=manifest_id,
+    )
+    sandbox_policy = record.get("sandbox_policy") if isinstance(record.get("sandbox_policy"), dict) else {}
+    examples: list[dict[str, Any]] = []
+    if (
+        not bool(record.get("reproducibility_complete"))
+        or _ensure_list(record.get("unresolved_packages"))
+        or record.get("lock_incomplete_reason")
+    ):
+        examples.append(
+            _example_record(
+                version=version,
+                task_family="reproducibility_refusal",
+                task_name="run_manifest_to_lock_refusal",
+                source_kind="run_manifest",
+                source_id=manifest_id,
+                source_file=source_file,
+                lineage_key=lineage,
+                input_context={
+                    "kind": record.get("kind"),
+                    "trial_id": record.get("trial_id"),
+                    "problem_id": record.get("problem_id"),
+                    "reproducibility_complete": record.get("reproducibility_complete"),
+                    "unresolved_packages": _ensure_list(record.get("unresolved_packages"))[:12],
+                    "lock_incomplete_reason": record.get("lock_incomplete_reason"),
+                },
+                target={
+                    "should_refuse_promotion": True,
+                    "operator_language": "manifest_lock_incomplete_refuse_or_downgrade",
+                    "next_action": "pin_dependencies_and_rebuild_manifest",
+                },
+                repo_root=repo_root,
+                state_dir=state_dir,
+                tags=("reproducibility", "lock_refusal"),
+            )
+        )
+    if sandbox_policy:
+        writable_mounts = _ensure_list(sandbox_policy.get("writable_mounts"))
+        examples.append(
+            _example_record(
+                version=version,
+                task_family="sandbox_policy_reasoning",
+                task_name="run_manifest_sandbox_to_write_scope_assessment",
+                source_kind="run_manifest",
+                source_id=f"{manifest_id}:sandbox",
+                source_file=source_file,
+                lineage_key=lineage,
+                input_context={
+                    "kind": record.get("kind"),
+                    "sandbox_mode": sandbox_policy.get("mode"),
+                    "profile": sandbox_policy.get("profile"),
+                    "network_policy": sandbox_policy.get("network_policy"),
+                    "read_only_mounts": _ensure_list(sandbox_policy.get("read_only_mounts"))[:8],
+                    "writable_mounts": writable_mounts[:8],
+                    "artifact_dir": sandbox_policy.get("artifact_dir"),
+                    "workspace_root": sandbox_policy.get("workspace_root"),
+                },
+                target={
+                    "artifact_only_write_scope": bool(sandbox_policy.get("artifact_dir"))
+                    and bool(writable_mounts)
+                    and all(str(item).startswith(str(sandbox_policy.get("artifact_dir"))) for item in writable_mounts),
+                    "network_policy": sandbox_policy.get("network_policy"),
+                    "operator_assessment": (
+                        "production_sandbox_ok"
+                        if sandbox_policy.get("profile") == "production"
+                        and sandbox_policy.get("network_policy") == "off"
+                        else "non_production_or_broad_sandbox_requires_review"
+                    ),
+                },
+                repo_root=repo_root,
+                state_dir=state_dir,
+                tags=("sandbox", "runtime", "policy"),
+            )
+        )
+    return examples
+
+
 def _examples_from_tcl_payload_bundle(
     bundle: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
 ) -> list[dict[str, Any]]:
@@ -667,6 +1175,7 @@ def _examples_from_tcl_payload_bundle(
     source_file = bundle.get("summary_file") or "tar_runs/payload_summary.json"
     data_provenance = config.get("data_provenance") if isinstance(config.get("data_provenance"), dict) else {}
     backend_provenance = config.get("backend_provenance") if isinstance(config.get("backend_provenance"), dict) else {}
+    lineage = _lineage_key(trial_id=trial_id, fallback=trial_id)
     return [
         _example_record(
             version=version,
@@ -675,6 +1184,7 @@ def _examples_from_tcl_payload_bundle(
             source_kind="tcl_payload_summary",
             source_id=trial_id,
             source_file=str(source_file),
+            lineage_key=lineage,
             input_context={
                 "trial_id": trial_id,
                 "strategy_family": summary.get("strategy_family") or config.get("strategy_family"),
@@ -721,6 +1231,7 @@ def _examples_from_tcl_trace_bundle(
     regime = _derive_tcl_regime(last_metric, thresholds)
     trial_id = str(last_metric.get("trial_id") or bundle.get("source_id") or "unknown-tcl-trace")
     source_file = bundle.get("trace_file") or "tar_runs/thermo_metrics.jsonl"
+    lineage = _lineage_key(trial_id=trial_id, fallback=trial_id)
     return [
         _example_record(
             version=version,
@@ -729,6 +1240,7 @@ def _examples_from_tcl_trace_bundle(
             source_kind="tcl_thermo_trace",
             source_id=trial_id,
             source_file=str(source_file),
+            lineage_key=lineage,
             input_context={
                 "trial_id": trial_id,
                 "num_steps": len(metrics),
@@ -763,6 +1275,7 @@ def _examples_from_recovery_state(
     record: dict[str, Any], *, version: str, repo_root: Path, state_dir: Path
 ) -> list[dict[str, Any]]:
     trial_id = str(record.get("trial_id") or "unknown-recovery")
+    lineage = _lineage_key(trial_id=trial_id, fallback=trial_id)
     recovery_target = _derive_tcl_recovery_action(record)
     return [
         _example_record(
@@ -772,6 +1285,7 @@ def _examples_from_recovery_state(
             source_kind="tcl_recovery_state",
             source_id=trial_id,
             source_file="recovery.json",
+            lineage_key=lineage,
             input_context={
                 "trial_id": trial_id,
                 "status": record.get("status"),
@@ -811,6 +1325,35 @@ def _iter_research_projects(path: Path) -> list[dict[str, Any]]:
             return normalized
         return [payload]
     return []
+
+
+def _iter_endpoint_records(path: Path) -> list[dict[str, Any]]:
+    payload = _maybe_json(path)
+    if payload is None:
+        return []
+    if isinstance(payload, dict):
+        entries = payload.get("entries")
+        if isinstance(entries, list):
+            return [item for item in entries if isinstance(item, dict)]
+        return [payload]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _iter_run_manifests(state_dir: Path) -> list[tuple[str, dict[str, Any]]]:
+    manifests_dir = state_dir / "manifests"
+    if not manifests_dir.exists():
+        return []
+    manifests: list[tuple[str, dict[str, Any]]] = []
+    for path in sorted(manifests_dir.glob("*.json")):
+        payload = _maybe_json(path)
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("manifest_version") != "tar.run.v1":
+            continue
+        manifests.append((_relative_or_name(path, state_dir.parent), payload))
+    return manifests
 
 
 def _iter_tcl_payload_bundles(repo_root: Path) -> list[dict[str, Any]]:
@@ -877,6 +1420,13 @@ def _collect_examples_for_state_dir(state_dir: Path, *, version: str) -> list[di
     )
     examples.extend(
         example
+        for record in _maybe_jsonl(state_dir / "claim_verdicts.jsonl")
+        for example in _examples_from_claim_verdict(
+            record, version=version, repo_root=repo_root, state_dir=state_dir
+        )
+    )
+    examples.extend(
+        example
         for record in _maybe_jsonl(state_dir / "falsification_plans.jsonl")
         for example in _examples_from_falsification_plan(
             record, version=version, repo_root=repo_root, state_dir=state_dir
@@ -891,9 +1441,41 @@ def _collect_examples_for_state_dir(state_dir: Path, *, version: str) -> list[di
     )
     examples.extend(
         example
+        for record in _maybe_jsonl(state_dir / "evidence_debt_records.jsonl")
+        for example in _examples_from_evidence_debt_record(
+            record, version=version, repo_root=repo_root, state_dir=state_dir
+        )
+    )
+    examples.extend(
+        example
+        for record in _maybe_jsonl(state_dir / "project_staleness_records.jsonl")
+        for example in _examples_from_project_staleness_record(
+            record, version=version, repo_root=repo_root, state_dir=state_dir
+        )
+    )
+    examples.extend(
+        example
         for record in _maybe_jsonl(state_dir / "portfolio_decisions.jsonl")
         for example in _examples_from_portfolio_decision(
             record, version=version, repo_root=repo_root, state_dir=state_dir
+        )
+    )
+    examples.extend(
+        example
+        for record in _iter_endpoint_records(state_dir / "inference_endpoints.json")
+        for example in _examples_from_endpoint_record(
+            record, version=version, repo_root=repo_root, state_dir=state_dir
+        )
+    )
+    examples.extend(
+        example
+        for source_file, record in _iter_run_manifests(state_dir)
+        for example in _examples_from_run_manifest(
+            record,
+            version=version,
+            repo_root=repo_root,
+            state_dir=state_dir,
+            source_file=source_file,
         )
     )
     examples.extend(
@@ -917,7 +1499,49 @@ def _collect_examples_for_state_dir(state_dir: Path, *, version: str) -> list[di
                 recovery_state, version=version, repo_root=repo_root, state_dir=state_dir
             )
         )
+    examples.extend(
+        example
+        for record in _maybe_jsonl(state_dir / "recovery_history.jsonl")
+        for example in _examples_from_recovery_state(
+            record, version=version, repo_root=repo_root, state_dir=state_dir
+        )
+    )
     return examples
+
+
+def _iter_source_artifact_paths(state_dir: Path) -> list[Path]:
+    repo_root = state_dir.parent.resolve()
+    paths: list[Path] = []
+    for relative in STATE_ARTIFACT_FILES:
+        path = state_dir / relative
+        if path.exists():
+            paths.append(path)
+    manifests_dir = state_dir / "manifests"
+    if manifests_dir.exists():
+        paths.extend(sorted(manifests_dir.glob("*.json")))
+    tar_runs_root = repo_root / "tar_runs"
+    if tar_runs_root.exists():
+        for summary_path in sorted(tar_runs_root.rglob("payload_summary.json")):
+            paths.append(summary_path)
+            config_path = summary_path.with_name("config.json")
+            thermo_path = summary_path.with_name("thermo_metrics.jsonl")
+            if config_path.exists():
+                paths.append(config_path)
+            if thermo_path.exists():
+                paths.append(thermo_path)
+    deduped = {str(path.resolve()): path for path in paths}
+    return [deduped[key] for key in sorted(deduped)]
+
+
+def _fingerprint_file(path: Path, *, root: Path) -> dict[str, Any]:
+    payload = {
+        "path": _relative_or_name(path, root),
+        "sha256": _sha256_file(path),
+        "size_bytes": path.stat().st_size,
+    }
+    if path.suffix == ".jsonl":
+        payload["records"] = _count_nonempty_lines(path)
+    return payload
 
 
 def build_master_dataset(
@@ -929,9 +1553,11 @@ def build_master_dataset(
     )
 
     deduped: dict[str, dict[str, Any]] = {}
+    pre_dedup_count = 0
     for state_dir in normalized_state_dirs:
         for example in _collect_examples_for_state_dir(state_dir.resolve(), version=version):
-            deduped[example["example_id"]] = example
+            pre_dedup_count += 1
+            deduped[example["dedupe_key"]] = example
     examples = sorted(deduped.values(), key=lambda item: item["example_id"])
 
     master_path = output_dir / "tar_master_dataset.jsonl"
@@ -942,12 +1568,27 @@ def build_master_dataset(
     split_examples: dict[str, list[dict[str, Any]]] = {"train": [], "validation": [], "test": []}
     task_families = Counter()
     source_kinds = Counter()
+    lineage_to_split: dict[str, str] = {}
+    lineages_by_split: dict[str, set[str]] = defaultdict(set)
+    families_by_split: dict[str, Counter[str]] = {
+        "train": Counter(),
+        "validation": Counter(),
+        "test": Counter(),
+    }
+
+    for example in examples:
+        split = _hash_split(str(example.get("lineage_key") or example["example_id"]))
+        example["split"] = split
+        task_families[example["task_family"]] += 1
+        source_kinds[example["source_kind"]] += 1
+        split_examples[split].append(example)
+        families_by_split[split][example["task_family"]] += 1
+        lineage_key = str(example.get("lineage_key") or example["example_id"])
+        lineages_by_split[split].add(lineage_key)
+        lineage_to_split.setdefault(lineage_key, split)
 
     with master_path.open("w", encoding="utf-8") as handle:
         for example in examples:
-            task_families[example["task_family"]] += 1
-            source_kinds[example["source_kind"]] += 1
-            split_examples[example["split"]].append(example)
             handle.write(json.dumps(example, ensure_ascii=True) + "\n")
 
     for path, split_name in (
@@ -959,20 +1600,45 @@ def build_master_dataset(
             for example in split_examples[split_name]:
                 handle.write(json.dumps(example, ensure_ascii=True) + "\n")
 
+    source_artifacts = [
+        _fingerprint_file(path, root=state_dir.parent.resolve())
+        for state_dir in normalized_state_dirs
+        for path in _iter_source_artifact_paths(state_dir.resolve())
+    ]
+    output_files = {
+        "master": _fingerprint_file(master_path, root=output_dir),
+        "train": _fingerprint_file(train_path, root=output_dir),
+        "validation": _fingerprint_file(validation_path, root=output_dir),
+        "test": _fingerprint_file(test_path, root=output_dir),
+    }
     manifest = {
         "dataset_version": version,
-        "state_dirs": [str(path.resolve()) for path in normalized_state_dirs],
-        "output_dir": str(output_dir),
+        "state_dirs": [
+            _relative_or_name(path.resolve(), output_dir.parent.resolve())
+            for path in normalized_state_dirs
+        ],
+        "output_dir": str(output_dir.resolve()),
         "records": len(examples),
+        "pre_dedup_records": pre_dedup_count,
+        "duplicate_examples_removed": pre_dedup_count - len(examples),
+        "dedupe_strategy": "stable_dedupe_key",
         "splits": {name: len(items) for name, items in split_examples.items()},
+        "split_lineages": {
+            name: len(items)
+            for name, items in sorted(lineages_by_split.items())
+        },
+        "split_task_families": {
+            name: dict(sorted(counter.items()))
+            for name, counter in sorted(families_by_split.items())
+        },
+        "split_integrity": {
+            "lineage_safe": True,
+            "lineage_count": len(lineage_to_split),
+        },
         "task_families": dict(sorted(task_families.items())),
         "source_kinds": dict(sorted(source_kinds.items())),
-        "files": {
-            "master": str(master_path),
-            "train": str(train_path),
-            "validation": str(validation_path),
-            "test": str(test_path),
-        },
+        "files": output_files,
+        "source_artifacts": source_artifacts,
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest

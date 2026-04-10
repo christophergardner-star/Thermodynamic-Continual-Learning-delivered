@@ -691,6 +691,19 @@ class TARStateStore:
         with self.audit_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
 
+    def iter_audit_events(self) -> Iterable[Dict[str, Any]]:
+        if not self.audit_log_path.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        for line in self.audit_log_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(json.loads(line))
+        return rows
+
+    def latest_audit_events(self, count: int = 20) -> List[Dict[str, Any]]:
+        rows = list(self.iter_audit_events())
+        return rows[-count:]
+
     def write_policy_bundle(
         self,
         policy: DirectorPolicy,

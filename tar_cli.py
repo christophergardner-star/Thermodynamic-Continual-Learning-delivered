@@ -145,6 +145,11 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--pause-project", action="store_true", dest="pause_project")
     group.add_argument("--resume-project", action="store_true", dest="resume_project")
     group.add_argument("--next-action", action="store_true", dest="next_action")
+    group.add_argument("--operator-view", action="store_true", dest="operator_view")
+    group.add_argument("--project-timeline", action="store_true", dest="project_timeline")
+    group.add_argument("--evidence-map", action="store_true", dest="evidence_map")
+    group.add_argument("--claim-lineage", action="store_true", dest="claim_lineage")
+    group.add_argument("--resume-dashboard", action="store_true", dest="resume_dashboard")
     group.add_argument("--portfolio-status", action="store_true", dest="portfolio_status")
     group.add_argument("--portfolio-review", action="store_true", dest="portfolio_review")
     group.add_argument("--portfolio-decide", action="store_true", dest="portfolio_decide")
@@ -239,6 +244,20 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
         return orchestrator.project_status(project.project_id)
     if args.next_action:
         return orchestrator.next_action(args.project_id or "")
+    if args.operator_view:
+        return orchestrator.operator_view(
+            include_blocked=args.include_blocked,
+            limit=args.max_results,
+            mode=args.prioritization_mode,
+        )
+    if args.project_timeline:
+        return orchestrator.project_timeline(args.project_id or "", limit=args.max_results)
+    if args.evidence_map:
+        return orchestrator.project_evidence_map(args.project_id or "")
+    if args.claim_lineage:
+        return orchestrator.claim_lineage(args.project_id or "")
+    if args.resume_dashboard:
+        return orchestrator.resume_dashboard(args.project_id or "")
     if args.portfolio_status:
         return orchestrator.portfolio_status(
             include_blocked=args.include_blocked,
@@ -649,6 +668,136 @@ def _render_next_action(payload: Dict[str, Any]) -> str:
     )
 
 
+def _render_operator_view(payload: Dict[str, Any]) -> str:
+    counts = payload.get("project_counts") or {}
+    health = payload.get("portfolio_health") or {}
+    lines = [
+        f"Generated At: {payload.get('generated_at', 'n/a')}",
+        f"Projects: total={counts.get('total', 0)} active={counts.get('active', 0)} paused={counts.get('paused', 0)} blocked={counts.get('blocked', 0)} stale={counts.get('stale', 0)}",
+        f"Portfolio Health: selected={health.get('selected_project_id', 'n/a')} resume_candidates={health.get('resume_candidates', 0)} promotion_blocked={health.get('promotion_blocked_projects', 0)}",
+        "",
+        "Active Projects:",
+    ]
+    active_projects = payload.get("active_projects") or []
+    if active_projects:
+        for item in active_projects:
+            lines.append(
+                f"- {item.get('title', item.get('project_id', 'n/a'))} :: status={item.get('status', 'n/a')} next={item.get('next_action', 'n/a')}"
+            )
+    else:
+        lines.append("No active projects.")
+    lines.extend(
+        [
+            "",
+            "Top Action Candidates:",
+            _render_ranked_candidates(payload.get("top_candidates", [])),
+        ]
+    )
+    promotion_blocked = payload.get("promotion_blocked_projects") or []
+    if promotion_blocked:
+        lines.append("")
+        lines.append(
+            "Promotion Blocked Projects: "
+            + ", ".join(item.get("project_id", "n/a") for item in promotion_blocked)
+        )
+    return "\n".join(lines)
+
+
+def _render_project_timeline(payload: Dict[str, Any]) -> str:
+    events = payload.get("events", [])
+    if not events:
+        return "No project timeline events recorded."
+    lines = [
+        f"Project: {payload.get('project_title', payload.get('project_id', 'n/a'))}",
+        f"Project ID: {payload.get('project_id', 'n/a')}",
+        f"Event Count: {payload.get('event_count', len(events))}",
+        "",
+        "Timeline:",
+    ]
+    for item in events:
+        lines.append(
+            f"- {item.get('timestamp', 'n/a')} :: {item.get('event_type', 'event')} :: {item.get('summary', 'n/a')}"
+        )
+    return "\n".join(lines)
+
+
+def _render_evidence_map(payload: Dict[str, Any]) -> str:
+    counts = payload.get("evidence_counts") or {}
+    benchmark_context = payload.get("benchmark_context") or {}
+    latest_debt = payload.get("latest_evidence_debt") or {}
+    lines = [
+        f"Project: {payload.get('project_title', payload.get('project_id', 'n/a'))}",
+        f"Project ID: {payload.get('project_id', 'n/a')}",
+        f"Evidence Summary: {payload.get('latest_evidence_summary', 'n/a')}",
+        f"Supporting Evidence: {counts.get('supporting', 0)}",
+        f"Contradicting Evidence: {counts.get('contradicting', 0)}",
+        f"Cited Research IDs: {', '.join(payload.get('cited_research_ids', [])) or 'n/a'}",
+        f"Retrieved Memory IDs: {', '.join(payload.get('retrieved_memory_ids', [])) or 'n/a'}",
+        f"Benchmark Context: ids={', '.join(benchmark_context.get('benchmark_ids', [])) or 'n/a'} alignment={benchmark_context.get('benchmark_alignment', 'n/a')} comparable={benchmark_context.get('canonical_comparable', False)}",
+        f"Latest Evidence Debt: overall={latest_debt.get('overall_debt', 'n/a')} blocked={latest_debt.get('promotion_blocked', False)}",
+    ]
+    contradiction_review = payload.get("contradiction_review")
+    if contradiction_review:
+        lines.append("Contradiction Review Present: yes")
+    claim_verdicts = payload.get("claim_verdicts") or []
+    if claim_verdicts:
+        lines.append("Claim Verdicts:")
+        for item in claim_verdicts:
+            lines.append(
+                f"- {item.get('verdict_id', 'n/a')} :: status={item.get('status', 'n/a')} linkage={item.get('linkage_status', 'n/a')} confidence={item.get('confidence', 'n/a')}"
+            )
+    return "\n".join(lines)
+
+
+def _render_claim_lineage(payload: Dict[str, Any]) -> str:
+    lines = [
+        f"Project: {payload.get('project_title', payload.get('project_id', 'n/a'))}",
+        f"Project ID: {payload.get('project_id', 'n/a')}",
+        f"Problem IDs: {', '.join(payload.get('problem_ids', [])) or 'n/a'}",
+        f"Studies: {len(payload.get('studies', []))}",
+        f"Executions: {len(payload.get('executions', []))}",
+        f"Research Decisions: {len(payload.get('research_decisions', []))}",
+        f"Claim Verdicts: {len(payload.get('verdicts', []))}",
+    ]
+    verdicts = payload.get("verdicts") or []
+    if verdicts:
+        lines.append("Verdicts:")
+        for item in verdicts:
+            lines.append(
+                f"- {item.get('created_at', 'n/a')} :: {item.get('status', 'n/a')} benchmark_problem={item.get('benchmark_problem_id', 'n/a')} linkage={item.get('linkage_status', 'n/a')} source={item.get('canonical_comparability_source', 'n/a')}"
+            )
+    return "\n".join(lines)
+
+
+def _render_resume_dashboard(payload: Dict[str, Any]) -> str:
+    project_payload = payload.get("project") or {}
+    project = project_payload.get("project", project_payload) if isinstance(project_payload, dict) else {}
+    next_action = payload.get("next_action") or {}
+    latest_debt = payload.get("latest_evidence_debt") or {}
+    latest_staleness = payload.get("latest_staleness") or {}
+    lines = [
+        f"Project: {project.get('title', project.get('project_id', 'n/a'))}",
+        f"Project ID: {project.get('project_id', 'n/a')}",
+        f"Resume State: {payload.get('resume_state', 'n/a')}",
+        f"Blockers: {', '.join(payload.get('blockers', [])) or 'none'}",
+        f"Next Action: {next_action.get('description', 'n/a')}",
+        f"Budget Remaining: {json.dumps(payload.get('budget_remaining', {}), sort_keys=True)}",
+        f"Latest Evidence Debt: overall={latest_debt.get('overall_debt', 'n/a')} blocked={latest_debt.get('promotion_blocked', False)}",
+        f"Latest Staleness: level={latest_staleness.get('staleness_level', 'n/a')} resume_candidate={latest_staleness.get('resume_candidate', False)}",
+    ]
+    priority = payload.get("latest_priority_record") or {}
+    if priority:
+        lines.append(
+            f"Latest Priority Record: score={priority.get('priority_score', 'n/a')} state={priority.get('recommended_state', 'n/a')}"
+        )
+    plan = payload.get("latest_falsification_plan") or {}
+    if plan:
+        lines.append(
+            f"Latest Falsification Plan: {plan.get('plan_id', 'n/a')} status={plan.get('status', 'n/a')} tests={len(plan.get('tests', []))}"
+        )
+    return "\n".join(lines)
+
+
 def _render_ranked_candidates(candidates: list[Dict[str, Any]]) -> str:
     if not candidates:
         return "No prioritized action candidates were available."
@@ -1054,6 +1203,45 @@ def main() -> int:
                     host=args.host,
                     port=args.port,
                 )
+            elif args.operator_view:
+                response = send_command(
+                    "operator_view",
+                    payload={
+                        "include_blocked": args.include_blocked,
+                        "limit": args.max_results,
+                        "mode": args.prioritization_mode,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.project_timeline:
+                response = send_command(
+                    "project_timeline",
+                    payload={"project_id": args.project_id or "", "limit": args.max_results},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.evidence_map:
+                response = send_command(
+                    "evidence_map",
+                    payload={"project_id": args.project_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.claim_lineage:
+                response = send_command(
+                    "claim_lineage",
+                    payload={"project_id": args.project_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.resume_dashboard:
+                response = send_command(
+                    "resume_dashboard",
+                    payload={"project_id": args.project_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
             elif args.portfolio_status:
                 response = send_command(
                     "portfolio_status",
@@ -1396,6 +1584,16 @@ def main() -> int:
             print(_render_project_list(payload))
         elif args.next_action:
             print(_render_next_action(payload))
+        elif args.operator_view:
+            print(_render_operator_view(payload))
+        elif args.project_timeline:
+            print(_render_project_timeline(payload))
+        elif args.evidence_map:
+            print(_render_evidence_map(payload))
+        elif args.claim_lineage:
+            print(_render_claim_lineage(payload))
+        elif args.resume_dashboard:
+            print(_render_resume_dashboard(payload))
         elif args.portfolio_status or args.rank_actions:
             snapshot_payload = payload.get("snapshot", payload) if args.rank_actions else payload
             candidates = snapshot_payload.get("candidates", payload.get("top_candidates", []))

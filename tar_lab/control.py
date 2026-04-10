@@ -103,6 +103,23 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
             payload = orchestrator.project_status(project.project_id)
         elif request.command == "next_action":
             payload = orchestrator.next_action(str(request.payload.get("project_id", "")))
+        elif request.command == "operator_view":
+            payload = orchestrator.operator_view(
+                include_blocked=bool(request.payload.get("include_blocked", True)),
+                limit=int(request.payload.get("limit", 5)),
+                mode=str(request.payload.get("mode", "balanced")),
+            )
+        elif request.command == "project_timeline":
+            payload = orchestrator.project_timeline(
+                str(request.payload.get("project_id", "")),
+                limit=int(request.payload.get("limit", 25)),
+            )
+        elif request.command == "evidence_map":
+            payload = orchestrator.project_evidence_map(str(request.payload.get("project_id", "")))
+        elif request.command == "claim_lineage":
+            payload = orchestrator.claim_lineage(str(request.payload.get("project_id", "")))
+        elif request.command == "resume_dashboard":
+            payload = orchestrator.resume_dashboard(str(request.payload.get("project_id", "")))
         elif request.command == "portfolio_status":
             payload = orchestrator.portfolio_status(
                 include_blocked=bool(request.payload.get("include_blocked", True)),

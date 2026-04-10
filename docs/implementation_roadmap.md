@@ -1,5 +1,19 @@
 # Post-Audit Remediation Roadmap
 
+## Status Note
+
+This document remains the historical roadmap for the remediation phase.
+
+- `WS1-WS7`: foundation phase complete
+- `WS8-WS16`: remediation phase complete
+- `WS17-WS20`: first post-remediation autonomy/control phase complete
+
+The active forward roadmap now lives in:
+
+- `docs/phase3_roadmap.md`
+
+That document is the authoritative plan for work after `WS20`.
+
 This is the authoritative roadmap after the full-system audit. Workstreams 1-7
 are considered closed at the roadmap level. This document governs the
 remediation phase required to bring the current stack from "implemented" to

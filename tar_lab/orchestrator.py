@@ -666,6 +666,24 @@ class TAROrchestrator:
         )
         return {"projects": [self.project_status(item.project_id) for item in projects]}
 
+    def _project_summary(self, project: ResearchProject) -> dict[str, Any]:
+        thread = self._project_thread(project)
+        action = self._project_action(project)
+        return {
+            "project_id": project.project_id,
+            "title": project.title,
+            "status": project.status,
+            "priority": project.priority,
+            "domain_profile": project.domain_profile,
+            "active_thread_id": project.active_thread_id,
+            "thread_status": thread.status if thread else None,
+            "confidence_state": thread.confidence_state if thread else None,
+            "next_action_id": action.action_id if action else None,
+            "next_action": action.description if action else None,
+            "latest_decision_summary": project.latest_decision_summary,
+            "updated_at": project.updated_at,
+        }
+
     def project_status(self, project_id: str) -> dict[str, Any]:
         project = self.store.get_research_project(project_id)
         if project is None:
@@ -679,6 +697,444 @@ class TAROrchestrator:
             "current_question": question.model_dump(mode="json") if question else None,
             "next_action": action.model_dump(mode="json") if action else None,
             "budget_remaining": self._budget_remaining_summary(project.budget_ledger),
+        }
+
+    def _project_studies(self, project_id: str) -> list[ProblemStudyReport]:
+        return [item for item in self.store.iter_problem_studies() if item.project_id == project_id]
+
+    def _project_executions(self, project_id: str) -> list[ProblemExecutionReport]:
+        return [item for item in self.store.iter_problem_executions() if item.project_id == project_id]
+
+    def _project_research_decisions(self, project_id: str) -> list[ResearchDecisionRecord]:
+        return [item for item in self.store.iter_research_decisions() if item.problem_id and any(study.problem_id == item.problem_id for study in self._project_studies(project_id))]
+
+    def _project_claim_verdicts(self, project_id: str) -> list[ClaimVerdict]:
+        problem_ids = {item.problem_id for item in self._project_studies(project_id)}
+        return [
+            item
+            for item in self.store.iter_claim_verdicts()
+            if item.benchmark_problem_id in problem_ids
+        ]
+
+    def _project_falsification_plans(self, project_id: str) -> list[FalsificationPlan]:
+        return [item for item in self.store.iter_falsification_plans() if item.project_id == project_id]
+
+    def _project_priority_records(self, project_id: str) -> list[ProjectPriorityRecord]:
+        return [item for item in self.store.iter_project_priority_records() if item.project_id == project_id]
+
+    def _project_related_portfolio_decisions(self, project_id: str) -> list[PortfolioDecision]:
+        related: list[PortfolioDecision] = []
+        for item in self.store.iter_portfolio_decisions():
+            if project_id == item.selected_project_id or project_id in {
+                *item.deferred_project_ids,
+                *item.parked_project_ids,
+                *item.resumed_project_ids,
+                *item.escalated_project_ids,
+                *item.retired_project_ids,
+            }:
+                related.append(item)
+        return related
+
+    def _timeline_event(
+        self,
+        *,
+        timestamp: Optional[str],
+        event_type: str,
+        summary: str,
+        details: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        return {
+            "timestamp": timestamp,
+            "event_type": event_type,
+            "summary": summary,
+            "details": details or {},
+        }
+
+    def operator_view(self, *, include_blocked: bool = True, limit: int = 5, mode: str = "balanced") -> dict[str, Any]:
+        portfolio, priorities, evidence_debts, stale_records = self._evaluate_portfolio(
+            include_blocked=include_blocked,
+            mode=mode,
+        )
+        projects = self.store.list_research_projects()
+        top_candidates = self._rank_action_candidates(
+            include_blocked=include_blocked,
+            limit=limit,
+            mode=mode,
+            persist=False,
+        )
+        promotion_blocked = [item.model_dump(mode="json") for item in evidence_debts if item.promotion_blocked][: max(1, limit)]
+        return {
+            "generated_at": self._project_now(),
+            "project_counts": {
+                "total": len(projects),
+                "active": len([item for item in projects if item.status == "active"]),
+                "paused": len([item for item in projects if item.status == "paused"]),
+                "blocked": len([item for item in projects if item.status == "blocked"]),
+                "stale": len([item for item in stale_records if item.staleness_level in {"stale", "critical"}]),
+            },
+            "portfolio_health": portfolio.health_snapshot.model_dump(mode="json"),
+            "active_projects": [self._project_summary(item) for item in projects if item.status == "active"][: max(1, limit)],
+            "blocked_projects": [self._project_summary(item) for item in projects if item.status == "blocked"][: max(1, limit)],
+            "top_candidates": [item.model_dump(mode="json") for item in top_candidates.candidates],
+            "top_projects": [item.model_dump(mode="json") for item in priorities[: max(1, limit)]],
+            "stale_projects": [
+                item.model_dump(mode="json")
+                for item in stale_records
+                if item.staleness_level in {"stale", "critical"}
+            ][: max(1, limit)],
+            "resume_candidates": [
+                {
+                    "staleness": item.model_dump(mode="json"),
+                    "priority": next(
+                        (record.model_dump(mode="json") for record in priorities if record.project_id == item.project_id),
+                        None,
+                    ),
+                }
+                for item in stale_records
+                if item.resume_candidate
+            ][: max(1, limit)],
+            "promotion_blocked_projects": promotion_blocked,
+            "latest_portfolio_decision": self.store.latest_portfolio_decision().model_dump(mode="json")
+            if self.store.latest_portfolio_decision()
+            else None,
+        }
+
+    def project_timeline(self, project_id: str, *, limit: int = 25) -> dict[str, Any]:
+        project = self.store.get_research_project(project_id)
+        if project is None:
+            raise RuntimeError(f"Unknown project: {project_id}")
+        studies = self._project_studies(project_id)
+        executions = self._project_executions(project_id)
+        decisions = self._project_research_decisions(project_id)
+        verdicts = self._project_claim_verdicts(project_id)
+        plans = self._project_falsification_plans(project_id)
+        portfolio_decisions = self._project_related_portfolio_decisions(project_id)
+        priority_records = self._project_priority_records(project_id)
+        evidence_debt = [item for item in self.store.iter_evidence_debt_records() if item.project_id == project_id]
+        staleness_records = [item for item in self.store.iter_project_staleness_records() if item.project_id == project_id]
+
+        events: list[dict[str, Any]] = [
+            self._timeline_event(
+                timestamp=project.created_at,
+                event_type="project_created",
+                summary=f"Project '{project.title}' created.",
+                details={"project_id": project.project_id, "status": project.status},
+            )
+        ]
+        for event in self.store.iter_audit_events():
+            payload = event.get("payload") or {}
+            if not isinstance(payload, dict) or payload.get("project_id") != project_id:
+                continue
+            if event.get("source") != "research_projects":
+                continue
+            action = str(event.get("action", "audit"))
+            if action == "create_project":
+                continue
+            events.append(
+                self._timeline_event(
+                    timestamp=event.get("timestamp"),
+                    event_type=f"audit_{action}",
+                    summary=f"Project {action.replace('_', ' ')}.",
+                    details=payload,
+                )
+            )
+        for study in studies:
+            events.append(
+                self._timeline_event(
+                    timestamp=study.created_at,
+                    event_type="problem_study",
+                    summary=f"Study planned for {study.problem_id} with {study.benchmark_alignment} benchmark alignment.",
+                    details={
+                        "problem_id": study.problem_id,
+                        "benchmark_ids": study.benchmark_ids,
+                        "benchmark_truth_statuses": study.benchmark_truth_statuses,
+                        "benchmark_alignment": study.benchmark_alignment,
+                        "next_action": study.next_action,
+                    },
+                )
+            )
+        for execution in executions:
+            events.append(
+                self._timeline_event(
+                    timestamp=execution.executed_at,
+                    event_type="problem_execution",
+                    summary=f"Execution {execution.status} via {execution.execution_mode}.",
+                    details={
+                        "problem_id": execution.problem_id,
+                        "execution_mode": execution.execution_mode,
+                        "status": execution.status,
+                        "benchmark_alignment": execution.benchmark_alignment,
+                        "canonical_comparable": execution.canonical_comparable,
+                        "summary": execution.summary,
+                    },
+                )
+            )
+        for decision in decisions:
+            events.append(
+                self._timeline_event(
+                    timestamp=decision.created_at,
+                    event_type="research_decision",
+                    summary=f"Decision selected action: {decision.selected_action}",
+                    details={
+                        "decision_id": decision.decision_id,
+                        "problem_id": decision.problem_id,
+                        "action_id": decision.action_id,
+                        "confidence": decision.confidence,
+                    },
+                )
+            )
+        for item in priority_records:
+            events.append(
+                self._timeline_event(
+                    timestamp=item.created_at,
+                    event_type="project_priority",
+                    summary=f"Project priority record: {item.recommended_state} at score {item.priority_score}.",
+                    details=item.model_dump(mode="json"),
+                )
+            )
+        for allocation in self.store.iter_budget_allocations():
+            candidate = allocation.selected_candidate
+            if candidate is None or candidate.project_id != project_id:
+                continue
+            events.append(
+                self._timeline_event(
+                    timestamp=allocation.created_at,
+                    event_type="budget_allocation",
+                    summary=f"Budget allocation selected {candidate.action_kind}.",
+                    details={
+                        "decision_id": allocation.decision_id,
+                        "action_id": candidate.action_id,
+                        "score": candidate.score,
+                        "schedule_created": allocation.schedule_created,
+                    },
+                )
+            )
+        for plan in plans:
+            events.append(
+                self._timeline_event(
+                    timestamp=plan.created_at,
+                    event_type="falsification_plan",
+                    summary=f"Falsification plan created with {len(plan.tests)} tests.",
+                    details={
+                        "plan_id": plan.plan_id,
+                        "trigger_reason": plan.trigger_reason,
+                        "status": plan.status,
+                    },
+                )
+            )
+        for verdict in verdicts:
+            events.append(
+                self._timeline_event(
+                    timestamp=verdict.created_at,
+                    event_type="claim_verdict",
+                    summary=f"Claim verdict {verdict.status} with linkage {verdict.linkage_status}.",
+                    details={
+                        "verdict_id": verdict.verdict_id,
+                        "benchmark_problem_id": verdict.benchmark_problem_id,
+                        "confidence": verdict.confidence,
+                        "canonical_comparability_source": verdict.canonical_comparability_source,
+                    },
+                )
+            )
+        for record in evidence_debt:
+            events.append(
+                self._timeline_event(
+                    timestamp=record.created_at,
+                    event_type="evidence_debt",
+                    summary=f"Evidence debt recorded at {record.overall_debt}.",
+                    details=record.model_dump(mode="json"),
+                )
+            )
+        for record in staleness_records:
+            events.append(
+                self._timeline_event(
+                    timestamp=record.created_at,
+                    event_type="project_staleness",
+                    summary=f"Project staleness level is {record.staleness_level}.",
+                    details=record.model_dump(mode="json"),
+                )
+            )
+        for decision in portfolio_decisions:
+            events.append(
+                self._timeline_event(
+                    timestamp=decision.created_at,
+                    event_type="portfolio_decision",
+                    summary="Portfolio decision affected this project.",
+                    details=decision.model_dump(mode="json"),
+                )
+            )
+        events.sort(key=lambda item: (item.get("timestamp") or "", item.get("event_type") or ""), reverse=True)
+        return {
+            "project_id": project.project_id,
+            "project_title": project.title,
+            "event_count": len(events),
+            "events": events[: max(1, limit)],
+        }
+
+    def project_evidence_map(self, project_id: str) -> dict[str, Any]:
+        project = self.store.get_research_project(project_id)
+        if project is None:
+            raise RuntimeError(f"Unknown project: {project_id}")
+        thread = self._project_thread(project)
+        studies = self._project_studies(project_id)
+        executions = self._project_executions(project_id)
+        latest_study = studies[-1] if studies else None
+        latest_execution = executions[-1] if executions else None
+        latest_debt = self.store.latest_evidence_debt_record(project_id=project_id)
+        latest_plan = self.store.latest_falsification_plan(project_id=project_id, thread_id=thread.thread_id if thread else None)
+        verdicts = self._project_claim_verdicts(project_id)
+        contradiction_review = None
+        if latest_execution and latest_execution.claim_verdict and latest_execution.claim_verdict.contradiction_review:
+            contradiction_review = latest_execution.claim_verdict.contradiction_review.model_dump(mode="json")
+        elif latest_study and latest_study.contradiction_review:
+            contradiction_review = latest_study.contradiction_review.model_dump(mode="json")
+        benchmark_context = latest_execution or latest_study
+        cited_research_ids = list(latest_study.cited_research_ids) if latest_study else []
+        retrieved_memory_ids = list(latest_study.retrieved_memory_ids) if latest_study else []
+        return {
+            "project_id": project.project_id,
+            "project_title": project.title,
+            "latest_evidence_summary": project.resume_snapshot.latest_evidence_summary,
+            "supporting_evidence_ids": list(thread.supporting_evidence_ids) if thread else [],
+            "contradicting_evidence_ids": list(thread.contradicting_evidence_ids) if thread else [],
+            "cited_research_ids": cited_research_ids,
+            "retrieved_memory_ids": retrieved_memory_ids,
+            "contradiction_review": contradiction_review,
+            "benchmark_context": {
+                "benchmark_ids": list(benchmark_context.benchmark_ids) if benchmark_context else [],
+                "benchmark_names": list(benchmark_context.benchmark_names) if benchmark_context else [],
+                "benchmark_truth_statuses": list(benchmark_context.benchmark_truth_statuses) if benchmark_context else [],
+                "benchmark_alignment": benchmark_context.benchmark_alignment if benchmark_context else None,
+                "canonical_comparable": benchmark_context.canonical_comparable if benchmark_context else False,
+            },
+            "latest_evidence_debt": latest_debt.model_dump(mode="json") if latest_debt else None,
+            "latest_falsification_plan": latest_plan.model_dump(mode="json") if latest_plan else None,
+            "claim_verdicts": [
+                {
+                    "verdict_id": item.verdict_id,
+                    "status": item.status,
+                    "benchmark_problem_id": item.benchmark_problem_id,
+                    "linkage_status": item.linkage_status,
+                    "canonical_comparability_source": item.canonical_comparability_source,
+                    "confidence": item.confidence,
+                }
+                for item in verdicts
+            ],
+            "evidence_counts": {
+                "supporting": len(thread.supporting_evidence_ids) if thread else 0,
+                "contradicting": len(thread.contradicting_evidence_ids) if thread else 0,
+                "cited_research": len(cited_research_ids),
+                "retrieved_memory": len(retrieved_memory_ids),
+                "claim_verdicts": len(verdicts),
+            },
+        }
+
+    def claim_lineage(self, project_id: str) -> dict[str, Any]:
+        project = self.store.get_research_project(project_id)
+        if project is None:
+            raise RuntimeError(f"Unknown project: {project_id}")
+        studies = self._project_studies(project_id)
+        executions = self._project_executions(project_id)
+        verdicts = self._project_claim_verdicts(project_id)
+        decisions = self._project_research_decisions(project_id)
+        problem_ids = sorted({item.problem_id for item in studies})
+        return {
+            "project_id": project.project_id,
+            "project_title": project.title,
+            "problem_ids": problem_ids,
+            "studies": [
+                {
+                    "problem_id": item.problem_id,
+                    "created_at": item.created_at,
+                    "benchmark_ids": item.benchmark_ids,
+                    "benchmark_truth_statuses": item.benchmark_truth_statuses,
+                    "benchmark_alignment": item.benchmark_alignment,
+                    "canonical_comparable": item.canonical_comparable,
+                }
+                for item in studies
+            ],
+            "executions": [
+                {
+                    "problem_id": item.problem_id,
+                    "executed_at": item.executed_at,
+                    "status": item.status,
+                    "execution_mode": item.execution_mode,
+                    "benchmark_alignment": item.benchmark_alignment,
+                    "canonical_comparable": item.canonical_comparable,
+                    "benchmark_names": item.benchmark_names,
+                }
+                for item in executions
+            ],
+            "research_decisions": [
+                {
+                    "decision_id": item.decision_id,
+                    "created_at": item.created_at,
+                    "problem_id": item.problem_id,
+                    "selected_action": item.selected_action,
+                    "confidence": item.confidence,
+                }
+                for item in decisions
+            ],
+            "verdicts": [
+                {
+                    "verdict_id": item.verdict_id,
+                    "created_at": item.created_at,
+                    "status": item.status,
+                    "trial_id": item.trial_id,
+                    "benchmark_problem_id": item.benchmark_problem_id,
+                    "benchmark_execution_mode": item.benchmark_execution_mode,
+                    "supporting_benchmark_names": item.supporting_benchmark_names,
+                    "linkage_status": item.linkage_status,
+                    "canonical_comparability_source": item.canonical_comparability_source,
+                    "confidence": item.confidence,
+                }
+                for item in verdicts
+            ],
+        }
+
+    def resume_dashboard(self, project_id: str) -> dict[str, Any]:
+        project = self.store.get_research_project(project_id)
+        if project is None:
+            raise RuntimeError(f"Unknown project: {project_id}")
+        thread = self._project_thread(project)
+        action = self._project_action(project)
+        latest_staleness = self.store.latest_project_staleness_record(project_id=project_id)
+        latest_debt = self.store.latest_evidence_debt_record(project_id=project_id)
+        latest_plan = self.store.latest_falsification_plan(project_id=project_id, thread_id=thread.thread_id if thread else None)
+        priority = next(
+            (
+                item
+                for item in reversed(list(self.store.iter_project_priority_records()))
+                if item.project_id == project_id
+            ),
+            None,
+        )
+        blockers = list(project.resume_snapshot.blockers)
+        if thread and thread.stop_reason and thread.stop_reason not in blockers:
+            blockers.append(thread.stop_reason)
+        if project.budget_ledger.budget_exhausted and "budget_exhausted" not in blockers:
+            blockers.append("budget_exhausted")
+        resume_state = "active"
+        if project.status == "blocked":
+            resume_state = "blocked"
+        elif project.status == "paused":
+            if blockers:
+                resume_state = "review"
+            elif latest_debt and latest_debt.promotion_blocked:
+                resume_state = "defer"
+            else:
+                resume_state = "ready"
+        return {
+            "project": self.project_status(project_id),
+            "resume_state": resume_state,
+            "resume_snapshot": project.resume_snapshot.model_dump(mode="json"),
+            "blockers": blockers,
+            "next_action": action.model_dump(mode="json") if action else None,
+            "budget_remaining": self._budget_remaining_summary(project.budget_ledger),
+            "latest_staleness": latest_staleness.model_dump(mode="json") if latest_staleness else None,
+            "latest_evidence_debt": latest_debt.model_dump(mode="json") if latest_debt else None,
+            "latest_priority_record": priority.model_dump(mode="json") if priority else None,
+            "latest_falsification_plan": latest_plan.model_dump(mode="json") if latest_plan else None,
         }
 
     def pause_project(
