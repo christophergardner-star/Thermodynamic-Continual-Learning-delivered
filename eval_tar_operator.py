@@ -65,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--predictor", default=None, choices=("heuristic", "gold", "hf_causal_lm"))
     parser.add_argument("--model", default=None)
     parser.add_argument("--adapter-path", default=None)
+    parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--max-items", type=int, default=None)
     parser.add_argument("--max-examples-per-family", type=int, default=None)
     parser.add_argument("--build-pack-only", action="store_true")
@@ -134,6 +135,8 @@ def load_eval_config(config_path: Path, *, repo_root: Path, args: argparse.Names
         config.runtime.model_name_or_path = args.model
     if args.adapter_path is not None:
         config.runtime.adapter_path = args.adapter_path
+    if args.max_new_tokens is not None:
+        config.runtime.max_new_tokens = args.max_new_tokens
     if args.max_examples_per_family is not None:
         config.selection.max_examples_per_family = args.max_examples_per_family
     if args.local_files_only:

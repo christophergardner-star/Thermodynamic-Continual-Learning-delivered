@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 from pathlib import Path
 
 from tar_lab.eval_harness import GoldPredictor, HeuristicPredictor, build_eval_pack, evaluate_eval_pack
@@ -156,6 +158,8 @@ def test_build_eval_pack_writes_manifest_and_suite_files(tmp_path: Path):
     assert len(manifest["source_dataset"]["test_sha256"]) == 64
     assert (eval_pack_dir / "eval_honesty.jsonl").exists()
     assert (eval_pack_dir / "eval_tcl.jsonl").exists()
+    first_item = json.loads((eval_pack_dir / "eval_core.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert [message["role"] for message in first_item["messages"]] == ["system", "user"]
 
 
 def test_evaluate_eval_pack_gold_predictor_scores_perfectly(tmp_path: Path):
@@ -195,3 +199,103 @@ def test_evaluate_eval_pack_heuristic_predictor_runs_end_to_end(tmp_path: Path):
     assert summary["overall"]["count"] == 4
     assert "tcl" in summary["suite_breakdown"]
     assert (output_dir / "errors.jsonl").exists()
+
+
+def test_hf_predictor_moves_non_quantized_model_to_cuda_when_available(monkeypatch):
+    moved_to: list[str] = []
+
+    class _FakeTensor:
+        def __init__(self, device: str = "cpu"):
+            self.device = device
+
+        def to(self, device):
+            target = str(device)
+            return _FakeTensor(target)
+
+        @property
+        def shape(self):
+            return (1, 4)
+
+        def __getitem__(self, item):
+            return _FakeTensor(self.device)
+
+    class _NoGrad:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: True),
+        device=lambda name: name,
+        bfloat16="bf16",
+        float16="fp16",
+        no_grad=lambda: _NoGrad(),
+        ones_like=lambda prompt, device=None: _FakeTensor(str(device or prompt.device)),
+    )
+
+    class _FakeTokenizer:
+        pad_token = None
+        eos_token = "<eos>"
+        eos_token_id = 7
+        chat_template = "fake"
+
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            return cls()
+
+        def apply_chat_template(self, *args, **kwargs):
+            return _FakeTensor("cpu")
+
+        def decode(self, tokens, skip_special_tokens=True):
+            return "{}"
+
+    class _FakeModel:
+        def __init__(self):
+            self._device = "cpu"
+
+        def to(self, device):
+            target = str(device)
+            moved_to.append(target)
+            self._device = target
+            return self
+
+        def eval(self):
+            return self
+
+        def parameters(self):
+            yield types.SimpleNamespace(device=self._device)
+
+        def generate(self, **kwargs):
+            return [_FakeTensor(self._device)]
+
+    class _FakeAutoModelForCausalLM:
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            return _FakeModel()
+
+    fake_transformers = types.SimpleNamespace(
+        AutoTokenizer=_FakeTokenizer,
+        AutoModelForCausalLM=_FakeAutoModelForCausalLM,
+        BitsAndBytesConfig=lambda **kwargs: kwargs,
+    )
+
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    from tar_lab.eval_harness import HFCausalLMPredictor
+
+    predictor = HFCausalLMPredictor(
+        model_name_or_path="Qwen/Qwen2.5-7B-Instruct",
+        adapter_path=None,
+        local_files_only=True,
+        max_new_tokens=8,
+        temperature=0.0,
+        top_p=1.0,
+        use_4bit=False,
+        bf16=True,
+    )
+
+    assert predictor.metadata()["predictor_type"] == "hf_causal_lm"
+    assert moved_to == ["cuda"]

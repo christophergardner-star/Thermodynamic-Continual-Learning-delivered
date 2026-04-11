@@ -75,6 +75,15 @@ def _suite_names_for_family(task_family: str) -> list[str]:
     return sorted({"core", suite_for_family(task_family)})
 
 
+def _evaluation_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    trimmed = list(messages)
+    while trimmed and str(trimmed[-1].get("role", "")).strip() == "assistant":
+        trimmed.pop()
+    if not trimmed:
+        raise ValueError("Evaluation items must retain at least one non-assistant prompt message.")
+    return trimmed
+
+
 def _lookup_key(value: Any, needle: str) -> Any:
     if isinstance(value, dict):
         if needle in value:
@@ -208,6 +217,7 @@ class HFCausalLMPredictor:
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
         self._torch = torch
+        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._tokenizer = AutoTokenizer.from_pretrained(
             model_name_or_path,
             trust_remote_code=False,
@@ -229,10 +239,14 @@ class HFCausalLMPredictor:
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
             )
+            if torch.cuda.is_available():
+                model_kwargs["device_map"] = "auto"
         else:
             model_kwargs["torch_dtype"] = torch.bfloat16 if bf16 else torch.float16
 
         model = AutoModelForCausalLM.from_pretrained(model_name_or_path, **model_kwargs)
+        if not use_4bit:
+            model = model.to(self._device)
         if adapter_path:
             from peft import PeftModel
 
@@ -315,7 +329,7 @@ def build_eval_pack(
                     lineage_key=str(example.get("lineage_key") or example["example_id"]),
                     source_kind=example["source_kind"],
                     source_id=str(example["provenance"]["source_id"]),
-                    messages=list(example["messages"]),
+                    messages=_evaluation_messages(list(example["messages"])),
                     input_context=dict(example["input_context"]),
                     gold_target=dict(example["target"]),
                     scoring_target=scoring_target_for_family(family, dict(example["target"])),
