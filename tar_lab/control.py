@@ -120,6 +120,10 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
             payload = orchestrator.claim_lineage(str(request.payload.get("project_id", "")))
         elif request.command == "resume_dashboard":
             payload = orchestrator.resume_dashboard(str(request.payload.get("project_id", "")))
+        elif request.command == "publication_handoff":
+            payload = orchestrator.publication_handoff(str(request.payload.get("project_id", "")))
+        elif request.command == "publication_log":
+            payload = orchestrator.publication_log(count=int(request.payload.get("count", 20)))
         elif request.command == "portfolio_status":
             payload = orchestrator.portfolio_status(
                 include_blocked=bool(request.payload.get("include_blocked", True)),

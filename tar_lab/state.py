@@ -21,6 +21,7 @@ from tar_lab.schemas import (
     PortfolioDecision,
     ProjectPriorityRecord,
     ProjectStalenessRecord,
+    PublicationHandoffPackage,
     GovernorMetrics,
     KnowledgeGraphEntry,
     KnowledgeGraphState,
@@ -75,6 +76,8 @@ class TARStateStore:
         self.evidence_debt_records_path = self.state_dir / "evidence_debt_records.jsonl"
         self.project_staleness_records_path = self.state_dir / "project_staleness_records.jsonl"
         self.portfolio_decisions_path = self.state_dir / "portfolio_decisions.jsonl"
+        self.publication_handoffs_path = self.state_dir / "publication_handoffs.jsonl"
+        self.publication_handoffs_dir = self.state_dir / "publication_handoffs"
         self.endpoint_registry_path = self.state_dir / "inference_endpoints.json"
         self.endpoints_dir = self.state_dir / "endpoints"
         self.role_assignments_path = self.state_dir / "role_assignments.json"
@@ -90,6 +93,7 @@ class TARStateStore:
         self.policies_dir.mkdir(parents=True, exist_ok=True)
         self.manifests_dir.mkdir(parents=True, exist_ok=True)
         self.endpoints_dir.mkdir(parents=True, exist_ok=True)
+        self.publication_handoffs_dir.mkdir(parents=True, exist_ok=True)
 
     def _atomic_write_text(self, path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -538,6 +542,36 @@ class TARStateStore:
             return None
         return rows[-1]
 
+    def publication_handoff_path(self, package_id: str) -> Path:
+        return self.publication_handoffs_dir / f"{package_id}.json"
+
+    def save_publication_handoff(self, package: PublicationHandoffPackage) -> Path:
+        path = self.publication_handoff_path(package.package_id)
+        payload = package.model_copy(update={"artifact_path": str(path)})
+        self._atomic_write_json(path, payload.model_dump(mode="json"))
+        return path
+
+    def append_publication_handoff(self, package: PublicationHandoffPackage) -> None:
+        with self.publication_handoffs_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(package.model_dump(mode="json")) + "\n")
+
+    def iter_publication_handoffs(self) -> Iterable[PublicationHandoffPackage]:
+        if not self.publication_handoffs_path.exists():
+            return []
+        rows: List[PublicationHandoffPackage] = []
+        for line in self.publication_handoffs_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(PublicationHandoffPackage.model_validate_json(line))
+        return rows
+
+    def latest_publication_handoff(self, project_id: Optional[str] = None) -> Optional[PublicationHandoffPackage]:
+        rows = list(self.iter_publication_handoffs())
+        for package in reversed(rows):
+            if project_id is not None and package.project_id != project_id:
+                continue
+            return package
+        return None
+
     def append_priority_snapshot(self, snapshot: PortfolioPrioritySnapshot) -> None:
         with self.priority_snapshots_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(snapshot.model_dump(mode="json")) + "\n")
@@ -774,6 +808,7 @@ class TARStateStore:
         latest_portfolio_decision = self.latest_portfolio_decision()
         latest_evidence_debt = self.latest_evidence_debt_record()
         latest_project_staleness = self.latest_project_staleness_record()
+        latest_publication_handoff = self.latest_publication_handoff()
         memory_manifest = self.load_memory_manifest()
         schedules = list(self.iter_problem_schedules())
         research_projects = self.list_research_projects()
@@ -810,6 +845,8 @@ class TARStateStore:
             "latest_evidence_debt_record": latest_evidence_debt.model_dump(mode="json") if latest_evidence_debt else None,
             "project_staleness_records": len(list(self.iter_project_staleness_records())),
             "latest_project_staleness_record": latest_project_staleness.model_dump(mode="json") if latest_project_staleness else None,
+            "publication_handoffs": len(list(self.iter_publication_handoffs())),
+            "latest_publication_handoff": latest_publication_handoff.model_dump(mode="json") if latest_publication_handoff else None,
             "memory_manifest": memory_manifest.model_dump(mode="json") if memory_manifest else None,
             "problem_schedules": len(schedules),
             "active_problem_schedules": len([item for item in schedules if item.status in {"scheduled", "leased", "running", "retry_wait"}]),

@@ -150,6 +150,8 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--evidence-map", action="store_true", dest="evidence_map")
     group.add_argument("--claim-lineage", action="store_true", dest="claim_lineage")
     group.add_argument("--resume-dashboard", action="store_true", dest="resume_dashboard")
+    group.add_argument("--publication-handoff", action="store_true", dest="publication_handoff")
+    group.add_argument("--publication-log", action="store_true", dest="publication_log")
     group.add_argument("--portfolio-status", action="store_true", dest="portfolio_status")
     group.add_argument("--portfolio-review", action="store_true", dest="portfolio_review")
     group.add_argument("--portfolio-decide", action="store_true", dest="portfolio_decide")
@@ -258,6 +260,10 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
         return orchestrator.claim_lineage(args.project_id or "")
     if args.resume_dashboard:
         return orchestrator.resume_dashboard(args.project_id or "")
+    if args.publication_handoff:
+        return orchestrator.publication_handoff(args.project_id or "")
+    if args.publication_log:
+        return orchestrator.publication_log(count=args.max_results)
     if args.portfolio_status:
         return orchestrator.portfolio_status(
             include_blocked=args.include_blocked,
@@ -454,6 +460,7 @@ def _render_status(payload: Dict[str, Any]) -> str:
         f"Portfolio Decisions: {payload.get('portfolio_decisions', 0)}",
         f"Evidence Debt Records: {payload.get('evidence_debt_records', 0)}",
         f"Staleness Records: {payload.get('project_staleness_records', 0)}",
+        f"Publication Handoffs: {payload.get('publication_handoffs', 0)}",
         f"Latest Claim Verdict: {(payload.get('latest_claim_verdict') or {}).get('status', 'n/a')}",
         f"Benchmark: {payload.get('benchmark_name') or ', '.join(payload.get('benchmark_ids', [])) or 'n/a'}",
         f"Benchmark Tier: {payload.get('benchmark_tier', 'n/a')}",
@@ -504,6 +511,12 @@ def _render_status(payload: Dict[str, Any]) -> str:
         lines.append(
             f"Latest Portfolio Decision: {latest_portfolio_decision.get('decision_id', 'n/a')} "
             f"selected {latest_portfolio_decision.get('selected_project_id', 'n/a')}"
+        )
+    latest_publication = payload.get("latest_publication_handoff") or {}
+    if latest_publication:
+        lines.append(
+            f"Latest Publication Handoff: {latest_publication.get('package_id', 'n/a')} "
+            f"for project {latest_publication.get('project_id', 'n/a')}"
         )
     return "\n".join(lines)
 
@@ -794,6 +807,63 @@ def _render_resume_dashboard(payload: Dict[str, Any]) -> str:
     if plan:
         lines.append(
             f"Latest Falsification Plan: {plan.get('plan_id', 'n/a')} status={plan.get('status', 'n/a')} tests={len(plan.get('tests', []))}"
+        )
+    return "\n".join(lines)
+
+
+def _render_publication_handoff(payload: Dict[str, Any]) -> str:
+    package = payload.get("package", payload)
+    accepted = package.get("accepted_claims", [])
+    provisional = package.get("provisional_claims", [])
+    rejected = package.get("rejected_alternatives", [])
+    lines = [
+        f"Publication Package: {package.get('package_id', 'n/a')}",
+        f"Project: {package.get('project_title', package.get('project_id', 'n/a'))}",
+        f"Project ID: {package.get('project_id', 'n/a')}",
+        f"Status: {package.get('package_status', 'n/a')}",
+        f"Claim Readiness: {package.get('claim_readiness_summary', 'n/a')}",
+        f"Accepted Claims: {len(accepted)}",
+        f"Provisional Claims: {len(provisional)}",
+        f"Rejected Alternatives: {len(rejected)}",
+        f"Benchmark Attachments: {len(package.get('benchmark_truth_attachments', []))}",
+        f"Lineage Events: {len(package.get('experiment_lineage', []))}",
+        f"Artifact Path: {package.get('artifact_path', 'n/a')}",
+    ]
+    if accepted:
+        lines.append("Accepted Claim Bundles:")
+        for item in accepted[:5]:
+            lines.append(
+                f"- {item.get('verdict_id', 'n/a')} :: confidence={item.get('confidence', 'n/a')} :: {item.get('summary', 'n/a')}"
+            )
+    if provisional:
+        lines.append("Provisional Claim Bundles:")
+        for item in provisional[:5]:
+            lines.append(
+                f"- {item.get('verdict_id', 'n/a')} :: confidence={item.get('confidence', 'n/a')} :: {item.get('summary', 'n/a')}"
+            )
+    if package.get("limitations"):
+        lines.append("Limitations:")
+        for item in package.get("limitations", [])[:5]:
+            lines.append(f"- {item}")
+    if package.get("open_questions"):
+        lines.append("Open Questions:")
+        for item in package.get("open_questions", [])[:5]:
+            lines.append(f"- {item}")
+    if package.get("writer_cautions"):
+        lines.append("Writer Cautions:")
+        for item in package.get("writer_cautions", [])[:5]:
+            lines.append(f"- {item}")
+    return "\n".join(lines)
+
+
+def _render_publication_log(payload: Dict[str, Any]) -> str:
+    packages = payload.get("packages", [])
+    if not packages:
+        return "No publication handoff packages recorded."
+    lines = ["Publication Handoff Packages:"]
+    for item in packages:
+        lines.append(
+            f"- {item.get('package_id', 'n/a')} :: project={item.get('project_id', 'n/a')} :: status={item.get('package_status', 'n/a')} :: accepted={len(item.get('accepted_claims', []))} provisional={len(item.get('provisional_claims', []))}"
         )
     return "\n".join(lines)
 
@@ -1242,6 +1312,20 @@ def main() -> int:
                     host=args.host,
                     port=args.port,
                 )
+            elif args.publication_handoff:
+                response = send_command(
+                    "publication_handoff",
+                    payload={"project_id": args.project_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.publication_log:
+                response = send_command(
+                    "publication_log",
+                    payload={"count": args.max_results},
+                    host=args.host,
+                    port=args.port,
+                )
             elif args.portfolio_status:
                 response = send_command(
                     "portfolio_status",
@@ -1594,6 +1678,10 @@ def main() -> int:
             print(_render_claim_lineage(payload))
         elif args.resume_dashboard:
             print(_render_resume_dashboard(payload))
+        elif args.publication_handoff:
+            print(_render_publication_handoff(payload))
+        elif args.publication_log:
+            print(_render_publication_log(payload))
         elif args.portfolio_status or args.rank_actions:
             snapshot_payload = payload.get("snapshot", payload) if args.rank_actions else payload
             candidates = snapshot_payload.get("candidates", payload.get("top_candidates", []))

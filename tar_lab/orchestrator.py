@@ -61,6 +61,11 @@ from tar_lab.schemas import (
     ProblemScheduleEntry,
     ProblemResolutionReport,
     ProblemStudyReport,
+    PublicationAlternativeBundle,
+    PublicationBenchmarkAttachment,
+    PublicationClaimBundle,
+    PublicationHandoffPackage,
+    PublicationLineageEntry,
     PreparedDataBundle,
     ResearchActionStatus,
     ResearchBudgetLedger,
@@ -735,6 +740,310 @@ class TAROrchestrator:
                 related.append(item)
         return related
 
+    def _project_verification_reports(self, project_id: str) -> list[VerificationReport]:
+        trial_ids = {item.trial_id for item in self._project_claim_verdicts(project_id)}
+        return [item for item in self.store.iter_verification_reports() if item.trial_id in trial_ids]
+
+    def _publication_claim_bundle(self, verdict: ClaimVerdict) -> PublicationClaimBundle:
+        summary = verdict.rationale[0] if verdict.rationale else f"Claim {verdict.verdict_id} is {verdict.status}."
+        return PublicationClaimBundle(
+            verdict_id=verdict.verdict_id,
+            disposition=verdict.status,
+            summary=summary,
+            rationale=list(verdict.rationale),
+            trial_id=verdict.trial_id,
+            confidence=verdict.confidence,
+            supporting_research_ids=list(verdict.supporting_research_ids),
+            supporting_evidence_ids=list(verdict.supporting_evidence_ids),
+            benchmark_names=list(verdict.supporting_benchmark_names),
+            canonical_benchmark_required=verdict.canonical_benchmark_required,
+            canonical_benchmark_satisfied=verdict.canonical_benchmark_satisfied,
+            linkage_status=verdict.linkage_status,
+        )
+
+    def _publication_alternatives(
+        self,
+        project: ResearchProject,
+        verdicts: list[ClaimVerdict],
+        decisions: list[ResearchDecisionRecord],
+    ) -> list[PublicationAlternativeBundle]:
+        alternatives: list[PublicationAlternativeBundle] = []
+        for verdict in verdicts:
+            if verdict.status in {"rejected", "contradicted", "insufficient_evidence"}:
+                alternatives.append(
+                    PublicationAlternativeBundle(
+                        alternative_id=verdict.verdict_id,
+                        source="claim_verdict",
+                        status=verdict.status,
+                        summary=verdict.rationale[0] if verdict.rationale else f"Claim {verdict.verdict_id} was not accepted.",
+                        why_rejected=list(verdict.rationale),
+                        related_verdict_id=verdict.verdict_id,
+                    )
+                )
+        for decision in decisions:
+            if decision.contradiction_review is not None and decision.contradiction_review.contradiction_count > 0:
+                alternatives.append(
+                    PublicationAlternativeBundle(
+                        alternative_id=decision.contradiction_review.review_id,
+                        source="contradiction_review",
+                        status="contradicted",
+                        summary=decision.contradiction_review.summary,
+                        why_rejected=[
+                            decision.contradiction_review.recommended_resolution,
+                            "Contradictory evidence remains unresolved.",
+                        ],
+                    )
+                )
+            for hypothesis in decision.hypotheses:
+                if hypothesis.unresolved_assumptions:
+                    alternatives.append(
+                        PublicationAlternativeBundle(
+                            alternative_id=hypothesis.hypothesis_id,
+                            source="hypothesis",
+                            status="insufficient_evidence",
+                            summary=hypothesis.hypothesis,
+                            why_rejected=list(hypothesis.unresolved_assumptions),
+                        )
+                    )
+        deduped: dict[str, PublicationAlternativeBundle] = {}
+        for item in alternatives:
+            deduped[item.alternative_id] = item
+        return list(deduped.values())
+
+    def _publication_benchmark_attachments(
+        self,
+        studies: list[ProblemStudyReport],
+        executions: list[ProblemExecutionReport],
+        verdicts: list[ClaimVerdict],
+    ) -> list[PublicationBenchmarkAttachment]:
+        attachments: list[PublicationBenchmarkAttachment] = []
+        for item in studies:
+            attachments.append(
+                PublicationBenchmarkAttachment(
+                    source_id=item.problem_id,
+                    source_kind="problem_study",
+                    benchmark_ids=list(item.benchmark_ids),
+                    benchmark_names=list(item.benchmark_names),
+                    benchmark_truth_statuses=list(item.benchmark_truth_statuses),
+                    benchmark_alignment=item.benchmark_alignment,
+                    canonical_comparable=item.canonical_comparable,
+                    requested_tier=item.benchmark_tier,
+                    actual_tiers=list(item.actual_benchmark_tiers),
+                )
+            )
+        for item in executions:
+            attachments.append(
+                PublicationBenchmarkAttachment(
+                    source_id=item.problem_id,
+                    source_kind="problem_execution",
+                    benchmark_ids=list(item.benchmark_ids),
+                    benchmark_names=list(item.benchmark_names),
+                    benchmark_truth_statuses=list(item.benchmark_truth_statuses),
+                    benchmark_alignment=item.benchmark_alignment,
+                    canonical_comparable=item.canonical_comparable,
+                    requested_tier=item.benchmark_tier,
+                    actual_tiers=list(item.actual_benchmark_tiers),
+                )
+            )
+        for item in verdicts:
+            attachments.append(
+                PublicationBenchmarkAttachment(
+                    source_id=item.verdict_id,
+                    source_kind="claim_verdict",
+                    benchmark_ids=list(item.supporting_benchmark_ids),
+                    benchmark_names=list(item.supporting_benchmark_names),
+                    benchmark_truth_statuses=[],
+                    benchmark_alignment="aligned" if item.canonical_benchmark_satisfied else "downgraded",
+                    canonical_comparable=item.canonical_benchmark_satisfied,
+                    requested_tier="canonical" if item.canonical_benchmark_required else "validation",
+                    actual_tiers=[],
+                )
+            )
+        deduped: dict[tuple[str, str], PublicationBenchmarkAttachment] = {}
+        for item in attachments:
+            deduped[(item.source_kind, item.source_id)] = item
+        return list(deduped.values())
+
+    def _publication_lineage(
+        self,
+        studies: list[ProblemStudyReport],
+        executions: list[ProblemExecutionReport],
+        decisions: list[ResearchDecisionRecord],
+        verdicts: list[ClaimVerdict],
+        verifications: list[VerificationReport],
+        plans: list[FalsificationPlan],
+        portfolio_decisions: list[PortfolioDecision],
+    ) -> list[PublicationLineageEntry]:
+        lineage: list[PublicationLineageEntry] = []
+        for item in studies:
+            lineage.append(
+                PublicationLineageEntry(
+                    event_id=f"study:{item.problem_id}",
+                    timestamp=item.created_at,
+                    event_type="problem_study",
+                    summary=f"Problem study created for '{item.problem}' with benchmark alignment {item.benchmark_alignment}.",
+                    source_id=item.problem_id,
+                    metadata={
+                        "benchmark_ids": list(item.benchmark_ids),
+                        "benchmark_truth_statuses": list(item.benchmark_truth_statuses),
+                        "canonical_comparable": item.canonical_comparable,
+                    },
+                )
+            )
+        for item in executions:
+            lineage.append(
+                PublicationLineageEntry(
+                    event_id=f"execution:{item.problem_id}:{item.executed_at}",
+                    timestamp=item.executed_at,
+                    event_type="problem_execution",
+                    summary=f"Problem execution finished with status {item.status} and benchmark alignment {item.benchmark_alignment}.",
+                    source_id=item.problem_id,
+                    metadata={
+                        "execution_mode": item.execution_mode,
+                        "reproducibility_complete": item.reproducibility_complete,
+                        "benchmark_truth_statuses": list(item.benchmark_truth_statuses),
+                    },
+                )
+            )
+        for item in decisions:
+            lineage.append(
+                PublicationLineageEntry(
+                    event_id=item.decision_id,
+                    timestamp=item.created_at,
+                    event_type="research_decision",
+                    summary=f"Research decision selected '{item.selected_action}' at confidence {item.confidence}.",
+                    source_id=item.problem_id,
+                    metadata={"notes": list(item.notes)},
+                )
+            )
+        for item in verifications:
+            lineage.append(
+                PublicationLineageEntry(
+                    event_id=f"verification:{item.trial_id}",
+                    timestamp=item.verified_at,
+                    event_type="verification",
+                    summary=f"Verification report marked trial {item.trial_id} as {item.verdict}.",
+                    source_id=item.trial_id,
+                    metadata={"recommendations": list(item.recommendations)},
+                )
+            )
+        for item in verdicts:
+            lineage.append(
+                PublicationLineageEntry(
+                    event_id=item.verdict_id,
+                    timestamp=item.created_at,
+                    event_type="claim_verdict",
+                    summary=f"Claim verdict {item.verdict_id} is {item.status} at confidence {item.confidence}.",
+                    source_id=item.trial_id,
+                    metadata={
+                        "canonical_benchmark_satisfied": item.canonical_benchmark_satisfied,
+                        "linkage_status": item.linkage_status,
+                    },
+                )
+            )
+        for item in plans:
+            pending = len([test for test in item.tests if test.status in {"planned", "attached", "running"}])
+            lineage.append(
+                PublicationLineageEntry(
+                    event_id=item.plan_id,
+                    timestamp=item.created_at,
+                    event_type="falsification_plan",
+                    summary=f"Falsification plan {item.plan_id} recorded with {pending} pending tests.",
+                    source_id=item.plan_id,
+                    metadata={"status": item.status, "pending_tests": pending},
+                )
+            )
+        for item in portfolio_decisions:
+            lineage.append(
+                PublicationLineageEntry(
+                    event_id=item.decision_id,
+                    timestamp=item.created_at,
+                    event_type="portfolio_decision",
+                    summary=f"Portfolio decision selected project {item.selected_project_id or 'none'}.",
+                    source_id=item.decision_id,
+                    metadata={
+                        "deferred_project_ids": list(item.deferred_project_ids),
+                        "parked_project_ids": list(item.parked_project_ids),
+                    },
+                )
+            )
+        lineage.sort(key=lambda item: (item.timestamp, item.event_id))
+        return lineage
+
+    def _publication_evidence_gaps(
+        self,
+        *,
+        project: ResearchProject,
+        evidence_debt: Optional[EvidenceDebtRecord],
+        plans: list[FalsificationPlan],
+        verdicts: list[ClaimVerdict],
+    ) -> list[str]:
+        gaps: list[str] = []
+        if evidence_debt is not None:
+            gap_fields = {
+                "falsification_gap": "falsification coverage remains incomplete",
+                "replication_gap": "replication coverage remains incomplete",
+                "benchmark_gap": "benchmark coverage remains incomplete",
+                "claim_linkage_gap": "claim linkage/provenance remains incomplete",
+                "calibration_gap": "calibration evidence remains incomplete",
+            }
+            for field_name, message in gap_fields.items():
+                if getattr(evidence_debt, field_name) > 0.0 and message not in gaps:
+                    gaps.append(message)
+        if any(plan.status == "active" for plan in plans):
+            gaps.append("an active falsification plan remains open")
+        if any(item.linkage_status != "exact" for item in verdicts):
+            gaps.append("at least one claim verdict has non-exact linkage")
+        thread = self._project_thread(project)
+        if thread and thread.contradicting_evidence_ids:
+            gaps.append("contradicting evidence remains attached to the active thread")
+        return gaps
+
+    def _publication_limitations(
+        self,
+        *,
+        project: ResearchProject,
+        executions: list[ProblemExecutionReport],
+        evidence_debt: Optional[EvidenceDebtRecord],
+        plans: list[FalsificationPlan],
+        verdicts: list[ClaimVerdict],
+        open_questions: list[str],
+    ) -> list[str]:
+        limitations = list(open_questions)
+        if evidence_debt is not None and evidence_debt.promotion_blocked:
+            limitations.append(
+                f"Evidence debt remains at {evidence_debt.overall_debt:.2f}; promotion is currently blocked."
+            )
+        if any(plan.status == "active" for plan in plans):
+            limitations.append("A falsification plan is still active, so publication claims should remain bounded.")
+        if any(not verdict.canonical_benchmark_satisfied and verdict.canonical_benchmark_required for verdict in verdicts):
+            limitations.append("Canonical benchmark comparability is required for at least one claim and is not yet satisfied.")
+        if any(not item.reproducibility_complete for item in executions):
+            limitations.append("At least one linked execution is not fully reproducible yet.")
+        return list(dict.fromkeys(limitations))
+
+    def _publication_writer_cautions(
+        self,
+        *,
+        package_status: str,
+        accepted_claims: list[PublicationClaimBundle],
+        provisional_claims: list[PublicationClaimBundle],
+        limitations: list[str],
+        evidence_gaps: list[str],
+    ) -> list[str]:
+        cautions: list[str] = []
+        if package_status != "ready":
+            cautions.append("Treat this package as evidence-bounded research support, not publication-ready proof.")
+        if provisional_claims:
+            cautions.append("Do not elevate provisional claims to accepted findings in downstream writing.")
+        if not accepted_claims:
+            cautions.append("No accepted claim bundle exists yet; any narrative must stay exploratory.")
+        if evidence_gaps:
+            cautions.append("Explicitly disclose unresolved evidence gaps and active falsification pressure.")
+        if limitations:
+            cautions.append("Carry project limitations and open questions into any downstream manuscript draft.")
+        return cautions
+
     def _timeline_event(
         self,
         *,
@@ -1135,6 +1444,115 @@ class TAROrchestrator:
             "latest_evidence_debt": latest_debt.model_dump(mode="json") if latest_debt else None,
             "latest_priority_record": priority.model_dump(mode="json") if priority else None,
             "latest_falsification_plan": latest_plan.model_dump(mode="json") if latest_plan else None,
+        }
+
+    def publication_handoff(self, project_id: str) -> dict[str, Any]:
+        project = self.store.get_research_project(project_id)
+        if project is None:
+            raise RuntimeError(f"Unknown project: {project_id}")
+        studies = self._project_studies(project_id)
+        executions = self._project_executions(project_id)
+        decisions = self._project_research_decisions(project_id)
+        verdicts = self._project_claim_verdicts(project_id)
+        verifications = self._project_verification_reports(project_id)
+        plans = self._project_falsification_plans(project_id)
+        portfolio_decisions = self._project_related_portfolio_decisions(project_id)
+        evidence_debt = self.store.latest_evidence_debt_record(project_id=project_id)
+        resume = self.resume_dashboard(project_id)
+
+        accepted_claims = [self._publication_claim_bundle(item) for item in verdicts if item.status == "accepted"]
+        provisional_claims = [self._publication_claim_bundle(item) for item in verdicts if item.status == "provisional"]
+        rejected_alternatives = self._publication_alternatives(project, verdicts, decisions)
+        benchmark_truth_attachments = self._publication_benchmark_attachments(studies, executions, verdicts)
+        experiment_lineage = self._publication_lineage(
+            studies,
+            executions,
+            decisions,
+            verdicts,
+            verifications,
+            plans,
+            portfolio_decisions,
+        )
+        open_questions = [
+            item.question
+            for item in project.open_questions
+            if item.status != "resolved"
+        ]
+        evidence_gaps = self._publication_evidence_gaps(
+            project=project,
+            evidence_debt=evidence_debt,
+            plans=plans,
+            verdicts=verdicts,
+        )
+        limitations = self._publication_limitations(
+            project=project,
+            executions=executions,
+            evidence_debt=evidence_debt,
+            plans=plans,
+            verdicts=verdicts,
+            open_questions=open_questions,
+        )
+        package_status = "not_ready"
+        if accepted_claims and not evidence_gaps and not limitations:
+            package_status = "ready"
+        elif accepted_claims or provisional_claims:
+            package_status = "provisional"
+        writer_cautions = self._publication_writer_cautions(
+            package_status=package_status,
+            accepted_claims=accepted_claims,
+            provisional_claims=provisional_claims,
+            limitations=limitations,
+            evidence_gaps=evidence_gaps,
+        )
+        if accepted_claims and not evidence_gaps and not limitations:
+            claim_readiness_summary = "Accepted claim bundles are publication-ready under the current evidence package."
+        elif accepted_claims or provisional_claims:
+            claim_readiness_summary = "Structured claim bundles exist, but publication claims should remain provisional."
+        else:
+            claim_readiness_summary = "No accepted claim bundle exists yet; the package is suitable only for bounded research handoff."
+
+        package = PublicationHandoffPackage(
+            package_id=self._continuity_id("publication"),
+            project_id=project.project_id,
+            project_title=project.title,
+            domain_profile=project.domain_profile,
+            package_status=package_status,
+            project_status=project.status,
+            latest_evidence_summary=(
+                project.resume_snapshot.latest_evidence_summary
+                if project.resume_snapshot is not None
+                else (project.latest_decision_summary or project.goal)
+            ),
+            claim_readiness_summary=claim_readiness_summary,
+            accepted_claims=accepted_claims,
+            provisional_claims=provisional_claims,
+            rejected_alternatives=rejected_alternatives,
+            experiment_lineage=experiment_lineage,
+            benchmark_truth_attachments=benchmark_truth_attachments,
+            limitations=limitations,
+            open_questions=open_questions,
+            evidence_gaps=evidence_gaps,
+            writer_cautions=writer_cautions,
+        )
+        artifact_path = self.store.save_publication_handoff(package)
+        package = package.model_copy(update={"artifact_path": str(artifact_path)})
+        self.store.append_publication_handoff(package)
+        self.store.append_audit_event(
+            "publication",
+            "publication_handoff",
+            package.model_dump(mode="json"),
+        )
+        return {
+            "generated": True,
+            "package": package.model_dump(mode="json"),
+            "resume_state": resume.get("resume_state"),
+        }
+
+    def publication_log(self, count: int = 20) -> dict[str, Any]:
+        packages = list(self.store.iter_publication_handoffs())
+        rows = sorted(packages, key=lambda item: (item.created_at, item.package_id), reverse=True)
+        return {
+            "packages": [item.model_dump(mode="json") for item in rows[: max(1, count)]],
         }
 
     def pause_project(

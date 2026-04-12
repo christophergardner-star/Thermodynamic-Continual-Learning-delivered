@@ -200,5 +200,6 @@ def test_ws21_dashboard_context_exposes_selected_project_views():
             assert context["selected_evidence_map"]["project_id"] == project.project_id
             assert context["selected_claim_lineage"]["project_id"] == project.project_id
             assert context["selected_timeline"]["project_id"] == project.project_id
+            assert context["selected_publication_handoff"]["package"]["project_id"] == project.project_id
         finally:
             orchestrator.shutdown()

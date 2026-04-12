@@ -177,6 +177,18 @@ ResearchResumeReason = Literal[
     "contradiction_requires_resolution",
     "human_requested_resume",
 ]
+PublicationPackageStatus = Literal["not_ready", "provisional", "ready"]
+PublicationClaimDisposition = Literal["accepted", "provisional", "rejected", "contradicted", "insufficient_evidence"]
+PublicationAlternativeSource = Literal["claim_verdict", "hypothesis", "contradiction_review"]
+PublicationLineageEventType = Literal[
+    "problem_study",
+    "problem_execution",
+    "research_decision",
+    "verification",
+    "claim_verdict",
+    "falsification_plan",
+    "portfolio_decision",
+]
 
 
 class DatasetSourceConfig(StrictModel):
@@ -1175,6 +1187,73 @@ class ResearchProjectState(StrictModel):
     entries: List[ResearchProject] = Field(default_factory=list)
 
 
+class PublicationClaimBundle(StrictModel):
+    verdict_id: str
+    disposition: PublicationClaimDisposition
+    summary: str
+    rationale: List[str] = Field(default_factory=list)
+    trial_id: Optional[str] = None
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    supporting_research_ids: List[str] = Field(default_factory=list)
+    supporting_evidence_ids: List[str] = Field(default_factory=list)
+    benchmark_names: List[str] = Field(default_factory=list)
+    canonical_benchmark_required: bool = False
+    canonical_benchmark_satisfied: bool = False
+    linkage_status: Literal["exact", "none", "ambiguous"] = "none"
+
+
+class PublicationAlternativeBundle(StrictModel):
+    alternative_id: str
+    source: PublicationAlternativeSource
+    status: PublicationClaimDisposition
+    summary: str
+    why_rejected: List[str] = Field(default_factory=list)
+    related_verdict_id: Optional[str] = None
+
+
+class PublicationBenchmarkAttachment(StrictModel):
+    source_id: str
+    source_kind: Literal["problem_study", "problem_execution", "claim_verdict"]
+    benchmark_ids: List[str] = Field(default_factory=list)
+    benchmark_names: List[str] = Field(default_factory=list)
+    benchmark_truth_statuses: List[BenchmarkTruthStatus] = Field(default_factory=list)
+    benchmark_alignment: BenchmarkAlignment = "aligned"
+    canonical_comparable: bool = False
+    requested_tier: Optional[BenchmarkTier] = None
+    actual_tiers: List[BenchmarkTier] = Field(default_factory=list)
+
+
+class PublicationLineageEntry(StrictModel):
+    event_id: str
+    timestamp: str = Field(default_factory=utc_now_iso)
+    event_type: PublicationLineageEventType
+    summary: str
+    source_id: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PublicationHandoffPackage(StrictModel):
+    package_id: str
+    created_at: str = Field(default_factory=utc_now_iso)
+    project_id: str
+    project_title: str
+    domain_profile: str
+    package_status: PublicationPackageStatus = "not_ready"
+    project_status: ResearchProjectStatus
+    latest_evidence_summary: str
+    claim_readiness_summary: str
+    accepted_claims: List[PublicationClaimBundle] = Field(default_factory=list)
+    provisional_claims: List[PublicationClaimBundle] = Field(default_factory=list)
+    rejected_alternatives: List[PublicationAlternativeBundle] = Field(default_factory=list)
+    experiment_lineage: List[PublicationLineageEntry] = Field(default_factory=list)
+    benchmark_truth_attachments: List[PublicationBenchmarkAttachment] = Field(default_factory=list)
+    limitations: List[str] = Field(default_factory=list)
+    open_questions: List[str] = Field(default_factory=list)
+    evidence_gaps: List[str] = Field(default_factory=list)
+    writer_cautions: List[str] = Field(default_factory=list)
+    artifact_path: Optional[str] = None
+
+
 class BreakthroughReport(StrictModel):
     trial_id: str
     generated_at: str = Field(default_factory=utc_now_iso)
@@ -1778,6 +1857,8 @@ class ControlRequest(StrictModel):
         "stale_projects",
         "evidence_debt",
         "resume_candidates",
+        "publication_handoff",
+        "publication_log",
         "scheduler_status",
         "run_scheduler_once",
         "list_benchmarks",

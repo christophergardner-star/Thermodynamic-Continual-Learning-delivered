@@ -58,6 +58,7 @@ def build_dashboard_context(
     selected_claim_lineage = None
     selected_timeline = None
     selected_falsification_status = None
+    selected_publication_handoff = None
     if selected_project_id:
         selected_project_status = orchestrator.project_status(selected_project_id)
         selected_resume_dashboard = orchestrator.resume_dashboard(selected_project_id)
@@ -65,6 +66,7 @@ def build_dashboard_context(
         selected_claim_lineage = orchestrator.claim_lineage(selected_project_id)
         selected_timeline = orchestrator.project_timeline(selected_project_id, limit=max_results * 3)
         selected_falsification_status = orchestrator.falsification_status(selected_project_id)
+        selected_publication_handoff = orchestrator.publication_handoff(selected_project_id)
 
     return {
         "workspace": orchestrator.workspace,
@@ -83,6 +85,7 @@ def build_dashboard_context(
         "selected_claim_lineage": selected_claim_lineage,
         "selected_timeline": selected_timeline,
         "selected_falsification_status": selected_falsification_status,
+        "selected_publication_handoff": selected_publication_handoff,
     }
 
 
@@ -264,6 +267,45 @@ def _render_project_tab(context: dict[str, Any]) -> None:
     )
 
 
+def _render_publication_tab(context: dict[str, Any]) -> None:
+    project_id = context["selected_project_id"]
+    if not project_id:
+        st.info("Select a project from the sidebar to inspect its publication handoff package.")
+        return
+
+    publication = context["selected_publication_handoff"] or {}
+    package = publication.get("package", publication)
+    accepted = package.get("accepted_claims", [])
+    provisional = package.get("provisional_claims", [])
+    rejected = package.get("rejected_alternatives", [])
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Package Status", package.get("package_status", "n/a"))
+    col2.metric("Accepted Claims", len(accepted))
+    col3.metric("Provisional Claims", len(provisional))
+    col4.metric("Rejected Alternatives", len(rejected))
+
+    left, right = st.columns(2)
+    with left:
+        _show_json("Publication Package", package, "No publication handoff package recorded.")
+        _show_dataframe(
+            "Experiment Lineage",
+            package.get("experiment_lineage", []),
+            "No publication lineage events recorded.",
+        )
+    with right:
+        _show_dataframe(
+            "Benchmark Truth Attachments",
+            package.get("benchmark_truth_attachments", []),
+            "No benchmark truth attachments recorded.",
+        )
+        _show_json(
+            "Writer Cautions",
+            package.get("writer_cautions", []),
+            "No writer cautions recorded.",
+        )
+
+
 def _render_infrastructure_tab(context: dict[str, Any]) -> None:
     status = context["status"]
     runtime = status.get("runtime", {})
@@ -347,6 +389,11 @@ def _render_raw_tab(context: dict[str, Any]) -> None:
             context["selected_evidence_map"],
             "No project selected.",
         )
+        _show_json(
+            "Selected Publication Handoff",
+            context["selected_publication_handoff"],
+            "No project selected.",
+        )
 
     graph_path = Path(context["workspace"]) / "tar_state" / "knowledge_graph.json"
     if graph_path.exists():
@@ -393,7 +440,7 @@ def main() -> None:
             )
         )
 
-        tabs = st.tabs(["Overview", "Operator", "Project", "Infrastructure", "Actions", "Raw"])
+        tabs = st.tabs(["Overview", "Operator", "Project", "Publication", "Infrastructure", "Actions", "Raw"])
         with tabs[0]:
             _render_overview_tab(context)
         with tabs[1]:
@@ -401,10 +448,12 @@ def main() -> None:
         with tabs[2]:
             _render_project_tab(context)
         with tabs[3]:
-            _render_infrastructure_tab(context)
+            _render_publication_tab(context)
         with tabs[4]:
-            _render_actions_tab(orchestrator)
+            _render_infrastructure_tab(context)
         with tabs[5]:
+            _render_actions_tab(orchestrator)
+        with tabs[6]:
             _render_raw_tab(context)
     finally:
         orchestrator.shutdown()
