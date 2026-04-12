@@ -50,6 +50,7 @@ class LoraSettings:
 @dataclass
 class TrainingRunConfig:
     model_name_or_path: str = "Qwen/Qwen2.5-7B-Instruct"
+    resume_adapter_path: str | None = None
     dataset_dir: str = "dataset_artifacts/tar_master_dataset_merged_v1"
     train_split_file: str = "tar_master_dataset_train.jsonl"
     validation_split_file: str = "tar_master_dataset_validation.jsonl"
@@ -89,6 +90,13 @@ class DatasetFileFingerprint:
 
 
 @dataclass
+class ArtifactFileFingerprint:
+    path: str
+    sha256: str
+    size_bytes: int
+
+
+@dataclass
 class DatasetBundle:
     dataset_dir: Path
     manifest: Path
@@ -97,6 +105,14 @@ class DatasetBundle:
     test_file: Path | None
     manifest_payload: dict[str, Any]
     files: dict[str, DatasetFileFingerprint]
+
+
+@dataclass
+class AdapterBundle:
+    adapter_dir: Path
+    adapter_config: Path
+    adapter_config_payload: dict[str, Any]
+    files: dict[str, ArtifactFileFingerprint]
 
 
 def parse_args() -> argparse.Namespace:
@@ -109,6 +125,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--dataset-dir", default=None)
     parser.add_argument("--model", default=None)
+    parser.add_argument("--resume-adapter-path", default=None)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--num-train-epochs", type=float, default=None)
     parser.add_argument("--max-seq-length", type=int, default=None)
@@ -192,6 +209,8 @@ def load_training_config(
             config.dataset_dir = args.dataset_dir
         if args.model is not None:
             config.model_name_or_path = args.model
+        if args.resume_adapter_path is not None:
+            config.resume_adapter_path = args.resume_adapter_path
         if args.max_steps is not None:
             config.max_steps = args.max_steps
         if args.num_train_epochs is not None:
@@ -248,6 +267,17 @@ def validate_training_config(config: TrainingRunConfig, *, repo_root: Path) -> N
         raise ValueError("output_dir must be set.")
     if _is_relative_to(output_dir, repo_root / "dataset_artifacts"):
         raise ValueError("Refusing to write training output inside dataset_artifacts.")
+    if config.resume_adapter_path is not None:
+        adapter_dir = _resolve_user_path(config.resume_adapter_path, base_dir=repo_root)
+        if adapter_dir is None or not adapter_dir.exists():
+            raise FileNotFoundError(
+                f"Continuation adapter directory does not exist: {config.resume_adapter_path}"
+            )
+        _require_no_symlink(adapter_dir)
+        if not _is_relative_to(adapter_dir, repo_root):
+            raise ValueError("Refusing continuation adapter outside the repo root.")
+        if output_dir == adapter_dir or _is_relative_to(output_dir, adapter_dir):
+            raise ValueError("Refusing to write output into the continuation adapter directory.")
 
 
 def resolve_model_source(config: TrainingRunConfig, *, repo_root: Path) -> str:
@@ -329,12 +359,113 @@ def resolve_dataset_bundle(config: TrainingRunConfig, *, repo_root: Path) -> Dat
     )
 
 
+def _artifact_fingerprint(path: Path) -> ArtifactFileFingerprint:
+    return ArtifactFileFingerprint(
+        path=str(path),
+        sha256=_sha256_file(path),
+        size_bytes=path.stat().st_size,
+    )
+
+
+def resolve_continuation_adapter(
+    config: TrainingRunConfig,
+    *,
+    repo_root: Path,
+    resolved_model: str,
+) -> AdapterBundle | None:
+    if config.resume_adapter_path is None:
+        return None
+
+    adapter_dir = _resolve_user_path(config.resume_adapter_path, base_dir=repo_root)
+    if adapter_dir is None or not adapter_dir.exists():
+        raise FileNotFoundError(
+            f"Continuation adapter directory does not exist: {config.resume_adapter_path}"
+        )
+    _require_no_symlink(adapter_dir)
+
+    adapter_config_path = adapter_dir / "adapter_config.json"
+    if not adapter_config_path.exists():
+        raise FileNotFoundError(
+            f"Required continuation adapter artifact missing: {adapter_config_path}"
+        )
+    _require_no_symlink(adapter_config_path)
+
+    adapter_model_path = None
+    for candidate_name in ("adapter_model.safetensors", "adapter_model.bin"):
+        candidate = adapter_dir / candidate_name
+        if candidate.exists():
+            _require_no_symlink(candidate)
+            adapter_model_path = candidate
+            break
+    if adapter_model_path is None:
+        raise FileNotFoundError(
+            f"Continuation adapter is missing adapter weights in {adapter_dir}"
+        )
+
+    adapter_config_payload = _read_json(adapter_config_path)
+    peft_type = str(adapter_config_payload.get("peft_type", "")).upper()
+    if peft_type and peft_type != "LORA":
+        raise ValueError("Continuation adapter must be a LoRA adapter.")
+
+    adapter_rank = adapter_config_payload.get("r")
+    if adapter_rank is not None and int(adapter_rank) != config.lora.rank:
+        raise ValueError("Continuation adapter rank does not match the active LoRA config.")
+    adapter_alpha = adapter_config_payload.get("lora_alpha")
+    if adapter_alpha is not None and int(adapter_alpha) != config.lora.alpha:
+        raise ValueError("Continuation adapter alpha does not match the active LoRA config.")
+    adapter_dropout = adapter_config_payload.get("lora_dropout")
+    if adapter_dropout is not None and float(adapter_dropout) != float(config.lora.dropout):
+        raise ValueError("Continuation adapter dropout does not match the active LoRA config.")
+    adapter_targets = adapter_config_payload.get("target_modules")
+    if adapter_targets:
+        normalized_targets = sorted(str(module) for module in adapter_targets)
+        if normalized_targets != sorted(config.lora.target_modules):
+            raise ValueError(
+                "Continuation adapter target_modules do not match the active LoRA config."
+            )
+
+    adapter_base_model = adapter_config_payload.get("base_model_name_or_path")
+    if (
+        isinstance(adapter_base_model, str)
+        and adapter_base_model.strip()
+        and resolved_model == config.model_name_or_path
+        and adapter_base_model != resolved_model
+    ):
+        raise ValueError(
+            "Continuation adapter base_model_name_or_path does not match the resolved model."
+        )
+
+    files = {
+        "adapter_config": _artifact_fingerprint(adapter_config_path),
+        adapter_model_path.name: _artifact_fingerprint(adapter_model_path),
+    }
+    for optional_name in (
+        "tokenizer_config.json",
+        "tokenizer.json",
+        "special_tokens_map.json",
+        "chat_template.jinja",
+        "README.md",
+    ):
+        candidate = adapter_dir / optional_name
+        if candidate.exists():
+            _require_no_symlink(candidate)
+            files[optional_name] = _artifact_fingerprint(candidate)
+
+    return AdapterBundle(
+        adapter_dir=adapter_dir,
+        adapter_config=adapter_config_path,
+        adapter_config_payload=adapter_config_payload,
+        files=files,
+    )
+
+
 def build_run_manifest(
     config: TrainingRunConfig,
     *,
     repo_root: Path,
     resolved_model: str,
     dataset_bundle: DatasetBundle,
+    continuation_adapter: AdapterBundle | None,
 ) -> dict[str, Any]:
     config_payload = asdict(config)
     config_payload["resolved_model"] = resolved_model
@@ -359,6 +490,22 @@ def build_run_manifest(
                 key: asdict(fingerprint) for key, fingerprint in dataset_bundle.files.items()
             },
         },
+        "continuation_adapter": (
+            {
+                "path": str(continuation_adapter.adapter_dir),
+                "base_model_name_or_path": continuation_adapter.adapter_config_payload.get(
+                    "base_model_name_or_path"
+                ),
+                "peft_type": continuation_adapter.adapter_config_payload.get("peft_type"),
+                "task_type": continuation_adapter.adapter_config_payload.get("task_type"),
+                "hashes": {
+                    key: asdict(fingerprint)
+                    for key, fingerprint in continuation_adapter.files.items()
+                },
+            }
+            if continuation_adapter is not None
+            else None
+        ),
         "config_sha256": hashlib.sha256(
             json.dumps(config_payload, sort_keys=True).encode("utf-8")
         ).hexdigest(),
@@ -415,6 +562,11 @@ def run_training(config: TrainingRunConfig, *, repo_root: Path) -> dict[str, Any
     _set_secure_runtime_env()
     resolved_model = resolve_model_source(config, repo_root=repo_root)
     dataset_bundle = resolve_dataset_bundle(config, repo_root=repo_root)
+    continuation_adapter = resolve_continuation_adapter(
+        config,
+        repo_root=repo_root,
+        resolved_model=resolved_model,
+    )
     output_dir = _resolve_user_path(config.output_dir, base_dir=repo_root)
     assert output_dir is not None
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -424,6 +576,7 @@ def run_training(config: TrainingRunConfig, *, repo_root: Path) -> dict[str, Any
         repo_root=repo_root,
         resolved_model=resolved_model,
         dataset_bundle=dataset_bundle,
+        continuation_adapter=continuation_adapter,
     )
     (output_dir / "run_manifest.json").write_text(
         json.dumps(run_manifest, indent=2, sort_keys=True),
@@ -434,6 +587,9 @@ def run_training(config: TrainingRunConfig, *, repo_root: Path) -> dict[str, Any
         summary = {
             "dry_run": True,
             "resolved_model": resolved_model,
+            "resume_adapter_path": str(continuation_adapter.adapter_dir)
+            if continuation_adapter is not None
+            else None,
             "dataset_dir": str(dataset_bundle.dataset_dir),
             "train_records": dataset_bundle.files["train"].records,
             "validation_records": dataset_bundle.files.get("validation").records
@@ -449,7 +605,7 @@ def run_training(config: TrainingRunConfig, *, repo_root: Path) -> dict[str, Any
 
     import torch
     from datasets import load_dataset
-    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
     from transformers import (
         AutoModelForCausalLM,
         AutoTokenizer,
@@ -462,7 +618,7 @@ def run_training(config: TrainingRunConfig, *, repo_root: Path) -> dict[str, Any
 
     set_seed(config.seed)
     tokenizer = AutoTokenizer.from_pretrained(
-        resolved_model,
+        str(continuation_adapter.adapter_dir) if continuation_adapter is not None else resolved_model,
         trust_remote_code=False,
         local_files_only=config.security.local_files_only,
     )
@@ -534,14 +690,25 @@ def run_training(config: TrainingRunConfig, *, repo_root: Path) -> dict[str, Any
     if config.lora.use_qlora:
         model = prepare_model_for_kbit_training(model)
 
-    peft_config = LoraConfig(
-        r=config.lora.rank,
-        lora_alpha=config.lora.alpha,
-        lora_dropout=config.lora.dropout,
-        target_modules=config.lora.target_modules,
-        task_type="CAUSAL_LM",
-    )
-    model = get_peft_model(model, peft_config)
+    if continuation_adapter is not None:
+        peft_from_pretrained_signature = inspect.signature(PeftModel.from_pretrained)
+        peft_from_pretrained_kwargs: dict[str, Any] = {}
+        if "is_trainable" in peft_from_pretrained_signature.parameters:
+            peft_from_pretrained_kwargs["is_trainable"] = True
+        model = PeftModel.from_pretrained(
+            model,
+            str(continuation_adapter.adapter_dir),
+            **peft_from_pretrained_kwargs,
+        )
+    else:
+        peft_config = LoraConfig(
+            r=config.lora.rank,
+            lora_alpha=config.lora.alpha,
+            lora_dropout=config.lora.dropout,
+            target_modules=config.lora.target_modules,
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, peft_config)
 
     training_args_kwargs = {
         "output_dir": str(output_dir),
@@ -612,6 +779,9 @@ def run_training(config: TrainingRunConfig, *, repo_root: Path) -> dict[str, Any
     summary = {
         "dry_run": False,
         "resolved_model": resolved_model,
+        "resume_adapter_path": str(continuation_adapter.adapter_dir)
+        if continuation_adapter is not None
+        else None,
         "dataset_dir": str(dataset_bundle.dataset_dir),
         "train_records": len(train_dataset),
         "validation_records": len(eval_dataset) if eval_dataset is not None else 0,

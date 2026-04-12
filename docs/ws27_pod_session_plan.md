@@ -1,5 +1,13 @@
 # WS27 Pod Session Plan
 
+Status:
+
+- this is the **initial** `WS27` probe session plan that was executed for the
+  first coder-backbone branch
+- after the probe result, use
+  [ws27_revised_branch_plan.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27_revised_branch_plan.md)
+  before any new pod rental
+
 ## Start Condition
 
 Open the pod only after all of these are true:

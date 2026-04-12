@@ -29,6 +29,8 @@ class EvalSecuritySettings:
 class EvalSelectionSettings:
     max_examples_per_family: int | None = None
     family_quotas: dict[str, int] = field(default_factory=dict)
+    include_families: list[str] = field(default_factory=list)
+    exclude_families: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -282,6 +284,8 @@ def main() -> int:
             test_split_file=config.test_split_file,
             family_quotas=config.selection.family_quotas,
             max_examples_per_family=config.selection.max_examples_per_family,
+            include_families=config.selection.include_families,
+            exclude_families=config.selection.exclude_families,
         )
         summary["eval_pack"] = {
             "items": pack_manifest["items"],

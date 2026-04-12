@@ -677,6 +677,8 @@ def build_eval_pack(
     test_split_file: str = "tar_master_dataset_test.jsonl",
     family_quotas: dict[str, int] | None = None,
     max_examples_per_family: int | None = None,
+    include_families: list[str] | None = None,
+    exclude_families: list[str] | None = None,
 ) -> dict[str, Any]:
     dataset_dir = dataset_dir.resolve()
     eval_pack_dir = eval_pack_dir.resolve()
@@ -685,10 +687,17 @@ def build_eval_pack(
     dataset_manifest = _load_json(dataset_dir / "manifest.json")
     test_path = dataset_dir / test_split_file
     test_examples = _load_jsonl(test_path)
+    include_family_set = {str(family) for family in include_families or []}
+    exclude_family_set = {str(family) for family in exclude_families or []}
 
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for example in sorted(test_examples, key=lambda row: row["example_id"]):
-        grouped[example["task_family"]].append(example)
+        family = str(example["task_family"])
+        if include_family_set and family not in include_family_set:
+            continue
+        if family in exclude_family_set:
+            continue
+        grouped[family].append(example)
 
     selected: list[EvalItem] = []
     for family, examples in sorted(grouped.items()):
@@ -758,6 +767,8 @@ def build_eval_pack(
         "selection": {
             "family_quotas": dict(sorted((family_quotas or {}).items())),
             "max_examples_per_family": max_examples_per_family,
+            "include_families": sorted(include_family_set),
+            "exclude_families": sorted(exclude_family_set),
         },
         "items": len(selected),
         "task_families": dict(sorted(task_families.items())),

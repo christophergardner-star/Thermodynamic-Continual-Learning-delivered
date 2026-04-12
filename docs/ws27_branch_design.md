@@ -1,5 +1,13 @@
 # WS27 Branch Design
 
+Status:
+
+- this document records the **initial** `WS27` branch choice that was taken to
+  the first pod-backed feasibility probe
+- that initial branch has now been superseded by
+  [ws27_revised_branch_plan.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27_revised_branch_plan.md)
+  after the probe result
+
 ## Primary Branch Choice
 
 `WS27` will start with `Candidate A: Operator-Plus-Auxiliary-TCL`.

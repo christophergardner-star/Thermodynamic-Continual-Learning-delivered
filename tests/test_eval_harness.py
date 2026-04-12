@@ -162,6 +162,25 @@ def test_build_eval_pack_writes_manifest_and_suite_files(tmp_path: Path):
     assert [message["role"] for message in first_item["messages"]] == ["system", "user"]
 
 
+def test_build_eval_pack_filters_families(tmp_path: Path):
+    dataset_dir = _seed_dataset(tmp_path)
+    eval_pack_dir = tmp_path / "eval_artifacts" / "ws24_filtered"
+    manifest = build_eval_pack(
+        dataset_dir=dataset_dir,
+        eval_pack_dir=eval_pack_dir,
+        eval_version="tar-operator-eval-ws24-filtered-v1",
+        include_families=["benchmark_honesty", "tcl_trace_analysis"],
+        exclude_families=["tcl_trace_analysis"],
+    )
+    assert manifest["items"] == 1
+    assert manifest["task_families"] == {"benchmark_honesty": 1}
+    assert manifest["selection"]["include_families"] == [
+        "benchmark_honesty",
+        "tcl_trace_analysis",
+    ]
+    assert manifest["selection"]["exclude_families"] == ["tcl_trace_analysis"]
+
+
 def test_evaluate_eval_pack_gold_predictor_scores_perfectly(tmp_path: Path):
     dataset_dir = _seed_dataset(tmp_path)
     eval_pack_dir = tmp_path / "eval_artifacts" / "ws24"
