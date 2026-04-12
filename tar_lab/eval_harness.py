@@ -156,6 +156,278 @@ def _heuristic_summary(item: EvalItem) -> dict[str, Any]:
             summary["resume_candidate"] = bool(_lookup_key(context, "resume_candidate"))
         if summary.get("closure_candidate") is None:
             summary["closure_candidate"] = bool(_lookup_key(context, "closure_candidate"))
+    elif item.task_family == "tcl_failure_mode_classification":
+        metrics = _lookup_key(context, "last_metrics") or {}
+        reasons = set(_lookup_key(context, "governor_reasons") or [])
+        drift_rho = float(metrics.get("drift_rho") or 0.0)
+        dimensionality_ratio = float(metrics.get("dimensionality_ratio") or 0.0)
+        training_loss = metrics.get("training_loss")
+        calibration = _lookup_key(context, "calibration") or {}
+        calibration_ece = calibration.get("ece")
+        if dimensionality_ratio > 0.0 and training_loss is not None and float(training_loss) <= 0.80 and dimensionality_ratio < 0.55:
+            summary.update(
+                {
+                    "failure_mode": "dimensionality_collapse",
+                    "severity": "high",
+                    "primary_signal": "dimensionality_ratio",
+                    "claim_promotion_safe": False,
+                }
+            )
+        elif drift_rho >= 0.12 or "weight_drift_limit" in reasons:
+            summary.update(
+                {
+                    "failure_mode": "drift_instability",
+                    "severity": "high",
+                    "primary_signal": "drift_rho",
+                    "claim_promotion_safe": False,
+                }
+            )
+        elif calibration_ece is not None and float(calibration_ece) >= 0.16:
+            summary.update(
+                {
+                    "failure_mode": "calibration_degradation",
+                    "severity": "medium",
+                    "primary_signal": "calibration_ece",
+                    "claim_promotion_safe": False,
+                }
+            )
+        else:
+            summary.update(
+                {
+                    "failure_mode": "stable_control",
+                    "severity": "low",
+                    "primary_signal": "equilibrium_gate",
+                    "claim_promotion_safe": bool(metrics.get("equilibrium_gate")),
+                }
+            )
+    elif item.task_family == "tcl_anchor_policy_judgement":
+        regime = str(_lookup_key(context, "regime") or "searching")
+        reasons = set(_lookup_key(context, "governor_reasons") or [])
+        anchor_dim = _lookup_key(context, "anchor_effective_dimensionality")
+        last_metrics = _lookup_key(context, "last_metrics") or {}
+        current_dim = last_metrics.get("effective_dimensionality")
+        if not anchor_dim:
+            summary.update(
+                {
+                    "anchor_policy": "anchor_absent_review",
+                    "anchor_reuse_recommended": False,
+                    "rationale_signals": ["anchor_missing"],
+                }
+            )
+        elif regime == "warming_up":
+            summary.update(
+                {
+                    "anchor_policy": "suppress_anchor_changes_during_warmup",
+                    "anchor_reuse_recommended": False,
+                    "rationale_signals": ["warmup_incomplete"],
+                }
+            )
+        elif regime in {"equilibrium", "stabilizing"} and current_dim is not None and float(anchor_dim) >= float(current_dim):
+            summary.update(
+                {
+                    "anchor_policy": "reuse_last_stable_anchor",
+                    "anchor_reuse_recommended": True,
+                    "rationale_signals": ["stable_regime", "anchor_capacity_available"],
+                }
+            )
+        elif "weight_drift_limit" in reasons:
+            summary.update(
+                {
+                    "anchor_policy": "reset_anchor_state",
+                    "anchor_reuse_recommended": False,
+                    "rationale_signals": ["quenching_or_drift_limit"],
+                }
+            )
+        else:
+            summary.update(
+                {
+                    "anchor_policy": "hold_anchor_constant",
+                    "anchor_reuse_recommended": False,
+                    "rationale_signals": ["monitor_anchor_pressure"],
+                }
+            )
+    elif item.task_family == "tcl_intervention_selection":
+        failure_mode = str(_lookup_key(context, "failure_mode") or "stable_control")
+        has_fallback_data = bool(_lookup_key(context, "has_fallback_data"))
+        regime = str(_lookup_key(context, "regime") or "searching")
+        if failure_mode == "dimensionality_collapse":
+            summary.update(
+                {
+                    "recommended_tcl_action": "reduce_anchor_pressure_and_run_short_recovery_probe",
+                    "intervention_reason": "quenching_signature",
+                    "claim_promotion_safe": False,
+                }
+            )
+        elif failure_mode == "drift_instability":
+            summary.update(
+                {
+                    "recommended_tcl_action": "tighten_governor_and_debug_drift_limit",
+                    "intervention_reason": "drift_instability",
+                    "claim_promotion_safe": False,
+                }
+            )
+        elif failure_mode == "calibration_degradation":
+            summary.update(
+                {
+                    "recommended_tcl_action": "run_calibration_repair_before_promotion",
+                    "intervention_reason": "calibration_gap",
+                    "claim_promotion_safe": False,
+                }
+            )
+        elif regime == "equilibrium" and not has_fallback_data:
+            summary.update(
+                {
+                    "recommended_tcl_action": "replicate_before_promotion",
+                    "intervention_reason": "equilibrium_without_fallback",
+                    "claim_promotion_safe": True,
+                }
+            )
+        else:
+            summary.update(
+                {
+                    "recommended_tcl_action": "continue_monitoring",
+                    "intervention_reason": "no_high_risk_signal",
+                    "claim_promotion_safe": False,
+                }
+            )
+    elif item.task_family == "tcl_trace_anomaly_diagnosis":
+        first_metric = _lookup_key(context, "first_metric") or {}
+        last_metric = _lookup_key(context, "last_metric") or {}
+        flags: list[str] = []
+        first_drift = float(first_metric.get("drift_rho") or 0.0)
+        last_drift = float(last_metric.get("drift_rho") or 0.0)
+        first_ratio = float(first_metric.get("dimensionality_ratio") or 0.0)
+        last_ratio = float(last_metric.get("dimensionality_ratio") or 0.0)
+        positive_ratios = [value for value in (first_ratio, last_ratio) if value > 0.0]
+        first_eq = float(first_metric.get("equilibrium_fraction") or 0.0)
+        last_eq = float(last_metric.get("equilibrium_fraction") or 0.0)
+        first_loss = float(first_metric.get("training_loss") or 0.0)
+        last_loss = float(last_metric.get("training_loss") or 0.0)
+        if max(first_drift, last_drift) >= 0.12:
+            flags.append("drift_spike")
+        if positive_ratios and min(positive_ratios) < 0.55 and max(first_loss, last_loss) <= 0.85:
+            flags.append("quenching_signature")
+        if first_eq >= 0.50 and last_eq <= first_eq - 0.25:
+            flags.append("equilibrium_backslide")
+        if first_loss > 0.0 and last_loss > first_loss * 1.15:
+            flags.append("loss_instability")
+        dominant = next((name for name in ("quenching_signature", "drift_spike", "equilibrium_backslide", "loss_instability") if name in flags), "none")
+        summary.update(
+            {
+                "anomaly_present": bool(flags),
+                "dominant_anomaly": dominant,
+                "anomaly_flags": flags,
+            }
+        )
+    elif item.task_family == "tcl_regime_transition_forecast":
+        current_regime = str(_lookup_key(context, "current_regime") or "searching")
+        anomaly = _lookup_key(context, "anomaly") or {}
+        dominant_anomaly = str((anomaly or {}).get("dominant_anomaly") or "none")
+        if dominant_anomaly in {"quenching_signature", "drift_spike"}:
+            summary.update(
+                {
+                    "predicted_next_regime": "thermodynamic_quenching",
+                    "intervention_urgency": "high",
+                    "confidence_band": "high",
+                }
+            )
+        elif current_regime == "warming_up":
+            summary.update(
+                {
+                    "predicted_next_regime": "stabilizing",
+                    "intervention_urgency": "medium",
+                    "confidence_band": "medium",
+                }
+            )
+        elif current_regime in {"searching", "stabilizing"}:
+            summary.update(
+                {
+                    "predicted_next_regime": "equilibrium",
+                    "intervention_urgency": "medium",
+                    "confidence_band": "medium",
+                }
+            )
+        else:
+            summary.update(
+                {
+                    "predicted_next_regime": current_regime,
+                    "intervention_urgency": "low",
+                    "confidence_band": "medium",
+                }
+            )
+    elif item.task_family == "tcl_recovery_confidence_estimation":
+        status = str(_lookup_key(context, "status") or "unknown")
+        consecutive_fail_fast = int(_lookup_key(context, "consecutive_fail_fast") or 0)
+        stable = bool(_lookup_key(context, "last_known_stable_hyperparameters"))
+        achieved_dim = float(_lookup_key(context, "max_effective_dimensionality_achieved") or 0.0)
+        if status == "completed" and stable:
+            summary.update(
+                {
+                    "recovery_outlook": "strong",
+                    "resume_confidence_band": "high",
+                    "requires_human_review": False,
+                }
+            )
+        elif status == "fail_fast" and consecutive_fail_fast >= 3:
+            summary.update(
+                {
+                    "recovery_outlook": "poor",
+                    "resume_confidence_band": "low",
+                    "requires_human_review": True,
+                }
+            )
+        elif status == "pivoted":
+            summary.update(
+                {
+                    "recovery_outlook": "guarded",
+                    "resume_confidence_band": "medium",
+                    "requires_human_review": True,
+                }
+            )
+        elif stable and achieved_dim >= 7.0:
+            summary.update(
+                {
+                    "recovery_outlook": "recoverable",
+                    "resume_confidence_band": "medium",
+                    "requires_human_review": False,
+                }
+            )
+    elif item.task_family == "tcl_run_triage":
+        status = str(_lookup_key(context, "status") or "unknown")
+        consecutive_fail_fast = int(_lookup_key(context, "consecutive_fail_fast") or 0)
+        recovery_confidence = _lookup_key(context, "recovery_confidence") or {}
+        if status == "completed" and recovery_confidence.get("resume_confidence_band") == "high":
+            summary.update(
+                {
+                    "operator_decision": "resume_controlled",
+                    "urgency": "medium",
+                    "human_review_required": False,
+                }
+            )
+        elif status == "fail_fast" and consecutive_fail_fast >= 3:
+            summary.update(
+                {
+                    "operator_decision": "pivot_or_terminate",
+                    "urgency": "high",
+                    "human_review_required": True,
+                }
+            )
+        elif status == "fail_fast":
+            summary.update(
+                {
+                    "operator_decision": "debug_before_resume",
+                    "urgency": "high",
+                    "human_review_required": True,
+                }
+            )
+        elif status == "pivoted":
+            summary.update(
+                {
+                    "operator_decision": "prepare_alternative_strategy",
+                    "urgency": "medium",
+                    "human_review_required": True,
+                }
+            )
     return summary
 
 

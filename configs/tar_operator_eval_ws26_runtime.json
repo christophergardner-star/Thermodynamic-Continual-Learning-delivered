@@ -1,0 +1,28 @@
+{
+  "dataset_dir": "dataset_artifacts/tar_master_dataset_ws26_merged_v1",
+  "test_split_file": "tar_master_dataset_test.jsonl",
+  "eval_pack_dir": "eval_artifacts/tar_operator_eval_ws26_v1",
+  "output_dir": "eval_artifacts/tar_operator_eval_runs/ws26_prompt_only_baseline",
+  "eval_version": "tar-operator-eval-ws26-v1",
+  "selection": {
+    "max_examples_per_family": null,
+    "family_quotas": {}
+  },
+  "security": {
+    "allow_external_dataset": false,
+    "allow_unverified_model": false,
+    "local_files_only": false,
+    "trust_remote_code": false
+  },
+  "runtime": {
+    "predictor_type": "hf_causal_lm",
+    "model_name_or_path": "Qwen/Qwen2.5-7B-Instruct",
+    "adapter_path": null,
+    "max_new_tokens": 128,
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "use_4bit": false,
+    "bf16": true,
+    "dry_run": false
+  }
+}

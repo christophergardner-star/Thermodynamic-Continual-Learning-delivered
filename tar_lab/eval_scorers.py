@@ -247,6 +247,12 @@ def _build_summary(task_family: str, payload: dict[str, Any] | None) -> dict[str
             "next_action": payload.get("next_action"),
             "stable_hyperparameters_available": payload.get("stable_hyperparameters_available"),
         }
+    if task_family == "tcl_recovery_confidence_estimation":
+        return {
+            "recovery_outlook": payload.get("recovery_outlook"),
+            "resume_confidence_band": payload.get("resume_confidence_band"),
+            "requires_human_review": payload.get("requires_human_review"),
+        }
     if task_family == "tcl_regime_diagnosis":
         return {
             "governor_action": payload.get("governor_action"),
@@ -255,6 +261,25 @@ def _build_summary(task_family: str, payload: dict[str, Any] | None) -> dict[str
             "regime": payload.get("regime"),
             "warning": payload.get("warning"),
         }
+    if task_family == "tcl_failure_mode_classification":
+        return {
+            "failure_mode": payload.get("failure_mode"),
+            "severity": payload.get("severity"),
+            "primary_signal": payload.get("primary_signal"),
+            "claim_promotion_safe": payload.get("claim_promotion_safe"),
+        }
+    if task_family == "tcl_anchor_policy_judgement":
+        return {
+            "anchor_policy": payload.get("anchor_policy"),
+            "anchor_reuse_recommended": payload.get("anchor_reuse_recommended"),
+            "rationale_signals": payload.get("rationale_signals"),
+        }
+    if task_family == "tcl_intervention_selection":
+        return {
+            "recommended_tcl_action": payload.get("recommended_tcl_action"),
+            "intervention_reason": payload.get("intervention_reason"),
+            "claim_promotion_safe": payload.get("claim_promotion_safe"),
+        }
     if task_family == "tcl_trace_analysis":
         return {
             "d_pr_trend": payload.get("d_pr_trend"),
@@ -262,6 +287,24 @@ def _build_summary(task_family: str, payload: dict[str, Any] | None) -> dict[str
             "equilibrium_trend": payload.get("equilibrium_trend"),
             "final_regime": payload.get("final_regime"),
             "warning": payload.get("warning"),
+        }
+    if task_family == "tcl_trace_anomaly_diagnosis":
+        return {
+            "anomaly_present": payload.get("anomaly_present"),
+            "dominant_anomaly": payload.get("dominant_anomaly"),
+            "anomaly_flags": payload.get("anomaly_flags"),
+        }
+    if task_family == "tcl_regime_transition_forecast":
+        return {
+            "predicted_next_regime": payload.get("predicted_next_regime"),
+            "intervention_urgency": payload.get("intervention_urgency"),
+            "confidence_band": payload.get("confidence_band"),
+        }
+    if task_family == "tcl_run_triage":
+        return {
+            "operator_decision": payload.get("operator_decision"),
+            "urgency": payload.get("urgency"),
+            "human_review_required": payload.get("human_review_required"),
         }
     if task_family == "verification_judgement":
         replication = (
@@ -425,6 +468,15 @@ FAMILY_RUBRICS: dict[str, FamilyRubric] = {
         ),
         decision_fields=("next_action",),
     ),
+    "tcl_recovery_confidence_estimation": FamilyRubric(
+        suite="tcl",
+        field_rules=(
+            FieldRule("recovery_outlook", 0.45, "text"),
+            FieldRule("resume_confidence_band", 0.35, "text"),
+            FieldRule("requires_human_review", 0.20, "bool"),
+        ),
+        decision_fields=("recovery_outlook", "resume_confidence_band"),
+    ),
     "tcl_regime_diagnosis": FamilyRubric(
         suite="tcl",
         field_rules=(
@@ -436,6 +488,34 @@ FAMILY_RUBRICS: dict[str, FamilyRubric] = {
         ),
         decision_fields=("regime", "governor_action"),
     ),
+    "tcl_failure_mode_classification": FamilyRubric(
+        suite="tcl",
+        field_rules=(
+            FieldRule("failure_mode", 0.40, "text"),
+            FieldRule("severity", 0.20, "text"),
+            FieldRule("primary_signal", 0.20, "text"),
+            FieldRule("claim_promotion_safe", 0.20, "bool"),
+        ),
+        decision_fields=("failure_mode", "severity"),
+    ),
+    "tcl_anchor_policy_judgement": FamilyRubric(
+        suite="tcl",
+        field_rules=(
+            FieldRule("anchor_policy", 0.45, "text"),
+            FieldRule("anchor_reuse_recommended", 0.25, "bool"),
+            FieldRule("rationale_signals", 0.30, "set"),
+        ),
+        decision_fields=("anchor_policy",),
+    ),
+    "tcl_intervention_selection": FamilyRubric(
+        suite="tcl",
+        field_rules=(
+            FieldRule("recommended_tcl_action", 0.50, "text"),
+            FieldRule("intervention_reason", 0.30, "text"),
+            FieldRule("claim_promotion_safe", 0.20, "bool"),
+        ),
+        decision_fields=("recommended_tcl_action", "intervention_reason"),
+    ),
     "tcl_trace_analysis": FamilyRubric(
         suite="tcl",
         field_rules=(
@@ -446,6 +526,33 @@ FAMILY_RUBRICS: dict[str, FamilyRubric] = {
             FieldRule("warning", 0.10, "text"),
         ),
         decision_fields=("final_regime",),
+    ),
+    "tcl_trace_anomaly_diagnosis": FamilyRubric(
+        suite="tcl",
+        field_rules=(
+            FieldRule("anomaly_present", 0.25, "bool"),
+            FieldRule("dominant_anomaly", 0.40, "text"),
+            FieldRule("anomaly_flags", 0.35, "set"),
+        ),
+        decision_fields=("anomaly_present", "dominant_anomaly"),
+    ),
+    "tcl_regime_transition_forecast": FamilyRubric(
+        suite="tcl",
+        field_rules=(
+            FieldRule("predicted_next_regime", 0.45, "text"),
+            FieldRule("intervention_urgency", 0.30, "text"),
+            FieldRule("confidence_band", 0.25, "text"),
+        ),
+        decision_fields=("predicted_next_regime", "intervention_urgency"),
+    ),
+    "tcl_run_triage": FamilyRubric(
+        suite="tcl",
+        field_rules=(
+            FieldRule("operator_decision", 0.45, "text"),
+            FieldRule("urgency", 0.30, "text"),
+            FieldRule("human_review_required", 0.25, "bool"),
+        ),
+        decision_fields=("operator_decision", "urgency"),
     ),
     "verification_judgement": FamilyRubric(
         suite="falsification",

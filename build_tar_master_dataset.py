@@ -10,7 +10,8 @@ from typing import Any, Iterable
 SYSTEM_PROMPT = (
     "You are TAR, a disciplined research operator. Separate measured results, "
     "inferences, hypotheses, blockers, and next actions. Stay honest when "
-    "benchmark truth, reproducibility, or capability is incomplete."
+    "benchmark truth, reproducibility, or capability is incomplete. Return "
+    "only a JSON object and do not include prose or markdown fences."
 )
 
 STATE_ARTIFACT_FILES = [
@@ -222,6 +223,302 @@ def _derive_tcl_recovery_action(recovery: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _derive_tcl_failure_mode(
+    *,
+    regime: dict[str, Any],
+    metrics: dict[str, Any],
+    governor_action: Any,
+    governor_reasons: Any,
+    calibration: dict[str, Any] | None,
+) -> dict[str, Any]:
+    drift_rho = _safe_float(metrics.get("drift_rho")) or 0.0
+    dimensionality_ratio = _safe_float(metrics.get("dimensionality_ratio")) or 0.0
+    equilibrium_fraction = _safe_float(metrics.get("equilibrium_fraction")) or 0.0
+    training_loss = _safe_float(metrics.get("training_loss"))
+    calibration_ece = _safe_float((calibration or {}).get("ece"))
+    reasons = {str(item) for item in _ensure_list(governor_reasons) if item is not None}
+    regime_name = str(regime.get("regime") or "searching")
+
+    failure_mode = "stable_control"
+    severity = "low"
+    primary_signal = "equilibrium_gate"
+    claim_promotion_safe = bool(metrics.get("equilibrium_gate")) and (calibration_ece or 0.0) <= 0.10
+
+    if (
+        dimensionality_ratio > 0.0
+        and training_loss is not None
+        and training_loss <= 0.80
+        and dimensionality_ratio < 0.55
+    ):
+        failure_mode = "dimensionality_collapse"
+        severity = "high"
+        primary_signal = "dimensionality_ratio"
+        claim_promotion_safe = False
+    elif drift_rho >= 0.12 or "weight_drift_limit" in reasons:
+        failure_mode = "drift_instability"
+        severity = "high"
+        primary_signal = "drift_rho"
+        claim_promotion_safe = False
+    elif calibration_ece is not None and calibration_ece >= 0.16:
+        failure_mode = "calibration_degradation"
+        severity = "medium"
+        primary_signal = "calibration_ece"
+        claim_promotion_safe = False
+    elif regime_name == "warming_up" or equilibrium_fraction < 0.20:
+        failure_mode = "warmup_incomplete"
+        severity = "medium"
+        primary_signal = "equilibrium_fraction"
+        claim_promotion_safe = False
+    elif str(governor_action or "") == "terminate":
+        failure_mode = "governor_termination"
+        severity = "medium"
+        primary_signal = "governor_action"
+        claim_promotion_safe = False
+
+    return {
+        "failure_mode": failure_mode,
+        "severity": severity,
+        "primary_signal": primary_signal,
+        "claim_promotion_safe": claim_promotion_safe,
+    }
+
+
+def _derive_tcl_anchor_policy(
+    *,
+    regime: dict[str, Any],
+    metrics: dict[str, Any],
+    anchor_effective_dimensionality: Any,
+    governor_reasons: Any,
+    recovery: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    current_dimensionality = _safe_float(metrics.get("effective_dimensionality"))
+    anchor_dimensionality = _safe_float(anchor_effective_dimensionality)
+    reasons = {str(item) for item in _ensure_list(governor_reasons) if item is not None}
+    regime_name = str(regime.get("regime") or "searching")
+
+    rationale_signals: list[str] = []
+    anchor_policy = "hold_anchor_constant"
+    anchor_reuse_recommended = bool((recovery or {}).get("last_anchor_path"))
+
+    if anchor_dimensionality is None or anchor_dimensionality <= 0.0:
+        anchor_policy = "anchor_absent_review"
+        anchor_reuse_recommended = False
+        rationale_signals.append("anchor_missing")
+    elif regime_name == "thermodynamic_quenching" or "weight_drift_limit" in reasons:
+        anchor_policy = "reset_anchor_state"
+        anchor_reuse_recommended = False
+        rationale_signals.append("quenching_or_drift_limit")
+    elif regime_name in {"equilibrium", "stabilizing"} and current_dimensionality is not None and anchor_dimensionality >= current_dimensionality:
+        anchor_policy = "reuse_last_stable_anchor"
+        anchor_reuse_recommended = True
+        rationale_signals.extend(["stable_regime", "anchor_capacity_available"])
+    elif regime_name == "warming_up":
+        anchor_policy = "suppress_anchor_changes_during_warmup"
+        anchor_reuse_recommended = False
+        rationale_signals.append("warmup_incomplete")
+    else:
+        rationale_signals.append("monitor_anchor_pressure")
+
+    return {
+        "anchor_policy": anchor_policy,
+        "anchor_reuse_recommended": anchor_reuse_recommended,
+        "rationale_signals": rationale_signals[:3],
+    }
+
+
+def _derive_tcl_trace_anomaly(metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    drift_values = [_safe_float(item.get("drift_rho")) for item in metrics]
+    dim_ratios = [_safe_float(item.get("dimensionality_ratio")) for item in metrics]
+    equilibrium_values = [_safe_float(item.get("equilibrium_fraction")) for item in metrics]
+    losses = [_safe_float(item.get("training_loss")) for item in metrics]
+
+    anomaly_flags: list[str] = []
+    drift_clean = [value for value in drift_values if value is not None]
+    ratio_clean = [value for value in dim_ratios if value is not None]
+    equilibrium_clean = [value for value in equilibrium_values if value is not None]
+    losses_clean = [value for value in losses if value is not None]
+
+    if drift_clean and max(drift_clean) >= 0.12:
+        anomaly_flags.append("drift_spike")
+    if ratio_clean and losses_clean and min(ratio_clean) < 0.55 and max(losses_clean) <= 0.85:
+        anomaly_flags.append("quenching_signature")
+    if equilibrium_clean and max(equilibrium_clean) >= 0.50 and equilibrium_clean[-1] <= max(equilibrium_clean) - 0.25:
+        anomaly_flags.append("equilibrium_backslide")
+    if len(losses_clean) >= 2 and losses_clean[-1] > losses_clean[0] * 1.15:
+        anomaly_flags.append("loss_instability")
+
+    dominant_priority = (
+        "quenching_signature",
+        "drift_spike",
+        "equilibrium_backslide",
+        "loss_instability",
+    )
+    dominant_anomaly = "none"
+    for label in dominant_priority:
+        if label in anomaly_flags:
+            dominant_anomaly = label
+            break
+
+    return {
+        "anomaly_present": bool(anomaly_flags),
+        "dominant_anomaly": dominant_anomaly,
+        "anomaly_flags": anomaly_flags,
+    }
+
+
+def _derive_tcl_transition_forecast(
+    *,
+    first_metric: dict[str, Any],
+    last_metric: dict[str, Any],
+    regime: dict[str, Any],
+    anomaly: dict[str, Any],
+) -> dict[str, Any]:
+    d_pr_trend = _trend_label(
+        first_metric.get("effective_dimensionality"),
+        last_metric.get("effective_dimensionality"),
+    )
+    equilibrium_trend = _trend_label(
+        first_metric.get("equilibrium_fraction"),
+        last_metric.get("equilibrium_fraction"),
+    )
+    drift_trend = _trend_label(
+        first_metric.get("drift_rho"),
+        last_metric.get("drift_rho"),
+    )
+    regime_name = str(regime.get("regime") or "searching")
+
+    predicted_next_regime = regime_name
+    intervention_urgency = "medium"
+    if anomaly.get("dominant_anomaly") in {"quenching_signature", "drift_spike"} or d_pr_trend == "collapsing":
+        predicted_next_regime = "thermodynamic_quenching"
+        intervention_urgency = "high"
+    elif regime_name == "warming_up" and equilibrium_trend == "increasing":
+        predicted_next_regime = "stabilizing"
+        intervention_urgency = "medium"
+    elif regime_name in {"searching", "stabilizing"} and equilibrium_trend == "increasing" and drift_trend != "increasing":
+        predicted_next_regime = "equilibrium"
+        intervention_urgency = "medium"
+    elif regime_name == "equilibrium":
+        intervention_urgency = "low"
+
+    known_trends = sum(label != "unknown" for label in (d_pr_trend, equilibrium_trend, drift_trend))
+    confidence_band = "high" if known_trends == 3 else "medium" if known_trends >= 2 else "low"
+    return {
+        "predicted_next_regime": predicted_next_regime,
+        "intervention_urgency": intervention_urgency,
+        "confidence_band": confidence_band,
+    }
+
+
+def _derive_tcl_intervention_policy(
+    *,
+    regime: dict[str, Any],
+    failure_mode: dict[str, Any],
+    anomaly: dict[str, Any],
+    has_fallback_data: bool,
+) -> dict[str, Any]:
+    regime_name = str(regime.get("regime") or "searching")
+    failure_label = str(failure_mode.get("failure_mode") or "stable_control")
+    dominant_anomaly = str(anomaly.get("dominant_anomaly") or "none")
+
+    recommended_tcl_action = "continue_monitoring"
+    intervention_reason = "no_high_risk_signal"
+    claim_promotion_safe = False
+
+    if failure_label == "dimensionality_collapse" or dominant_anomaly == "quenching_signature":
+        recommended_tcl_action = "reduce_anchor_pressure_and_run_short_recovery_probe"
+        intervention_reason = "quenching_signature"
+    elif failure_label == "drift_instability" or dominant_anomaly == "drift_spike":
+        recommended_tcl_action = "tighten_governor_and_debug_drift_limit"
+        intervention_reason = "drift_instability"
+    elif failure_label == "calibration_degradation":
+        recommended_tcl_action = "run_calibration_repair_before_promotion"
+        intervention_reason = "calibration_gap"
+    elif failure_label == "warmup_incomplete":
+        recommended_tcl_action = "continue_statistical_warmup"
+        intervention_reason = "warmup_incomplete"
+    elif regime_name == "equilibrium" and not has_fallback_data and not anomaly.get("anomaly_present"):
+        recommended_tcl_action = "replicate_before_promotion"
+        intervention_reason = "equilibrium_without_fallback"
+        claim_promotion_safe = True
+
+    return {
+        "recommended_tcl_action": recommended_tcl_action,
+        "intervention_reason": intervention_reason,
+        "claim_promotion_safe": claim_promotion_safe,
+    }
+
+
+def _derive_tcl_recovery_confidence(recovery: dict[str, Any]) -> dict[str, Any]:
+    status = str(recovery.get("status") or "unknown")
+    consecutive_fail_fast = int(recovery.get("consecutive_fail_fast") or 0)
+    stable_hyperparameters_available = bool(recovery.get("last_known_stable_hyperparameters"))
+    achieved_dimensionality = _safe_float(recovery.get("max_effective_dimensionality_achieved")) or 0.0
+
+    recovery_outlook = "uncertain"
+    resume_confidence_band = "low"
+    requires_human_review = True
+    if status == "completed" and stable_hyperparameters_available:
+        recovery_outlook = "strong"
+        resume_confidence_band = "high"
+        requires_human_review = False
+    elif status == "fail_fast" and consecutive_fail_fast >= 3:
+        recovery_outlook = "poor"
+        resume_confidence_band = "low"
+    elif status == "pivoted":
+        recovery_outlook = "guarded"
+        resume_confidence_band = "medium"
+    elif stable_hyperparameters_available and achieved_dimensionality >= 7.0:
+        recovery_outlook = "recoverable"
+        resume_confidence_band = "medium"
+        requires_human_review = False
+
+    return {
+        "recovery_outlook": recovery_outlook,
+        "resume_confidence_band": resume_confidence_band,
+        "requires_human_review": requires_human_review,
+    }
+
+
+def _derive_tcl_run_triage(
+    recovery: dict[str, Any], *, recovery_confidence: dict[str, Any]
+) -> dict[str, Any]:
+    status = str(recovery.get("status") or "unknown")
+    consecutive_fail_fast = int(recovery.get("consecutive_fail_fast") or 0)
+
+    operator_decision = "inspect_recovery_state"
+    urgency = "medium"
+    if status == "completed" and recovery_confidence.get("resume_confidence_band") == "high":
+        operator_decision = "resume_controlled"
+        urgency = "medium"
+    elif status == "fail_fast" and consecutive_fail_fast >= 3:
+        operator_decision = "pivot_or_terminate"
+        urgency = "high"
+    elif status == "fail_fast":
+        operator_decision = "debug_before_resume"
+        urgency = "high"
+    elif status == "pivoted":
+        operator_decision = "prepare_alternative_strategy"
+        urgency = "medium"
+
+    return {
+        "operator_decision": operator_decision,
+        "urgency": urgency,
+        "human_review_required": bool(recovery_confidence.get("requires_human_review")),
+    }
+
+
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -313,7 +610,8 @@ def _render_user_prompt(task_family: str, task_name: str, input_context: dict[st
     return (
         f"Task family: {task_family}\n"
         f"Task: {task_name}\n"
-        "Use the TAR operator contract. Return a concise JSON answer aligned to the target.\n\n"
+        "Use the TAR operator contract. Return only a concise JSON object aligned to the target. "
+        "Do not add explanatory prose or markdown fences.\n\n"
         f"Input state:\n{payload}"
     )
 
@@ -1176,6 +1474,25 @@ def _examples_from_tcl_payload_bundle(
     data_provenance = config.get("data_provenance") if isinstance(config.get("data_provenance"), dict) else {}
     backend_provenance = config.get("backend_provenance") if isinstance(config.get("backend_provenance"), dict) else {}
     lineage = _lineage_key(trial_id=trial_id, fallback=trial_id)
+    failure_mode = _derive_tcl_failure_mode(
+        regime=regime,
+        metrics=metrics,
+        governor_action=summary.get("governor_action"),
+        governor_reasons=summary.get("governor_reasons"),
+        calibration=summary.get("calibration") if isinstance(summary.get("calibration"), dict) else {},
+    )
+    anchor_policy = _derive_tcl_anchor_policy(
+        regime=regime,
+        metrics=metrics,
+        anchor_effective_dimensionality=summary.get("anchor_effective_dimensionality"),
+        governor_reasons=summary.get("governor_reasons"),
+    )
+    intervention_policy = _derive_tcl_intervention_policy(
+        regime=regime,
+        failure_mode=failure_mode,
+        anomaly={"anomaly_present": False, "dominant_anomaly": "none", "anomaly_flags": []},
+        has_fallback_data=bool(data_provenance.get("has_fallback")),
+    )
     return [
         _example_record(
             version=version,
@@ -1214,7 +1531,74 @@ def _examples_from_tcl_payload_bundle(
             repo_root=repo_root,
             state_dir=state_dir,
             tags=("tcl", "thermodynamics", "governor"),
-        )
+        ),
+        _example_record(
+            version=version,
+            task_family="tcl_failure_mode_classification",
+            task_name="payload_summary_to_failure_mode",
+            source_kind="tcl_payload_summary",
+            source_id=f"{trial_id}:failure_mode",
+            source_file=str(source_file),
+            lineage_key=lineage,
+            input_context={
+                "trial_id": trial_id,
+                "regime": regime.get("regime"),
+                "warning": regime.get("warning"),
+                "governor_action": summary.get("governor_action"),
+                "governor_reasons": _ensure_list(summary.get("governor_reasons"))[:6],
+                "last_metrics": metrics,
+                "calibration": summary.get("calibration"),
+            },
+            target=failure_mode,
+            repo_root=repo_root,
+            state_dir=state_dir,
+            tags=("tcl", "diagnosis", "failure_mode"),
+        ),
+        _example_record(
+            version=version,
+            task_family="tcl_anchor_policy_judgement",
+            task_name="payload_summary_to_anchor_policy",
+            source_kind="tcl_payload_summary",
+            source_id=f"{trial_id}:anchor_policy",
+            source_file=str(source_file),
+            lineage_key=lineage,
+            input_context={
+                "trial_id": trial_id,
+                "regime": regime.get("regime"),
+                "warning": regime.get("warning"),
+                "governor_reasons": _ensure_list(summary.get("governor_reasons"))[:6],
+                "anchor_effective_dimensionality": summary.get("anchor_effective_dimensionality"),
+                "last_metrics": metrics,
+            },
+            target=anchor_policy,
+            repo_root=repo_root,
+            state_dir=state_dir,
+            tags=("tcl", "anchor", "policy"),
+        ),
+        _example_record(
+            version=version,
+            task_family="tcl_intervention_selection",
+            task_name="payload_summary_to_intervention_selection",
+            source_kind="tcl_payload_summary",
+            source_id=f"{trial_id}:intervention",
+            source_file=str(source_file),
+            lineage_key=lineage,
+            input_context={
+                "trial_id": trial_id,
+                "regime": regime.get("regime"),
+                "warning": regime.get("warning"),
+                "failure_mode": failure_mode.get("failure_mode"),
+                "severity": failure_mode.get("severity"),
+                "governor_action": summary.get("governor_action"),
+                "governor_reasons": _ensure_list(summary.get("governor_reasons"))[:6],
+                "has_fallback_data": data_provenance.get("has_fallback"),
+                "calibration": summary.get("calibration"),
+            },
+            target=intervention_policy,
+            repo_root=repo_root,
+            state_dir=state_dir,
+            tags=("tcl", "intervention", "operator"),
+        ),
     ]
 
 
@@ -1232,6 +1616,13 @@ def _examples_from_tcl_trace_bundle(
     trial_id = str(last_metric.get("trial_id") or bundle.get("source_id") or "unknown-tcl-trace")
     source_file = bundle.get("trace_file") or "tar_runs/thermo_metrics.jsonl"
     lineage = _lineage_key(trial_id=trial_id, fallback=trial_id)
+    anomaly = _derive_tcl_trace_anomaly(metrics)
+    transition_forecast = _derive_tcl_transition_forecast(
+        first_metric=first_metric,
+        last_metric=last_metric,
+        regime=regime,
+        anomaly=anomaly,
+    )
     return [
         _example_record(
             version=version,
@@ -1267,7 +1658,48 @@ def _examples_from_tcl_trace_bundle(
             repo_root=repo_root,
             state_dir=state_dir,
             tags=("tcl", "trace", "thermodynamics"),
-        )
+        ),
+        _example_record(
+            version=version,
+            task_family="tcl_trace_anomaly_diagnosis",
+            task_name="thermo_trace_to_anomaly_report",
+            source_kind="tcl_thermo_trace",
+            source_id=f"{trial_id}:anomaly",
+            source_file=str(source_file),
+            lineage_key=lineage,
+            input_context={
+                "trial_id": trial_id,
+                "num_steps": len(metrics),
+                "first_metric": first_metric,
+                "last_metric": last_metric,
+                "governor_thresholds": thresholds,
+            },
+            target=anomaly,
+            repo_root=repo_root,
+            state_dir=state_dir,
+            tags=("tcl", "trace", "anomaly"),
+        ),
+        _example_record(
+            version=version,
+            task_family="tcl_regime_transition_forecast",
+            task_name="thermo_trace_to_regime_forecast",
+            source_kind="tcl_thermo_trace",
+            source_id=f"{trial_id}:forecast",
+            source_file=str(source_file),
+            lineage_key=lineage,
+            input_context={
+                "trial_id": trial_id,
+                "num_steps": len(metrics),
+                "first_metric": first_metric,
+                "last_metric": last_metric,
+                "current_regime": regime.get("regime"),
+                "anomaly": anomaly,
+            },
+            target=transition_forecast,
+            repo_root=repo_root,
+            state_dir=state_dir,
+            tags=("tcl", "trace", "forecast"),
+        ),
     ]
 
 
@@ -1277,6 +1709,8 @@ def _examples_from_recovery_state(
     trial_id = str(record.get("trial_id") or "unknown-recovery")
     lineage = _lineage_key(trial_id=trial_id, fallback=trial_id)
     recovery_target = _derive_tcl_recovery_action(record)
+    recovery_confidence = _derive_tcl_recovery_confidence(record)
+    run_triage = _derive_tcl_run_triage(record, recovery_confidence=recovery_confidence)
     return [
         _example_record(
             version=version,
@@ -1305,7 +1739,49 @@ def _examples_from_recovery_state(
             repo_root=repo_root,
             state_dir=state_dir,
             tags=("tcl", "recovery", "continuation"),
-        )
+        ),
+        _example_record(
+            version=version,
+            task_family="tcl_recovery_confidence_estimation",
+            task_name="recovery_state_to_confidence_band",
+            source_kind="tcl_recovery_state",
+            source_id=f"{trial_id}:confidence",
+            source_file="recovery.json",
+            lineage_key=lineage,
+            input_context={
+                "trial_id": trial_id,
+                "status": record.get("status"),
+                "consecutive_fail_fast": record.get("consecutive_fail_fast"),
+                "last_known_stable_hyperparameters": record.get("last_known_stable_hyperparameters"),
+                "last_fail_reason": record.get("last_fail_reason"),
+                "max_effective_dimensionality_achieved": record.get("max_effective_dimensionality_achieved"),
+            },
+            target=recovery_confidence,
+            repo_root=repo_root,
+            state_dir=state_dir,
+            tags=("tcl", "recovery", "confidence"),
+        ),
+        _example_record(
+            version=version,
+            task_family="tcl_run_triage",
+            task_name="recovery_state_to_operator_triage",
+            source_kind="tcl_recovery_state",
+            source_id=f"{trial_id}:triage",
+            source_file="recovery.json",
+            lineage_key=lineage,
+            input_context={
+                "trial_id": trial_id,
+                "status": record.get("status"),
+                "consecutive_fail_fast": record.get("consecutive_fail_fast"),
+                "last_fail_reason": record.get("last_fail_reason"),
+                "last_strategy_family": record.get("last_strategy_family"),
+                "recovery_confidence": recovery_confidence,
+            },
+            target=run_triage,
+            repo_root=repo_root,
+            state_dir=state_dir,
+            tags=("tcl", "recovery", "triage"),
+        ),
     ]
 
 

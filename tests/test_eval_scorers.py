@@ -53,3 +53,47 @@ def test_score_prediction_for_tcl_trace_analysis_scores_exact_match():
     assert result.score == 1.0
     assert result.decision_correct is True
     assert result.error_bucket == "none"
+
+
+def test_score_prediction_for_tcl_intervention_selection_scores_exact_match():
+    target = {
+        "recommended_tcl_action": "tighten_governor_and_debug_drift_limit",
+        "intervention_reason": "drift_instability",
+        "claim_promotion_safe": False,
+    }
+    result = score_prediction(
+        item_id="eval-3",
+        example_id="example-3",
+        task_family="tcl_intervention_selection",
+        suite_names=["core", "tcl"],
+        gold_target=target,
+        prediction_text=json.dumps(target),
+    )
+    assert result.score == 1.0
+    assert result.decision_correct is True
+    assert result.error_bucket == "none"
+
+
+def test_score_prediction_for_tcl_recovery_confidence_estimation_flags_mismatch():
+    target = {
+        "recovery_outlook": "poor",
+        "resume_confidence_band": "low",
+        "requires_human_review": True,
+    }
+    result = score_prediction(
+        item_id="eval-4",
+        example_id="example-4",
+        task_family="tcl_recovery_confidence_estimation",
+        suite_names=["core", "tcl"],
+        gold_target=target,
+        prediction_text=json.dumps(
+            {
+                "recovery_outlook": "strong",
+                "resume_confidence_band": "high",
+                "requires_human_review": False,
+            }
+        ),
+    )
+    assert result.score < 0.5
+    assert result.decision_correct is False
+    assert result.error_bucket == "tcl_reasoning_mismatch"

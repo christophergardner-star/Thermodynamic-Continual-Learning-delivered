@@ -5,6 +5,7 @@ from pathlib import Path
 
 from build_tar_master_dataset import build_master_dataset
 from generate_ws23_dataset_campaign import build_campaign_workspace
+from generate_ws26_tcl_campaign import build_tcl_workspace
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -491,11 +492,22 @@ def test_build_master_dataset_includes_tcl_native_families(tmp_path: Path) -> No
     manifest = build_master_dataset(state_dir, output_dir, version="tar-master-v1")
 
     assert manifest["task_families"]["tcl_regime_diagnosis"] >= 1
+    assert manifest["task_families"]["tcl_failure_mode_classification"] >= 1
+    assert manifest["task_families"]["tcl_anchor_policy_judgement"] >= 1
+    assert manifest["task_families"]["tcl_intervention_selection"] >= 1
     assert manifest["task_families"]["tcl_trace_analysis"] >= 1
+    assert manifest["task_families"]["tcl_trace_anomaly_diagnosis"] >= 1
+    assert manifest["task_families"]["tcl_regime_transition_forecast"] >= 1
     assert manifest["task_families"]["tcl_recovery_planning"] >= 1
+    assert manifest["task_families"]["tcl_recovery_confidence_estimation"] >= 1
+    assert manifest["task_families"]["tcl_run_triage"] >= 1
     rows = (output_dir / "tar_master_dataset.jsonl").read_text(encoding="utf-8").splitlines()
     assert any('"task_family": "tcl_regime_diagnosis"' in row for row in rows)
+    assert any('"task_family": "tcl_failure_mode_classification"' in row for row in rows)
+    assert any('"task_family": "tcl_intervention_selection"' in row for row in rows)
+    assert any('"task_family": "tcl_trace_anomaly_diagnosis"' in row for row in rows)
     assert any('"task_family": "tcl_recovery_planning"' in row for row in rows)
+    assert any('"task_family": "tcl_run_triage"' in row for row in rows)
 
 
 def test_build_master_dataset_merges_multiple_state_dirs(tmp_path: Path) -> None:
@@ -609,3 +621,15 @@ def test_ws23_campaign_generator_produces_private_state_bundle(tmp_path: Path) -
     assert (workspace / "tar_state" / "claim_verdicts.jsonl").exists()
     assert (workspace / "tar_state" / "inference_endpoints.json").exists()
     assert (workspace / "tar_state" / "manifests").exists()
+
+
+def test_ws26_tcl_campaign_generator_produces_tcl_state_bundle(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws26_campaign"
+    summary = build_tcl_workspace(workspace, trials_per_scenario=2, prefix="unit")
+
+    assert summary["trial_count"] == 16
+    assert summary["recovery_records"] == 16
+    assert (workspace / "tar_state" / "recovery.json").exists()
+    assert (workspace / "tar_state" / "recovery_history.jsonl").exists()
+    assert (workspace / "tar_runs").exists()
+    assert (workspace / "ws26_tcl_campaign_manifest.json").exists()

@@ -81,8 +81,15 @@ Current task families:
 - `claim_lineage_audit`
 - `evidence_debt_judgement`
 - `tcl_regime_diagnosis`
+- `tcl_failure_mode_classification`
+- `tcl_anchor_policy_judgement`
+- `tcl_intervention_selection`
 - `tcl_trace_analysis`
+- `tcl_trace_anomaly_diagnosis`
+- `tcl_regime_transition_forecast`
 - `tcl_recovery_planning`
+- `tcl_recovery_confidence_estimation`
+- `tcl_run_triage`
 
 ## Split Integrity
 
@@ -184,6 +191,52 @@ artifacts into supervised examples:
 
 These families are grounded in actual TAR/TCL artifacts rather than synthetic
 free-form descriptions.
+
+## WS26 TCL-Deepening Expansion
+
+`WS26` expands the TCL side from first-generation runtime interpretation into
+operator-grade diagnosis and intervention.
+
+New TCL families:
+
+- `tcl_failure_mode_classification`
+  - classify dimensionality collapse, drift instability, calibration decay, and
+    warmup incompleteness from payload summaries
+- `tcl_anchor_policy_judgement`
+  - judge whether anchor reuse, suppression, reset, or hold is appropriate
+- `tcl_intervention_selection`
+  - choose the next TCL intervention under concrete regime and failure signals
+- `tcl_trace_anomaly_diagnosis`
+  - surface drift spikes, quenching signatures, equilibrium backslide, and loss
+    instability from thermodynamic traces
+- `tcl_regime_transition_forecast`
+  - forecast the next likely regime and intervention urgency
+- `tcl_recovery_confidence_estimation`
+  - estimate recovery outlook and resume confidence from recovery state
+- `tcl_run_triage`
+  - decide whether to resume, debug, pivot, or terminate a TCL run
+
+These families are grounded in:
+
+- `tar_runs/**/payload_summary.json`
+- `tar_runs/**/thermo_metrics.jsonl`
+- `tar_runs/**/config.json`
+- `tar_state/recovery.json`
+- `tar_state/recovery_history.jsonl`
+
+To generate controlled WS26 TCL state and then build the deeper release:
+
+```bash
+python generate_ws26_tcl_campaign.py --output-root dataset_artifacts/ws26_tcl_campaign_state_v1 --trials-per-scenario 12
+python build_tar_master_dataset.py --state-dir tar_state --state-dir dataset_artifacts/ws26_tcl_campaign_state_v1/tar_state --output-dir dataset_artifacts/tar_master_dataset_ws26_v1 --version tar-master-ws26-v1
+```
+
+To merge the broader `WS23` release with the `WS26` TCL-deepening release into
+the actual retraining target:
+
+```bash
+python merge_tar_dataset_releases.py --dataset-dir dataset_artifacts/tar_master_dataset_ws23_v1 --dataset-dir dataset_artifacts/tar_master_dataset_ws26_v1 --output-dir dataset_artifacts/tar_master_dataset_ws26_merged_v1 --version tar-master-ws26-merged-v1
+```
 
 ## WS23 Release Practice
 

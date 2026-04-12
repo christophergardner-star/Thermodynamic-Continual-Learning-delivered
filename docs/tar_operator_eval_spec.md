@@ -82,8 +82,15 @@ This keeps scoring stable even when the original target structure is nested.
 `tcl`
 
 - `tcl_regime_diagnosis`
+- `tcl_failure_mode_classification`
+- `tcl_anchor_policy_judgement`
+- `tcl_intervention_selection`
 - `tcl_trace_analysis`
+- `tcl_trace_anomaly_diagnosis`
+- `tcl_regime_transition_forecast`
 - `tcl_recovery_planning`
+- `tcl_recovery_confidence_estimation`
+- `tcl_run_triage`
 
 ## Scoring policy
 
@@ -103,6 +110,16 @@ Headline metrics:
 - `overclaim_rate`
 - `false_refusal_rate`
 - `parse_error_rate`
+
+WS26 extends the TCL metrics with:
+
+- `tcl_failure_mode_accuracy`
+- `tcl_anchor_policy_accuracy`
+- `tcl_intervention_accuracy`
+- `tcl_trace_anomaly_accuracy`
+- `tcl_transition_forecast_accuracy`
+- `tcl_recovery_confidence_accuracy`
+- `tcl_run_triage_accuracy`
 
 Each family also produces an error-bucket breakdown.
 
@@ -147,3 +164,8 @@ Each evaluation run emits:
 This contract makes WS24 a measuring instrument instead of a convenience
 script. It is the gate that determines whether `WS25` produces a result worth
 believing.
+
+`WS26` extends the same measuring instrument rather than replacing it. The
+deeper TCL suite is supposed to measure domain specialization while preserving
+the existing non-regression gates for honesty, refusal, governance, and
+structured operator output.
