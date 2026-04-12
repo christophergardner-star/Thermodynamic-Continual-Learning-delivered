@@ -299,3 +299,113 @@ def test_hf_predictor_moves_non_quantized_model_to_cuda_when_available(monkeypat
 
     assert predictor.metadata()["predictor_type"] == "hf_causal_lm"
     assert moved_to == ["cuda"]
+
+
+def test_asc_predictor_loads_checkpoint_and_infers_tokenizer(monkeypatch, tmp_path: Path):
+    moved_to: list[str] = []
+    loaded_paths: list[str] = []
+    tokenizer_sources: list[str] = []
+
+    checkpoint_dir = tmp_path / "ws27_asc_probe" / "final"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    (checkpoint_dir / "asc_config.json").write_text(
+        json.dumps({"base_model_name": "Qwen/Qwen2.5-Coder-7B-Instruct"}),
+        encoding="utf-8",
+    )
+
+    class _FakeTensor:
+        def __init__(self, device: str = "cpu"):
+            self.device = device
+
+        def to(self, device):
+            target = str(device)
+            return _FakeTensor(target)
+
+        @property
+        def shape(self):
+            return (1, 4)
+
+        def __getitem__(self, item):
+            return _FakeTensor(self.device)
+
+    class _NoGrad:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: True),
+        device=lambda name: name,
+        bfloat16="bf16",
+        float16="fp16",
+        no_grad=lambda: _NoGrad(),
+        ones_like=lambda prompt, device=None: _FakeTensor(str(device or prompt.device)),
+    )
+
+    class _FakeTokenizer:
+        pad_token = None
+        eos_token = "<eos>"
+        eos_token_id = 7
+        chat_template = "fake"
+
+        @classmethod
+        def from_pretrained(cls, model_name_or_path, *args, **kwargs):
+            tokenizer_sources.append(model_name_or_path)
+            return cls()
+
+        def apply_chat_template(self, *args, **kwargs):
+            return _FakeTensor("cpu")
+
+        def decode(self, tokens, skip_special_tokens=True):
+            return "{}"
+
+    class _FakeASCModel:
+        def __init__(self):
+            self._device = "cpu"
+
+        def to(self, device):
+            target = str(device)
+            moved_to.append(target)
+            self._device = target
+            return self
+
+        def eval(self):
+            return self
+
+        def parameters(self):
+            yield types.SimpleNamespace(device=self._device)
+
+        def generate(self, **kwargs):
+            return [_FakeTensor(self._device)]
+
+    class _FakeASCForCausalLM:
+        @classmethod
+        def load(cls, path):
+            loaded_paths.append(path)
+            return _FakeASCModel()
+
+    fake_transformers = types.SimpleNamespace(AutoTokenizer=_FakeTokenizer)
+    fake_asc_model = types.SimpleNamespace(ASCForCausalLM=_FakeASCForCausalLM)
+
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(sys.modules, "asc_model", fake_asc_model)
+
+    from tar_lab.eval_harness import ASCCausalLMPredictor
+
+    predictor = ASCCausalLMPredictor(
+        model_name_or_path=str(checkpoint_dir),
+        tokenizer_name_or_path=None,
+        local_files_only=True,
+        max_new_tokens=8,
+        temperature=0.0,
+        top_p=1.0,
+        bf16=True,
+    )
+
+    assert predictor.metadata()["predictor_type"] == "asc_causal_lm"
+    assert loaded_paths == [str(checkpoint_dir.resolve())]
+    assert tokenizer_sources == ["Qwen/Qwen2.5-Coder-7B-Instruct"]
+    assert moved_to == ["cuda"]

@@ -8,6 +8,7 @@ from typing import Any
 
 from train_tar_operator_sft import APPROVED_REMOTE_MODELS
 from tar_lab.eval_harness import (
+    ASCCausalLMPredictor,
     GoldPredictor,
     HFCausalLMPredictor,
     HeuristicPredictor,
@@ -34,6 +35,7 @@ class EvalSelectionSettings:
 class EvalRuntimeSettings:
     predictor_type: str = "heuristic"
     model_name_or_path: str = "Qwen/Qwen2.5-7B-Instruct"
+    tokenizer_name_or_path: str | None = None
     adapter_path: str | None = None
     max_new_tokens: int = 384
     temperature: float = 0.0
@@ -62,8 +64,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-pack-dir", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--eval-version", default=None)
-    parser.add_argument("--predictor", default=None, choices=("heuristic", "gold", "hf_causal_lm"))
+    parser.add_argument(
+        "--predictor",
+        default=None,
+        choices=("heuristic", "gold", "hf_causal_lm", "asc_causal_lm"),
+    )
     parser.add_argument("--model", default=None)
+    parser.add_argument("--tokenizer-source", default=None)
     parser.add_argument("--adapter-path", default=None)
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--max-items", type=int, default=None)
@@ -133,6 +140,8 @@ def load_eval_config(config_path: Path, *, repo_root: Path, args: argparse.Names
         config.runtime.predictor_type = args.predictor
     if args.model is not None:
         config.runtime.model_name_or_path = args.model
+    if args.tokenizer_source is not None:
+        config.runtime.tokenizer_name_or_path = args.tokenizer_source
     if args.adapter_path is not None:
         config.runtime.adapter_path = args.adapter_path
     if args.max_new_tokens is not None:
@@ -154,7 +163,12 @@ def load_eval_config(config_path: Path, *, repo_root: Path, args: argparse.Names
 def validate_eval_config(config: EvalConfig, *, repo_root: Path) -> None:
     if config.security.trust_remote_code:
         raise ValueError("trust_remote_code must remain false for TAR operator evaluation.")
-    if config.runtime.predictor_type not in {"heuristic", "gold", "hf_causal_lm"}:
+    if config.runtime.predictor_type not in {
+        "heuristic",
+        "gold",
+        "hf_causal_lm",
+        "asc_causal_lm",
+    }:
         raise ValueError("Unsupported predictor_type.")
     dataset_dir = _resolve_user_path(config.dataset_dir, base_dir=repo_root)
     if dataset_dir is None or not dataset_dir.exists():
@@ -175,11 +189,15 @@ def validate_eval_config(config: EvalConfig, *, repo_root: Path) -> None:
 
 
 def resolve_model_source(config: EvalConfig, *, repo_root: Path) -> str | None:
-    if config.runtime.predictor_type != "hf_causal_lm":
+    if config.runtime.predictor_type not in {"hf_causal_lm", "asc_causal_lm"}:
         return None
     maybe_path = _resolve_user_path(config.runtime.model_name_or_path, base_dir=repo_root)
     if maybe_path is not None and maybe_path.exists():
         return str(maybe_path)
+    if config.runtime.predictor_type == "asc_causal_lm":
+        raise FileNotFoundError(
+            "ASC evaluation requires a local checkpoint directory for model_name_or_path."
+        )
     if (
         not config.security.allow_unverified_model
         and config.runtime.model_name_or_path not in APPROVED_REMOTE_MODELS
@@ -195,6 +213,29 @@ def create_predictor(config: EvalConfig, *, repo_root: Path):
     if predictor_type == "heuristic":
         return HeuristicPredictor()
     resolved_model = resolve_model_source(config, repo_root=repo_root)
+    tokenizer_source = None
+    if config.runtime.tokenizer_name_or_path:
+        resolved_tokenizer = _resolve_user_path(
+            config.runtime.tokenizer_name_or_path,
+            base_dir=repo_root,
+        )
+        tokenizer_source = (
+            str(resolved_tokenizer)
+            if resolved_tokenizer is not None and resolved_tokenizer.exists()
+            else config.runtime.tokenizer_name_or_path
+        )
+    if predictor_type == "asc_causal_lm":
+        if config.runtime.adapter_path:
+            raise ValueError("ASC evaluation does not use adapter_path.")
+        return ASCCausalLMPredictor(
+            model_name_or_path=str(resolved_model),
+            tokenizer_name_or_path=tokenizer_source,
+            local_files_only=config.security.local_files_only,
+            max_new_tokens=config.runtime.max_new_tokens,
+            temperature=config.runtime.temperature,
+            top_p=config.runtime.top_p,
+            bf16=config.runtime.bf16,
+        )
     adapter_path = None
     if config.runtime.adapter_path:
         adapter_path = str(

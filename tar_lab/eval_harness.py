@@ -564,6 +564,111 @@ class HFCausalLMPredictor:
         return self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
 
+class ASCCausalLMPredictor:
+    def __init__(
+        self,
+        *,
+        model_name_or_path: str,
+        tokenizer_name_or_path: str | None,
+        local_files_only: bool,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        bf16: bool,
+    ) -> None:
+        import torch
+        from asc_model import ASCForCausalLM
+        from transformers import AutoTokenizer
+
+        model_path = Path(model_name_or_path).resolve()
+        if not model_path.exists():
+            raise FileNotFoundError(f"ASC checkpoint directory does not exist: {model_name_or_path}")
+        asc_config_path = model_path / "asc_config.json"
+        if not asc_config_path.exists():
+            raise FileNotFoundError(
+                f"ASC checkpoint is missing asc_config.json: {model_name_or_path}"
+            )
+
+        asc_config = _load_json(asc_config_path)
+        tokenizer_source = tokenizer_name_or_path or self._infer_tokenizer_source(
+            model_path=model_path,
+            asc_config=asc_config,
+        )
+
+        self._torch = torch
+        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_source,
+            trust_remote_code=False,
+            local_files_only=local_files_only,
+        )
+        if self._tokenizer.pad_token is None:
+            self._tokenizer.pad_token = self._tokenizer.eos_token
+        if self._tokenizer.chat_template is None:
+            raise ValueError("WS27 ASC evaluation requires a chat-template tokenizer.")
+
+        model = ASCForCausalLM.load(str(model_path))
+        if torch.cuda.is_available():
+            model = model.to(self._device)
+        self._model = model.eval()
+        self._max_new_tokens = max_new_tokens
+        self._temperature = temperature
+        self._top_p = top_p
+        self._do_sample = temperature > 0.0
+        self._device = next(model.parameters()).device
+        self._model_name_or_path = str(model_path)
+        self._tokenizer_name_or_path = str(tokenizer_source)
+        self._asc_base_model_name = asc_config.get("base_model_name")
+        self._bf16 = bf16
+
+    @staticmethod
+    def _infer_tokenizer_source(*, model_path: Path, asc_config: dict[str, Any]) -> str:
+        tokenizer_markers = (
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+        )
+        if any((model_path / name).exists() for name in tokenizer_markers):
+            return str(model_path)
+        base_model_name = asc_config.get("base_model_name")
+        if isinstance(base_model_name, str) and base_model_name.strip():
+            return base_model_name
+        return str(model_path)
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "predictor_type": "asc_causal_lm",
+            "model_name_or_path": self._model_name_or_path,
+            "tokenizer_name_or_path": self._tokenizer_name_or_path,
+            "asc_base_model_name": self._asc_base_model_name,
+            "max_new_tokens": self._max_new_tokens,
+            "temperature": self._temperature,
+            "top_p": self._top_p,
+            "bf16": self._bf16,
+        }
+
+    def predict(self, item: EvalItem) -> str:
+        with self._torch.no_grad():
+            prompt = self._tokenizer.apply_chat_template(
+                item.messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_tensors="pt",
+            ).to(self._device)
+            attention_mask = self._torch.ones_like(prompt, device=self._device)
+            generated = self._model.generate(
+                input_ids=prompt,
+                attention_mask=attention_mask,
+                max_new_tokens=self._max_new_tokens,
+                do_sample=self._do_sample,
+                temperature=self._temperature if self._do_sample else None,
+                top_p=self._top_p if self._do_sample else None,
+                pad_token_id=self._tokenizer.eos_token_id,
+            )
+            new_tokens = generated[0][prompt.shape[-1] :]
+        return self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+
 def build_eval_pack(
     *,
     dataset_dir: Path,
