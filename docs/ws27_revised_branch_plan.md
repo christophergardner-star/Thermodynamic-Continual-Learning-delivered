@@ -22,7 +22,8 @@ Current status:
 - current coder-backbone variant remains rejected
 - revised `WS27R1` branch is validated
 - `WS27R1 run1` is complete
-- the open issue is bounded parse/output reliability, not branch viability
+- `WS27R2` refinement is complete
+- `WS27` is now closed successfully
 
 ## Core Revision
 
@@ -163,14 +164,13 @@ The revised probe has now cleared the branch-justification bar on the true
 
 `WS27R1 run1` is now complete.
 
-The branch should now be treated as **successful with a structured-output
-caveat** if all of these remain true:
+The branch should now be treated as **successful** if all of these remain true:
 
 - it preserves `overclaim_rate = 0.0`
 - it preserves strong WS26 non-regression behaviour
 - it remains materially above the failed coder-backbone path
 - it improves or at least stabilizes the true-continuation probe result
-- parse reliability remains the only significant open weakness
+- parse reliability no longer blocks closure after `WS27-R2`
 
 Reference result for the true-continuation probe:
 
@@ -179,8 +179,8 @@ Reference result for the true-continuation probe:
 - `parse_error_rate = 0.16`
 - `overclaim_rate = 0.0`
 
-The parse caveat remains open and is now tracked in
-[ws27_parse_hardening_plan.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27_parse_hardening_plan.md).
+That closure is now confirmed in
+[ws27r2_refine_closeout.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27r2_refine_closeout.md).
 
 ## Revised Execution Order
 
@@ -231,10 +231,10 @@ This phase is now complete. `run1` is justified.
 
 ## Pod Usage
 
-Do **not** open another pod immediately.
+Do **not** open another pod for `WS27`.
 
-The next pod is justified only if the bounded hardening plan is approved and the
-local prep is complete.
+The bounded hardening pod cycle is complete and no further `WS27` pod work is
+currently justified.
 
 That means:
 
@@ -256,7 +256,8 @@ Reason:
 
 ## Immediate Next Step
 
-The next concrete step is local:
+The next concrete step is no longer inside `WS27`.
 
-- execute the bounded plan in
-  [ws27_parse_hardening_plan.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27_parse_hardening_plan.md)
+`WS27` is closed. The next active work is the roadmap transition into
+`Phase 4`, starting from
+[phase4_roadmap.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/phase4_roadmap.md).

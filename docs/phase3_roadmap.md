@@ -1,5 +1,15 @@
 # Phase 3 Roadmap
 
+## Status
+
+`Phase 3` is now complete through `WS27-R2`.
+
+This document should now be treated as the historical roadmap for the
+`WS21-WS27` era.
+
+The active forward roadmap has moved to
+[phase4_roadmap.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/phase4_roadmap.md).
+
 This is the authoritative forward roadmap after completion of:
 
 - `WS1-WS7` foundation phase

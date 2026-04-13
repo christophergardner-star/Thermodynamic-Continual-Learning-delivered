@@ -1,5 +1,21 @@
 # WS27 Parse Hardening Plan
 
+## Status
+
+This plan has now been executed successfully.
+
+Closing result from
+[ws27r2_refine_closeout.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27r2_refine_closeout.md):
+
+- branch eval `parse_error_rate = 0.07333333333333333`
+- branch eval `mean_score = 0.8926666666666669`
+- branch eval `decision_accuracy = 0.88`
+- WS26 non-regression `parse_error_rate = 0.0`
+- `overclaim_rate = 0.0`
+
+This document should now be treated as the historical plan for the bounded
+`WS27-R2` refinement cycle, not as an open next-step plan.
+
 ## Purpose
 
 This plan defines the smallest correct next step after
@@ -210,25 +226,46 @@ This hardening plan is successful only if all are true:
 - the next pod, if any, is for a specific bounded refinement run, not
   exploratory guesswork
 
+## Outcome
+
+The plan succeeded.
+
+What actually closed the issue:
+
+- higher eval budget at `192`
+- compact `project_resume` contract and training targets
+- bounded continuation from the proven `WS27R1` line
+
+What was not needed:
+
+- a new backbone
+- a broad dataset redesign
+- a further `256`-token evaluation cycle
+
 ## Pod Policy
 
-Do **not** open a new pod for this plan yet.
+Do **not** open a new pod for this plan now.
 
-Open a pod only if:
+This plan's pod cycle is complete and no further `WS27` pod run is currently
+justified.
+
+It was correct to open a pod only after:
 
 1. the local parse-regression slice exists
 2. candidate runtime/contract changes are implemented
 3. local tests are green
 4. the next immediate step is a bounded refinement run
 
-That keeps the next GPU cycle disciplined.
+That kept the GPU cycle disciplined, and the plan is now closed.
 
-## Recommended Immediate Sequence
+## Closing Sequence
+
+The executed sequence was:
 
 1. build the parse-regression slice
-2. add fixtures/tests for the two failing families
-3. add candidate runtime configs with higher output budget
-4. complete the bounded local budget assessment
-5. tighten the `project_resume` format/contract path locally
-6. then decide whether the branch should be closed as successful-with-caveat or
-   sent to one final bounded pod refinement
+2. add fixtures/tests for the failing families
+3. add `192` and `256` runtime variants
+4. complete the bounded local assessment
+5. harden the `project_resume` contract
+6. run one bounded refinement pod cycle
+7. close `WS27` successfully
