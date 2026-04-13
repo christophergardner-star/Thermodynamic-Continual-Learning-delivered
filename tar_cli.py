@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paper-path", action="append", dest="paper_paths")
     parser.add_argument("--checkpoint-name", dest="checkpoint_name")
     parser.add_argument("--model-path", dest="model_path")
+    parser.add_argument("--experiment-backend-id", dest="experiment_backend_id")
     parser.add_argument("--base-model-id", dest="base_model_id")
     parser.add_argument("--adapter-path", dest="adapter_path")
     parser.add_argument("--backend-name", default="transformers", dest="backend_name")
@@ -130,6 +131,7 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--show-manifest", action="store_true", dest="show_manifest")
     group.add_argument("--ingest-papers", action="store_true", dest="ingest_papers")
     group.add_argument("--list-experiment-backends", action="store_true", dest="list_experiment_backends")
+    group.add_argument("--experiment-backend-runtime-status", action="store_true", dest="experiment_backend_runtime_status")
     group.add_argument("--run-runtime-cycle", action="store_true", dest="run_runtime_cycle")
     group.add_argument("--list-alerts", action="store_true", dest="list_alerts")
     group.add_argument("--retry-failed-job", action="store_true", dest="retry_failed_job")
@@ -360,6 +362,12 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
         return orchestrator.ingest_papers(args.paper_paths or []).model_dump(mode="json")
     if args.list_experiment_backends:
         return {"backends": orchestrator.list_experiment_backends()}
+    if args.experiment_backend_runtime_status:
+        return orchestrator.experiment_backend_runtime_status(
+            backend_id=args.experiment_backend_id,
+            trial_name=args.trial_id,
+            limit=args.max_results,
+        )
     if args.run_runtime_cycle:
         return orchestrator.run_runtime_cycle(max_jobs=args.max_jobs, stale_after_s=args.stale_after_s).model_dump(mode="json")
     if args.list_alerts:
@@ -473,6 +481,7 @@ def _render_status(payload: Dict[str, Any]) -> str:
         f"Alert Count: {payload.get('alerts', 0)}",
         f"Endpoints: {len(payload.get('endpoints', []))}",
         f"Role Assignments: {len(payload.get('role_assignments', []))}",
+        f"Experiment Backend Runs: {payload.get('experiment_backend_runs', 0)}",
         f"Research Projects: {payload.get('research_projects', 0)}",
         f"Active Research Projects: {payload.get('active_research_projects', 0)}",
         f"Prioritization Snapshots: {payload.get('prioritization_snapshots', 0)}",
@@ -538,6 +547,18 @@ def _render_status(payload: Dict[str, Any]) -> str:
         lines.append(
             f"Latest Publication Handoff: {latest_publication.get('package_id', 'n/a')} "
             f"for project {latest_publication.get('project_id', 'n/a')}"
+        )
+    latest_backend_runtime = payload.get("latest_experiment_backend_run") or {}
+    if latest_backend_runtime:
+        lines.append(
+            f"Latest Backend Run: {latest_backend_runtime.get('trial_name', 'n/a')} "
+            f"[{latest_backend_runtime.get('backend_id', 'n/a')}] "
+            f"{latest_backend_runtime.get('status', 'n/a')}"
+        )
+        resume = latest_backend_runtime.get("resume") or {}
+        lines.append(
+            f"Latest Backend Resume: {resume.get('mode', 'n/a')} "
+            f"(checkpoint={resume.get('checkpoint_exists', False)})"
         )
     operator_serving = payload.get("operator_serving") or {}
     operator_state = operator_serving.get("state") or {}
@@ -651,6 +672,42 @@ def _render_operator_serving_status(payload: Dict[str, Any]) -> str:
         f"Endpoint Status: {endpoint.get('status', 'n/a')}",
         f"Role Assignment: {role_assignment.get('checkpoint_name', 'n/a')}",
     ]
+    return "\n".join(lines)
+
+
+def _render_experiment_backend_runtime_status(payload: Dict[str, Any]) -> str:
+    counts = payload.get("counts", {})
+    latest = payload.get("latest") or {}
+    records = payload.get("records", [])
+    lines = [
+        f"Backend Runtime Records: {counts.get('total', 0)}",
+        f"Resumable Records: {counts.get('resumable', 0)}",
+        f"Planned: {counts.get('planned', 0)}",
+        f"Running: {counts.get('running', 0)}",
+        f"Completed: {counts.get('completed', 0)}",
+        f"Failed: {counts.get('failed', 0)}",
+        f"Interrupted: {counts.get('interrupted', 0)}",
+    ]
+    if latest:
+        lines.extend(
+            [
+                f"Latest Trial: {latest.get('trial_name', 'n/a')}",
+                f"Latest Backend: {latest.get('backend_id', 'n/a')}",
+                f"Latest Status: {latest.get('status', 'n/a')}",
+                f"Latest Steps: {latest.get('completed_steps', 0)}",
+                f"Latest Checkpoint: {(latest.get('resume') or {}).get('latest_checkpoint_path', 'n/a')}",
+            ]
+        )
+    if records:
+        lines.append("")
+        lines.append("Records:")
+        for item in records:
+            resume = item.get("resume") or {}
+            lines.append(
+                f"- {item.get('trial_name', 'n/a')} [{item.get('backend_id', 'n/a')}] "
+                f"{item.get('status', 'n/a')} steps={item.get('completed_steps', 0)} "
+                f"resume={resume.get('mode', 'n/a')}"
+            )
     return "\n".join(lines)
 
 
@@ -1557,6 +1614,17 @@ def main() -> int:
                 )
             elif args.list_experiment_backends:
                 response = send_command("list_experiment_backends", host=args.host, port=args.port)
+            elif args.experiment_backend_runtime_status:
+                response = send_command(
+                    "experiment_backend_runtime_status",
+                    payload={
+                        "backend_id": args.experiment_backend_id,
+                        "trial_name": args.trial_id,
+                        "limit": args.max_results,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
             elif args.run_runtime_cycle:
                 response = send_command(
                     "run_runtime_cycle",
@@ -1730,6 +1798,8 @@ def main() -> int:
             print(_render_endpoint_health(payload))
         elif args.operator_serving_status or args.select_operator_checkpoint:
             print(_render_operator_serving_status(payload))
+        elif args.experiment_backend_runtime_status:
+            print(_render_experiment_backend_runtime_status(payload))
         elif args.create_project or args.project_status or args.pause_project or args.resume_project:
             print(_render_project_status(payload))
         elif args.list_projects:
@@ -1779,7 +1849,7 @@ def main() -> int:
             print(_render_regime(payload))
         elif args.ingest_research:
             print(f"Ingested {payload.get('indexed', 0)} research documents for topic: {payload.get('topic', '')}")
-        elif args.verify_last_trial or args.breakthrough_report or args.resolve_problem or args.prepare_science_env or args.study_problem or args.run_problem_study or args.schedule_problem_study or args.scheduler_status or args.run_scheduler_once or args.frontier_status or args.runtime_status or args.list_benchmarks or args.benchmark_status or args.prepare_payload_env or args.rebuild_locked_image or args.show_manifest or args.ingest_papers or args.list_experiment_backends or args.run_runtime_cycle or args.list_alerts or args.retry_failed_job or args.cancel_job or args.sandbox_policy or args.register_checkpoint or args.list_checkpoints or args.build_inference_endpoint or args.list_endpoints or args.start_endpoint or args.stop_endpoint or args.restart_endpoint or args.endpoint_health or args.assign_role or args.select_operator_checkpoint or args.operator_serving_status or args.claim_policy or args.claim_verdict or args.research_decision_log:
+        elif args.verify_last_trial or args.breakthrough_report or args.resolve_problem or args.prepare_science_env or args.study_problem or args.run_problem_study or args.schedule_problem_study or args.scheduler_status or args.run_scheduler_once or args.frontier_status or args.runtime_status or args.list_benchmarks or args.benchmark_status or args.prepare_payload_env or args.rebuild_locked_image or args.show_manifest or args.ingest_papers or args.list_experiment_backends or args.experiment_backend_runtime_status or args.run_runtime_cycle or args.list_alerts or args.retry_failed_job or args.cancel_job or args.sandbox_policy or args.register_checkpoint or args.list_checkpoints or args.build_inference_endpoint or args.list_endpoints or args.start_endpoint or args.stop_endpoint or args.restart_endpoint or args.endpoint_health or args.assign_role or args.select_operator_checkpoint or args.operator_serving_status or args.claim_policy or args.claim_verdict or args.research_decision_log:
             print(json.dumps(payload, indent=2))
         else:
             print(json.dumps(payload, indent=2))

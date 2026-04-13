@@ -203,3 +203,36 @@ def test_ws21_dashboard_context_exposes_selected_project_views():
             assert context["selected_publication_handoff"]["package"]["project_id"] == project.project_id
         finally:
             orchestrator.shutdown()
+
+
+def test_ws29_backend_runtime_surfaces_in_control_and_dashboard():
+    with tempfile.TemporaryDirectory() as tmp:
+        _copy_science_profiles(tmp)
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            orchestrator.experiment_backends.build_plan(
+                "asc_full",
+                trial_name="trial-backend-runtime",
+                config={"size": "124M", "max_steps": 12},
+            )
+            response = handle_request(
+                orchestrator,
+                ControlRequest(
+                    command="experiment_backend_runtime_status",
+                    payload={"limit": 10},
+                ),
+            )
+            assert response.ok is True
+            assert response.payload["counts"]["total"] >= 1
+            assert response.payload["latest"]["backend_id"] == "asc_full"
+
+            context = dashboard.build_dashboard_context(
+                orchestrator,
+                include_blocked=True,
+                max_results=5,
+                selected_project_id="",
+            )
+            assert context["experiment_backend_runtime_status"]["counts"]["total"] >= 1
+            assert context["experiment_backend_runtime_status"]["latest"]["trial_name"] == "trial-backend-runtime"
+        finally:
+            orchestrator.shutdown()

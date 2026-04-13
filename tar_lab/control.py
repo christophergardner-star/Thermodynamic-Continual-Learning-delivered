@@ -232,6 +232,12 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
             ).model_dump(mode="json")
         elif request.command == "list_experiment_backends":
             payload = {"backends": orchestrator.list_experiment_backends()}
+        elif request.command == "experiment_backend_runtime_status":
+            payload = orchestrator.experiment_backend_runtime_status(
+                backend_id=request.payload.get("backend_id"),
+                trial_name=request.payload.get("trial_name"),
+                limit=int(request.payload.get("limit", 20)),
+            )
         elif request.command == "run_runtime_cycle":
             payload = orchestrator.run_runtime_cycle(
                 max_jobs=int(request.payload.get("max_jobs", 1)),

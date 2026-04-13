@@ -51,6 +51,7 @@ def build_dashboard_context(
         include_blocked=include_blocked,
         limit=max_results,
     )
+    experiment_backend_runtime_status = orchestrator.experiment_backend_runtime_status(limit=max_results * 3)
 
     selected_project_status = None
     selected_resume_dashboard = None
@@ -79,6 +80,7 @@ def build_dashboard_context(
         "operator_view": operator_view,
         "portfolio_status": portfolio_status,
         "portfolio_review": portfolio_review,
+        "experiment_backend_runtime_status": experiment_backend_runtime_status,
         "selected_project_status": selected_project_status,
         "selected_resume_dashboard": selected_resume_dashboard,
         "selected_evidence_map": selected_evidence_map,
@@ -314,17 +316,22 @@ def _render_infrastructure_tab(context: dict[str, Any]) -> None:
     role_assignments = status.get("role_assignments", [])
     operator_serving = status.get("operator_serving", {})
     operator_state = operator_serving.get("state", {})
+    backend_runtime = context.get("experiment_backend_runtime_status", {})
+    backend_counts = backend_runtime.get("counts", {})
+    backend_records = backend_runtime.get("records", [])
 
-    runtime_col1, runtime_col2, runtime_col3, runtime_col4 = st.columns(4)
+    runtime_col1, runtime_col2, runtime_col3, runtime_col4, runtime_col5 = st.columns(5)
     runtime_col1.metric("Reproducible", status.get("reproducibility_complete", False))
     runtime_col2.metric("Active Leases", len(runtime.get("active_leases", [])))
     runtime_col3.metric("Retry Waiting", len(runtime.get("retry_waiting", [])))
     runtime_col4.metric("Alerts", len(runtime.get("alerts", [])))
+    runtime_col5.metric("Backend Runs", backend_counts.get("total", 0))
 
-    endpoint_col1, endpoint_col2, endpoint_col3 = st.columns(3)
+    endpoint_col1, endpoint_col2, endpoint_col3, endpoint_col4 = st.columns(4)
     endpoint_col1.metric("Endpoints", len(endpoints))
     endpoint_col2.metric("Role Assignments", len(role_assignments))
     endpoint_col3.metric("Operator Mode", operator_state.get("mode", "n/a"))
+    endpoint_col4.metric("Resumable Backends", backend_counts.get("resumable", 0))
 
     infra_left, infra_right = st.columns(2)
     with infra_left:
@@ -334,6 +341,12 @@ def _render_infrastructure_tab(context: dict[str, Any]) -> None:
         _show_json("Operator Serving", operator_serving, "No operator serving state recorded.")
         _show_json("Inference Endpoints", endpoints, "No managed inference endpoints registered.")
         _show_json("Role Assignments", role_assignments, "No role assignments recorded.")
+
+    _show_dataframe(
+        "Experiment Backend Runs",
+        backend_records,
+        "No backend runtime records recorded.",
+    )
 
 
 def _render_actions_tab(orchestrator: TAROrchestrator) -> None:

@@ -99,6 +99,7 @@ DataAccessMode = Literal["OFFLINE_FALLBACK", "CACHED_REAL", "DOWNLOAD_REAL"]
 DataPurity = Literal["fallback", "cached_real", "download_real", "local_real", "mixed"]
 RunIntent = Literal["control", "plumbing", "research"]
 BackendStatus = Literal["executable", "scaffold"]
+ExperimentBackendRunStatus = Literal["planned", "running", "completed", "failed", "interrupted"]
 BenchmarkTier = Literal["smoke", "validation", "canonical"]
 BenchmarkTruthStatus = Literal["canonical_ready", "validation_only", "smoke_only", "unsupported"]
 BenchmarkAlignment = Literal["aligned", "downgraded", "refused", "mixed"]
@@ -1391,6 +1392,45 @@ class ExperimentBackendSpec(StrictModel):
     notes: List[str] = Field(default_factory=list)
 
 
+class ExperimentResumeInfo(StrictModel):
+    supported: bool = False
+    requested: bool = False
+    mode: Literal["fresh_start", "checkpoint_resume"] = "fresh_start"
+    resume_from_checkpoint: Optional[str] = None
+    latest_checkpoint_path: Optional[str] = None
+    checkpoint_exists: bool = False
+    reason: Optional[str] = None
+
+
+class ExperimentArtifactLineage(StrictModel):
+    training_log_path: Optional[str] = None
+    latest_checkpoint_path: Optional[str] = None
+    final_checkpoint_path: Optional[str] = None
+    summary_path: Optional[str] = None
+
+
+class ExperimentBackendRuntimeRecord(StrictModel):
+    trial_name: str
+    backend_id: str
+    status: ExperimentBackendRunStatus = "planned"
+    output_dir: str
+    manifest_path: Optional[str] = None
+    backend_state_path: Optional[str] = None
+    supports_resume: bool = False
+    resume: ExperimentResumeInfo = Field(default_factory=ExperimentResumeInfo)
+    artifact_lineage: ExperimentArtifactLineage = Field(default_factory=ExperimentArtifactLineage)
+    completed_steps: int = Field(default=0, ge=0)
+    current_epoch: int = Field(default=0, ge=0)
+    epoch_step: int = Field(default=0, ge=0)
+    launch_count: int = Field(default=0, ge=0)
+    last_error: Optional[str] = None
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+    last_started_at: Optional[str] = None
+    last_completed_at: Optional[str] = None
+    last_heartbeat_at: Optional[str] = None
+
+
 class ExperimentLaunchPlan(StrictModel):
     backend: ExperimentBackendSpec
     trial_name: str
@@ -1398,6 +1438,9 @@ class ExperimentLaunchPlan(StrictModel):
     runtime: RuntimeSpec
     output_dir: str
     manifest_path: str
+    backend_state_path: Optional[str] = None
+    resume: ExperimentResumeInfo = Field(default_factory=ExperimentResumeInfo)
+    artifact_lineage: ExperimentArtifactLineage = Field(default_factory=ExperimentArtifactLineage)
     config: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -1811,6 +1854,7 @@ class InferenceEndpointPlan(StrictModel):
 
 class FrontierStatus(StrictModel):
     experiment_backends: List[ExperimentBackendSpec] = Field(default_factory=list)
+    experiment_backend_runtime_records: List[ExperimentBackendRuntimeRecord] = Field(default_factory=list)
     payload_environment: Optional[PayloadEnvironmentReport] = None
     literature_artifacts: int = Field(default=0, ge=0)
     literature_conflicts: int = Field(default=0, ge=0)
@@ -1887,6 +1931,7 @@ class ControlRequest(StrictModel):
         "show_manifest",
         "ingest_papers",
         "list_experiment_backends",
+        "experiment_backend_runtime_status",
         "run_runtime_cycle",
         "list_alerts",
         "retry_failed_job",

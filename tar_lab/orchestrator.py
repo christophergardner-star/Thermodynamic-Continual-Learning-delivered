@@ -396,6 +396,39 @@ class TAROrchestrator:
     def list_experiment_backends(self) -> list[dict[str, Any]]:
         return [item.model_dump(mode="json") for item in self.experiment_backends.list_backends()]
 
+    def experiment_backend_runtime_status(
+        self,
+        *,
+        backend_id: str | None = None,
+        trial_name: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        rows = self.store.list_experiment_backend_runtimes()
+        if backend_id:
+            rows = [item for item in rows if item.backend_id == backend_id]
+        if trial_name:
+            rows = [item for item in rows if item.trial_name == trial_name]
+        rows = sorted(rows, key=lambda item: item.updated_at, reverse=True)
+        limited = rows[: max(1, limit)]
+        counts: dict[str, int] = {}
+        for item in rows:
+            counts[item.status] = counts.get(item.status, 0) + 1
+        resumable = len([item for item in rows if item.supports_resume])
+        return {
+            "filters": {
+                "backend_id": backend_id,
+                "trial_name": trial_name,
+                "limit": max(1, limit),
+            },
+            "counts": {
+                "total": len(rows),
+                "resumable": resumable,
+                **counts,
+            },
+            "latest": limited[0].model_dump(mode="json") if limited else None,
+            "records": [item.model_dump(mode="json") for item in limited],
+        }
+
     def run_runtime_cycle(self, *, max_jobs: int = 1, stale_after_s: int = 900) -> RuntimeHeartbeat:
         reprioritized = self._reprioritize_scheduled_jobs()
         if reprioritized:
@@ -3508,6 +3541,7 @@ class TAROrchestrator:
             )
         return FrontierStatus(
             experiment_backends=self.experiment_backends.list_backends(),
+            experiment_backend_runtime_records=self.store.list_experiment_backend_runtimes(),
             payload_environment=payload_env,
             literature_artifacts=literature_status["artifacts"],  # type: ignore[index]
             literature_conflicts=literature_status["conflicts"],  # type: ignore[index]
@@ -4545,6 +4579,9 @@ class TAROrchestrator:
         payload["endpoints"] = [item.model_dump(mode="json") for item in self.inference_bridge.list_endpoints()]
         payload["role_assignments"] = [item.model_dump(mode="json") for item in self.inference_bridge.list_role_assignments()]
         payload["operator_serving"] = self.inference_bridge.operator_serving_status().model_dump(mode="json")
+        payload["experiment_backend_runtime_records"] = [
+            item.model_dump(mode="json") for item in self.store.list_experiment_backend_runtimes()
+        ]
         payload["claim_policy"] = self._claim_policy().model_dump(mode="json")
         latest_claim_verdict = self.store.latest_claim_verdict()
         payload["latest_claim_verdict"] = latest_claim_verdict.model_dump(mode="json") if latest_claim_verdict else None

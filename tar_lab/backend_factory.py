@@ -4,7 +4,15 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
-from tar_lab.schemas import BackendProvenance, ExperimentBackendSpec, ExperimentLaunchPlan, RuntimeSpec
+from tar_lab.schemas import (
+    BackendProvenance,
+    ExperimentArtifactLineage,
+    ExperimentBackendRuntimeRecord,
+    ExperimentBackendSpec,
+    ExperimentLaunchPlan,
+    ExperimentResumeInfo,
+    RuntimeSpec,
+)
 from tar_lab.state import TARStateStore
 
 
@@ -76,16 +84,17 @@ class ExperimentBackendRegistry:
                 research_grade_capable=True,
                 expected_data_type="token_sequence",
                 requires_tokenizer=True,
-                supports_resume=False,
+                supports_resume=True,
                 supports_distributed=True,
                 requires_gpu=True,
                 required_deps=["torch", "transformers"],
                 required_metrics=["task_loss", "consistency_loss"],
-                required_artifacts=["training_log.json", "model_checkpoint"],
+                required_artifacts=["training_log.json", "resume_state.pt", "model_checkpoint"],
                 valid_input_contract=["Use a real text corpus and a real tokenizer for research runs."],
                 notes=[
                     "Use this instead of asc_train.py/asc_train_cpu.py for valid ASC research runs.",
                     "Designed for real text-model training, not just TAR payload validation.",
+                    "Checkpoint-aware relaunch is supported through resume_state.pt and deterministic per-epoch shuffling.",
                 ],
             ),
             "coding_asc": ExperimentBackendSpec(
@@ -196,6 +205,87 @@ class ExperimentBackendRegistry:
         spec = self.get(backend_id)
         return BackendProvenance.model_validate(spec.model_dump(mode="json"))
 
+    def _state_path(self, trial_name: str, backend_id: str) -> Path:
+        return self.store.experiment_backend_state_path(trial_name, backend_id)
+
+    @staticmethod
+    def _container_state_path(trial_name: str, backend_id: str) -> str:
+        return f"/workspace/tar_state/experiment_backends/{trial_name}__{backend_id}.json"
+
+    @staticmethod
+    def _container_output_dir(trial_name: str, backend_id: str) -> str:
+        return f"/workspace/tar_runs/{trial_name}/{backend_id}"
+
+    def _build_artifact_lineage(
+        self,
+        spec: ExperimentBackendSpec,
+        output_dir: Path,
+        payload: Dict[str, Any],
+    ) -> ExperimentArtifactLineage:
+        if spec.backend_id == "asc_full":
+            size = str(payload.get("size", "124M"))
+            run_dir = output_dir / f"ASC-{size}"
+            return ExperimentArtifactLineage(
+                training_log_path=str(run_dir / "training_log.json"),
+                latest_checkpoint_path=str(run_dir / "resume_state.pt"),
+                final_checkpoint_path=str(run_dir / "final"),
+            )
+        if spec.backend_id == "asc_text":
+            return ExperimentArtifactLineage(
+                summary_path=str(output_dir / "payload_summary.json"),
+                latest_checkpoint_path=str(output_dir / "asc_checkpoint.pt"),
+            )
+        if spec.backend_id in {"asc_cv", "asc_rl", "asc_qml"}:
+            return ExperimentArtifactLineage(
+                summary_path=str(output_dir / "execution_summary.json"),
+                latest_checkpoint_path=str(output_dir / f"{spec.backend_id}_checkpoint.pt"),
+            )
+        return ExperimentArtifactLineage(
+            training_log_path=str(output_dir / "training_log.json"),
+            final_checkpoint_path=str(output_dir / "final"),
+        )
+
+    def _resolve_resume(
+        self,
+        spec: ExperimentBackendSpec,
+        output_dir: Path,
+        payload: Dict[str, Any],
+        artifact_lineage: ExperimentArtifactLineage,
+    ) -> ExperimentResumeInfo:
+        requested_path = payload.get("resume_from_checkpoint")
+        if requested_path is not None:
+            requested = Path(str(requested_path))
+            return ExperimentResumeInfo(
+                supported=spec.supports_resume,
+                requested=True,
+                mode="checkpoint_resume",
+                resume_from_checkpoint=str(requested),
+                latest_checkpoint_path=str(requested),
+                checkpoint_exists=requested.exists(),
+                reason="explicit_resume_requested",
+            )
+        latest_path = artifact_lineage.latest_checkpoint_path
+        if spec.supports_resume and latest_path:
+            latest = Path(latest_path)
+            if latest.exists():
+                return ExperimentResumeInfo(
+                    supported=True,
+                    requested=True,
+                    mode="checkpoint_resume",
+                    resume_from_checkpoint=str(latest),
+                    latest_checkpoint_path=str(latest),
+                    checkpoint_exists=True,
+                    reason="existing_checkpoint_detected",
+                )
+        return ExperimentResumeInfo(
+            supported=spec.supports_resume,
+            requested=False,
+            mode="fresh_start",
+            latest_checkpoint_path=latest_path,
+            checkpoint_exists=bool(latest_path and Path(latest_path).exists()),
+            reason="fresh_start",
+        )
+
     def build_plan(
         self,
         backend_id: str,
@@ -211,6 +301,11 @@ class ExperimentBackendRegistry:
         output_dir = self.workspace / "tar_runs" / trial_name / spec.backend_id
         output_dir.mkdir(parents=True, exist_ok=True)
         runtime = RuntimeSpec()
+        artifact_lineage = self._build_artifact_lineage(spec, output_dir, payload)
+        resume = self._resolve_resume(spec, output_dir, payload, artifact_lineage)
+        backend_state_path = self._state_path(trial_name, spec.backend_id)
+        container_output_dir = self._container_output_dir(trial_name, spec.backend_id)
+        container_state_path = self._container_state_path(trial_name, spec.backend_id)
 
         if spec.backend_id == "asc_text":
             command = [
@@ -243,7 +338,20 @@ class ExperimentBackendRegistry:
                 str(payload.get("batch_size", 2)),
                 "--max_steps",
                 str(payload.get("max_steps", 100)),
+                "--out_dir",
+                container_output_dir,
+                "--seed",
+                str(payload.get("seed", 42)),
+                "--backend_state_path",
+                container_state_path,
             ]
+            if resume.requested and resume.resume_from_checkpoint:
+                command.extend(
+                    [
+                        "--resume_from_checkpoint",
+                        f"{container_output_dir}/ASC-{str(payload.get('size', '124M'))}/resume_state.pt",
+                    ]
+                )
         elif spec.backend_id == "coding_asc":
             command = [
                 "python",
@@ -277,9 +385,25 @@ class ExperimentBackendRegistry:
             runtime=runtime,
             output_dir=str(output_dir),
             manifest_path=str(output_dir / "experiment_backend.json"),
+            backend_state_path=str(backend_state_path),
+            resume=resume,
+            artifact_lineage=artifact_lineage,
             config=payload,
         )
         Path(plan.manifest_path).write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+        self.store.save_experiment_backend_runtime(
+            ExperimentBackendRuntimeRecord(
+                trial_name=trial_name,
+                backend_id=spec.backend_id,
+                status="planned",
+                output_dir=str(output_dir),
+                manifest_path=plan.manifest_path,
+                backend_state_path=str(backend_state_path),
+                supports_resume=spec.supports_resume,
+                resume=resume,
+                artifact_lineage=artifact_lineage,
+            )
+        )
         if spec.backend_id in {"asc_cv", "asc_rl", "asc_qml"}:
             (output_dir / "backend_config.json").write_text(
                 json_dumps(
@@ -304,4 +428,5 @@ class ExperimentBackendRegistry:
         return {
             "available": [item.model_dump(mode="json") for item in self.list_backends()],
             "planned_runs": len(manifests),
+            "runtime_records": [item.model_dump(mode="json") for item in self.store.list_experiment_backend_runtimes()],
         }

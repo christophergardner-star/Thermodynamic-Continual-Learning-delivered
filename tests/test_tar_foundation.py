@@ -1423,6 +1423,43 @@ def test_frontier_status_surfaces_operator_serving_state():
             orchestrator.shutdown()
 
 
+def test_frontier_status_surfaces_experiment_backend_runtime_records():
+    with tempfile.TemporaryDirectory() as tmp:
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            orchestrator.experiment_backends.build_plan(
+                "asc_full",
+                trial_name="trial-backend-runtime",
+                config={"size": "124M", "max_steps": 12},
+            )
+            frontier = orchestrator.frontier_status()
+            assert frontier.experiment_backend_runtime_records
+            assert frontier.experiment_backend_runtime_records[-1].backend_id == "asc_full"
+        finally:
+            orchestrator.shutdown()
+
+
+def test_status_renderer_surfaces_latest_experiment_backend_run():
+    payload = {
+        "recovery": {"trial_id": "trial-1", "status": "completed", "consecutive_fail_fast": 0},
+        "last_three_metrics": [],
+        "gpu": {},
+        "memory": {},
+        "endpoints": [],
+        "role_assignments": [],
+        "experiment_backend_runs": 1,
+        "latest_experiment_backend_run": {
+            "trial_name": "trial-backend-runtime",
+            "backend_id": "asc_full",
+            "status": "planned",
+            "resume": {"mode": "fresh_start", "checkpoint_exists": False},
+        },
+    }
+    rendered = tar_cli._render_status(payload)
+    assert "Experiment Backend Runs: 1" in rendered
+    assert "Latest Backend Run: trial-backend-runtime [asc_full] planned" in rendered
+
+
 def test_runtime_status_renderer_surfaces_lock_warning():
     payload = {
         "safe_execution_mode": "docker_container_only",

@@ -15,6 +15,7 @@ from tar_lab.schemas import (
     DatasetManifest,
     DirectorPolicy,
     EvidenceDebtRecord,
+    ExperimentBackendRuntimeRecord,
     EndpointRecord,
     EndpointRegistryState,
     FalsificationPlan,
@@ -86,6 +87,7 @@ class TARStateStore:
         self.endpoints_dir = self.state_dir / "endpoints"
         self.role_assignments_path = self.state_dir / "role_assignments.json"
         self.operator_serving_path = self.state_dir / "operator_serving.json"
+        self.experiment_backends_dir = self.state_dir / "experiment_backends"
         self.memory_manifest_path = self.state_dir / "memory_manifest.json"
         self.alerts_path = self.state_dir / "alerts.jsonl"
         self.runtime_heartbeat_path = self.state_dir / "runtime_heartbeat.json"
@@ -99,6 +101,7 @@ class TARStateStore:
         self.manifests_dir.mkdir(parents=True, exist_ok=True)
         self.endpoints_dir.mkdir(parents=True, exist_ok=True)
         self.publication_handoffs_dir.mkdir(parents=True, exist_ok=True)
+        self.experiment_backends_dir.mkdir(parents=True, exist_ok=True)
 
     def _atomic_write_text(self, path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -659,6 +662,31 @@ class TARStateStore:
             return state
         return CheckpointRegistryState.model_validate_json(self.checkpoint_registry_path.read_text(encoding="utf-8"))
 
+    def experiment_backend_state_path(self, trial_name: str, backend_id: str) -> Path:
+        return self.experiment_backends_dir / f"{trial_name}__{backend_id}.json"
+
+    def save_experiment_backend_runtime(self, record: ExperimentBackendRuntimeRecord) -> Path:
+        updated = record.model_copy(update={"updated_at": _utc_now()})
+        path = self.experiment_backend_state_path(updated.trial_name, updated.backend_id)
+        self._atomic_write_json(path, updated.model_dump(mode="json"))
+        return path
+
+    def load_experiment_backend_runtime(
+        self,
+        trial_name: str,
+        backend_id: str,
+    ) -> Optional[ExperimentBackendRuntimeRecord]:
+        path = self.experiment_backend_state_path(trial_name, backend_id)
+        if not path.exists():
+            return None
+        return ExperimentBackendRuntimeRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def list_experiment_backend_runtimes(self) -> List[ExperimentBackendRuntimeRecord]:
+        rows: List[ExperimentBackendRuntimeRecord] = []
+        for path in sorted(self.experiment_backends_dir.glob("*.json")):
+            rows.append(ExperimentBackendRuntimeRecord.model_validate_json(path.read_text(encoding="utf-8")))
+        return rows
+
     def save_checkpoint_registry(self, state: CheckpointRegistryState) -> None:
         self._atomic_write_json(self.checkpoint_registry_path, state.model_dump(mode="json"))
 
@@ -853,6 +881,7 @@ class TARStateStore:
         schedules = list(self.iter_problem_schedules())
         research_projects = self.list_research_projects()
         alerts = list(self.iter_alerts())
+        experiment_backends = self.list_experiment_backend_runtimes()
         return {
             "recovery": recovery.model_dump(mode="json"),
             "knowledge_graph_entries": len(graph.entries),
@@ -891,6 +920,8 @@ class TARStateStore:
             "problem_schedules": len(schedules),
             "active_problem_schedules": len([item for item in schedules if item.status in {"scheduled", "leased", "running", "retry_wait"}]),
             "latest_problem_schedule": schedules[-1].model_dump(mode="json") if schedules else None,
+            "experiment_backend_runs": len(experiment_backends),
+            "latest_experiment_backend_run": experiment_backends[-1].model_dump(mode="json") if experiment_backends else None,
             "endpoints": len(self.list_endpoints()),
             "role_assignments": [item.model_dump(mode="json") for item in self.list_role_assignments()],
             "alerts": len(alerts),
