@@ -46,11 +46,18 @@ TAR now has:
 - a validated `WS25` TAR operator line
 - a validated `WS26` TCL-deepened line
 - a closed `WS27` branch with successful bounded refinement
+- a closed `WS28` operator-serving integration layer
+- a closed `WS29` backend resume and runtime-state layer
 
 Most recent branch closure:
 
 - see
   [ws27r2_refine_closeout.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27r2_refine_closeout.md)
+
+Most recent backend closure:
+
+- see
+  [ws29_closeout.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws29_closeout.md)
 
 ## Guiding Principle
 
@@ -149,6 +156,12 @@ Execution posture:
 
 - laptop-first for backend and manifest logic
 - pod required for real end-to-end backend execution and resume validation
+
+Status:
+
+- completed
+- closeout:
+  [ws29_closeout.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws29_closeout.md)
 
 ### `WS30`: Locked Payload Adoption And Build Attestation
 
@@ -295,21 +308,21 @@ Execution posture:
 
 The recommended professional order is:
 
-1. `WS29`
-2. `WS30`
-3. `WS31`
-4. `WS32`
-5. `WS33`
-6. `WS34`
-7. `WS35`
+1. `WS30`
+2. `WS31`
+3. `WS32`
+4. `WS33`
+5. `WS34`
+6. `WS35`
 
 ## Why This Order Is Correct
 
-`WS29` and `WS30` next:
+`WS30` next:
 
-- the next weak link is the live research loop, not another model branch
-- real backends and locked environments must catch up to the already-strong
-  planning and evaluation layers
+- `WS29` closed the first real backend-runtime gap
+- the next weak link is now reproducible environment adoption and build truth
+- locked execution policy needs to catch up to the already-strong planning,
+  evaluation, serving, and backend layers
 
 `WS31` before deeper retrieval/runtime work:
 
@@ -351,17 +364,17 @@ Pod/GPU time in Phase 4 should stay narrow and explicit.
 
 The first clearly justified remaining Phase 4 pod point is:
 
-- `WS29`
+- `WS30`
 
 ## Immediate Next Step
 
 The next logical workstream is:
 
-- `WS29: Real Experiment Backend And Resume Semantics`
+- `WS30: Locked Payload Adoption And Build Attestation`
 
 It should start locally.
 
 The immediate engineering goal is:
 
-- convert `asc_full` and related backend plans into resilient resumable runtime
-  components before broader Phase 4 execution scale-up
+- make locked payload and build provenance operational policy for real runs
+  before broader benchmark and retrieval scale-up
