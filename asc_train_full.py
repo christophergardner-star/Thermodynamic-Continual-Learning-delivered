@@ -180,6 +180,12 @@ def _normalize_cuda_rng_state_all(state: Any) -> list[torch.ByteTensor]:
     raise TypeError(f"Unsupported CUDA RNG state payload: {type(state)!r}")
 
 
+def _partial_step_cap_reached(*, step: int, planned_total_steps: int, max_steps: int | None) -> bool:
+    if max_steps is None:
+        return False
+    return max_steps < planned_total_steps and step >= max_steps
+
+
 def _save_training_log(
     run_dir: Path,
     *,
@@ -468,7 +474,8 @@ def main() -> int:
     print(f"  Total trainable:  {summary['total_trainable']:,}\n")
 
     steps_per_epoch = max(1, math.ceil(len(tokenized) / args.batch_size))
-    total_steps = steps_per_epoch * args.epochs
+    planned_total_steps = steps_per_epoch * args.epochs
+    total_steps = planned_total_steps
     if args.max_steps:
         total_steps = min(total_steps, args.max_steps)
 
@@ -488,6 +495,8 @@ def main() -> int:
     step = 0
     start_epoch = 0
     start_epoch_step = 0
+    current_epoch = start_epoch
+    current_epoch_step = start_epoch_step
 
     if resume_bundle is not None:
         step, start_epoch, start_epoch_step, history, latest_metrics = _restore_resume_state(
@@ -561,6 +570,8 @@ def main() -> int:
 
                 step += 1
                 epoch_step = batch_index + 1
+                current_epoch = epoch
+                current_epoch_step = epoch_step
                 task_value = float(task_loss.item())
                 consist_value = float(consist_loss.item())
                 epoch_task += task_value
@@ -645,54 +656,103 @@ def main() -> int:
 
             avg_ppl = math.exp(min(epoch_task / max(epoch_n, 1), 20.0))
             print(f"\nEpoch {epoch + 1} done -- avg PPL: {avg_ppl:.2f}\n")
+            current_epoch = epoch + 1
+            current_epoch_step = 0
             start_epoch_step = 0
             if args.max_steps and step >= args.max_steps:
                 break
 
-        final_path = run_dir / "final"
-        model.save(str(final_path))
-        resume_state = _save_resume_bundle(
-            run_dir,
-            model=model,
-            base_optimizer=base_optimizer,
-            warp_optimizer=warp_optimizer,
-            scheduler=scheduler,
-            step=step,
-            epoch_index=args.epochs,
-            epoch_step=0,
-            history=history,
-            args=args,
-            latest_checkpoint_path=str(final_path),
-            latest_metrics=latest_metrics,
-        )
-        _save_plot(run_dir, history)
-        _save_training_log(
-            run_dir,
-            args=args,
-            status="completed",
-            step=step,
-            epoch_index=args.epochs,
-            epoch_step=0,
-            resumed_from_checkpoint=resumed_from_checkpoint,
-            latest_checkpoint_path=str(resume_state),
-            final_checkpoint_path=str(final_path),
-            history=history,
-            latest_metrics=latest_metrics,
-        )
-        _update_backend_state(
-            args.backend_state_path,
-            status="completed",
-            output_dir=run_dir,
-            completed_steps=step,
-            current_epoch=args.epochs,
-            epoch_step=0,
-            latest_checkpoint_path=str(resume_state),
-            final_checkpoint_path=str(final_path),
-            resumed_from_checkpoint=resumed_from_checkpoint,
-            resume_source=str(resume_source) if resume_source else None,
-        )
+        if _partial_step_cap_reached(step=step, planned_total_steps=planned_total_steps, max_steps=args.max_steps):
+            checkpoint_dir = _checkpoint_dir(run_dir, step)
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            model.save(str(checkpoint_dir))
+            resume_state = _save_resume_bundle(
+                run_dir,
+                model=model,
+                base_optimizer=base_optimizer,
+                warp_optimizer=warp_optimizer,
+                scheduler=scheduler,
+                step=step,
+                epoch_index=current_epoch,
+                epoch_step=current_epoch_step,
+                history=history,
+                args=args,
+                latest_checkpoint_path=str(checkpoint_dir),
+                latest_metrics=latest_metrics,
+            )
+            _save_plot(run_dir, history)
+            _save_training_log(
+                run_dir,
+                args=args,
+                status="interrupted",
+                step=step,
+                epoch_index=current_epoch,
+                epoch_step=current_epoch_step,
+                resumed_from_checkpoint=resumed_from_checkpoint,
+                latest_checkpoint_path=str(resume_state),
+                final_checkpoint_path=None,
+                history=history,
+                latest_metrics=latest_metrics,
+            )
+            _update_backend_state(
+                args.backend_state_path,
+                status="interrupted",
+                output_dir=run_dir,
+                completed_steps=step,
+                current_epoch=current_epoch,
+                epoch_step=current_epoch_step,
+                latest_checkpoint_path=str(resume_state),
+                final_checkpoint_path=None,
+                resumed_from_checkpoint=resumed_from_checkpoint,
+                resume_source=str(resume_source) if resume_source else None,
+                last_error="max_steps_reached",
+            )
+            print(f"Partial checkpoint saved -> {checkpoint_dir}")
+        else:
+            final_path = run_dir / "final"
+            model.save(str(final_path))
+            resume_state = _save_resume_bundle(
+                run_dir,
+                model=model,
+                base_optimizer=base_optimizer,
+                warp_optimizer=warp_optimizer,
+                scheduler=scheduler,
+                step=step,
+                epoch_index=args.epochs,
+                epoch_step=0,
+                history=history,
+                args=args,
+                latest_checkpoint_path=str(final_path),
+                latest_metrics=latest_metrics,
+            )
+            _save_plot(run_dir, history)
+            _save_training_log(
+                run_dir,
+                args=args,
+                status="completed",
+                step=step,
+                epoch_index=args.epochs,
+                epoch_step=0,
+                resumed_from_checkpoint=resumed_from_checkpoint,
+                latest_checkpoint_path=str(resume_state),
+                final_checkpoint_path=str(final_path),
+                history=history,
+                latest_metrics=latest_metrics,
+            )
+            _update_backend_state(
+                args.backend_state_path,
+                status="completed",
+                output_dir=run_dir,
+                completed_steps=step,
+                current_epoch=args.epochs,
+                epoch_step=0,
+                latest_checkpoint_path=str(resume_state),
+                final_checkpoint_path=str(final_path),
+                resumed_from_checkpoint=resumed_from_checkpoint,
+                resume_source=str(resume_source) if resume_source else None,
+            )
+            print(f"Final model saved -> {final_path}")
 
-        print(f"Final model saved -> {final_path}")
         total_min = (time.time() - global_start) / 60.0
         print(f"\nTotal training time: {total_min:.1f} min  |  Steps: {step}")
         return 0

@@ -8,6 +8,7 @@ from asc_model import ASCConfig, ASCForCausalLM
 from asc_train_full import (
     _load_resume_bundle,
     _normalize_rng_tensor,
+    _partial_step_cap_reached,
     _resolve_tokenizer_source,
     _restore_resume_state,
     _save_resume_bundle,
@@ -182,3 +183,10 @@ def test_ws29_restore_resume_state_normalizes_rng_payloads():
 
         assert restored[0] == 3
         assert _normalize_rng_tensor(payload["torch_rng_state"]).dtype == torch.uint8
+
+
+def test_ws29_partial_step_cap_detects_resumable_partial_runs():
+    assert _partial_step_cap_reached(step=3, planned_total_steps=100, max_steps=3) is True
+    assert _partial_step_cap_reached(step=6, planned_total_steps=100, max_steps=6) is True
+    assert _partial_step_cap_reached(step=100, planned_total_steps=100, max_steps=None) is False
+    assert _partial_step_cap_reached(step=100, planned_total_steps=100, max_steps=100) is False
