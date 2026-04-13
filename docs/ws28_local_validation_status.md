@@ -1,7 +1,7 @@
 ## WS28 Local Validation Status
 
 ### Result
-WS28 implementation is complete locally, but WS28 cannot be closed as a healthy local-serving workstream on the current workstation.
+WS28 implementation was completed locally, but the current workstation could not close WS28 as a healthy local-serving environment.
 
 ### What Was Successfully Validated
 - The real `WS27-R2` adapter was restored into:
@@ -36,14 +36,15 @@ Current workstation constraints at validation time:
 That is not a safe or truthful environment for a healthy 7B base-plus-adapter serve.
 
 ### Conclusion
-- WS28 code and runtime integration are ready.
-- WS28 operational closeout requires one healthy serve on adequate hardware.
-- The first justified next pod point is now **WS28 fit validation**, not WS29.
+- WS28 code and runtime integration were ready before pod validation.
+- The workstation failure was a host-fit issue, not a code-path failure.
+- WS28 was later closed successfully through pod validation.
 
-### Required Next Step
-Run one short pod-backed healthy endpoint validation using:
+### Historical Next Step
+The required next step from this local-only state was:
+- run one short pod-backed healthy endpoint validation using:
 - `Qwen/Qwen2.5-7B-Instruct`
 - `training_artifacts/ws27r2_qwen25_7b_refine_run1/final_adapter`
 - the WS28 inference bridge and local serving path
 
-If that passes, WS28 can be closed and pushed as operationally complete.
+That later passed, and WS28 was closed as operationally complete.

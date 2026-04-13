@@ -120,6 +120,12 @@ Execution posture:
 - laptop-first for integration and local serving tests
 - pod only for throughput, memory, or multi-checkpoint comparison work
 
+Status:
+
+- completed
+- closeout:
+  [ws28_closeout.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws28_closeout.md)
+
 ### `WS29`: Real Experiment Backend And Resume Semantics
 
 Purpose:
@@ -289,21 +295,15 @@ Execution posture:
 
 The recommended professional order is:
 
-1. `WS28`
-2. `WS29`
-3. `WS30`
-4. `WS31`
-5. `WS32`
-6. `WS33`
-7. `WS34`
-8. `WS35`
+1. `WS29`
+2. `WS30`
+3. `WS31`
+4. `WS32`
+5. `WS33`
+6. `WS34`
+7. `WS35`
 
 ## Why This Order Is Correct
-
-`WS28` first:
-
-- the strongest trained operator line should become part of the system before
-  more large experimental surface area is added
 
 `WS29` and `WS30` next:
 
@@ -349,22 +349,19 @@ Pod/GPU time in Phase 4 should stay narrow and explicit.
 
 ### Earliest justified pod point in Phase 4
 
-The first clearly justified Phase 4 pod point is usually:
+The first clearly justified remaining Phase 4 pod point is:
 
 - `WS29`
-
-`WS28` should start locally unless serving throughput or memory fit forces a GPU
-environment earlier.
 
 ## Immediate Next Step
 
 The next logical workstream is:
 
-- `WS28: Native Inference Integration And Operator Serving`
+- `WS29: Real Experiment Backend And Resume Semantics`
 
 It should start locally.
 
 The immediate engineering goal is:
 
-- make the validated `WS27` line selectable and usable as a first-class TAR
-  inference component before any new large training cycle is considered
+- convert `asc_full` and related backend plans into resilient resumable runtime
+  components before broader Phase 4 execution scale-up
