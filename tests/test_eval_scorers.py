@@ -97,3 +97,25 @@ def test_score_prediction_for_tcl_recovery_confidence_estimation_flags_mismatch(
     assert result.score < 0.5
     assert result.decision_correct is False
     assert result.error_bucket == "tcl_reasoning_mismatch"
+
+
+def test_score_prediction_for_project_resume_accepts_compact_contract():
+    target = {
+        "budget_pressure_level": "medium",
+        "active_thread_id": "thread-1",
+        "current_question_id": "question-1",
+        "next_action_id": "action-1",
+        "next_action_kind": "run_problem_study",
+        "next_action_status": "planned",
+    }
+    result = score_prediction(
+        item_id="eval-project-resume-1",
+        example_id="example-project-resume-1",
+        task_family="project_resume",
+        suite_names=["core", "resume"],
+        gold_target=target,
+        prediction_text=json.dumps(target),
+    )
+    assert result.score == 1.0
+    assert result.decision_correct is True
+    assert result.error_bucket == "none"

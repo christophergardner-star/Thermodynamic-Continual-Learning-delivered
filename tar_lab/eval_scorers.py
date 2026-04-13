@@ -223,11 +223,11 @@ def _build_summary(task_family: str, payload: dict[str, Any] | None) -> dict[str
         resume = payload.get("resume_snapshot") if isinstance(payload.get("resume_snapshot"), dict) else {}
         return {
             "budget_pressure_level": payload.get("budget_pressure_level"),
-            "active_thread_id": resume.get("active_thread_id"),
-            "current_question_id": resume.get("current_question_id"),
-            "next_action_id": resume.get("next_action_id"),
-            "next_action_kind": next_action.get("action_kind"),
-            "next_action_status": next_action.get("status"),
+            "active_thread_id": payload.get("active_thread_id") or resume.get("active_thread_id"),
+            "current_question_id": payload.get("current_question_id") or resume.get("current_question_id"),
+            "next_action_id": payload.get("next_action_id") or resume.get("next_action_id"),
+            "next_action_kind": payload.get("next_action_kind") or next_action.get("action_kind"),
+            "next_action_status": payload.get("next_action_status") or next_action.get("status"),
         }
     if task_family == "reproducibility_refusal":
         return {
@@ -596,15 +596,11 @@ def render_prediction_from_summary(task_family: str, summary: dict[str, Any]) ->
     if task_family == "project_resume":
         return {
             "budget_pressure_level": summary.get("budget_pressure_level"),
-            "next_action": {
-                "action_kind": summary.get("next_action_kind"),
-                "status": summary.get("next_action_status"),
-            },
-            "resume_snapshot": {
-                "active_thread_id": summary.get("active_thread_id"),
-                "current_question_id": summary.get("current_question_id"),
-                "next_action_id": summary.get("next_action_id"),
-            },
+            "active_thread_id": summary.get("active_thread_id"),
+            "current_question_id": summary.get("current_question_id"),
+            "next_action_id": summary.get("next_action_id"),
+            "next_action_kind": summary.get("next_action_kind"),
+            "next_action_status": summary.get("next_action_status"),
         }
     if task_family == "falsification_planning":
         test_kinds = summary.get("test_kinds", [])

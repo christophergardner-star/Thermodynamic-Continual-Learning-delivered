@@ -26,6 +26,36 @@ def _seed_record(
     lineage_key: str,
     split: str,
 ) -> dict:
+    if task_family == "project_resume":
+        target = {
+            "budget_pressure_level": "medium",
+            "resume_snapshot": {
+                "active_thread_id": "thread-1",
+                "current_question_id": "question-1",
+                "next_action_id": "action-1",
+                "blockers": [],
+                "budget_remaining_summary": {"experiments_remaining": 2},
+                "latest_evidence_summary": "Use compact resume output.",
+            },
+            "next_action": {
+                "action_kind": "run_problem_study",
+                "status": "planned",
+            },
+        }
+        input_context = {
+            "title": "resume_project",
+            "goal": "Check contract compaction",
+            "status": "active",
+            "active_thread_id": "thread-1",
+            "latest_decision_summary": "Return the compact resume state.",
+            "budget": {"budget_pressure_level": "medium"},
+            "current_question_id": "question-1",
+            "blockers": [],
+            "budget_remaining_summary": {"experiments_remaining": 2},
+        }
+    else:
+        input_context = {"family": task_family}
+        target = {"family": task_family}
     return {
         "example_id": example_id,
         "dedupe_key": example_id,
@@ -35,12 +65,12 @@ def _seed_record(
         "task_name": f"{task_family}_task",
         "source_kind": task_family,
         "tags": [],
-        "input_context": {"family": task_family},
-        "target": {"family": task_family},
+        "input_context": input_context,
+        "target": target,
         "messages": [
             {"role": "system", "content": "sys"},
             {"role": "user", "content": "ask"},
-            {"role": "assistant", "content": "{\"family\": \"" + task_family + "\"}"},
+            {"role": "assistant", "content": json.dumps(target)},
         ],
         "provenance": {
             "state_file": "seed.jsonl",
@@ -180,3 +210,16 @@ def test_build_ws27_branch_release_preserves_component_mix_and_lineage_safety(tm
     assert set(branch_manifest["selection_policy"]["non_regression_families"]) == set(
         NON_REGRESSION_FAMILIES
     )
+
+    project_resume_rows = [row for row in branch_records if row["task_family"] == "project_resume"]
+    assert project_resume_rows
+    for row in project_resume_rows:
+        assert row["target"] == {
+            "budget_pressure_level": "medium",
+            "active_thread_id": "thread-1",
+            "current_question_id": "question-1",
+            "next_action_id": "action-1",
+            "next_action_kind": "run_problem_study",
+            "next_action_status": "planned",
+        }
+        assert '"next_action_status"' in row["messages"][1]["content"]

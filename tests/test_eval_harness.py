@@ -87,21 +87,20 @@ def _seed_dataset(root: Path) -> Path:
             lineage_key="project:resume-1",
             input_context={
                 "budget_pressure_level": "medium",
-                "resume_snapshot": {
+                "resume_state": {
                     "active_thread_id": "thread-1",
                     "current_question_id": "question-1",
                     "next_action_id": "action-1",
                 },
-                "next_action": {"action_kind": "run_problem_study", "status": "planned"},
+                "next_action_state": {"action_kind": "run_problem_study", "status": "planned"},
             },
             target={
                 "budget_pressure_level": "medium",
-                "resume_snapshot": {
-                    "active_thread_id": "thread-1",
-                    "current_question_id": "question-1",
-                    "next_action_id": "action-1",
-                },
-                "next_action": {"action_kind": "run_problem_study", "status": "planned"},
+                "active_thread_id": "thread-1",
+                "current_question_id": "question-1",
+                "next_action_id": "action-1",
+                "next_action_kind": "run_problem_study",
+                "next_action_status": "planned",
             },
         ),
         _seed_example(

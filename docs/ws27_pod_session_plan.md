@@ -2,10 +2,15 @@
 
 Status:
 
-- this is the current `WS27R1 run1` pod session plan
+- this plan has now been executed successfully
 - the initial coder-backbone probe plan is historical
 - the true-continuation justification result is recorded in
   [ws27r1_true_continuation_closeout.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27r1_true_continuation_closeout.md)
+- the `run1` result is recorded in
+  [ws27r1_run1_closeout.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27r1_run1_closeout.md)
+
+This file should now be treated as the historical execution plan for the first
+full `WS27R1 run1` pod cycle.
 
 ## Start Condition
 

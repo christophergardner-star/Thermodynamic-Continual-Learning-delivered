@@ -6,7 +6,14 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-from build_tar_master_dataset import _count_nonempty_lines, _hash_split, _relative_or_name, _sha256_file
+from build_tar_master_dataset import (
+    SYSTEM_PROMPT,
+    _count_nonempty_lines,
+    _hash_split,
+    _relative_or_name,
+    _render_user_prompt,
+    _sha256_file,
+)
 
 WEAK_FAMILIES = [
     "tcl_anchor_policy_judgement",
@@ -108,6 +115,8 @@ def _copy_example(
     duplicate_index: int = 0,
 ) -> dict[str, Any]:
     normalized = json.loads(json.dumps(example))
+    if normalized.get("task_family") == "project_resume":
+        normalized = _normalize_project_resume_example(normalized)
     normalized["dataset_version"] = dataset_version
     normalized["split"] = _hash_split(str(normalized.get("lineage_key") or normalized["example_id"]))
     if duplicate_index > 0:
@@ -123,6 +132,68 @@ def _copy_example(
     tags = list(normalized.get("tags") or [])
     tags.extend([f"ws27:{component}", "ws27:private_release"])
     normalized["tags"] = sorted(set(tags))
+    return normalized
+
+
+def _normalize_project_resume_example(example: dict[str, Any]) -> dict[str, Any]:
+    normalized = json.loads(json.dumps(example))
+    target = normalized.get("target") if isinstance(normalized.get("target"), dict) else {}
+    input_context = normalized.get("input_context") if isinstance(normalized.get("input_context"), dict) else {}
+    next_action = target.get("next_action") if isinstance(target.get("next_action"), dict) else {}
+    resume_snapshot = (
+        target.get("resume_snapshot") if isinstance(target.get("resume_snapshot"), dict) else {}
+    )
+    compact_target = {
+        "budget_pressure_level": target.get("budget_pressure_level")
+        or input_context.get("budget_pressure_level")
+        or ((input_context.get("budget") or {}) if isinstance(input_context.get("budget"), dict) else {}).get(
+            "budget_pressure_level"
+        ),
+        "active_thread_id": target.get("active_thread_id")
+        or resume_snapshot.get("active_thread_id")
+        or input_context.get("active_thread_id"),
+        "current_question_id": target.get("current_question_id")
+        or resume_snapshot.get("current_question_id")
+        or input_context.get("current_question_id"),
+        "next_action_id": target.get("next_action_id") or resume_snapshot.get("next_action_id"),
+        "next_action_kind": target.get("next_action_kind") or next_action.get("action_kind"),
+        "next_action_status": target.get("next_action_status") or next_action.get("status"),
+    }
+    compact_input = {
+        "title": input_context.get("title"),
+        "goal": input_context.get("goal"),
+        "status": input_context.get("status"),
+        "latest_decision_summary": input_context.get("latest_decision_summary"),
+        "budget_pressure_level": compact_target.get("budget_pressure_level"),
+        "resume_state": {
+            "active_thread_id": compact_target.get("active_thread_id"),
+            "current_question_id": compact_target.get("current_question_id"),
+            "next_action_id": compact_target.get("next_action_id"),
+        },
+        "next_action_state": {
+            "action_kind": compact_target.get("next_action_kind"),
+            "status": compact_target.get("next_action_status"),
+        },
+        "blockers": input_context.get("blockers") or resume_snapshot.get("blockers"),
+        "budget_remaining_summary": input_context.get("budget_remaining_summary")
+        or resume_snapshot.get("budget_remaining_summary"),
+        "latest_evidence_summary": input_context.get("latest_evidence_summary")
+        or resume_snapshot.get("latest_evidence_summary"),
+    }
+    normalized["input_context"] = compact_input
+    normalized["target"] = compact_target
+    normalized["messages"] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": _render_user_prompt(
+                str(normalized.get("task_family")),
+                str(normalized.get("task_name")),
+                compact_input,
+            ),
+        },
+        {"role": "assistant", "content": json.dumps(compact_target, indent=2, sort_keys=True)},
+    ]
     return normalized
 
 

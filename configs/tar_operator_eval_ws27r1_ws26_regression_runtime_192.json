@@ -1,0 +1,38 @@
+{
+  "dataset_dir": "dataset_artifacts/tar_master_dataset_ws26_merged_v1",
+  "test_split_file": "tar_master_dataset_test.jsonl",
+  "eval_pack_dir": "eval_artifacts/tar_operator_eval_ws27r1_ws26_regression_v1",
+  "output_dir": "eval_artifacts/tar_operator_eval_runs/ws27r1_ws26_regression_eval_192",
+  "eval_version": "tar-operator-eval-ws27r1-ws26-regression-v1",
+  "selection": {
+    "max_examples_per_family": null,
+    "family_quotas": {},
+    "include_families": [
+      "benchmark_honesty",
+      "claim_lineage_audit",
+      "falsification_planning",
+      "reproducibility_refusal",
+      "sandbox_policy_reasoning",
+      "verification_judgement"
+    ],
+    "exclude_families": []
+  },
+  "security": {
+    "allow_external_dataset": false,
+    "allow_unverified_model": false,
+    "local_files_only": false,
+    "trust_remote_code": false
+  },
+  "runtime": {
+    "predictor_type": "hf_causal_lm",
+    "model_name_or_path": "Qwen/Qwen2.5-7B-Instruct",
+    "tokenizer_name_or_path": null,
+    "adapter_path": null,
+    "max_new_tokens": 192,
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "use_4bit": false,
+    "bf16": true,
+    "dry_run": false
+  }
+}

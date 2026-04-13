@@ -605,12 +605,28 @@ def _sanitize_value(value: Any, *, repo_root: Path, state_dir: Path) -> Any:
     return text
 
 
+def _task_contract_suffix(task_family: str) -> str:
+    if task_family == "project_resume":
+        return (
+            "Return exactly this compact JSON schema and no nested objects beyond the top level: "
+            "{"
+            '"budget_pressure_level", '
+            '"active_thread_id", '
+            '"current_question_id", '
+            '"next_action_id", '
+            '"next_action_kind", '
+            '"next_action_status"'
+            "}."
+        )
+    return "Return only a concise JSON object aligned to the target."
+
+
 def _render_user_prompt(task_family: str, task_name: str, input_context: dict[str, Any]) -> str:
     payload = json.dumps(input_context, indent=2, sort_keys=True)
     return (
         f"Task family: {task_family}\n"
         f"Task: {task_name}\n"
-        "Use the TAR operator contract. Return only a concise JSON object aligned to the target. "
+        f"Use the TAR operator contract. {_task_contract_suffix(task_family)} "
         "Do not add explanatory prose or markdown fences.\n\n"
         f"Input state:\n{payload}"
     )
@@ -1001,6 +1017,14 @@ def _examples_from_research_project(
         if isinstance(item, dict) and item.get("action_id") == resume_snapshot.get("next_action_id"):
             next_action = item
             break
+    compact_resume_target = {
+        "budget_pressure_level": budget.get("budget_pressure_level"),
+        "active_thread_id": resume_snapshot.get("active_thread_id") or record.get("active_thread_id"),
+        "current_question_id": resume_snapshot.get("current_question_id"),
+        "next_action_id": resume_snapshot.get("next_action_id"),
+        "next_action_kind": (next_action or {}).get("action_kind"),
+        "next_action_status": (next_action or {}).get("status"),
+    }
     return [
         _example_record(
             version=version,
@@ -1014,18 +1038,22 @@ def _examples_from_research_project(
                 "title": record.get("title"),
                 "goal": record.get("goal"),
                 "status": record.get("status"),
-                "active_thread_id": record.get("active_thread_id"),
                 "latest_decision_summary": record.get("latest_decision_summary"),
-                "budget": budget,
-                "current_question_id": resume_snapshot.get("current_question_id"),
+                "budget_pressure_level": budget.get("budget_pressure_level"),
+                "resume_state": {
+                    "active_thread_id": compact_resume_target["active_thread_id"],
+                    "current_question_id": compact_resume_target["current_question_id"],
+                    "next_action_id": compact_resume_target["next_action_id"],
+                },
+                "next_action_state": {
+                    "action_kind": compact_resume_target["next_action_kind"],
+                    "status": compact_resume_target["next_action_status"],
+                },
                 "blockers": resume_snapshot.get("blockers"),
                 "budget_remaining_summary": resume_snapshot.get("budget_remaining_summary"),
+                "latest_evidence_summary": resume_snapshot.get("latest_evidence_summary"),
             },
-            target={
-                "resume_snapshot": resume_snapshot,
-                "next_action": next_action,
-                "budget_pressure_level": budget.get("budget_pressure_level"),
-            },
+            target=compact_resume_target,
             repo_root=repo_root,
             state_dir=state_dir,
             tags=("continuity", "resume"),

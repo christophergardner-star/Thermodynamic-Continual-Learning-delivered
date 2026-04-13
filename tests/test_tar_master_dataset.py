@@ -612,6 +612,62 @@ def test_build_master_dataset_keeps_project_lineage_in_single_split(tmp_path: Pa
     assert len({row["split"] for row in lineage_rows}) == 1
 
 
+def test_build_master_dataset_uses_compact_project_resume_contract(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    state_dir = repo_root / "tar_state"
+    output_dir = repo_root / "dataset_artifacts" / "compact_resume"
+    state_dir.mkdir(parents=True)
+
+    _write_json(
+        state_dir / "research_projects.json",
+        [
+            {
+                "project_id": "project-compact-1",
+                "title": "compact_resume_project",
+                "goal": "Check compact resume formatting",
+                "status": "active",
+                "active_thread_id": "thread-compact-1",
+                "latest_decision_summary": "Use a compact resume contract.",
+                "budget_ledger": {"budget_pressure_level": "medium"},
+                "resume_snapshot": {
+                    "project_id": "project-compact-1",
+                    "active_thread_id": "thread-compact-1",
+                    "current_question_id": "question-compact-1",
+                    "next_action_id": "action-compact-1",
+                    "blockers": [],
+                    "budget_remaining_summary": {"experiments_remaining": 2},
+                    "latest_evidence_summary": "Waiting on benchmark-aligned follow-up.",
+                },
+                "planned_actions": [
+                    {
+                        "action_id": "action-compact-1",
+                        "action_kind": "run_problem_study",
+                        "status": "planned",
+                    }
+                ],
+            }
+        ],
+    )
+
+    build_master_dataset(state_dir, output_dir, version="tar-master-v1")
+    rows = [
+        json.loads(line)
+        for line in (output_dir / "tar_master_dataset.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    project_resume = next(row for row in rows if row["task_family"] == "project_resume")
+    assert project_resume["target"] == {
+        "budget_pressure_level": "medium",
+        "active_thread_id": "thread-compact-1",
+        "current_question_id": "question-compact-1",
+        "next_action_id": "action-compact-1",
+        "next_action_kind": "run_problem_study",
+        "next_action_status": "planned",
+    }
+    assert '"next_action_status"' in project_resume["messages"][1]["content"]
+    assert '"next_action_kind"' in project_resume["messages"][1]["content"]
+
+
 def test_ws23_campaign_generator_produces_private_state_bundle(tmp_path: Path) -> None:
     workspace = tmp_path / "campaign"
     summary = build_campaign_workspace(workspace, projects_per_campaign=2, prefix="unit")

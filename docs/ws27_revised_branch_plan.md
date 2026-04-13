@@ -11,15 +11,18 @@ result recorded in
 - current coder-backbone variant: **no-go**
 - `WS27` overall as a research branch: **go**
 
-That go is now grounded in the true-continuation rerun recorded in
+That go is grounded first in the true-continuation rerun recorded in
 [ws27r1_true_continuation_closeout.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27r1_true_continuation_closeout.md).
 
-It means:
+It is now further supported by the full `run1` result recorded in
+[ws27r1_run1_closeout.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27r1_run1_closeout.md).
 
-- continue `WS27` on the revised branch
-- do **not** repeat the first coder-backbone probe as-is
-- advance to `WS27R1 run1` rather than spending another pod cycle on probe-only
-  work
+Current status:
+
+- current coder-backbone variant remains rejected
+- revised `WS27R1` branch is validated
+- `WS27R1 run1` is complete
+- the open issue is bounded parse/output reliability, not branch viability
 
 ## Core Revision
 
@@ -158,15 +161,16 @@ This matters because `WS27` must not buy TCL gains by giving back:
 The revised probe has now cleared the branch-justification bar on the true
 `WS26` continuation line.
 
-The next serious branch step is `WS27R1 run1`, not another probe.
+`WS27R1 run1` is now complete.
 
-`WS27R1 run1` should be accepted only if all of these are true:
+The branch should now be treated as **successful with a structured-output
+caveat** if all of these remain true:
 
 - it preserves `overclaim_rate = 0.0`
 - it preserves strong WS26 non-regression behaviour
 - it remains materially above the failed coder-backbone path
 - it improves or at least stabilizes the true-continuation probe result
-- parse reliability does not regress materially above the true probe level
+- parse reliability remains the only significant open weakness
 
 Reference result for the true-continuation probe:
 
@@ -175,7 +179,8 @@ Reference result for the true-continuation probe:
 - `parse_error_rate = 0.16`
 - `overclaim_rate = 0.0`
 
-The parse caveat remains open and should be monitored during `run1`.
+The parse caveat remains open and is now tracked in
+[ws27_parse_hardening_plan.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27_parse_hardening_plan.md).
 
 ## Revised Execution Order
 
@@ -226,15 +231,17 @@ This phase is now complete. `run1` is justified.
 
 ## Pod Usage
 
-Open the next pod for `WS27R1 run1` after the local repo state is pushed.
+Do **not** open another pod immediately.
 
-The next pod is justified now because:
+The next pod is justified only if the bounded hardening plan is approved and the
+local prep is complete.
 
-- adapter-continuation support is implemented
-- revised dataset artifacts are built
-- revised eval configs exist
-- the true `WS26` continuation line has been validated
-- `run1` is the next immediate GPU-bound step
+That means:
+
+- parse-regression fixtures are in place
+- candidate runtime/contract adjustments are in place
+- local tests are green
+- a bounded refinement run is the next immediate step
 
 Recommended next pod:
 
@@ -249,7 +256,7 @@ Reason:
 
 ## Immediate Next Step
 
-The next concrete step is:
+The next concrete step is local:
 
-- run `WS27R1 run1` on a fresh pod using the regenerated true `WS26` adapter as
-  the continuation base
+- execute the bounded plan in
+  [ws27_parse_hardening_plan.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27_parse_hardening_plan.md)
