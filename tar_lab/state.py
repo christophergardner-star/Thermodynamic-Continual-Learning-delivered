@@ -10,6 +10,8 @@ from tar_lab.schemas import (
     BudgetAllocationDecision,
     BreakthroughReport,
     ClaimVerdict,
+    CheckpointRecord,
+    CheckpointRegistryState,
     DatasetManifest,
     DirectorPolicy,
     EvidenceDebtRecord,
@@ -23,6 +25,7 @@ from tar_lab.schemas import (
     ProjectStalenessRecord,
     PublicationHandoffPackage,
     GovernorMetrics,
+    OperatorServingState,
     KnowledgeGraphEntry,
     KnowledgeGraphState,
     ProblemExecutionReport,
@@ -78,9 +81,11 @@ class TARStateStore:
         self.portfolio_decisions_path = self.state_dir / "portfolio_decisions.jsonl"
         self.publication_handoffs_path = self.state_dir / "publication_handoffs.jsonl"
         self.publication_handoffs_dir = self.state_dir / "publication_handoffs"
+        self.checkpoint_registry_path = self.state_dir / "checkpoint_registry.json"
         self.endpoint_registry_path = self.state_dir / "inference_endpoints.json"
         self.endpoints_dir = self.state_dir / "endpoints"
         self.role_assignments_path = self.state_dir / "role_assignments.json"
+        self.operator_serving_path = self.state_dir / "operator_serving.json"
         self.memory_manifest_path = self.state_dir / "memory_manifest.json"
         self.alerts_path = self.state_dir / "alerts.jsonl"
         self.runtime_heartbeat_path = self.state_dir / "runtime_heartbeat.json"
@@ -647,6 +652,31 @@ class TARStateStore:
             return state
         return EndpointRegistryState.model_validate_json(self.endpoint_registry_path.read_text(encoding="utf-8"))
 
+    def load_checkpoint_registry(self) -> CheckpointRegistryState:
+        if not self.checkpoint_registry_path.exists():
+            state = CheckpointRegistryState()
+            self.save_checkpoint_registry(state)
+            return state
+        return CheckpointRegistryState.model_validate_json(self.checkpoint_registry_path.read_text(encoding="utf-8"))
+
+    def save_checkpoint_registry(self, state: CheckpointRegistryState) -> None:
+        self._atomic_write_json(self.checkpoint_registry_path, state.model_dump(mode="json"))
+
+    def upsert_checkpoint(self, record: CheckpointRecord) -> None:
+        state = self.load_checkpoint_registry()
+        entries = [item for item in state.entries if item.name != record.name]
+        entries.append(record)
+        self.save_checkpoint_registry(CheckpointRegistryState(entries=entries))
+
+    def list_checkpoints(self) -> List[CheckpointRecord]:
+        return self.load_checkpoint_registry().entries
+
+    def get_checkpoint(self, checkpoint_name: str) -> Optional[CheckpointRecord]:
+        for entry in self.list_checkpoints():
+            if entry.name == checkpoint_name:
+                return entry
+        return None
+
     def save_endpoint_registry(self, state: EndpointRegistryState) -> None:
         self._atomic_write_json(self.endpoint_registry_path, state.model_dump(mode="json"))
 
@@ -697,6 +727,16 @@ class TARStateStore:
 
     def list_role_assignments(self) -> List[RoleAssignment]:
         return self.load_role_assignments().entries
+
+    def load_operator_serving_state(self) -> OperatorServingState:
+        if not self.operator_serving_path.exists():
+            state = OperatorServingState()
+            self.save_operator_serving_state(state)
+            return state
+        return OperatorServingState.model_validate_json(self.operator_serving_path.read_text(encoding="utf-8"))
+
+    def save_operator_serving_state(self, state: OperatorServingState) -> None:
+        self._atomic_write_json(self.operator_serving_path, state.model_dump(mode="json"))
 
     def append_alert(self, alert: AlertRecord) -> None:
         with self.alerts_path.open("a", encoding="utf-8") as handle:

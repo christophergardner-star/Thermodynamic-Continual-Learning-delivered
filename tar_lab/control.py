@@ -251,6 +251,8 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
                 model_path=str(request.payload.get("model_path", "")),
                 backend=str(request.payload.get("backend", "transformers")),
                 role=str(request.payload.get("role", "assistant")),
+                base_model_id=request.payload.get("base_model_id"),
+                adapter_path=request.payload.get("adapter_path"),
                 trust_remote_code=request.payload.get("trust_remote_code"),
             ).model_dump(mode="json")
         elif request.command == "list_checkpoints":
@@ -290,6 +292,15 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
                 checkpoint_name=str(request.payload.get("checkpoint_name", "")),
                 endpoint_name=request.payload.get("endpoint_name"),
             ).model_dump(mode="json")
+        elif request.command == "select_operator_checkpoint":
+            payload = orchestrator.select_operator_checkpoint(
+                checkpoint_name=str(request.payload.get("checkpoint_name", "")),
+                mode=str(request.payload.get("mode", "tuned_local")),
+                role=str(request.payload.get("role", "assistant")),
+                endpoint_name=request.payload.get("endpoint_name"),
+            ).model_dump(mode="json")
+        elif request.command == "operator_serving_status":
+            payload = orchestrator.operator_serving_status().model_dump(mode="json")
         elif request.command == "claim_policy":
             payload = orchestrator.claim_policy()
         elif request.command == "claim_verdict":

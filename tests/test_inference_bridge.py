@@ -185,3 +185,75 @@ def test_inference_bridge_uses_repo_serve_local_path_from_non_repo_workspace():
         plan = bridge.build_endpoint("asc-local", role="assistant", port=8120)
 
         assert Path(plan.command[1]) == Path(__file__).resolve().parents[1] / "serve_local.py"
+
+
+def test_inference_bridge_builds_adapter_backed_endpoint_plan():
+    with tempfile.TemporaryDirectory() as tmp:
+        adapter_dir = Path(tmp) / "adapter"
+        adapter_dir.mkdir()
+        bridge = InferenceBridge(tmp)
+        record = bridge.register_checkpoint(
+            name="tar-operator-ws27r2",
+            model_path=str(adapter_dir),
+            base_model_id="Qwen/Qwen2.5-7B-Instruct",
+            adapter_path=str(adapter_dir),
+            backend="transformers",
+            role="assistant",
+        )
+        assert record.checkpoint_kind == "adapter"
+        plan = bridge.build_endpoint("tar-operator-ws27r2", port=8111)
+        assert "--adapter-path" in plan.command
+        assert "Qwen/Qwen2.5-7B-Instruct" in plan.command
+        assert plan.env["TAR_ENDPOINT_CHECKPOINT_KIND"] == "adapter"
+        assert plan.env["TAR_ENDPOINT_ADAPTER_PATH"] == str(adapter_dir.resolve())
+
+
+def test_operator_checkpoint_selection_persists_state():
+    with tempfile.TemporaryDirectory() as tmp:
+        adapter_dir = Path(tmp) / "adapter"
+        adapter_dir.mkdir()
+        bridge = InferenceBridge(tmp)
+        bridge.register_checkpoint(
+            name="tar-operator-ws27r2",
+            model_path=str(adapter_dir),
+            base_model_id="Qwen/Qwen2.5-7B-Instruct",
+            adapter_path=str(adapter_dir),
+            backend="transformers",
+            role="assistant",
+        )
+
+        status = bridge.select_operator_checkpoint(
+            checkpoint_name="tar-operator-ws27r2",
+            mode="tuned_local",
+            role="assistant",
+        )
+
+        assert status.state.active_checkpoint_name == "tar-operator-ws27r2"
+        assert status.state.mode == "tuned_local"
+        assert status.checkpoint is not None
+        assert status.checkpoint.checkpoint_kind == "adapter"
+
+
+def test_start_endpoint_syncs_active_operator_endpoint(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        model_dir = Path(tmp) / "mock-model"
+        model_dir.mkdir()
+        (model_dir / "mock_endpoint.json").write_text("{}", encoding="utf-8")
+        bridge = InferenceBridge(tmp)
+        bridge.register_checkpoint(name="asc-local", model_path=str(model_dir), backend="transformers", role="assistant")
+        bridge.select_operator_checkpoint(checkpoint_name="asc-local", mode="prompt_only", role="assistant")
+
+        monkeypatch.setattr(
+            "tar_lab.inference_bridge.subprocess.Popen",
+            lambda *args, **kwargs: SimpleNamespace(pid=4321, poll=lambda: None, terminate=lambda: None, wait=lambda timeout=5: 0),
+        )
+        monkeypatch.setattr(
+            bridge,
+            "endpoint_health",
+            lambda endpoint_name: EndpointHealth(endpoint_name=endpoint_name, status="healthy", ok=True, backend="mock", model_id="asc-local"),
+        )
+        monkeypatch.setattr(bridge, "_pid_alive", lambda pid: True)
+
+        bridge.start_endpoint("asc-local", role="assistant")
+        status = bridge.operator_serving_status()
+        assert status.state.endpoint_name == "assistant-asc-local"

@@ -1375,6 +1375,54 @@ def test_endpoint_list_renderer_surfaces_record_details():
     assert "Manifest: C:/tmp/endpoint_manifest.json" in rendered
 
 
+def test_status_renderer_surfaces_operator_serving():
+    payload = {
+        "recovery": {"trial_id": "trial-1", "status": "completed", "consecutive_fail_fast": 0},
+        "last_three_metrics": [],
+        "gpu": {},
+        "memory": {},
+        "endpoints": [],
+        "role_assignments": [],
+        "operator_serving": {
+            "state": {
+                "active_checkpoint_name": "tar-operator-ws27r2",
+                "mode": "tuned_local",
+                "endpoint_name": "assistant-tar-operator-ws27r2",
+            },
+            "checkpoint": {"checkpoint_kind": "adapter"},
+        },
+    }
+    rendered = tar_cli._render_status(payload)
+    assert "Operator Serving: tuned_local via tar-operator-ws27r2" in rendered
+    assert "Operator Checkpoint Kind: adapter" in rendered
+
+
+def test_frontier_status_surfaces_operator_serving_state():
+    with tempfile.TemporaryDirectory() as tmp:
+        adapter_dir = Path(tmp) / "adapter"
+        adapter_dir.mkdir()
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            orchestrator.register_checkpoint(
+                name="tar-operator-ws27r2",
+                model_path=str(adapter_dir),
+                backend="transformers",
+                role="assistant",
+                base_model_id="Qwen/Qwen2.5-7B-Instruct",
+                adapter_path=str(adapter_dir),
+            )
+            orchestrator.select_operator_checkpoint(
+                checkpoint_name="tar-operator-ws27r2",
+                mode="tuned_local",
+                role="assistant",
+            )
+            frontier = orchestrator.frontier_status()
+            assert frontier.operator_serving is not None
+            assert frontier.operator_serving.state.active_checkpoint_name == "tar-operator-ws27r2"
+        finally:
+            orchestrator.shutdown()
+
+
 def test_runtime_status_renderer_surfaces_lock_warning():
     payload = {
         "safe_execution_mode": "docker_container_only",

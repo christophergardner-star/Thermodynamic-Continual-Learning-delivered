@@ -312,6 +312,8 @@ def _render_infrastructure_tab(context: dict[str, Any]) -> None:
     sandbox_policy = runtime.get("sandbox_policy", {})
     endpoints = status.get("endpoints", [])
     role_assignments = status.get("role_assignments", [])
+    operator_serving = status.get("operator_serving", {})
+    operator_state = operator_serving.get("state", {})
 
     runtime_col1, runtime_col2, runtime_col3, runtime_col4 = st.columns(4)
     runtime_col1.metric("Reproducible", status.get("reproducibility_complete", False))
@@ -322,13 +324,14 @@ def _render_infrastructure_tab(context: dict[str, Any]) -> None:
     endpoint_col1, endpoint_col2, endpoint_col3 = st.columns(3)
     endpoint_col1.metric("Endpoints", len(endpoints))
     endpoint_col2.metric("Role Assignments", len(role_assignments))
-    endpoint_col3.metric("Claim Verdicts", status.get("claim_verdicts", 0))
+    endpoint_col3.metric("Operator Mode", operator_state.get("mode", "n/a"))
 
     infra_left, infra_right = st.columns(2)
     with infra_left:
         _show_json("Runtime", runtime, "No runtime state recorded.")
         _show_json("Sandbox Policy", sandbox_policy, "No sandbox policy recorded.")
     with infra_right:
+        _show_json("Operator Serving", operator_serving, "No operator serving state recorded.")
         _show_json("Inference Endpoints", endpoints, "No managed inference endpoints registered.")
         _show_json("Role Assignments", role_assignments, "No role assignments recorded.")
 

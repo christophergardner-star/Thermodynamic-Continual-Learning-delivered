@@ -50,6 +50,7 @@ from tar_lab.schemas import (
     KnowledgeGraphEntry,
     LabChatResponse,
     LiveDockerTestReport,
+    OperatorServingStatus,
     PaperIngestReport,
     PayloadEnvironmentReport,
     PortfolioDecision,
@@ -3343,6 +3344,8 @@ class TAROrchestrator:
         model_path: str,
         backend: str = "transformers",
         role: str = "assistant",
+        base_model_id: Optional[str] = None,
+        adapter_path: Optional[str] = None,
         trust_remote_code: Optional[bool] = None,
     ) -> CheckpointRecord:
         metadata = {}
@@ -3353,6 +3356,8 @@ class TAROrchestrator:
             model_path=model_path,
             backend=backend,
             role=role,
+            base_model_id=base_model_id,
+            adapter_path=adapter_path,
             metadata=metadata,
         )
         self.store.append_audit_event(
@@ -3456,6 +3461,26 @@ class TAROrchestrator:
         self.store.append_audit_event("inference", "assign_role", assignment.model_dump(mode="json"))
         return assignment
 
+    def select_operator_checkpoint(
+        self,
+        *,
+        checkpoint_name: str,
+        mode: str = "tuned_local",
+        role: str = "assistant",
+        endpoint_name: Optional[str] = None,
+    ) -> OperatorServingStatus:
+        status = self.inference_bridge.select_operator_checkpoint(
+            checkpoint_name=checkpoint_name,
+            mode=mode,
+            role=role,
+            endpoint_name=endpoint_name,
+        )
+        self.store.append_audit_event("inference", "select_operator_checkpoint", status.model_dump(mode="json"))
+        return status
+
+    def operator_serving_status(self) -> OperatorServingStatus:
+        return self.inference_bridge.operator_serving_status()
+
     def claim_policy(self) -> dict[str, Any]:
         return self.inference_bridge.default_claim_policy().model_dump(mode="json")
 
@@ -3495,6 +3520,7 @@ class TAROrchestrator:
             registered_checkpoints=self.inference_bridge.list_checkpoints(),
             managed_endpoints=self.inference_bridge.list_endpoints(),
             role_assignments=self.inference_bridge.list_role_assignments(),
+            operator_serving=self.inference_bridge.operator_serving_status(),
             claim_policy=self._claim_policy(),
             recent_claim_verdicts=list(self.store.iter_claim_verdicts())[-5:],
             benchmark_profiles=self.profile_registry.benchmark_profile_counts(),
@@ -4518,6 +4544,7 @@ class TAROrchestrator:
         payload["alerts"] = len(list(self.store.iter_alerts()))
         payload["endpoints"] = [item.model_dump(mode="json") for item in self.inference_bridge.list_endpoints()]
         payload["role_assignments"] = [item.model_dump(mode="json") for item in self.inference_bridge.list_role_assignments()]
+        payload["operator_serving"] = self.inference_bridge.operator_serving_status().model_dump(mode="json")
         payload["claim_policy"] = self._claim_policy().model_dump(mode="json")
         latest_claim_verdict = self.store.latest_claim_verdict()
         payload["latest_claim_verdict"] = latest_claim_verdict.model_dump(mode="json") if latest_claim_verdict else None

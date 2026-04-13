@@ -55,6 +55,7 @@ def build_endpoint_manifest(args: argparse.Namespace) -> dict:
     return {
         "backend": args.backend,
         "model": args.model,
+        "adapter_path": args.adapter_path,
         "host": args.host,
         "port": args.port,
         "role": args.role,
@@ -67,6 +68,7 @@ def build_endpoint_manifest(args: argparse.Namespace) -> dict:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve local coding ASC model")
     parser.add_argument("--model", default="Qwen/Qwen2.5-Coder-7B-Instruct")
+    parser.add_argument("--adapter-path", dest="adapter_path")
     parser.add_argument("--backend", default="auto", choices=["auto", "vllm", "transformers"])
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", default="127.0.0.1")
@@ -108,12 +110,22 @@ def _serve_transformers(args: argparse.Namespace) -> int:
     except ImportError:
         print("transformers backend requires torch and transformers to be installed.")
         return 1
+    peft_model = None
+    if args.adapter_path:
+        try:
+            from peft import PeftModel  # type: ignore
+        except ImportError:
+            print("adapter-backed transformers serving requires peft to be installed.")
+            return 1
+        peft_model = PeftModel
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=bool(args.trust_remote_code))
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(args.model, trust_remote_code=bool(args.trust_remote_code))
+    if args.adapter_path and peft_model is not None:
+        model = peft_model.from_pretrained(model, args.adapter_path, is_trainable=False)
     model.to(device)
     model.eval()
     served_model_name = args.served_model_name
@@ -135,6 +147,7 @@ def _serve_transformers(args: argparse.Namespace) -> int:
                         "backend": "transformers",
                         "model": served_model_name,
                         "role": args.role,
+                        "adapter_path": args.adapter_path,
                         "trust_remote_code": bool(args.trust_remote_code),
                     }
                 )
@@ -296,6 +309,9 @@ def main() -> int:
 
     backend = detect_backend() if args.backend == "auto" else args.backend
     if backend == "vllm":
+        if args.adapter_path:
+            print("vllm backend does not support adapter_path in WS28 local serving.")
+            return 1
         cmd = [
             sys.executable,
             "-m",

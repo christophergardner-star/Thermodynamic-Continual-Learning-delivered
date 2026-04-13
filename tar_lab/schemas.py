@@ -1717,6 +1717,9 @@ class CheckpointRecord(StrictModel):
     model_path: str
     backend: Literal["transformers", "vllm"]
     role: Literal["assistant", "director", "strategist", "scout"] = "assistant"
+    checkpoint_kind: Literal["base", "adapter"] = "base"
+    base_model_id: Optional[str] = None
+    adapter_path: Optional[str] = None
     created_at: str = Field(default_factory=utc_now_iso)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
@@ -1778,6 +1781,21 @@ class RoleAssignmentState(StrictModel):
     entries: List[RoleAssignment] = Field(default_factory=list)
 
 
+class OperatorServingState(StrictModel):
+    active_checkpoint_name: Optional[str] = None
+    mode: Literal["prompt_only", "tuned_local"] = "tuned_local"
+    role: Literal["assistant", "director", "strategist", "scout"] = "assistant"
+    endpoint_name: Optional[str] = None
+    selected_at: str = Field(default_factory=utc_now_iso)
+
+
+class OperatorServingStatus(StrictModel):
+    state: OperatorServingState = Field(default_factory=OperatorServingState)
+    checkpoint: Optional[CheckpointRecord] = None
+    endpoint: Optional[EndpointRecord] = None
+    role_assignment: Optional[RoleAssignment] = None
+
+
 class InferenceEndpointPlan(StrictModel):
     checkpoint: CheckpointRecord
     host: str
@@ -1805,6 +1823,7 @@ class FrontierStatus(StrictModel):
     registered_checkpoints: List[CheckpointRecord] = Field(default_factory=list)
     managed_endpoints: List[EndpointRecord] = Field(default_factory=list)
     role_assignments: List[RoleAssignment] = Field(default_factory=list)
+    operator_serving: Optional[OperatorServingStatus] = None
     claim_policy: Optional[ClaimAcceptancePolicy] = None
     recent_claim_verdicts: List[ClaimVerdict] = Field(default_factory=list)
     benchmark_profiles: Dict[str, int] = Field(default_factory=dict)
@@ -1882,6 +1901,8 @@ class ControlRequest(StrictModel):
         "restart_endpoint",
         "endpoint_health",
         "assign_role",
+        "select_operator_checkpoint",
+        "operator_serving_status",
         "claim_policy",
         "claim_verdict",
         "research_decision_log",

@@ -45,8 +45,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--paper-path", action="append", dest="paper_paths")
     parser.add_argument("--checkpoint-name", dest="checkpoint_name")
     parser.add_argument("--model-path", dest="model_path")
+    parser.add_argument("--base-model-id", dest="base_model_id")
+    parser.add_argument("--adapter-path", dest="adapter_path")
     parser.add_argument("--backend-name", default="transformers", dest="backend_name")
     parser.add_argument("--role-name", default="assistant", dest="role_name")
+    parser.add_argument(
+        "--operator-mode",
+        default="tuned_local",
+        dest="operator_mode",
+        choices=["prompt_only", "tuned_local"],
+    )
     parser.add_argument("--trust-remote-code", action="store_true", dest="trust_remote_code")
     parser.add_argument("--no-trust-remote-code", action="store_false", dest="trust_remote_code")
     parser.set_defaults(trust_remote_code=None)
@@ -136,6 +144,8 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--restart-endpoint", action="store_true", dest="restart_endpoint")
     group.add_argument("--endpoint-health", action="store_true", dest="endpoint_health")
     group.add_argument("--assign-role", action="store_true", dest="assign_role")
+    group.add_argument("--select-operator-checkpoint", action="store_true", dest="select_operator_checkpoint")
+    group.add_argument("--operator-serving-status", action="store_true", dest="operator_serving_status")
     group.add_argument("--claim-policy", action="store_true", dest="claim_policy")
     group.add_argument("--claim-verdict", action="store_true", dest="claim_verdict")
     group.add_argument("--research-decision-log", action="store_true", dest="research_decision_log")
@@ -366,6 +376,8 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
             model_path=args.model_path or "",
             backend=args.backend_name,
             role=args.role_name,
+            base_model_id=args.base_model_id,
+            adapter_path=args.adapter_path,
             trust_remote_code=args.trust_remote_code,
         ).model_dump(mode="json")
     if args.list_checkpoints:
@@ -405,6 +417,15 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
             checkpoint_name=args.checkpoint_name or "",
             endpoint_name=args.endpoint_name,
         ).model_dump(mode="json")
+    if args.select_operator_checkpoint:
+        return orchestrator.select_operator_checkpoint(
+            checkpoint_name=args.checkpoint_name or "",
+            mode=args.operator_mode,
+            role=args.role_name,
+            endpoint_name=args.endpoint_name,
+        ).model_dump(mode="json")
+    if args.operator_serving_status:
+        return orchestrator.operator_serving_status().model_dump(mode="json")
     if args.claim_policy:
         return orchestrator.claim_policy()
     if args.claim_verdict:
@@ -518,6 +539,16 @@ def _render_status(payload: Dict[str, Any]) -> str:
             f"Latest Publication Handoff: {latest_publication.get('package_id', 'n/a')} "
             f"for project {latest_publication.get('project_id', 'n/a')}"
         )
+    operator_serving = payload.get("operator_serving") or {}
+    operator_state = operator_serving.get("state") or {}
+    operator_checkpoint = operator_serving.get("checkpoint") or {}
+    if operator_state.get("active_checkpoint_name"):
+        lines.append(
+            f"Operator Serving: {operator_state.get('mode', 'n/a')} via "
+            f"{operator_state.get('active_checkpoint_name', 'n/a')}"
+        )
+        lines.append(f"Operator Endpoint: {operator_state.get('endpoint_name', 'n/a')}")
+        lines.append(f"Operator Checkpoint Kind: {operator_checkpoint.get('checkpoint_kind', 'n/a')}")
     return "\n".join(lines)
 
 
@@ -600,6 +631,25 @@ def _render_endpoint_health(payload: Dict[str, Any]) -> str:
         f"Checked At: {health.get('checked_at', endpoint.get('last_health_at', 'n/a'))}",
         f"Stdout Log: {endpoint.get('stdout_log_path', 'n/a')}",
         f"Stderr Log: {endpoint.get('stderr_log_path', 'n/a')}",
+    ]
+    return "\n".join(lines)
+
+
+def _render_operator_serving_status(payload: Dict[str, Any]) -> str:
+    state = payload.get("state", {})
+    checkpoint = payload.get("checkpoint", {})
+    endpoint = payload.get("endpoint", {})
+    role_assignment = payload.get("role_assignment", {})
+    lines = [
+        f"Operator Mode: {state.get('mode', 'n/a')}",
+        f"Active Checkpoint: {state.get('active_checkpoint_name', 'n/a')}",
+        f"Role: {state.get('role', 'n/a')}",
+        f"Selected Endpoint: {state.get('endpoint_name', 'n/a')}",
+        f"Checkpoint Kind: {checkpoint.get('checkpoint_kind', 'n/a')}",
+        f"Base Model: {checkpoint.get('base_model_id', checkpoint.get('model_path', 'n/a'))}",
+        f"Adapter Path: {checkpoint.get('adapter_path', 'n/a')}",
+        f"Endpoint Status: {endpoint.get('status', 'n/a')}",
+        f"Role Assignment: {role_assignment.get('checkpoint_name', 'n/a')}",
     ]
     return "\n".join(lines)
 
@@ -1543,6 +1593,8 @@ def main() -> int:
                     payload={
                         "name": args.checkpoint_name or "",
                         "model_path": args.model_path or "",
+                        "base_model_id": args.base_model_id,
+                        "adapter_path": args.adapter_path,
                         "backend": args.backend_name,
                         "role": args.role_name,
                         "trust_remote_code": args.trust_remote_code,
@@ -1617,6 +1669,20 @@ def main() -> int:
                     host=args.host,
                     port=args.port,
                 )
+            elif args.select_operator_checkpoint:
+                response = send_command(
+                    "select_operator_checkpoint",
+                    payload={
+                        "checkpoint_name": args.checkpoint_name or "",
+                        "mode": args.operator_mode,
+                        "role": args.role_name,
+                        "endpoint_name": args.endpoint_name,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.operator_serving_status:
+                response = send_command("operator_serving_status", host=args.host, port=args.port)
             elif args.claim_policy:
                 response = send_command("claim_policy", host=args.host, port=args.port)
             elif args.claim_verdict:
@@ -1662,6 +1728,8 @@ def main() -> int:
             print(_render_endpoint_list(payload))
         elif args.endpoint_health:
             print(_render_endpoint_health(payload))
+        elif args.operator_serving_status or args.select_operator_checkpoint:
+            print(_render_operator_serving_status(payload))
         elif args.create_project or args.project_status or args.pause_project or args.resume_project:
             print(_render_project_status(payload))
         elif args.list_projects:
@@ -1711,7 +1779,7 @@ def main() -> int:
             print(_render_regime(payload))
         elif args.ingest_research:
             print(f"Ingested {payload.get('indexed', 0)} research documents for topic: {payload.get('topic', '')}")
-        elif args.verify_last_trial or args.breakthrough_report or args.resolve_problem or args.prepare_science_env or args.study_problem or args.run_problem_study or args.schedule_problem_study or args.scheduler_status or args.run_scheduler_once or args.frontier_status or args.runtime_status or args.list_benchmarks or args.benchmark_status or args.prepare_payload_env or args.rebuild_locked_image or args.show_manifest or args.ingest_papers or args.list_experiment_backends or args.run_runtime_cycle or args.list_alerts or args.retry_failed_job or args.cancel_job or args.sandbox_policy or args.register_checkpoint or args.list_checkpoints or args.build_inference_endpoint or args.list_endpoints or args.start_endpoint or args.stop_endpoint or args.restart_endpoint or args.endpoint_health or args.assign_role or args.claim_policy or args.claim_verdict or args.research_decision_log:
+        elif args.verify_last_trial or args.breakthrough_report or args.resolve_problem or args.prepare_science_env or args.study_problem or args.run_problem_study or args.schedule_problem_study or args.scheduler_status or args.run_scheduler_once or args.frontier_status or args.runtime_status or args.list_benchmarks or args.benchmark_status or args.prepare_payload_env or args.rebuild_locked_image or args.show_manifest or args.ingest_papers or args.list_experiment_backends or args.run_runtime_cycle or args.list_alerts or args.retry_failed_job or args.cancel_job or args.sandbox_policy or args.register_checkpoint or args.list_checkpoints or args.build_inference_endpoint or args.list_endpoints or args.start_endpoint or args.stop_endpoint or args.restart_endpoint or args.endpoint_health or args.assign_role or args.select_operator_checkpoint or args.operator_serving_status or args.claim_policy or args.claim_verdict or args.research_decision_log:
             print(json.dumps(payload, indent=2))
         else:
             print(json.dumps(payload, indent=2))

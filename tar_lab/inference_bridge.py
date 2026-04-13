@@ -13,11 +13,12 @@ from urllib.request import urlopen
 
 from tar_lab.schemas import (
     CheckpointRecord,
-    CheckpointRegistryState,
     ClaimAcceptancePolicy,
     EndpointHealth,
     EndpointRecord,
     InferenceEndpointPlan,
+    OperatorServingState,
+    OperatorServingStatus,
     RoleAssignment,
 )
 from tar_lab.state import TARStateStore
@@ -30,16 +31,13 @@ VALID_ROLES = {"assistant", "director", "strategist", "scout"}
 class InferenceBridge:
     def __init__(self, workspace: str = "."):
         self.store = TARStateStore(workspace)
-        self.registry_path = self.store.state_dir / "checkpoint_registry.json"
         self._processes: dict[str, subprocess.Popen[Any]] = {}
 
-    def load_registry(self) -> CheckpointRegistryState:
-        if not self.registry_path.exists():
-            return CheckpointRegistryState()
-        return CheckpointRegistryState.model_validate_json(self.registry_path.read_text(encoding="utf-8"))
+    def load_registry(self):
+        return self.store.load_checkpoint_registry()
 
-    def save_registry(self, registry: CheckpointRegistryState) -> None:
-        self.registry_path.write_text(registry.model_dump_json(indent=2), encoding="utf-8")
+    def save_registry(self, registry) -> None:
+        self.store.save_checkpoint_registry(registry)
 
     def register_checkpoint(
         self,
@@ -48,6 +46,8 @@ class InferenceBridge:
         model_path: str,
         backend: str = "transformers",
         role: str = "assistant",
+        base_model_id: Optional[str] = None,
+        adapter_path: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> CheckpointRecord:
         backend_name = str(backend).strip().lower()
@@ -56,27 +56,34 @@ class InferenceBridge:
             raise ValueError(f"Unsupported inference backend: {backend}")
         if role_name not in VALID_ROLES:
             raise ValueError(f"Unsupported inference role: {role}")
+        resolved_adapter_path = self._normalize_model_reference(adapter_path) if adapter_path else None
+        resolved_base_model_id = self._normalize_model_reference(base_model_id) if base_model_id else None
+        checkpoint_kind = "adapter" if resolved_adapter_path else "base"
+        if checkpoint_kind == "adapter" and not resolved_base_model_id:
+            raise ValueError("Adapter-backed checkpoints require base_model_id.")
+        if checkpoint_kind == "adapter" and backend_name != "transformers":
+            raise ValueError("Adapter-backed checkpoints currently require the transformers backend.")
         record = CheckpointRecord(
             name=name,
-            model_path=str(Path(model_path).expanduser().resolve()),
+            model_path=self._normalize_model_reference(model_path),
             backend=backend_name,  # type: ignore[arg-type]
             role=role_name,  # type: ignore[arg-type]
+            checkpoint_kind=checkpoint_kind,  # type: ignore[arg-type]
+            base_model_id=resolved_base_model_id,
+            adapter_path=resolved_adapter_path,
             metadata=metadata or {},
         )
-        registry = self.load_registry()
-        entries = [item for item in registry.entries if item.name != name]
-        entries.append(record)
-        self.save_registry(CheckpointRegistryState(entries=entries))
+        self.store.upsert_checkpoint(record)
         return record
 
     def list_checkpoints(self) -> list[CheckpointRecord]:
-        return self.load_registry().entries
+        return self.store.list_checkpoints()
 
     def get(self, name: str) -> CheckpointRecord:
-        for item in self.load_registry().entries:
-            if item.name == name:
-                return item
-        raise KeyError(f"Unknown checkpoint: {name}")
+        checkpoint = self.store.get_checkpoint(name)
+        if checkpoint is None:
+            raise KeyError(f"Unknown checkpoint: {name}")
+        return checkpoint
 
     def build_endpoint(
         self,
@@ -93,19 +100,30 @@ class InferenceBridge:
             raise ValueError(f"Unsupported endpoint role: {resolved_role}")
         endpoint_name = f"{resolved_role}-{name}"
         resolved_trust_remote_code = self._resolve_trust_remote_code(checkpoint, trust_remote_code)
+        command_model = checkpoint.model_path
+        adapter_path = checkpoint.adapter_path
+        if checkpoint.checkpoint_kind == "adapter":
+            if checkpoint.backend != "transformers":
+                raise ValueError("Adapter-backed endpoints currently require the transformers backend.")
+            if not checkpoint.base_model_id or not adapter_path:
+                raise ValueError("Adapter-backed checkpoints require base_model_id and adapter_path.")
+            command_model = checkpoint.base_model_id
         env = {
             "TAR_ENDPOINT_NAME": endpoint_name,
             "TAR_ENDPOINT_ROLE": resolved_role,
             "TAR_ENDPOINT_MODEL": checkpoint.name,
+            "TAR_ENDPOINT_CHECKPOINT_KIND": checkpoint.checkpoint_kind,
             "TAR_ENDPOINT_TRUST_REMOTE_CODE": "1" if resolved_trust_remote_code else "0",
         }
+        if adapter_path:
+            env["TAR_ENDPOINT_ADAPTER_PATH"] = adapter_path
         command = [
             sys.executable,
             str(self._serve_local_path()),
             "--backend",
             checkpoint.backend,
             "--model",
-            checkpoint.model_path,
+            command_model,
             "--host",
             host,
             "--port",
@@ -115,6 +133,8 @@ class InferenceBridge:
             "--served-model-name",
             checkpoint.name,
         ]
+        if adapter_path:
+            command.extend(["--adapter-path", adapter_path])
         if resolved_trust_remote_code:
             command.append("--trust-remote-code")
         manifest_path = self.store.endpoint_manifest_path(endpoint_name)
@@ -242,6 +262,7 @@ class InferenceBridge:
             while time.time() < deadline:
                 refreshed = self.refresh_endpoint_health(record.endpoint_name)
                 if refreshed.health is not None and refreshed.health.ok:
+                    self._sync_operator_serving_endpoint(name, refreshed.role, refreshed.endpoint_name)
                     return refreshed
                 time.sleep(0.25)
             refreshed = self.refresh_endpoint_health(record.endpoint_name)
@@ -269,7 +290,9 @@ class InferenceBridge:
             )
             self.store.upsert_endpoint(failed)
             return failed
-        return self.refresh_endpoint_health(record.endpoint_name)
+        refreshed = self.refresh_endpoint_health(record.endpoint_name)
+        self._sync_operator_serving_endpoint(name, refreshed.role, refreshed.endpoint_name)
+        return refreshed
 
     def stop_endpoint(self, endpoint_name: str) -> EndpointRecord:
         record = self.get_endpoint(endpoint_name)
@@ -409,6 +432,57 @@ class InferenceBridge:
     def list_role_assignments(self) -> list[RoleAssignment]:
         return self.store.list_role_assignments()
 
+    def select_operator_checkpoint(
+        self,
+        *,
+        checkpoint_name: str,
+        mode: str = "tuned_local",
+        role: str = "assistant",
+        endpoint_name: Optional[str] = None,
+    ) -> OperatorServingStatus:
+        checkpoint = self.get(checkpoint_name)
+        resolved_mode = str(mode).strip().lower()
+        resolved_role = str(role).strip().lower()
+        if resolved_mode not in {"prompt_only", "tuned_local"}:
+            raise ValueError(f"Unsupported operator mode: {mode}")
+        if resolved_role not in VALID_ROLES:
+            raise ValueError(f"Unsupported operator role: {role}")
+        if resolved_mode == "prompt_only" and checkpoint.checkpoint_kind != "base":
+            raise ValueError("prompt_only mode requires a base checkpoint.")
+        if resolved_mode == "tuned_local" and checkpoint.checkpoint_kind != "adapter":
+            raise ValueError("tuned_local mode requires an adapter-backed checkpoint.")
+        if endpoint_name is not None:
+            endpoint = self.get_endpoint(endpoint_name)
+            if endpoint.checkpoint_name != checkpoint.name:
+                raise ValueError("Selected endpoint does not match the requested checkpoint.")
+        state = OperatorServingState(
+            active_checkpoint_name=checkpoint.name,
+            mode=resolved_mode,  # type: ignore[arg-type]
+            role=resolved_role,  # type: ignore[arg-type]
+            endpoint_name=endpoint_name,
+        )
+        self.store.save_operator_serving_state(state)
+        return self.operator_serving_status()
+
+    def operator_serving_status(self) -> OperatorServingStatus:
+        state = self.store.load_operator_serving_state()
+        checkpoint = self.store.get_checkpoint(state.active_checkpoint_name) if state.active_checkpoint_name else None
+        endpoint = self.store.get_endpoint(state.endpoint_name) if state.endpoint_name else None
+        assignment = next(
+            (
+                item
+                for item in self.store.list_role_assignments()
+                if item.role == state.role and (checkpoint is None or item.checkpoint_name == checkpoint.name)
+            ),
+            None,
+        )
+        return OperatorServingStatus(
+            state=state,
+            checkpoint=checkpoint,
+            endpoint=endpoint,
+            role_assignment=assignment,
+        )
+
     @staticmethod
     def default_claim_policy() -> ClaimAcceptancePolicy:
         return ClaimAcceptancePolicy()
@@ -464,3 +538,29 @@ class InferenceBridge:
     @staticmethod
     def _serve_local_path() -> Path:
         return Path(__file__).resolve().parents[1] / "serve_local.py"
+
+    @staticmethod
+    def _normalize_model_reference(raw: Optional[str]) -> str:
+        if raw is None:
+            return ""
+        value = str(raw).strip()
+        candidate = Path(value).expanduser()
+        is_explicit_path = (
+            candidate.exists()
+            or value.startswith(".")
+            or value.startswith("~")
+            or value.startswith("/")
+            or value.startswith("\\")
+            or (len(value) > 1 and value[1] == ":")
+        )
+        if is_explicit_path:
+            return str(candidate.resolve())
+        return value
+
+    def _sync_operator_serving_endpoint(self, checkpoint_name: str, role: str, endpoint_name: str) -> None:
+        state = self.store.load_operator_serving_state()
+        if state.active_checkpoint_name != checkpoint_name or state.role != role:
+            return
+        self.store.save_operator_serving_state(
+            state.model_copy(update={"endpoint_name": endpoint_name, "selected_at": self._now()})
+        )

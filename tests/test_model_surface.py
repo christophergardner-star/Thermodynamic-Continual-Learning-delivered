@@ -3,7 +3,9 @@ import tempfile
 from pathlib import Path
 
 from deepseek_asc_finetune import MODEL_PRESETS, derive_run_name, resolve_model_id
-from serve_local import build_continue_config, build_status_payload
+from types import SimpleNamespace
+
+from serve_local import build_continue_config, build_endpoint_manifest, build_status_payload
 from stack_data_prep import DEFAULT_TOKENIZER_ID
 
 
@@ -34,6 +36,23 @@ def test_build_status_payload_reads_known_files():
         payload = build_status_payload(tmp)
         assert payload["status"]["phase"] == "complete"
         assert payload["training_manifest"] is None
+
+
+def test_build_endpoint_manifest_includes_adapter_path():
+    args = SimpleNamespace(
+        backend="transformers",
+        model="Qwen/Qwen2.5-7B-Instruct",
+        adapter_path="C:/tmp/final_adapter",
+        host="127.0.0.1",
+        port=8000,
+        role="assistant",
+        served_model_name="tar-operator-ws27r2",
+        workspace=".",
+        trust_remote_code=False,
+    )
+    manifest = build_endpoint_manifest(args)
+    assert manifest["adapter_path"] == "C:/tmp/final_adapter"
+    assert manifest["model"] == "Qwen/Qwen2.5-7B-Instruct"
 
 
 def test_default_tokenizer_is_qwen():
