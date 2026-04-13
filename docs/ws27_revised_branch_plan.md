@@ -9,13 +9,17 @@ result recorded in
 ## Revised Go / No-Go Call
 
 - current coder-backbone variant: **no-go**
-- `WS27` overall as a research branch: **conditional go**
+- `WS27` overall as a research branch: **go**
 
-That conditional go means:
+That go is now grounded in the true-continuation rerun recorded in
+[ws27r1_true_continuation_closeout.md](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws27r1_true_continuation_closeout.md).
 
-- continue `WS27`, but only with a redesigned branch that changes the right
-  variable
+It means:
+
+- continue `WS27` on the revised branch
 - do **not** repeat the first coder-backbone probe as-is
+- advance to `WS27R1 run1` rather than spending another pod cycle on probe-only
+  work
 
 ## Core Revision
 
@@ -151,24 +155,27 @@ This matters because `WS27` must not buy TCL gains by giving back:
 
 ## Revised Success Criteria
 
-The next `WS27` probe should only advance to a larger run if all of these are
-true:
+The revised probe has now cleared the branch-justification bar on the true
+`WS26` continuation line.
 
-- `WS27` probe mean score is materially above the first failed probe
-- `WS27` probe decision accuracy is materially above the first failed probe
-- no major TCL family remains at `0.0` decision accuracy
-- honesty overclaim returns to `0.0`
-- parse error remains at or below the current probe level
-- `WS26` non-regression checks stay inside an acceptable tolerance band
+The next serious branch step is `WS27R1 run1`, not another probe.
 
-Practical target for the revised probe:
+`WS27R1 run1` should be accepted only if all of these are true:
 
-- `mean_score >= 0.60`
-- `decision_accuracy >= 0.50`
-- `parse_error_rate <= 0.12`
+- it preserves `overclaim_rate = 0.0`
+- it preserves strong WS26 non-regression behaviour
+- it remains materially above the failed coder-backbone path
+- it improves or at least stabilizes the true-continuation probe result
+- parse reliability does not regress materially above the true probe level
+
+Reference result for the true-continuation probe:
+
+- `mean_score = 0.8207`
+- `decision_accuracy = 0.8133`
+- `parse_error_rate = 0.16`
 - `overclaim_rate = 0.0`
 
-Those are still only probe targets. They are not the final branch success bar.
+The parse caveat remains open and should be monitored during `run1`.
 
 ## Revised Execution Order
 
@@ -211,20 +218,23 @@ Local only after artifacts are secured.
 
 Tasks:
 
-1. compare revised probe vs failed probe
-2. compare revised probe vs `WS26`
-3. decide whether a serious `WS27` run is finally justified
+1. compare the true-continuation probe vs failed probe
+2. compare the true-continuation probe vs `WS26`
+3. confirm whether `run1` is justified
+
+This phase is now complete. `run1` is justified.
 
 ## Pod Usage
 
-Do **not** open a new pod yet.
+Open the next pod for `WS27R1 run1` after the local repo state is pushed.
 
-The next pod is justified only when:
+The next pod is justified now because:
 
 - adapter-continuation support is implemented
 - revised dataset artifacts are built
 - revised eval configs exist
-- local dry-runs are green
+- the true `WS26` continuation line has been validated
+- `run1` is the next immediate GPU-bound step
 
 Recommended next pod:
 
@@ -239,9 +249,7 @@ Reason:
 
 ## Immediate Next Step
 
-The next concrete step is local:
+The next concrete step is:
 
-- implement adapter-continuation support in
-  [train_tar_operator_sft.py](c:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/train_tar_operator_sft.py)
-
-That is the right next engineering move before any new GPU spend.
+- run `WS27R1 run1` on a fresh pod using the regenerated true `WS26` adapter as
+  the continuation base
