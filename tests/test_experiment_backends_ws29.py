@@ -8,6 +8,7 @@ from asc_model import ASCConfig, ASCForCausalLM
 from asc_train_full import (
     _load_resume_bundle,
     _normalize_rng_tensor,
+    _next_resume_position_after_epoch,
     _partial_step_cap_reached,
     _resolve_tokenizer_source,
     _restore_resume_state,
@@ -190,3 +191,20 @@ def test_ws29_partial_step_cap_detects_resumable_partial_runs():
     assert _partial_step_cap_reached(step=6, planned_total_steps=100, max_steps=6) is True
     assert _partial_step_cap_reached(step=100, planned_total_steps=100, max_steps=None) is False
     assert _partial_step_cap_reached(step=100, planned_total_steps=100, max_steps=100) is False
+
+
+def test_ws29_next_resume_position_stays_in_epoch_when_step_cap_hits():
+    assert _next_resume_position_after_epoch(
+        epoch=0,
+        epoch_step=3,
+        step=3,
+        planned_total_steps=100,
+        max_steps=3,
+    ) == (0, 3)
+    assert _next_resume_position_after_epoch(
+        epoch=0,
+        epoch_step=50,
+        step=50,
+        planned_total_steps=100,
+        max_steps=None,
+    ) == (1, 0)

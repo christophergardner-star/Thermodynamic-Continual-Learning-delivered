@@ -186,6 +186,19 @@ def _partial_step_cap_reached(*, step: int, planned_total_steps: int, max_steps:
     return max_steps < planned_total_steps and step >= max_steps
 
 
+def _next_resume_position_after_epoch(
+    *,
+    epoch: int,
+    epoch_step: int,
+    step: int,
+    planned_total_steps: int,
+    max_steps: int | None,
+) -> tuple[int, int]:
+    if _partial_step_cap_reached(step=step, planned_total_steps=planned_total_steps, max_steps=max_steps):
+        return epoch, epoch_step
+    return epoch + 1, 0
+
+
 def _save_training_log(
     run_dir: Path,
     *,
@@ -656,8 +669,13 @@ def main() -> int:
 
             avg_ppl = math.exp(min(epoch_task / max(epoch_n, 1), 20.0))
             print(f"\nEpoch {epoch + 1} done -- avg PPL: {avg_ppl:.2f}\n")
-            current_epoch = epoch + 1
-            current_epoch_step = 0
+            current_epoch, current_epoch_step = _next_resume_position_after_epoch(
+                epoch=epoch,
+                epoch_step=epoch_step,
+                step=step,
+                planned_total_steps=planned_total_steps,
+                max_steps=args.max_steps,
+            )
             start_epoch_step = 0
             if args.max_steps and step >= args.max_steps:
                 break
