@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 from asc_model import ASCConfig, ASCForCausalLM
-from asc_train_full import _load_resume_bundle, _save_resume_bundle
+from asc_train_full import _load_resume_bundle, _resolve_tokenizer_source, _save_resume_bundle
 from tar_lab.experiment_backends import ExperimentBackendRegistry
 
 
@@ -117,3 +117,20 @@ def test_ws29_resume_bundle_round_trip_for_asc_full():
         assert payload["epoch_step"] == 2
         assert payload["latest_checkpoint_path"] == str(checkpoint_dir)
         assert payload["history"]["task_loss"][-1] == 1.1
+
+
+def test_ws29_resolve_tokenizer_source_falls_back_to_saved_base_model_name():
+    with tempfile.TemporaryDirectory() as tmp:
+        checkpoint_dir = Path(tmp) / "ASC-124M" / "step_3"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / "asc_config.json").write_text(
+            '{"base_model_name": "gpt2"}',
+            encoding="utf-8",
+        )
+
+        tokenizer_source = _resolve_tokenizer_source(
+            size="124M",
+            resume_bundle={"latest_checkpoint_path": str(checkpoint_dir)},
+        )
+
+        assert tokenizer_source == "gpt2"

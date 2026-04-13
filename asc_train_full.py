@@ -124,6 +124,42 @@ def _load_resume_bundle(path: Path, device: torch.device) -> dict[str, Any]:
     return torch.load(path, map_location=device, weights_only=False)
 
 
+def _resolve_tokenizer_source(
+    *,
+    size: str,
+    resume_bundle: dict[str, Any] | None,
+) -> str:
+    default_source = ASCConfig.for_size(size).base_model_name
+    if not resume_bundle:
+        return default_source
+    latest_checkpoint_path = resume_bundle.get("latest_checkpoint_path")
+    if not latest_checkpoint_path:
+        return default_source
+
+    checkpoint_path = Path(str(latest_checkpoint_path))
+    tokenizer_markers = (
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json",
+        "merges.txt",
+        "special_tokens_map.json",
+    )
+    if checkpoint_path.is_dir() and any((checkpoint_path / marker).exists() for marker in tokenizer_markers):
+        return str(checkpoint_path)
+
+    config_path = checkpoint_path / "asc_config.json"
+    if config_path.exists():
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        base_model_name = payload.get("base_model_name")
+        if isinstance(base_model_name, str) and base_model_name.strip():
+            return base_model_name
+
+    return default_source
+
+
 def _save_training_log(
     run_dir: Path,
     *,
@@ -393,11 +429,7 @@ def main() -> int:
 
     print("Loading dataset...")
     dataset = load_dataset("wikitext", args.dataset, split="train")
-    tokenizer_source = (
-        str(resume_bundle["latest_checkpoint_path"])
-        if resume_bundle and resume_bundle.get("latest_checkpoint_path")
-        else ASCConfig.for_size(args.size).base_model_name
-    )
+    tokenizer_source = _resolve_tokenizer_source(size=args.size, resume_bundle=resume_bundle)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
     tokenizer.pad_token = tokenizer.eos_token
 
