@@ -160,6 +160,26 @@ def _resolve_tokenizer_source(
     return default_source
 
 
+def _normalize_rng_tensor(state: Any) -> torch.ByteTensor:
+    if isinstance(state, torch.Tensor):
+        return state.detach().to(device="cpu", dtype=torch.uint8)
+    if isinstance(state, (bytes, bytearray)):
+        return torch.tensor(list(state), dtype=torch.uint8)
+    if isinstance(state, (list, tuple)):
+        return torch.tensor(list(state), dtype=torch.uint8)
+    raise TypeError(f"Unsupported RNG state payload: {type(state)!r}")
+
+
+def _normalize_cuda_rng_state_all(state: Any) -> list[torch.ByteTensor]:
+    if state is None:
+        return []
+    if isinstance(state, torch.Tensor):
+        return [_normalize_rng_tensor(state)]
+    if isinstance(state, (list, tuple)):
+        return [_normalize_rng_tensor(item) for item in state]
+    raise TypeError(f"Unsupported CUDA RNG state payload: {type(state)!r}")
+
+
 def _save_training_log(
     run_dir: Path,
     *,
@@ -332,10 +352,10 @@ def _restore_resume_state(
     if bundle.get("numpy_random_state") is not None:
         np.random.set_state(bundle["numpy_random_state"])
     if bundle.get("torch_rng_state") is not None:
-        torch.set_rng_state(bundle["torch_rng_state"])
+        torch.set_rng_state(_normalize_rng_tensor(bundle["torch_rng_state"]))
     cuda_state = bundle.get("cuda_rng_state_all")
     if cuda_state is not None and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(cuda_state)
+        torch.cuda.set_rng_state_all(_normalize_cuda_rng_state_all(cuda_state))
     history = bundle.get("history") or {"step": [], "task_loss": [], "consist_loss": [], "ppl": []}
     return (
         int(bundle.get("completed_steps", 0)),

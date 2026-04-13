@@ -5,7 +5,13 @@ from pathlib import Path
 import torch
 
 from asc_model import ASCConfig, ASCForCausalLM
-from asc_train_full import _load_resume_bundle, _resolve_tokenizer_source, _save_resume_bundle
+from asc_train_full import (
+    _load_resume_bundle,
+    _normalize_rng_tensor,
+    _resolve_tokenizer_source,
+    _restore_resume_state,
+    _save_resume_bundle,
+)
 from tar_lab.experiment_backends import ExperimentBackendRegistry
 
 
@@ -134,3 +140,45 @@ def test_ws29_resolve_tokenizer_source_falls_back_to_saved_base_model_name():
         )
 
         assert tokenizer_source == "gpt2"
+
+
+def test_ws29_restore_resume_state_normalizes_rng_payloads():
+    with tempfile.TemporaryDirectory() as tmp:
+        run_dir = Path(tmp) / "asc_full" / "ASC-124M"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        model = _tiny_model()
+        base_optimizer = torch.optim.AdamW(model.parameters_trainable(), lr=1e-3)
+        warp_optimizer = torch.optim.AdamW(model.warp.parameters(), lr=3e-3)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(base_optimizer, T_max=10)
+        checkpoint_dir = run_dir / "step_3"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        model.save(str(checkpoint_dir))
+
+        resume_path = _save_resume_bundle(
+            run_dir,
+            model=model,
+            base_optimizer=base_optimizer,
+            warp_optimizer=warp_optimizer,
+            scheduler=scheduler,
+            step=3,
+            epoch_index=1,
+            epoch_step=2,
+            history={"step": [1.0], "task_loss": [1.2], "consist_loss": [0.8], "ppl": [3.3]},
+            args=_args(run_dir.parent),
+            latest_checkpoint_path=str(checkpoint_dir),
+            latest_metrics={"task_loss": 1.2, "consistency_loss": 0.8, "ppl": 3.3},
+        )
+        payload = _load_resume_bundle(resume_path, torch.device("cpu"))
+        payload["torch_rng_state"] = payload["torch_rng_state"].tolist()
+
+        restored = _restore_resume_state(
+            payload,
+            args=_args(run_dir.parent),
+            model=model,
+            base_optimizer=base_optimizer,
+            warp_optimizer=warp_optimizer,
+            scheduler=scheduler,
+        )
+
+        assert restored[0] == 3
+        assert _normalize_rng_tensor(payload["torch_rng_state"]).dtype == torch.uint8
