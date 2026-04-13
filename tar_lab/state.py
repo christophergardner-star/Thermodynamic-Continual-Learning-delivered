@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from tar_lab.schemas import (
     AlertRecord,
+    BuildAttestation,
     BudgetAllocationDecision,
     BreakthroughReport,
     ClaimVerdict,
@@ -88,6 +89,7 @@ class TARStateStore:
         self.role_assignments_path = self.state_dir / "role_assignments.json"
         self.operator_serving_path = self.state_dir / "operator_serving.json"
         self.experiment_backends_dir = self.state_dir / "experiment_backends"
+        self.build_attestations_dir = self.state_dir / "build_attestations"
         self.memory_manifest_path = self.state_dir / "memory_manifest.json"
         self.alerts_path = self.state_dir / "alerts.jsonl"
         self.runtime_heartbeat_path = self.state_dir / "runtime_heartbeat.json"
@@ -102,6 +104,7 @@ class TARStateStore:
         self.endpoints_dir.mkdir(parents=True, exist_ok=True)
         self.publication_handoffs_dir.mkdir(parents=True, exist_ok=True)
         self.experiment_backends_dir.mkdir(parents=True, exist_ok=True)
+        self.build_attestations_dir.mkdir(parents=True, exist_ok=True)
 
     def _atomic_write_text(self, path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -348,6 +351,50 @@ class TARStateStore:
         path = self.manifests_dir / f"image-{manifest.hash_sha256[:16]}.json"
         self._atomic_write_json(path, manifest.model_dump(mode="json"))
         return path
+
+    def build_attestation_path(self, attestation_id: str) -> Path:
+        return self.build_attestations_dir / f"{attestation_id}.json"
+
+    def save_build_attestation(self, attestation: BuildAttestation) -> Path:
+        path = self.build_attestation_path(attestation.attestation_id)
+        self._atomic_write_json(path, attestation.model_dump(mode="json"))
+        return path
+
+    def load_build_attestation(self, attestation_id: str) -> Optional[BuildAttestation]:
+        path = self.build_attestation_path(attestation_id)
+        if not path.exists():
+            return None
+        return BuildAttestation.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def load_build_attestation_path(self, path: str) -> Optional[BuildAttestation]:
+        attestation_path = Path(path)
+        if not attestation_path.exists():
+            return None
+        return BuildAttestation.model_validate_json(attestation_path.read_text(encoding="utf-8"))
+
+    def list_build_attestations(self) -> List[BuildAttestation]:
+        rows: List[BuildAttestation] = []
+        for path in sorted(self.build_attestations_dir.glob("*.json")):
+            rows.append(BuildAttestation.model_validate_json(path.read_text(encoding="utf-8")))
+        return rows
+
+    def latest_build_attestation(
+        self,
+        *,
+        scope_kind: Optional[str] = None,
+        trial_id: Optional[str] = None,
+        problem_id: Optional[str] = None,
+    ) -> Optional[BuildAttestation]:
+        rows = self.list_build_attestations()
+        for attestation in reversed(rows):
+            if scope_kind is not None and attestation.scope_kind != scope_kind:
+                continue
+            if trial_id is not None and attestation.trial_id != trial_id:
+                continue
+            if problem_id is not None and attestation.problem_id != problem_id:
+                continue
+            return attestation
+        return None
 
     def load_memory_manifest(self) -> Optional[MemoryStoreManifest]:
         if not self.memory_manifest_path.exists():

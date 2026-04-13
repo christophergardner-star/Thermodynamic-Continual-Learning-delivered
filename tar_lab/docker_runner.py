@@ -38,6 +38,9 @@ class BuildResult:
     returncode: Optional[int] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
+    image_digest: Optional[str] = None
+    image_id: Optional[str] = None
+    digest_source: str = "unavailable"
 
 
 @dataclass
@@ -266,6 +269,11 @@ class DockerRunner:
         if dry_run:
             return BuildResult(mode="dry_run", command=command, image_tag=bundle.docker_image_tag)
         proc = subprocess.run(command, capture_output=True, text=True, check=False)
+        image_digest = None
+        image_id = None
+        digest_source = "unavailable"
+        if proc.returncode == 0:
+            image_digest, image_id, digest_source = self._inspect_image_metadata(bundle.docker_image_tag)
         return BuildResult(
             mode="subprocess",
             command=command,
@@ -273,6 +281,9 @@ class DockerRunner:
             returncode=proc.returncode,
             stdout=proc.stdout,
             stderr=proc.stderr,
+            image_digest=image_digest,
+            image_id=image_id,
+            digest_source=digest_source,
         )
 
     def build_payload_environment(
@@ -296,6 +307,11 @@ class DockerRunner:
         if dry_run:
             return BuildResult(mode="dry_run", command=command, image_tag=report.image_tag)
         proc = subprocess.run(command, capture_output=True, text=True, check=False)
+        image_digest = None
+        image_id = None
+        digest_source = "unavailable"
+        if proc.returncode == 0:
+            image_digest, image_id, digest_source = self._inspect_image_metadata(report.image_tag)
         return BuildResult(
             mode="subprocess",
             command=command,
@@ -303,6 +319,9 @@ class DockerRunner:
             returncode=proc.returncode,
             stdout=proc.stdout,
             stderr=proc.stderr,
+            image_digest=image_digest,
+            image_id=image_id,
+            digest_source=digest_source,
         )
 
     def run_science_environment(
@@ -519,6 +538,35 @@ class DockerRunner:
         if command and Path(command[0]).name.lower().startswith("docker"):
             return [self.docker_bin, *command[1:]]
         return list(command)
+
+    def _inspect_image_metadata(self, image_tag: str) -> tuple[Optional[str], Optional[str], str]:
+        if docker is not None:
+            try:
+                client = docker.from_env()
+                image = client.images.get(image_tag)
+                attrs = getattr(image, "attrs", {}) or {}
+                repo_digests = attrs.get("RepoDigests") or []
+                image_id = attrs.get("Id")
+                image_digest = repo_digests[0] if repo_digests else None
+                return image_digest, image_id, "docker_sdk"
+            except Exception:
+                pass
+
+        inspect_cmd = [self.docker_bin, "image", "inspect", image_tag]
+        proc = subprocess.run(inspect_cmd, capture_output=True, text=True, check=False)
+        if proc.returncode != 0 or not (proc.stdout or "").strip():
+            return None, None, "unavailable"
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return None, None, "unavailable"
+        if not payload:
+            return None, None, "unavailable"
+        first = payload[0] or {}
+        repo_digests = first.get("RepoDigests") or []
+        image_id = first.get("Id")
+        image_digest = repo_digests[0] if repo_digests else None
+        return image_digest, image_id, "docker_inspect"
 
     @staticmethod
     def _require_locked_runtime(runtime: RuntimeSpec) -> None:

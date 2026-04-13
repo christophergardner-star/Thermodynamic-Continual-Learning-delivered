@@ -1,5 +1,6 @@
 import tempfile
 from importlib import metadata
+from types import SimpleNamespace
 
 import pytest
 
@@ -39,6 +40,30 @@ def test_build_payload_environment_refuses_incomplete_lock(monkeypatch):
         assert build.returncode == 1
         assert build.stderr is not None
         assert "peft" in build.stderr
+
+
+def test_build_payload_environment_records_image_metadata(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        builder = PayloadEnvironmentBuilder(tmp)
+        report = builder.prepare()
+        runner = DockerRunner(docker_bin="docker-custom")
+
+        monkeypatch.setattr(
+            "tar_lab.docker_runner.subprocess.run",
+            lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="built", stderr=""),
+        )
+        monkeypatch.setattr(
+            runner,
+            "_inspect_image_metadata",
+            lambda image_tag: (f"{image_tag}@sha256:abc123", "sha256:image123", "docker_inspect"),
+        )
+
+        build = runner.build_payload_environment(report, dry_run=False)
+
+        assert build.returncode == 0
+        assert build.image_digest == f"{report.image_tag}@sha256:abc123"
+        assert build.image_id == "sha256:image123"
+        assert build.digest_source == "docker_inspect"
 
 
 def test_compose_runtime_command_refuses_workspace_write_in_production():

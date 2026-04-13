@@ -4,6 +4,7 @@ from pathlib import Path
 
 from tar_lab import reproducibility as reproducibility_module
 from tar_lab.orchestrator import TAROrchestrator
+from tar_lab.docker_runner import BuildResult
 from tar_lab.reproducibility import PayloadEnvironmentBuilder
 from tar_lab.schemas import ScienceEnvironmentBundle
 
@@ -158,5 +159,75 @@ def test_science_bundle_locking_injects_manifest_paths_and_network_policy():
             assert "none" in bundle.run_command
             assert any(item.startswith("TAR_IMAGE_MANIFEST=/workspace/") for item in bundle.run_command)
             assert any(item.startswith("TAR_RUN_MANIFEST=/workspace/") for item in bundle.run_command)
+        finally:
+            orchestrator.shutdown()
+
+
+def test_rebuild_locked_image_persists_build_attestation_and_status():
+    with tempfile.TemporaryDirectory() as tmp:
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            def fake_build(report, dry_run=False):
+                return BuildResult(
+                    mode="subprocess",
+                    command=["docker", "build", "-t", report.image_tag],
+                    image_tag=report.image_tag,
+                    returncode=0,
+                    stdout="built",
+                    stderr="",
+                    image_digest=f"{report.image_tag}@sha256:abc123",
+                    image_id="sha256:image123",
+                    digest_source="docker_inspect",
+                )
+
+            orchestrator.docker_runner.build_payload_environment = fake_build  # type: ignore[assignment]
+            report = orchestrator.rebuild_locked_image()
+            status = orchestrator.status()
+            runtime = orchestrator.runtime_status()
+
+            assert report.build_status == "built"
+            assert report.build_attestation is not None
+            assert report.build_attestation.image_digest == f"{report.image_tag}@sha256:abc123"
+            assert report.build_attestation_path is not None
+            assert Path(report.build_attestation_path).exists()
+            assert status["build_attestation_id"] == report.build_attestation.attestation_id
+            assert status["image_digest"] == report.build_attestation.image_digest
+            assert runtime["payload_build_status"] == "built"
+            assert runtime["build_attestation_id"] == report.build_attestation.attestation_id
+        finally:
+            orchestrator.shutdown()
+
+
+def test_prepare_science_environment_build_attaches_build_attestation():
+    with tempfile.TemporaryDirectory() as tmp:
+        _copy_science_profiles(tmp)
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            def fake_build(bundle, dry_run=False):
+                return BuildResult(
+                    mode="subprocess",
+                    command=["docker", "build", "-t", bundle.docker_image_tag],
+                    image_tag=bundle.docker_image_tag,
+                    returncode=0,
+                    stdout="built",
+                    stderr="",
+                    image_digest=f"{bundle.docker_image_tag}@sha256:def456",
+                    image_id="sha256:science456",
+                    digest_source="docker_inspect",
+                )
+
+            orchestrator.docker_runner.build_science_environment = fake_build  # type: ignore[assignment]
+            bundle = orchestrator.prepare_science_environment(
+                "Investigate calibration in deep learning",
+                build=True,
+                benchmark_tier="validation",
+            )
+
+            assert bundle.build_status == "built"
+            assert bundle.build_attestation is not None
+            assert bundle.build_attestation.scope_kind == "science_bundle"
+            assert bundle.build_attestation.image_digest == f"{bundle.docker_image_tag}@sha256:def456"
+            assert bundle.build_attestation_path is not None
+            assert Path(bundle.build_attestation_path).exists()
         finally:
             orchestrator.shutdown()

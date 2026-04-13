@@ -576,6 +576,8 @@ class ScienceEnvironmentBundle(StrictModel):
     run_manifest_path: Optional[str] = None
     image_manifest: Optional[ImageManifest] = None
     run_manifest: Optional[RunManifest] = None
+    build_attestation_path: Optional[str] = None
+    build_attestation: Optional[BuildAttestation] = None
     reproducibility_complete: bool = False
     locked_packages: List[str] = Field(default_factory=list)
     unresolved_packages: List[str] = Field(default_factory=list)
@@ -672,6 +674,9 @@ class ProblemExecutionReport(StrictModel):
     manifest_path: Optional[str] = None
     manifest_hash: Optional[str] = None
     dependency_hash: Optional[str] = None
+    build_attestation_path: Optional[str] = None
+    build_attestation_id: Optional[str] = None
+    image_digest: Optional[str] = None
     reproducibility_complete: bool = False
     sandbox_policy: Optional[SandboxPolicy] = None
     artifacts: List[ExecutionArtifact] = Field(default_factory=list)
@@ -1621,6 +1626,27 @@ class EnvironmentFingerprint(StrictModel):
     python_version: str
 
 
+class BuildAttestation(StrictModel):
+    manifest_version: Literal["tar.build.v1"] = "tar.build.v1"
+    attestation_id: str
+    scope_kind: Literal["payload_environment", "science_bundle"]
+    image_tag: str
+    build_command: List[str] = Field(default_factory=list)
+    builder_backend: Literal["dry_run", "subprocess", "docker_sdk"]
+    build_status: Literal["not_requested", "dry_run", "built", "failed"] = "not_requested"
+    returncode: Optional[int] = None
+    built_at: str = Field(default_factory=utc_now_iso)
+    image_manifest_hash: str
+    dependency_lock_hash: str
+    environment_fingerprint_id: str
+    run_manifest_hash: Optional[str] = None
+    image_digest: Optional[str] = None
+    image_id: Optional[str] = None
+    digest_source: Literal["docker_inspect", "docker_sdk", "unavailable"] = "unavailable"
+    trial_id: Optional[str] = None
+    problem_id: Optional[str] = None
+
+
 class ImageManifest(StrictModel):
     manifest_version: Literal["tar.repro.v1"] = "tar.repro.v1"
     image_tag: str
@@ -1713,6 +1739,8 @@ class PayloadEnvironmentReport(StrictModel):
     lock_incomplete_reason: Optional[str] = None
     image_manifest: Optional[ImageManifest] = None
     run_manifest: Optional[RunManifest] = None
+    build_attestation_path: Optional[str] = None
+    build_attestation: Optional[BuildAttestation] = None
     reproducibility_complete: bool = False
 
 

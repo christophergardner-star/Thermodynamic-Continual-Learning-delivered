@@ -7,10 +7,11 @@ import platform
 from shutil import which
 from importlib import metadata
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
 from tar_lab.errors import ReproducibilityLockError
 from tar_lab.schemas import (
+    BuildAttestation,
     DependencyPackageRecord,
     DependencyLockManifest,
     EnvironmentFingerprint,
@@ -212,6 +213,58 @@ class PayloadEnvironmentBuilder:
         )
         self.store.write_run_manifest(manifest)
         return manifest
+
+    def attach_payload_build_attestation(
+        self,
+        report: PayloadEnvironmentReport,
+        *,
+        build_result: Any,
+    ) -> PayloadEnvironmentReport:
+        if report.image_manifest is None:
+            return report
+        attestation = self._build_attestation(
+            scope_kind="payload_environment",
+            image_manifest=report.image_manifest,
+            run_manifest=report.run_manifest,
+            build_result=build_result,
+        )
+        path = self.store.save_build_attestation(attestation)
+        updated = report.model_copy(
+            update={
+                "build_status": attestation.build_status,
+                "build_command": attestation.build_command,
+                "build_attestation_path": str(path),
+                "build_attestation": attestation,
+            }
+        )
+        Path(updated.manifest_path).write_text(updated.model_dump_json(indent=2), encoding="utf-8")
+        return updated
+
+    def attach_science_build_attestation(
+        self,
+        bundle: ScienceEnvironmentBundle,
+        *,
+        build_result: Any,
+    ) -> ScienceEnvironmentBundle:
+        if bundle.image_manifest is None:
+            return bundle
+        attestation = self._build_attestation(
+            scope_kind="science_bundle",
+            image_manifest=bundle.image_manifest,
+            run_manifest=bundle.run_manifest,
+            build_result=build_result,
+            trial_id=bundle.problem_id,
+            problem_id=bundle.problem_id,
+        )
+        path = self.store.save_build_attestation(attestation)
+        return bundle.model_copy(
+            update={
+                "build_status": attestation.build_status,
+                "build_command": attestation.build_command,
+                "build_attestation_path": str(path),
+                "build_attestation": attestation,
+            }
+        )
 
     @staticmethod
     def default_sandbox_policy(
@@ -536,3 +589,53 @@ class PayloadEnvironmentBuilder:
         except ValueError:
             return None
         return f"/workspace/{rel.as_posix()}"
+
+    def _build_attestation(
+        self,
+        *,
+        scope_kind: str,
+        image_manifest: ImageManifest,
+        run_manifest: Optional[RunManifest],
+        build_result: Any,
+        trial_id: Optional[str] = None,
+        problem_id: Optional[str] = None,
+    ) -> BuildAttestation:
+        build_status = "dry_run" if getattr(build_result, "mode", None) == "dry_run" else (
+            "built" if getattr(build_result, "returncode", None) == 0 else "failed"
+        )
+        payload = {
+            "scope_kind": scope_kind,
+            "image_tag": image_manifest.image_tag,
+            "build_command": list(getattr(build_result, "command", []) or []),
+            "builder_backend": getattr(build_result, "mode", "subprocess"),
+            "build_status": build_status,
+            "returncode": getattr(build_result, "returncode", None),
+            "image_manifest_hash": image_manifest.hash_sha256,
+            "dependency_lock_hash": image_manifest.dependency_lock.hash_sha256,
+            "environment_fingerprint_id": image_manifest.environment_fingerprint.fingerprint_id,
+            "run_manifest_hash": run_manifest.hash_sha256 if run_manifest is not None else None,
+            "image_digest": getattr(build_result, "image_digest", None),
+            "image_id": getattr(build_result, "image_id", None),
+            "digest_source": getattr(build_result, "digest_source", "unavailable"),
+            "trial_id": trial_id,
+            "problem_id": problem_id,
+        }
+        attestation_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+        return BuildAttestation(
+            attestation_id=f"build-{attestation_hash[:16]}",
+            scope_kind=scope_kind,  # type: ignore[arg-type]
+            image_tag=image_manifest.image_tag,
+            build_command=list(getattr(build_result, "command", []) or []),
+            builder_backend=getattr(build_result, "mode", "subprocess"),  # type: ignore[arg-type]
+            build_status=build_status,  # type: ignore[arg-type]
+            returncode=getattr(build_result, "returncode", None),
+            image_manifest_hash=image_manifest.hash_sha256,
+            dependency_lock_hash=image_manifest.dependency_lock.hash_sha256,
+            environment_fingerprint_id=image_manifest.environment_fingerprint.fingerprint_id,
+            run_manifest_hash=run_manifest.hash_sha256 if run_manifest is not None else None,
+            image_digest=getattr(build_result, "image_digest", None),
+            image_id=getattr(build_result, "image_id", None),
+            digest_source=getattr(build_result, "digest_source", "unavailable"),  # type: ignore[arg-type]
+            trial_id=trial_id,
+            problem_id=problem_id,
+        )

@@ -333,8 +333,10 @@ class TAROrchestrator:
                 "build_command": build.command,
             }
         )
-        manifest_path = Path(report.manifest_path)
-        manifest_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+        report = self.payload_environment.attach_payload_build_attestation(
+            report,
+            build_result=build,
+        )
         self.store.append_audit_event(
             "reproducibility",
             "rebuild_locked_image",
@@ -342,6 +344,8 @@ class TAROrchestrator:
                 "image_tag": report.image_tag,
                 "build_status": report.build_status,
                 "manifest_hash": report.run_manifest.hash_sha256 if report.run_manifest is not None else None,
+                "build_attestation_id": report.build_attestation.attestation_id if report.build_attestation else None,
+                "image_digest": report.build_attestation.image_digest if report.build_attestation else None,
                 "unresolved_dependencies": report.unresolved_packages,
                 "lock_incomplete_reason": report.lock_incomplete_reason,
             },
@@ -377,6 +381,7 @@ class TAROrchestrator:
         heartbeat = self.runtime_daemon.load_heartbeat()
         payload_env = self.payload_environment.load()
         sandbox_policy = self.sandbox_policy()
+        build_attestation = self.store.latest_build_attestation(scope_kind="payload_environment")
         return {
             "heartbeat": heartbeat.model_dump(mode="json") if heartbeat is not None else None,
             "active_leases": [item.model_dump(mode="json") for item in schedules if item.status in {"leased", "running"}],
@@ -388,6 +393,10 @@ class TAROrchestrator:
             "payload_image": payload_env.image_tag if payload_env is not None else None,
             "manifest_hash": payload_env.run_manifest.hash_sha256 if payload_env and payload_env.run_manifest else None,
             "reproducibility_complete": bool(payload_env is not None and payload_env.reproducibility_complete),
+            "payload_build_status": payload_env.build_status if payload_env is not None else "not_requested",
+            "build_attestation_id": build_attestation.attestation_id if build_attestation is not None else None,
+            "build_attestation": build_attestation.model_dump(mode="json") if build_attestation is not None else None,
+            "image_digest": build_attestation.image_digest if build_attestation is not None else None,
             "unresolved_dependency_count": len(payload_env.unresolved_packages) if payload_env is not None else 0,
             "unresolved_dependencies": list(payload_env.unresolved_packages) if payload_env is not None else [],
             "lock_incomplete_reason": payload_env.lock_incomplete_reason if payload_env is not None else None,
@@ -3635,13 +3644,16 @@ class TAROrchestrator:
         bundle = self.payload_environment.lock_science_bundle(bundle)
         if build:
             build_result = self.docker_runner.build_science_environment(bundle, dry_run=False)
-            status = "built" if build_result.returncode == 0 else "failed"
             bundle = bundle.model_copy(
                 update={
-                    "build_status": status,
+                    "build_status": "built" if build_result.returncode == 0 else "failed",
                     "build_stdout": build_result.stdout,
                     "build_stderr": build_result.stderr,
                 }
+            )
+            bundle = self.payload_environment.attach_science_build_attestation(
+                bundle,
+                build_result=build_result,
             )
         self.store.append_audit_event(
             "science",
@@ -3654,6 +3666,7 @@ class TAROrchestrator:
                 "benchmark_tier": bundle.benchmark_tier,
                 "requested_benchmark": bundle.requested_benchmark,
                 "build_status": bundle.build_status,
+                "build_attestation_id": bundle.build_attestation.attestation_id if bundle.build_attestation else None,
             },
         )
         return bundle
@@ -3694,13 +3707,16 @@ class TAROrchestrator:
         bundle = self.payload_environment.lock_science_bundle(bundle)
         if build_env:
             build_result = self.docker_runner.build_science_environment(bundle, dry_run=False)
-            status = "built" if build_result.returncode == 0 else "failed"
             bundle = bundle.model_copy(
                 update={
-                    "build_status": status,
+                    "build_status": "built" if build_result.returncode == 0 else "failed",
                     "build_stdout": build_result.stdout,
                     "build_stderr": build_result.stderr,
                 }
+            )
+            bundle = self.payload_environment.attach_science_build_attestation(
+                bundle,
+                build_result=build_result,
             )
         report = self.problem_engine.build_study_report(
             problem=problem,
@@ -3846,13 +3862,16 @@ class TAROrchestrator:
         if use_docker:
             if build_env or bundle.build_status not in {"built"}:
                 build_result = self.docker_runner.build_science_environment(bundle, dry_run=False)
-                build_status = "built" if build_result.returncode == 0 else "failed"
                 bundle = bundle.model_copy(
                     update={
-                        "build_status": build_status,
+                        "build_status": "built" if build_result.returncode == 0 else "failed",
                         "build_stdout": build_result.stdout,
                         "build_stderr": build_result.stderr,
                     }
+                )
+                bundle = self.payload_environment.attach_science_build_attestation(
+                    bundle,
+                    build_result=build_result,
                 )
                 if build_result.returncode != 0:
                     report = ProblemExecutionReport(
@@ -3879,6 +3898,9 @@ class TAROrchestrator:
                         manifest_path=bundle.run_manifest_path,
                         manifest_hash=bundle.run_manifest.hash_sha256 if bundle.run_manifest else None,
                         dependency_hash=bundle.image_manifest.dependency_lock.hash_sha256 if bundle.image_manifest else None,
+                        build_attestation_path=bundle.build_attestation_path,
+                        build_attestation_id=bundle.build_attestation.attestation_id if bundle.build_attestation else None,
+                        image_digest=bundle.build_attestation.image_digest if bundle.build_attestation else None,
                         reproducibility_complete=bundle.reproducibility_complete,
                         sandbox_policy=bundle.sandbox_policy,
                         summary="Docker build failed before study execution.",
@@ -3916,6 +3938,9 @@ class TAROrchestrator:
                     manifest_path=bundle.run_manifest_path,
                     manifest_hash=bundle.run_manifest.hash_sha256 if bundle.run_manifest else None,
                     dependency_hash=bundle.image_manifest.dependency_lock.hash_sha256 if bundle.image_manifest else None,
+                    build_attestation_path=bundle.build_attestation_path,
+                    build_attestation_id=bundle.build_attestation.attestation_id if bundle.build_attestation else None,
+                    image_digest=bundle.build_attestation.image_digest if bundle.build_attestation else None,
                     reproducibility_complete=bundle.reproducibility_complete,
                     sandbox_policy=bundle.sandbox_policy,
                     summary="Study execution failed before a report was produced.",
@@ -3975,6 +4000,9 @@ class TAROrchestrator:
                     manifest_path=bundle.run_manifest_path,
                     manifest_hash=bundle.run_manifest.hash_sha256 if bundle.run_manifest else None,
                     dependency_hash=bundle.image_manifest.dependency_lock.hash_sha256 if bundle.image_manifest else None,
+                    build_attestation_path=bundle.build_attestation_path,
+                    build_attestation_id=bundle.build_attestation.attestation_id if bundle.build_attestation else None,
+                    image_digest=bundle.build_attestation.image_digest if bundle.build_attestation else None,
                     reproducibility_complete=bundle.reproducibility_complete,
                     sandbox_policy=bundle.sandbox_policy,
                     summary="Local study execution failed before a report was produced.",
@@ -4000,6 +4028,9 @@ class TAROrchestrator:
                 "manifest_path": report.manifest_path or bundle.run_manifest_path,
                 "manifest_hash": report.manifest_hash or (bundle.run_manifest.hash_sha256 if bundle.run_manifest else None),
                 "dependency_hash": report.dependency_hash or (bundle.image_manifest.dependency_lock.hash_sha256 if bundle.image_manifest else None),
+                "build_attestation_path": report.build_attestation_path or bundle.build_attestation_path,
+                "build_attestation_id": report.build_attestation_id or (bundle.build_attestation.attestation_id if bundle.build_attestation else None),
+                "image_digest": report.image_digest or (bundle.build_attestation.image_digest if bundle.build_attestation else None),
                 "reproducibility_complete": report.reproducibility_complete or bundle.reproducibility_complete,
                 "sandbox_policy": report.sandbox_policy or bundle.sandbox_policy,
             }
@@ -4567,6 +4598,11 @@ class TAROrchestrator:
         payload["image_tag"] = payload_env.image_tag if payload_env is not None else None
         payload["reproducibility_complete"] = bool(payload_env is not None and payload_env.reproducibility_complete)
         payload["manifest_hash"] = payload_env.run_manifest.hash_sha256 if payload_env and payload_env.run_manifest else None
+        payload["build_status"] = payload_env.build_status if payload_env is not None else "not_requested"
+        payload["build_attestation_path"] = payload_env.build_attestation_path if payload_env is not None else None
+        payload["build_attestation"] = payload_env.build_attestation.model_dump(mode="json") if payload_env and payload_env.build_attestation else None
+        payload["build_attestation_id"] = payload_env.build_attestation.attestation_id if payload_env and payload_env.build_attestation else None
+        payload["image_digest"] = payload_env.build_attestation.image_digest if payload_env and payload_env.build_attestation else None
         payload["unresolved_dependency_count"] = len(payload_env.unresolved_packages) if payload_env is not None else 0
         payload["unresolved_dependencies"] = list(payload_env.unresolved_packages) if payload_env is not None else []
         payload["lock_incomplete_reason"] = payload_env.lock_incomplete_reason if payload_env is not None else None
