@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any, Dict, Optional
@@ -49,7 +50,9 @@ from tar_lab.schemas import (
     InferenceEndpointPlan,
     KnowledgeGraphEntry,
     LabChatResponse,
+    LiteraturePolicySignal,
     LiveDockerTestReport,
+    MemorySearchHit,
     OperatorServingStatus,
     PaperIngestReport,
     PayloadEnvironmentReport,
@@ -111,7 +114,7 @@ class TAROrchestrator:
         self.store = TARStateStore(workspace)
         self.workspace = str(self.store.workspace)
         self.data_manager = DataManager(workspace)
-        self.hierarchy = hierarchy or TriModelHierarchy()
+        self.hierarchy = hierarchy or TriModelHierarchy(workspace=self.workspace)
         self.governor = governor or ThermodynamicGovernor()
         self.docker_runner = docker_runner or DockerRunner()
         self.hardware = hardware or NvidiaSMI()
@@ -216,6 +219,96 @@ class TAROrchestrator:
             return []
         return self.vault.search_similar_trials(metrics or self.store.tail_metrics(3))
 
+    def _retrieve_literature_policy_hits(self, objective_slug: str, limit: int = 6) -> list[MemorySearchHit]:
+        synced = self._sync_memory()
+        if self.vault is None or not synced:
+            return []
+        query = objective_slug.replace("-", " ")
+        hits: list[MemorySearchHit] = []
+        for kind, count in (("paper_claim", 4), ("research", 2)):
+            try:
+                rows = self.vault.search(query, n_results=count, kind=kind, require_research_grade=True)
+            except Exception:
+                rows = self.vault.search(query, n_results=count, kind=kind)
+            hits.extend(rows)
+        deduped: dict[str, MemorySearchHit] = {}
+        for hit in hits:
+            deduped.setdefault(hit.document_id, hit)
+        return list(deduped.values())[: max(1, limit)]
+
+    def _distil_literature_policy_signal(self, objective_slug: str) -> Optional[LiteraturePolicySignal]:
+        hits = self._retrieve_literature_policy_hits(objective_slug)
+        if not hits:
+            return None
+        topic_counts: dict[str, int] = {}
+        cited_document_ids: list[str] = []
+        positive = 0
+        negative = 0
+        anchor_tokens = {"anchor", "continual", "forget", "memory", "retention", "stability"}
+        drift_tokens = {"drift", "entropy", "instability", "collapse", "recovery", "quench", "noise"}
+        layer_tokens = {"layer", "freeze", "depth", "capacity", "backbone", "adapter"}
+        for hit in hits:
+            metadata = hit.metadata or {}
+            cited_document_ids.append(
+                str(
+                    metadata.get("paper_id")
+                    or metadata.get("document_id")
+                    or hit.document_id
+                )
+            )
+            polarity = str(metadata.get("polarity") or "").lower()
+            if polarity == "positive":
+                positive += 1
+            elif polarity == "negative":
+                negative += 1
+            for token in re.findall(r"[a-z0-9]+", hit.document.lower()):
+                if len(token) <= 4 or token in {"paper", "result", "study", "model", "method"}:
+                    continue
+                topic_counts[token] = topic_counts.get(token, 0) + 1
+        topic_terms = [token for token, _ in sorted(topic_counts.items(), key=lambda item: (-item[1], item[0]))[:8]]
+        token_set = set(topic_terms)
+        contradiction_pressure = 0.0
+        if positive and negative:
+            contradiction_pressure = min(1.0, 0.45 + (0.1 * min(positive, negative)))
+        elif negative:
+            contradiction_pressure = min(1.0, 0.2 + (0.1 * negative))
+        recommended_family = None
+        rationale: list[str] = []
+        if token_set & drift_tokens or contradiction_pressure >= 0.45:
+            recommended_family = "ou_drift_jitter"
+            rationale.append("literature signal emphasizes instability, drift, or contradiction pressure")
+        elif token_set & anchor_tokens:
+            recommended_family = "elastic_anchor"
+            rationale.append("literature signal emphasizes anchoring and retention pressure")
+        elif token_set & layer_tokens:
+            recommended_family = "layer_freeze"
+            rationale.append("literature signal emphasizes layer-localized or capacity effects")
+        dominant_polarity = "mixed"
+        if positive and not negative:
+            dominant_polarity = "positive"
+        elif negative and not positive:
+            dominant_polarity = "negative"
+        elif not positive and not negative:
+            dominant_polarity = "neutral"
+        confidence = min(
+            1.0,
+            0.2
+            + (0.08 * len(hits))
+            + (0.15 if recommended_family is not None else 0.0)
+            + (0.1 if contradiction_pressure >= 0.45 else 0.0),
+        )
+        return LiteraturePolicySignal(
+            objective_slug=objective_slug,
+            evidence_count=len(hits),
+            recommended_family=recommended_family,
+            dominant_polarity=dominant_polarity,  # type: ignore[arg-type]
+            contradiction_pressure=round(contradiction_pressure, 6),
+            confidence=round(confidence, 6),
+            topic_terms=topic_terms,
+            cited_document_ids=sorted(dict.fromkeys(cited_document_ids)),
+            rationale=rationale or ["literature signal was present but not decisive"],
+        )
+
     def plan_trial(self, dry_run: bool = False) -> tuple[Any, Any, Any]:
         self._ensure_recent_metrics()
         run_intent = self._resolve_run_intent(dry_run=dry_run)
@@ -224,12 +317,14 @@ class TAROrchestrator:
         recovery = self.store.load_recovery()
         self.store.save_recovery(recovery.model_copy(update={"trial_id": trial_id, "status": "planning"}))
         memory_hits = self._retrieve_strategy_hits()
+        literature_signal = self._distil_literature_policy_signal("thermodynamic-anchor")
         policy, plan, task = self.hierarchy.produce_bundle(
             self.store,
             trial_id=trial_id,
             workspace=self.workspace,
             dry_run=dry_run,
             memory_hits=memory_hits,
+            literature_signal=literature_signal,
         )
         payload = self._build_payload_config(plan, data_bundle, run_intent=run_intent)
         payload_path = self.store.write_payload_config(payload)
@@ -314,6 +409,34 @@ class TAROrchestrator:
         )
         self._sync_memory()
         return report
+
+    def literature_status(self) -> dict[str, Any]:
+        return self.literature_engine.status()
+
+    def list_paper_artifacts(self, limit: int = 20) -> dict[str, Any]:
+        return {
+            "artifacts": self.literature_engine.list_artifacts(limit=limit),
+            "count": len(list(self.literature_engine.iter_artifacts())),
+            "latest_manifest": (
+                self.literature_engine.latest_manifest().model_dump(mode="json")
+                if self.literature_engine.latest_manifest() is not None
+                else None
+            ),
+        }
+
+    def paper_artifact(self, paper_id: str) -> dict[str, Any]:
+        artifact = self.literature_engine.get_artifact(paper_id)
+        if artifact is None:
+            raise RuntimeError(f"Paper artifact not found: {paper_id}")
+        conflicts = self.literature_engine.conflict_report(paper_id=paper_id, limit=100)
+        return {
+            "artifact": artifact.model_dump(mode="json"),
+            "conflicts": conflicts["conflicts"],
+            "conflict_count": conflicts["count"],
+        }
+
+    def literature_conflicts(self, *, paper_id: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+        return self.literature_engine.conflict_report(paper_id=paper_id, limit=limit)
 
     def prepare_payload_environment(self) -> PayloadEnvironmentReport:
         report = self.payload_environment.prepare()
@@ -1804,6 +1927,36 @@ class TAROrchestrator:
             score = max(score, 0.9)
         return score
 
+    @staticmethod
+    def _evidence_debt_remediation_actions() -> set[str]:
+        return {
+            "verify_claim",
+            "review_execution_result",
+            "mechanism_ablation",
+            "replication_check",
+            "seed_variance_check",
+            "contradiction_resolution",
+            "benchmark_stress_probe",
+            "calibration_check",
+            "environment_reproduction_check",
+            "claim_linkage_sanity_check",
+        }
+
+    def _evidence_debt_gate(
+        self,
+        project: ResearchProject,
+        action: ResearchPlannedAction,
+    ) -> tuple[EvidenceDebtRecord, Optional[str]]:
+        evidence_debt = self._compute_evidence_debt(project)
+        if not evidence_debt.promotion_blocked:
+            return evidence_debt, None
+        if action.action_kind in self._evidence_debt_remediation_actions():
+            return evidence_debt, None
+        return (
+            evidence_debt,
+            "evidence debt blocks non-remediation scheduling; only falsification, replication, and repair work may proceed",
+        )
+
     def _strategic_priority_value(self, project: ResearchProject) -> float:
         return max(0.0, min(1.0, 0.25 + (project.priority * 0.15)))
 
@@ -1818,6 +1971,7 @@ class TAROrchestrator:
         action = self._project_action(project, action_id=action_id)
         if thread is None or action is None or action.status not in {"planned", "queued"}:
             return None
+        evidence_debt, evidence_gate_reason = self._evidence_debt_gate(project, action)
         question = self._project_question(project, question_id=action.depends_on[0] if action.depends_on else None) or self._project_question(project)
         dependency_readiness = self._dependency_readiness_value(project, thread)
         benchmark_value = self._benchmark_value(project, action, question)
@@ -1847,7 +2001,12 @@ class TAROrchestrator:
             ),
             6,
         )
-        blocked = dependency_readiness <= 0.0 or project.status == "blocked" or project.budget_ledger.budget_exhausted
+        blocked = (
+            dependency_readiness <= 0.0
+            or project.status == "blocked"
+            or project.budget_ledger.budget_exhausted
+            or evidence_gate_reason is not None
+        )
         rationale: list[str] = []
         if question is not None and question.blocking:
             rationale.append("blocking question raises uncertainty-reduction value")
@@ -1859,6 +2018,10 @@ class TAROrchestrator:
             rationale.append("budget pressure penalizes further expensive work")
         if project.status == "blocked":
             rationale.append("project is currently blocked and must be deprioritized")
+        if evidence_gate_reason is not None:
+            rationale.append(evidence_gate_reason)
+        elif evidence_debt.promotion_blocked:
+            rationale.append("promotion remains blocked but this action is evidence-debt remediation work")
         return PrioritizedActionCandidate(
             candidate_id=f"{project.project_id}:{action.action_id}",
             project_id=project.project_id,
@@ -2672,22 +2835,21 @@ class TAROrchestrator:
         priority_score: float,
     ) -> tuple[str, list[str]]:
         rationale: list[str] = []
-        falsification_actions = {
-            "mechanism_ablation",
-            "replication_check",
-            "seed_variance_check",
-            "contradiction_resolution",
-            "benchmark_stress_probe",
-            "calibration_check",
-            "environment_reproduction_check",
-            "claim_linkage_sanity_check",
-        }
+        falsification_actions = self._evidence_debt_remediation_actions()
         if project.status == "completed":
             return "complete", ["project goal is already complete"]
         if project.status == "abandoned":
             return "retire", ["project has already been abandoned"]
         if thread is not None and thread.stop_reason in {"dependency_missing", "benchmark_unavailable"}:
             return "block", [f"project is blocked by {thread.stop_reason}"]
+        if evidence_debt.promotion_blocked:
+            if candidate is None:
+                return "defer", ["promotion is blocked by evidence debt and no remediation action is currently ready"]
+            if candidate.action_kind not in self._evidence_debt_remediation_actions():
+                if candidate.score_breakdown.contradiction_urgency >= 0.7:
+                    rationale.append("contradiction pressure is high and promotion is blocked by evidence debt")
+                    return "escalate", rationale
+                return "defer", ["promotion is blocked by evidence debt until remediation work is selected"]
         if staleness.resume_candidate:
             rationale.append("project is stale but resume-worthy")
             return "resume", rationale
@@ -3558,6 +3720,8 @@ class TAROrchestrator:
             payload_environment=payload_env,
             literature_artifacts=literature_status["artifacts"],  # type: ignore[index]
             literature_conflicts=literature_status["conflicts"],  # type: ignore[index]
+            literature_manifests=literature_status.get("manifests", 0),  # type: ignore[arg-type]
+            latest_literature_manifest=self.literature_engine.latest_manifest(),
             embedder=vault_status.get("embedder", "unavailable"),
             semantic_research_ready=bool(vault_status.get("semantic_research_ready", False)),
             reranker=str(vault_status.get("reranker", "scientific-hybrid-reranker")),
@@ -3695,8 +3859,11 @@ class TAROrchestrator:
         )
         research = self.ingest_research(topic=problem, max_results=max_results)
         self._sync_memory()
+        retrieval_mode: str = "lexical_fallback"
         try:
             memory_hits = self.vault.search(problem, n_results=5, require_research_grade=True) if self.vault is not None else []
+            if self.vault is not None:
+                retrieval_mode = "semantic"
         except Exception:
             memory_hits = self.vault.search(problem, n_results=5) if self.vault is not None else []
         evidence_bundle = build_evidence_bundle(problem, memory_hits)
@@ -3738,6 +3905,7 @@ class TAROrchestrator:
                 "evidence_bundle": evidence_bundle,
                 "hypotheses": build_hypotheses(problem, evidence_bundle, benchmark_ids=report.benchmark_ids),
                 "contradiction_review": evidence_bundle.contradiction_review,
+                "retrieval_mode": retrieval_mode,
             }
         )
         if build_env and bundle.build_status == "failed":
@@ -3755,6 +3923,10 @@ class TAROrchestrator:
             wall_clock_minutes=planning_minutes,
         )
         self.store.append_problem_study(report)
+        Path(report.environment.study_plan_path).write_text(
+            report.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
         decision = self._build_research_decision(
             prompt=problem,
             evidence_bundle=evidence_bundle,
@@ -4667,6 +4839,7 @@ class TAROrchestrator:
             if latest_problem_execution is not None
             else (latest_problem_study.canonical_comparable if latest_problem_study is not None else False)
         )
+        payload["literature"] = self.literature_status()
         payload["memory"] = self.vault.stats() if self.vault is not None else {"error": self.memory_error}
         if self.memory_error:
             payload["memory"]["error"] = self.memory_error

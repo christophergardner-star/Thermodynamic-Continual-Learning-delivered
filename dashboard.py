@@ -52,6 +52,9 @@ def build_dashboard_context(
         limit=max_results,
     )
     experiment_backend_runtime_status = orchestrator.experiment_backend_runtime_status(limit=max_results * 3)
+    literature_status = orchestrator.literature_status()
+    literature_artifacts = orchestrator.list_paper_artifacts(limit=max_results)
+    literature_conflicts = orchestrator.literature_conflicts(limit=max_results)
 
     selected_project_status = None
     selected_resume_dashboard = None
@@ -81,6 +84,9 @@ def build_dashboard_context(
         "portfolio_status": portfolio_status,
         "portfolio_review": portfolio_review,
         "experiment_backend_runtime_status": experiment_backend_runtime_status,
+        "literature_status": literature_status,
+        "literature_artifacts": literature_artifacts,
+        "literature_conflicts": literature_conflicts,
         "selected_project_status": selected_project_status,
         "selected_resume_dashboard": selected_resume_dashboard,
         "selected_evidence_map": selected_evidence_map,
@@ -352,6 +358,35 @@ def _render_infrastructure_tab(context: dict[str, Any]) -> None:
     )
 
 
+def _render_literature_tab(context: dict[str, Any]) -> None:
+    literature_status = context.get("literature_status", {})
+    literature_artifacts = context.get("literature_artifacts", {})
+    literature_conflicts = context.get("literature_conflicts", {})
+    latest_manifest = literature_status.get("latest_manifest", {})
+    capability = literature_status.get("capability_report", {})
+
+    top1, top2, top3, top4, top5 = st.columns(5)
+    top1.metric("Artifacts", literature_status.get("artifacts", 0))
+    top2.metric("Conflicts", literature_status.get("conflicts", 0))
+    top3.metric("Manifests", literature_status.get("manifests", 0))
+    top4.metric("Tables", literature_status.get("tables", 0))
+    top5.metric("Figures", literature_status.get("figures", 0))
+
+    left, right = st.columns(2)
+    with left:
+        _show_json("Literature Status", literature_status, "No literature status recorded.")
+        _show_json("Latest Manifest", latest_manifest, "No literature ingest manifest recorded.")
+    with right:
+        _show_json("Literature Capabilities", capability, "No literature capability report recorded.")
+        _show_json("Recent Conflicts", literature_conflicts, "No literature conflicts recorded.")
+
+    _show_dataframe(
+        "Paper Artifacts",
+        literature_artifacts.get("artifacts", []),
+        "No literature artifacts recorded.",
+    )
+
+
 def _render_actions_tab(orchestrator: TAROrchestrator) -> None:
     button_col1, button_col2, button_col3 = st.columns(3)
     if button_col1.button("Dry Run"):
@@ -459,7 +494,7 @@ def main() -> None:
             )
         )
 
-        tabs = st.tabs(["Overview", "Operator", "Project", "Publication", "Infrastructure", "Actions", "Raw"])
+        tabs = st.tabs(["Overview", "Operator", "Project", "Publication", "Infrastructure", "Literature", "Actions", "Raw"])
         with tabs[0]:
             _render_overview_tab(context)
         with tabs[1]:
@@ -471,8 +506,10 @@ def main() -> None:
         with tabs[4]:
             _render_infrastructure_tab(context)
         with tabs[5]:
-            _render_actions_tab(orchestrator)
+            _render_literature_tab(context)
         with tabs[6]:
+            _render_actions_tab(orchestrator)
+        with tabs[7]:
             _render_raw_tab(context)
     finally:
         orchestrator.shutdown()

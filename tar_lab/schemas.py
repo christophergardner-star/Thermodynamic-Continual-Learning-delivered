@@ -282,6 +282,18 @@ class PreparedDataBundle(StrictModel):
     research_grade: bool = False
 
 
+class LiteraturePolicySignal(StrictModel):
+    objective_slug: str
+    evidence_count: int = Field(default=0, ge=0)
+    recommended_family: Optional[Literal["elastic_anchor", "ou_drift_jitter", "layer_freeze"]] = None
+    dominant_polarity: Literal["positive", "negative", "mixed", "neutral"] = "neutral"
+    contradiction_pressure: float = Field(default=0.0, ge=0.0, le=1.0)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    topic_terms: List[str] = Field(default_factory=list)
+    cited_document_ids: List[str] = Field(default_factory=list)
+    rationale: List[str] = Field(default_factory=list)
+
+
 class DirectorPolicy(StrictModel):
     version: Literal["tar.v1"] = "tar.v1"
     role: Literal["director"] = "director"
@@ -293,6 +305,7 @@ class DirectorPolicy(StrictModel):
     failure_streak: int = Field(default=0, ge=0)
     quantitative_justification: QuantitativeJustification
     data_anchor: List[GovernorMetrics]
+    literature_signal: Optional[LiteraturePolicySignal] = None
 
     @field_validator("objective_slug")
     @classmethod
@@ -647,6 +660,7 @@ class ProblemStudyReport(StrictModel):
     metric_hooks: List[str] = Field(default_factory=list)
     cited_research_ids: List[str] = Field(default_factory=list)
     retrieved_memory_ids: List[str] = Field(default_factory=list)
+    retrieval_mode: Literal["semantic", "lexical_fallback"] = "lexical_fallback"
     evidence_bundle: Optional[EvidenceBundle] = None
     hypotheses: List[HypothesisRecord] = Field(default_factory=list)
     contradiction_review: Optional[ContradictionReview] = None
@@ -1482,12 +1496,22 @@ class ExperimentLaunchPlan(StrictModel):
     config: Dict[str, Any] = Field(default_factory=dict)
 
 
+class PaperSourceFingerprint(StrictModel):
+    source_hash_sha256: str
+    source_size_bytes: int = Field(default=0, ge=0)
+    source_kind: Literal["pdf", "text", "other"] = "other"
+    normalized_path: Optional[str] = None
+    dedupe_key: Optional[str] = None
+
+
 class PaperSection(StrictModel):
     section_id: str
     heading: str
     text: str
     page_start: Optional[int] = None
     page_end: Optional[int] = None
+    text_hash: Optional[str] = None
+    word_count: int = Field(default=0, ge=0)
 
 
 class BibliographyEntry(StrictModel):
@@ -1517,6 +1541,8 @@ class ResearchClaim(StrictModel):
     citation_span_start: Optional[int] = None
     citation_span_end: Optional[int] = None
     evidence_kind: Literal["claim_sentence", "claim_clause", "table_caption", "figure_caption"] = "claim_sentence"
+    citation_count: int = Field(default=0, ge=0)
+    quality_flags: List[str] = Field(default_factory=list)
     source_excerpt: Optional[str] = None
 
 
@@ -1524,10 +1550,20 @@ class CitationEdge(StrictModel):
     source_paper_id: str
     citation_key: str
     raw_text: str
+    section_id: Optional[str] = None
     page_number: Optional[int] = None
     bibliography_entry_id: Optional[str] = None
     citation_style: Literal["numeric", "author_year", "unknown"] = "unknown"
     source_excerpt: Optional[str] = None
+
+
+class TableMetricHint(StrictModel):
+    metric_name: str
+    value: Optional[float] = None
+    row_index: int = Field(default=0, ge=0)
+    column_index: int = Field(default=0, ge=0)
+    row_label: Optional[str] = None
+    column_label: Optional[str] = None
 
 
 class PaperTable(StrictModel):
@@ -1536,6 +1572,12 @@ class PaperTable(StrictModel):
     caption: str
     raw_text: str
     rows: List[List[str]] = Field(default_factory=list)
+    header: List[str] = Field(default_factory=list)
+    row_count: int = Field(default=0, ge=0)
+    column_count: int = Field(default=0, ge=0)
+    numeric_cell_count: int = Field(default=0, ge=0)
+    metric_hints: List[TableMetricHint] = Field(default_factory=list)
+    related_claim_ids: List[str] = Field(default_factory=list)
     page_number: Optional[int] = None
     context_excerpt: Optional[str] = None
 
@@ -1546,6 +1588,10 @@ class PaperFigure(StrictModel):
     caption: str
     raw_text: str
     source: Literal["text", "pdf_image", "ocr"] = "text"
+    figure_label: Optional[str] = None
+    caption_hash: Optional[str] = None
+    ocr_text_present: bool = False
+    related_claim_ids: List[str] = Field(default_factory=list)
     page_number: Optional[int] = None
     context_excerpt: Optional[str] = None
 
@@ -1556,6 +1602,9 @@ class ClaimCluster(StrictModel):
     topic_terms: List[str] = Field(default_factory=list)
     contradiction_pairs: List[List[str]] = Field(default_factory=list)
     evidence_count: int = Field(default=0, ge=0)
+    paper_count: int = Field(default=0, ge=0)
+    cross_paper: bool = False
+    polarity_distribution: Dict[str, int] = Field(default_factory=dict)
 
 
 class ClaimConflict(StrictModel):
@@ -1563,6 +1612,8 @@ class ClaimConflict(StrictModel):
     right_claim_id: str
     reason: str
     score: float = Field(ge=0.0, le=1.0)
+    conflict_kind: Literal["cluster_polarity", "cross_paper_topic_polarity"] = "cross_paper_topic_polarity"
+    shared_token_count: int = Field(default=0, ge=0)
     left_paper_id: Optional[str] = None
     right_paper_id: Optional[str] = None
     left_page_number: Optional[int] = None
@@ -1593,15 +1644,32 @@ class EvidenceTrace(StrictModel):
     page_number: Optional[int] = None
     score: Optional[float] = None
     source_path: Optional[str] = None
+    source_hash_sha256: Optional[str] = None
     excerpt: str = ""
     bibliography_entry_ids: List[str] = Field(default_factory=list)
     contradiction_count: int = Field(default=0, ge=0)
     contradiction_summary: List[str] = Field(default_factory=list)
 
 
+class LiteratureIngestManifest(StrictModel):
+    manifest_id: str
+    requested_paths: List[str] = Field(default_factory=list)
+    resolved_paths: List[str] = Field(default_factory=list)
+    artifact_ids: List[str] = Field(default_factory=list)
+    artifact_count: int = Field(default=0, ge=0)
+    deduplicated_existing: int = Field(default=0, ge=0)
+    stored_total: int = Field(default=0, ge=0)
+    conflict_count: int = Field(default=0, ge=0)
+    failed: List[Dict[str, str]] = Field(default_factory=list)
+    parser_chain: List[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now_iso)
+    manifest_path: Optional[str] = None
+
+
 class PaperArtifact(StrictModel):
     paper_id: str
     source_path: str
+    canonical_source_path: Optional[str] = None
     title: str
     abstract: str = ""
     sections: List[PaperSection] = Field(default_factory=list)
@@ -1614,18 +1682,26 @@ class PaperArtifact(StrictModel):
     ocr_used: bool = False
     parser_used: Optional[str] = None
     page_count: int = Field(default=0, ge=0)
+    source_fingerprint: Optional[PaperSourceFingerprint] = None
+    ingest_manifest_id: Optional[str] = None
     capability_report: Optional[LiteratureCapabilityReport] = None
     extraction_notes: List[str] = Field(default_factory=list)
     extracted_at: str = Field(default_factory=utc_now_iso)
+    stored_at: str = Field(default_factory=utc_now_iso)
 
 
 class PaperIngestReport(StrictModel):
     requested_paths: List[str] = Field(default_factory=list)
     ingested: int = Field(default=0, ge=0)
+    deduplicated_existing: int = Field(default=0, ge=0)
+    stored_total: int = Field(default=0, ge=0)
     failed: List[Dict[str, str]] = Field(default_factory=list)
     artifacts: List[PaperArtifact] = Field(default_factory=list)
     conflicts: List[ClaimConflict] = Field(default_factory=list)
     capability_report: Optional[LiteratureCapabilityReport] = None
+    manifest_id: Optional[str] = None
+    manifest_path: Optional[str] = None
+    latest_manifest: Optional[LiteratureIngestManifest] = None
 
 
 class DependencyPackageRecord(StrictModel):
@@ -1919,6 +1995,8 @@ class FrontierStatus(StrictModel):
     payload_environment: Optional[PayloadEnvironmentReport] = None
     literature_artifacts: int = Field(default=0, ge=0)
     literature_conflicts: int = Field(default=0, ge=0)
+    literature_manifests: int = Field(default=0, ge=0)
+    latest_literature_manifest: Optional[LiteratureIngestManifest] = None
     embedder: str = "BAAI/bge-small-en-v1.5"
     semantic_research_ready: bool = False
     reranker: str = "scientific-hybrid-reranker"
@@ -1991,6 +2069,10 @@ class ControlRequest(StrictModel):
         "rebuild_locked_image",
         "show_manifest",
         "ingest_papers",
+        "literature_status",
+        "list_paper_artifacts",
+        "paper_artifact",
+        "literature_conflicts",
         "list_experiment_backends",
         "experiment_backend_runtime_status",
         "run_runtime_cycle",

@@ -18,6 +18,7 @@ from tar_lab.schemas import (
     HypothesisRecord,
     LabChatResponse,
     LocalLLMConfig,
+    LiteraturePolicySignal,
     MemorySearchHit,
     QuantitativeJustification,
     RuntimeSpec,
@@ -338,6 +339,50 @@ def _role_config_from_env(role: str) -> Optional[LocalLLMConfig]:
     )
 
 
+def _role_config_from_serving_state(role: str, workspace: str = ".") -> Optional[LocalLLMConfig]:
+    store = TARStateStore(workspace)
+    assignment = next(
+        (
+            item
+            for item in reversed(store.list_role_assignments())
+            if item.role == role and item.status == "assigned"
+        ),
+        None,
+    )
+    endpoint = None
+    checkpoint_name = None
+    if assignment is not None and assignment.endpoint_name:
+        endpoint = store.get_endpoint(assignment.endpoint_name)
+        checkpoint_name = assignment.checkpoint_name
+    if endpoint is None:
+        serving_state = store.load_operator_serving_state()
+        if serving_state.role == role and serving_state.endpoint_name:
+            endpoint = store.get_endpoint(serving_state.endpoint_name)
+            checkpoint_name = serving_state.active_checkpoint_name
+    if endpoint is None:
+        endpoint = next(
+            (
+                item
+                for item in store.list_endpoints()
+                if item.role == role and item.status in {"registered", "starting", "running"}
+            ),
+            None,
+        )
+        checkpoint_name = endpoint.checkpoint_name if endpoint is not None else checkpoint_name
+    if endpoint is None or not endpoint.base_url:
+        return None
+    checkpoint = store.get_checkpoint(checkpoint_name or endpoint.checkpoint_name)
+    role_key = role.upper()
+    return LocalLLMConfig(
+        base_url=endpoint.base_url,
+        api_key=os.environ.get(f"TAR_{role_key}_API_KEY") or os.environ.get("TAR_LLM_API_KEY", "local"),
+        model=checkpoint.name if checkpoint is not None else endpoint.checkpoint_name,
+        temperature=float(os.environ.get(f"TAR_{role_key}_TEMPERATURE") or os.environ.get("TAR_LLM_TEMPERATURE", "0.0")),
+        timeout_s=float(os.environ.get(f"TAR_{role_key}_TIMEOUT_S") or os.environ.get("TAR_LLM_TIMEOUT_S", "120")),
+        max_retries=int(os.environ.get(f"TAR_{role_key}_MAX_RETRIES") or os.environ.get("TAR_LLM_MAX_RETRIES", "3")),
+    )
+
+
 def _extract_json(text: str) -> str:
     stripped = text.strip()
     fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", stripped, flags=re.S)
@@ -433,7 +478,13 @@ class LocalOpenAIRole:
 class RuleDirector:
     families = ["elastic_anchor", "ou_drift_jitter", "layer_freeze"]
 
-    def propose(self, store: TARStateStore, trial_id: str, objective_slug: str) -> DirectorPolicy:
+    def propose(
+        self,
+        store: TARStateStore,
+        trial_id: str,
+        objective_slug: str,
+        literature_signal: Optional[LiteraturePolicySignal] = None,
+    ) -> DirectorPolicy:
         recent = store.tail_metrics(3)
         if len(recent) != 3:
             raise ValueError("Director requires exactly three recent log points from logs/")
@@ -446,6 +497,12 @@ class RuleDirector:
         if pivot_required:
             current_idx = self.families.index(last_family) if last_family in self.families else 0
             experiment_family = self.families[(current_idx + 1) % len(self.families)]
+        elif (
+            literature_signal is not None
+            and literature_signal.recommended_family in self.families
+            and literature_signal.confidence >= 0.35
+        ):
+            experiment_family = literature_signal.recommended_family
 
         anchor_path = recovery.last_anchor_path or "anchors/thermodynamic_anchor.safetensors"
         return DirectorPolicy(
@@ -457,6 +514,7 @@ class RuleDirector:
             failure_streak=failure_streak,
             quantitative_justification=_quantitative_justification(recent),
             data_anchor=recent,
+            literature_signal=literature_signal,
         )
 
     def chat(
@@ -698,15 +756,17 @@ class RuleScout:
 class TriModelHierarchy:
     def __init__(
         self,
+        workspace: str = ".",
         director_config: Optional[LocalLLMConfig] = None,
         strategist_config: Optional[LocalLLMConfig] = None,
         scout_config: Optional[LocalLLMConfig] = None,
         client_factory: Optional[Callable[..., Any]] = None,
         allow_rule_fallback: bool = True,
     ):
-        self.director_config = director_config or _role_config_from_env("director")
-        self.strategist_config = strategist_config or _role_config_from_env("strategist")
-        self.scout_config = scout_config or _role_config_from_env("scout")
+        self.workspace = workspace
+        self.director_config = director_config or _role_config_from_env("director") or _role_config_from_serving_state("director", workspace=workspace)
+        self.strategist_config = strategist_config or _role_config_from_env("strategist") or _role_config_from_serving_state("strategist", workspace=workspace)
+        self.scout_config = scout_config or _role_config_from_env("scout") or _role_config_from_serving_state("scout", workspace=workspace)
         self.client_factory = client_factory
         self.allow_rule_fallback = allow_rule_fallback
 
@@ -726,6 +786,7 @@ class TriModelHierarchy:
         objective_slug: str = "thermodynamic-anchor",
         dry_run: bool = False,
         memory_hits: Optional[List[MemorySearchHit]] = None,
+        literature_signal: Optional[LiteraturePolicySignal] = None,
     ) -> tuple[DirectorPolicy, StrategistPlan, ScoutTask]:
         if self.live_enabled:
             return self._produce_live_bundle(
@@ -735,9 +796,15 @@ class TriModelHierarchy:
                 objective_slug=objective_slug,
                 dry_run=dry_run,
                 memory_hits=memory_hits,
+                literature_signal=literature_signal,
             )
         if self.allow_rule_fallback and dry_run:
-            policy = self.rule_director.propose(store, trial_id=trial_id, objective_slug=objective_slug)
+            policy = self.rule_director.propose(
+                store,
+                trial_id=trial_id,
+                objective_slug=objective_slug,
+                literature_signal=literature_signal,
+            )
             plan = self.rule_strategist.propose(policy, memory_hits=memory_hits)
             task = self.rule_scout.propose(plan, workspace=workspace, dry_run=dry_run)
             return policy, plan, task
@@ -754,6 +821,7 @@ class TriModelHierarchy:
         objective_slug: str,
         dry_run: bool,
         memory_hits: Optional[List[MemorySearchHit]],
+        literature_signal: Optional[LiteraturePolicySignal],
     ) -> tuple[DirectorPolicy, StrategistPlan, ScoutTask]:
         recent = store.tail_metrics(3)
         if len(recent) != 3:
@@ -772,11 +840,13 @@ class TriModelHierarchy:
             recovery=recovery,
             recent=recent,
             expected_q=expected_q,
+            literature_signal=literature_signal,
         )
         director_draft = director.generate(
             system_prompt=(
                 "You are the TAR Director. Return JSON only. Choose the high-level experiment family and anchor path. "
-                "Do not write prose outside JSON. Respect pivot logic after three fail-fast events."
+                "Do not write prose outside JSON. Respect pivot logic after three fail-fast events. "
+                "Use the literature signal when present to bias family selection."
             ),
             user_prompt=director_prompt,
         )
@@ -790,6 +860,7 @@ class TriModelHierarchy:
             failure_streak=recovery.consecutive_fail_fast,
             quantitative_justification=expected_q,
             data_anchor=recent,
+            literature_signal=literature_signal,
         )
 
         strategist_prompt = self._strategist_prompt(policy)
@@ -973,6 +1044,7 @@ class TriModelHierarchy:
         recovery: Any,
         recent: List[GovernorMetrics],
         expected_q: QuantitativeJustification,
+        literature_signal: Optional[LiteraturePolicySignal],
     ) -> str:
         return (
             f"Trial ID: {trial_id}\n"
@@ -980,6 +1052,7 @@ class TriModelHierarchy:
             f"Recovery: {json.dumps(recovery.model_dump(mode='json'), indent=2)}\n"
             f"Last three metrics: {json.dumps([item.model_dump(mode='json') for item in recent], indent=2)}\n"
             f"Quantitative justification: {json.dumps(expected_q.model_dump(mode='json'), indent=2)}\n"
+            f"Literature signal: {json.dumps(literature_signal.model_dump(mode='json'), indent=2) if literature_signal is not None else 'null'}\n"
             "Choose one experiment_family from elastic_anchor, ou_drift_jitter, layer_freeze. "
             "If consecutive_fail_fast >= 3, pivot_required must be true."
         )

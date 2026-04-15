@@ -4,22 +4,26 @@ import io
 import json
 import re
 from dataclasses import dataclass
-from hashlib import blake2b
+from hashlib import blake2b, sha256
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
 from tar_lab.schemas import (
     BibliographyEntry,
     CitationEdge,
     ClaimCluster,
     ClaimConflict,
+    LiteratureIngestManifest,
     LiteratureCapabilityReport,
     PaperArtifact,
     PaperFigure,
     PaperIngestReport,
+    PaperSourceFingerprint,
     PaperSection,
     PaperTable,
     ResearchClaim,
+    TableMetricHint,
+    utc_now_iso,
 )
 from tar_lab.state import TARStateStore
 
@@ -64,52 +68,105 @@ class ParsedPage:
 class LiteratureEngine:
     def __init__(self, workspace: str = "."):
         self.store = TARStateStore(workspace)
-        self.root = self.store.state_dir / "literature"
+        self.root = self.store.literature_dir
         self.root.mkdir(parents=True, exist_ok=True)
-        self.artifacts_path = self.root / "paper_artifacts.jsonl"
-        self.conflicts_path = self.root / "claim_conflicts.json"
+        self.manifests_dir = self.store.literature_manifests_dir
+        self.artifacts_path = self.store.literature_artifacts_path
+        self.conflicts_path = self.store.literature_conflicts_path
 
     def ingest_paths(self, paths: Iterable[str]) -> PaperIngestReport:
         requested_paths = list(paths)
-        artifacts: list[PaperArtifact] = []
+        artifact_order: list[str] = []
+        resolved_paths: list[str] = []
         failures: list[dict[str, str]] = []
+        deduplicated_existing = 0
+        stored_artifacts = {item.paper_id: item for item in self.iter_artifacts()}
         for raw_path in requested_paths:
             try:
                 path = Path(raw_path).expanduser().resolve()
+                resolved_paths.append(str(path))
                 artifact = self._parse_path(path)
-                self._append_artifact(artifact)
-                artifacts.append(artifact)
+                if artifact.paper_id in stored_artifacts:
+                    deduplicated_existing += 1
+                    artifact = artifact.model_copy(update={"stored_at": stored_artifacts[artifact.paper_id].stored_at})
+                else:
+                    artifact = artifact.model_copy(update={"stored_at": artifact.extracted_at})
+                stored_artifacts[artifact.paper_id] = artifact
+                if artifact.paper_id not in artifact_order:
+                    artifact_order.append(artifact.paper_id)
             except Exception as exc:
                 failures.append({"path": raw_path, "error": str(exc)})
-        conflicts = self.detect_conflicts(artifacts or list(self.iter_artifacts()))
-        self.conflicts_path.write_text(
-            json.dumps([item.model_dump(mode="json") for item in conflicts], indent=2),
-            encoding="utf-8",
+        manifest_created_at = utc_now_iso()
+        manifest = LiteratureIngestManifest(
+            manifest_id=_stable_id(
+                "literature_manifest",
+                f"{'|'.join(resolved_paths or requested_paths or ['empty'])}:{manifest_created_at}:{len(self.store.list_literature_manifests())}",
+            ),
+            requested_paths=requested_paths,
+            resolved_paths=resolved_paths,
+            artifact_ids=artifact_order,
+            artifact_count=len(artifact_order),
+            deduplicated_existing=deduplicated_existing,
+            failed=failures,
+            parser_chain=self.capability_report().parser_chain,
+            created_at=manifest_created_at,
         )
+        for paper_id in manifest.artifact_ids:
+            if paper_id in stored_artifacts:
+                stored_artifacts[paper_id] = stored_artifacts[paper_id].model_copy(
+                    update={"ingest_manifest_id": manifest.manifest_id}
+                )
+        artifacts = [stored_artifacts[paper_id] for paper_id in artifact_order if paper_id in stored_artifacts]
+        all_artifacts = sorted(
+            stored_artifacts.values(),
+            key=lambda item: (item.stored_at, item.paper_id),
+        )
+        conflicts = self.detect_conflicts(all_artifacts)
+        manifest = manifest.model_copy(
+            update={
+                "stored_total": len(all_artifacts),
+                "conflict_count": len(conflicts),
+            }
+        )
+        self.store.save_paper_artifacts(all_artifacts)
+        self.store.save_literature_conflicts(conflicts)
+        manifest_path = self.store.save_literature_manifest(manifest)
         return PaperIngestReport(
             requested_paths=requested_paths,
-            ingested=len(artifacts),
+            ingested=len(artifact_order),
+            deduplicated_existing=deduplicated_existing,
+            stored_total=len(all_artifacts),
             failed=failures,
             artifacts=artifacts,
             conflicts=conflicts,
             capability_report=self.capability_report(),
+            manifest_id=manifest.manifest_id,
+            manifest_path=str(manifest_path),
+            latest_manifest=manifest.model_copy(update={"manifest_path": str(manifest_path)}),
         )
 
     def iter_artifacts(self) -> Iterable[PaperArtifact]:
-        if not self.artifacts_path.exists():
-            return []
-        rows: list[PaperArtifact] = []
-        for line in self.artifacts_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(PaperArtifact.model_validate_json(line))
-        return rows
+        return self.store.load_paper_artifacts()
 
     def status(self) -> dict[str, object]:
+        artifacts = list(self.iter_artifacts())
         conflicts = self.load_conflicts()
+        latest_manifest = self.store.latest_literature_manifest()
+        parser_counts: dict[str, int] = {}
+        for artifact in artifacts:
+            parser = artifact.parser_used or "unknown"
+            parser_counts[parser] = parser_counts.get(parser, 0) + 1
         return {
-            "artifacts": len(list(self.iter_artifacts())),
+            "artifacts": len(artifacts),
             "conflicts": len(conflicts),
+            "claims": sum(len(item.claims) for item in artifacts),
+            "tables": sum(len(item.tables) for item in artifacts),
+            "figures": sum(len(item.figures) for item in artifacts),
+            "ocr_artifacts": len([item for item in artifacts if item.ocr_used]),
+            "manifests": len(self.store.list_literature_manifests()),
             "storage_path": str(self.artifacts_path),
+            "parser_counts": parser_counts,
+            "latest_manifest": latest_manifest.model_dump(mode="json") if latest_manifest else None,
             "capability_report": self.capability_report().model_dump(mode="json"),
         }
 
@@ -141,10 +198,35 @@ class LiteratureEngine:
         )
 
     def load_conflicts(self) -> list[ClaimConflict]:
-        if not self.conflicts_path.exists():
-            return []
-        payload = json.loads(self.conflicts_path.read_text(encoding="utf-8"))
-        return [ClaimConflict.model_validate(item) for item in payload]
+        return self.store.load_literature_conflicts()
+
+    def latest_manifest(self) -> Optional[LiteratureIngestManifest]:
+        return self.store.latest_literature_manifest()
+
+    def get_artifact(self, paper_id: str) -> Optional[PaperArtifact]:
+        for artifact in self.iter_artifacts():
+            if artifact.paper_id == paper_id:
+                return artifact
+        return None
+
+    def list_artifacts(self, limit: int = 20) -> list[dict[str, Any]]:
+        artifacts = sorted(
+            list(self.iter_artifacts()),
+            key=lambda item: (item.stored_at, item.paper_id),
+            reverse=True,
+        )
+        return [self._artifact_summary(item) for item in artifacts[: max(1, limit)]]
+
+    def conflict_report(self, paper_id: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+        rows = self.load_conflicts()
+        if paper_id:
+            rows = [item for item in rows if item.left_paper_id == paper_id or item.right_paper_id == paper_id]
+        rows = sorted(rows, key=lambda item: (item.score, item.left_claim_id, item.right_claim_id), reverse=True)
+        return {
+            "paper_id": paper_id,
+            "conflicts": [item.model_dump(mode="json") for item in rows[: max(1, limit)]],
+            "count": len(rows),
+        }
 
     def detect_conflicts(self, artifacts: Iterable[PaperArtifact]) -> list[ClaimConflict]:
         conflicts: dict[tuple[str, str], ClaimConflict] = {}
@@ -163,6 +245,8 @@ class LiteratureEngine:
                         right_claim_id=pair[1],
                         reason=f"Same semantic cluster with opposite polarity: {', '.join(cluster.topic_terms[:6])}",
                         score=0.9,
+                        conflict_kind="cluster_polarity",
+                        shared_token_count=len(cluster.topic_terms),
                         left_paper_id=left.paper_id,
                         right_paper_id=right.paper_id,
                         left_page_number=left.page_number,
@@ -172,13 +256,23 @@ class LiteratureEngine:
 
         for idx, left in enumerate(claims):
             left_tokens = self._claim_signature(left.text)
+            left_scope = self._claim_scope_tokens(left.text)
             for right in claims[idx + 1 :]:
                 if left.paper_id == right.paper_id:
                     continue
-                overlap = left_tokens & self._claim_signature(right.text)
-                if len(overlap) < 2:
+                right_tokens = self._claim_signature(right.text)
+                overlap = left_tokens & right_tokens
+                if len(overlap) < 3:
                     continue
                 if left.polarity == right.polarity or "neutral" in {left.polarity, right.polarity}:
+                    continue
+                if not self._cross_paper_conflict_scope_ok(
+                    left.text,
+                    right.text,
+                    left_scope=left_scope,
+                    right_scope=self._claim_scope_tokens(right.text),
+                    overlap=overlap,
+                ):
                     continue
                 pair = tuple(sorted((left.claim_id, right.claim_id)))
                 conflicts.setdefault(
@@ -188,6 +282,8 @@ class LiteratureEngine:
                         right_claim_id=pair[1],
                         reason=f"Shared topic tokens with opposite polarity: {', '.join(sorted(list(overlap))[:6])}",
                         score=min(0.99, 0.2 + 0.1 * len(overlap)),
+                        conflict_kind="cross_paper_topic_polarity",
+                        shared_token_count=len(overlap),
                         left_paper_id=left.paper_id,
                         right_paper_id=right.paper_id,
                         left_page_number=left.page_number,
@@ -197,26 +293,23 @@ class LiteratureEngine:
                 )
         return list(conflicts.values())
 
-    def _append_artifact(self, artifact: PaperArtifact) -> None:
-        with self.artifacts_path.open("a", encoding="utf-8") as handle:
-            handle.write(artifact.model_dump_json() + "\n")
-
     def _parse_path(self, path: Path) -> PaperArtifact:
         if not path.exists():
             raise FileNotFoundError(path)
+        source_fingerprint = self._source_fingerprint(path)
         pages, extraction_notes, ocr_used = self._read_document(path)
         full_text = "\n\n".join(page.text for page in pages if page.text.strip())
         title, abstract, body = self._split_front_matter(full_text, fallback_title=path.stem)
-        sections = self._split_sections(pages)
-        paper_id = _stable_id("paper", str(path))
+        sections = self._annotate_sections(self._split_sections(pages))
+        paper_id = _stable_id("paper", source_fingerprint.source_hash_sha256)
         bibliography = self._extract_bibliography(paper_id, pages)
-        citations = self._extract_citations(paper_id, pages, bibliography)
+        citations = self._extract_citations(paper_id, pages, bibliography, sections)
         claims = self._extract_claims(paper_id, sections, pages, bibliography)
-        tables = self._extract_tables(paper_id, pages, sections)
-        figures = self._extract_figures(paper_id, pages, sections)
+        tables = self._extract_tables(paper_id, pages, sections, claims)
+        figures = self._extract_figures(paper_id, pages, sections, claims)
         clusters = self._cluster_claims(claims)
         if not sections:
-            sections = [
+            sections = self._annotate_sections([
                 PaperSection(
                     section_id="section:0",
                     heading="Document",
@@ -224,10 +317,11 @@ class LiteratureEngine:
                     page_start=pages[0].page_number if pages else None,
                     page_end=pages[-1].page_number if pages else None,
                 )
-            ]
+            ])
         return PaperArtifact(
             paper_id=paper_id,
             source_path=str(path),
+            canonical_source_path=str(path),
             title=title,
             abstract=abstract,
             sections=sections,
@@ -240,6 +334,7 @@ class LiteratureEngine:
             ocr_used=ocr_used,
             parser_used=pages[0].source if pages else None,
             page_count=len(pages),
+            source_fingerprint=source_fingerprint,
             capability_report=self.capability_report(parser_used=pages[0].source if pages else None, notes=extraction_notes),
             extraction_notes=extraction_notes,
         )
@@ -477,6 +572,7 @@ class LiteratureEngine:
         paper_id: str,
         pages: list[ParsedPage],
         bibliography: list[BibliographyEntry],
+        sections: Optional[list[PaperSection]] = None,
     ) -> list[CitationEdge]:
         citations: list[CitationEdge] = []
         seen: set[str] = set()
@@ -495,6 +591,7 @@ class LiteratureEngine:
                         source_paper_id=paper_id,
                         citation_key=key,
                         raw_text=raw,
+                        section_id=self._find_section_id(sections or [], raw, page.page_number),
                         page_number=page.page_number,
                         bibliography_entry_id=bibliography_index.get(self._normalize_citation_key(key)),
                         citation_style="numeric",
@@ -511,6 +608,7 @@ class LiteratureEngine:
                         source_paper_id=paper_id,
                         citation_key=raw,
                         raw_text=raw,
+                        section_id=self._find_section_id(sections or [], raw, page.page_number),
                         page_number=page.page_number,
                         bibliography_entry_id=bibliography_index.get(self._normalize_citation_key(raw)),
                         citation_style="author_year",
@@ -541,6 +639,13 @@ class LiteratureEngine:
                     for key in (self._normalize_citation_key(item) for item in citations)
                     if key in bibliography_index
                 ]
+                quality_flags: list[str] = []
+                if label in {"measured_result", "inference"} and not citations:
+                    quality_flags.append("citation_missing")
+                if evidence_kind == "claim_clause":
+                    quality_flags.append("clause_split")
+                if len(sentence) > 220:
+                    quality_flags.append("long_claim")
                 page_number = self._locate_page_for_text(sentence, pages, section.page_start, section.page_end)
                 citation_spans = [match.span() for match in re.finditer(r"\[[0-9,\-\s]{1,20}\]|\b[A-Z][a-z]+(?: et al\.)?,?\s+\d{4}\b", sentence)]
                 excerpt = self._extract_excerpt(section.text, local_start, local_end)
@@ -560,12 +665,20 @@ class LiteratureEngine:
                         citation_span_start=(local_start + citation_spans[0][0]) if citation_spans else None,
                         citation_span_end=(local_start + citation_spans[-1][1]) if citation_spans else None,
                         evidence_kind=evidence_kind,
+                        citation_count=len(citations),
+                        quality_flags=quality_flags,
                         source_excerpt=excerpt,
                     )
                 )
         return claims
 
-    def _extract_tables(self, paper_id: str, pages: list[ParsedPage], sections: list[PaperSection]) -> list[PaperTable]:
+    def _extract_tables(
+        self,
+        paper_id: str,
+        pages: list[ParsedPage],
+        sections: list[PaperSection],
+        claims: list[ResearchClaim],
+    ) -> list[PaperTable]:
         tables: list[PaperTable] = []
         seen: set[str] = set()
         for page in pages:
@@ -573,17 +686,26 @@ class LiteratureEngine:
                 caption = self._compact(match.group(1))
                 body = match.group(2).strip()
                 rows = self._parse_table_rows(body)
+                section_id = self._find_section_id(sections, caption, page.page_number)
                 table_id = _stable_id("table", f"{paper_id}:{page.page_number}:{caption}")
                 if table_id in seen:
                     continue
                 seen.add(table_id)
+                header = rows[0] if rows else []
+                metric_hints = self._extract_table_metric_hints(rows)
                 tables.append(
                     PaperTable(
                         table_id=table_id,
-                        section_id=self._find_section_id(sections, caption, page.page_number),
+                        section_id=section_id,
                         caption=caption,
                         raw_text=self._compact(f"{caption}\n{body}"),
                         rows=rows,
+                        header=header,
+                        row_count=len(rows),
+                        column_count=max((len(item) for item in rows), default=0),
+                        numeric_cell_count=self._count_numeric_cells(rows),
+                        metric_hints=metric_hints,
+                        related_claim_ids=self._related_claim_ids(claims, section_id, page.page_number),
                         page_number=page.page_number,
                         context_excerpt=self._extract_context(page.text, caption),
                     )
@@ -593,29 +715,44 @@ class LiteratureEngine:
                 rows = self._parse_table_rows(raw)
                 if not rows:
                     continue
+                section_id = self._find_section_id(sections, raw, page.page_number)
                 table_id = _stable_id("table", f"{paper_id}:{page.page_number}:{raw[:120]}")
                 if table_id in seen:
                     continue
                 seen.add(table_id)
+                header = rows[0] if rows else []
                 tables.append(
                     PaperTable(
                         table_id=table_id,
-                        section_id=self._find_section_id(sections, raw, page.page_number),
+                        section_id=section_id,
                         caption="Inline table block",
                         raw_text=self._compact(raw),
                         rows=rows,
+                        header=header,
+                        row_count=len(rows),
+                        column_count=max((len(item) for item in rows), default=0),
+                        numeric_cell_count=self._count_numeric_cells(rows),
+                        metric_hints=self._extract_table_metric_hints(rows),
+                        related_claim_ids=self._related_claim_ids(claims, section_id, page.page_number),
                         page_number=page.page_number,
                         context_excerpt=self._extract_context(page.text, raw),
                     )
                 )
         return tables
 
-    def _extract_figures(self, paper_id: str, pages: list[ParsedPage], sections: list[PaperSection]) -> list[PaperFigure]:
+    def _extract_figures(
+        self,
+        paper_id: str,
+        pages: list[ParsedPage],
+        sections: list[PaperSection],
+        claims: list[ResearchClaim],
+    ) -> list[PaperFigure]:
         figures: list[PaperFigure] = []
         seen: set[str] = set()
         for page in pages:
             for match in re.finditer(r"(?is)((?:figure|fig\.)\s+\d+[^\n]*?(?=\n\s*\n|\n(?:table|figure|fig\.|\d+\s+[A-Z])|\Z))", page.text):
                 raw = self._compact(match.group(1))
+                section_id = self._find_section_id(sections, raw, page.page_number)
                 figure_id = _stable_id("figure", f"{paper_id}:{page.page_number}:{raw}")
                 if figure_id in seen:
                     continue
@@ -623,10 +760,14 @@ class LiteratureEngine:
                 figures.append(
                     PaperFigure(
                         figure_id=figure_id,
-                        section_id=self._find_section_id(sections, raw, page.page_number),
+                        section_id=section_id,
                         caption=raw,
                         raw_text=raw,
                         source="ocr" if page.used_ocr else "text",
+                        figure_label=self._figure_label(raw),
+                        caption_hash=sha256(raw.encode("utf-8")).hexdigest(),
+                        ocr_text_present=page.used_ocr,
+                        related_claim_ids=self._related_claim_ids(claims, section_id, page.page_number),
                         page_number=page.page_number,
                         context_excerpt=self._extract_context(page.text, raw),
                     )
@@ -681,14 +822,29 @@ class LiteratureEngine:
             claim_ids = [claims[idx].claim_id for idx in indices]
             tokens: dict[str, int] = {}
             contradiction_pairs: list[list[str]] = []
+            paper_ids: set[str] = set()
+            polarity_distribution: dict[str, int] = {}
             for idx in indices:
+                paper_ids.add(claims[idx].paper_id)
+                polarity_distribution[claims[idx].polarity] = polarity_distribution.get(claims[idx].polarity, 0) + 1
                 for token in self._claim_signature(claims[idx].text):
                     tokens[token] = tokens.get(token, 0) + 1
             for left_idx, idx in enumerate(indices):
                 for jdx in indices[left_idx + 1 :]:
                     left = claims[idx]
                     right = claims[jdx]
-                    if left.paper_id != right.paper_id and left.polarity != right.polarity and "neutral" not in {left.polarity, right.polarity}:
+                    if (
+                        left.paper_id != right.paper_id
+                        and left.polarity != right.polarity
+                        and "neutral" not in {left.polarity, right.polarity}
+                        and self._cross_paper_conflict_scope_ok(
+                            left.text,
+                            right.text,
+                            left_scope=self._claim_scope_tokens(left.text),
+                            right_scope=self._claim_scope_tokens(right.text),
+                            overlap=self._claim_signature(left.text) & self._claim_signature(right.text),
+                        )
+                    ):
                         contradiction_pairs.append([left.claim_id, right.claim_id])
             topic_terms = [token for token, _ in sorted(tokens.items(), key=lambda item: (-item[1], item[0]))[:8]]
             clusters.append(
@@ -698,9 +854,121 @@ class LiteratureEngine:
                     topic_terms=topic_terms,
                     contradiction_pairs=contradiction_pairs,
                     evidence_count=len(indices),
+                    paper_count=len(paper_ids),
+                    cross_paper=len(paper_ids) > 1,
+                    polarity_distribution=polarity_distribution,
                 )
             )
         return clusters
+
+    def _source_fingerprint(self, path: Path) -> PaperSourceFingerprint:
+        digest = sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        suffix = path.suffix.lower()
+        source_kind = "pdf" if suffix == ".pdf" else ("text" if suffix in {".txt", ".md", ".rst"} else "other")
+        source_hash = digest.hexdigest()
+        return PaperSourceFingerprint(
+            source_hash_sha256=source_hash,
+            source_size_bytes=path.stat().st_size,
+            source_kind=source_kind,
+            normalized_path=str(path),
+            dedupe_key=f"{source_kind}:{source_hash}",
+        )
+
+    def _annotate_sections(self, sections: list[PaperSection]) -> list[PaperSection]:
+        annotated: list[PaperSection] = []
+        for section in sections:
+            text_hash = sha256(section.text.encode("utf-8")).hexdigest() if section.text else None
+            word_count = len(re.findall(r"\b\S+\b", section.text))
+            annotated.append(section.model_copy(update={"text_hash": text_hash, "word_count": word_count}))
+        return annotated
+
+    def _artifact_summary(self, artifact: PaperArtifact) -> dict[str, Any]:
+        return {
+            "paper_id": artifact.paper_id,
+            "title": artifact.title,
+            "canonical_source_path": artifact.canonical_source_path or artifact.source_path,
+            "parser_used": artifact.parser_used,
+            "ocr_used": artifact.ocr_used,
+            "page_count": artifact.page_count,
+            "claims": len(artifact.claims),
+            "tables": len(artifact.tables),
+            "figures": len(artifact.figures),
+            "claim_clusters": len(artifact.claim_clusters),
+            "source_hash_sha256": (
+                artifact.source_fingerprint.source_hash_sha256 if artifact.source_fingerprint is not None else None
+            ),
+            "stored_at": artifact.stored_at,
+            "ingest_manifest_id": artifact.ingest_manifest_id,
+        }
+
+    def _count_numeric_cells(self, rows: list[list[str]]) -> int:
+        count = 0
+        for row in rows:
+            for cell in row:
+                if self._coerce_float(cell) is not None:
+                    count += 1
+        return count
+
+    def _extract_table_metric_hints(self, rows: list[list[str]]) -> list[TableMetricHint]:
+        if not rows:
+            return []
+        header = rows[0] if rows and any(self._coerce_float(cell) is None for cell in rows[0]) else []
+        data_rows = rows[1:] if header else rows
+        hints: list[TableMetricHint] = []
+        for row_index, row in enumerate(data_rows, start=1 if header else 0):
+            row_label = row[0] if row else None
+            for column_index, cell in enumerate(row):
+                numeric = self._coerce_float(cell)
+                if numeric is None:
+                    continue
+                column_label = header[column_index] if header and column_index < len(header) else None
+                metric_name = " / ".join([item for item in [row_label, column_label] if item and item != cell]) or f"col_{column_index}"
+                hints.append(
+                    TableMetricHint(
+                        metric_name=self._compact(metric_name),
+                        value=numeric,
+                        row_index=row_index,
+                        column_index=column_index,
+                        row_label=row_label,
+                        column_label=column_label,
+                    )
+                )
+        return hints[:32]
+
+    def _related_claim_ids(
+        self,
+        claims: list[ResearchClaim],
+        section_id: Optional[str],
+        page_number: Optional[int],
+    ) -> list[str]:
+        rows: list[str] = []
+        for claim in claims:
+            if section_id is not None and claim.section_id == section_id:
+                rows.append(claim.claim_id)
+                continue
+            if page_number is not None and claim.page_number == page_number:
+                rows.append(claim.claim_id)
+        return rows[:12]
+
+    @staticmethod
+    def _figure_label(raw: str) -> Optional[str]:
+        match = re.match(r"(?i)\b((?:figure|fig\.)\s+\d+)", raw.strip())
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _coerce_float(value: str) -> Optional[float]:
+        compact = value.strip().replace(",", "")
+        if compact.endswith("%"):
+            compact = compact[:-1]
+        if not compact:
+            return None
+        try:
+            return float(compact)
+        except ValueError:
+            return None
 
     def _locate_page_for_text(
         self,
@@ -783,6 +1051,54 @@ class LiteratureEngine:
         return normalized
 
     @staticmethod
+    def _claim_scope_tokens(text: str) -> set[str]:
+        lowered = text.lower()
+        tokens: set[str] = set()
+        for marker, token in re.findall(r"\b(under|with|without|when|while|across|for|in|on)\s+([a-z0-9_-]+)", lowered):
+            if len(token) <= 3:
+                continue
+            tokens.add(token)
+            tokens.add(f"{marker}:{token}")
+        for token in re.findall(r"\b(bounded|unbounded|noisy|clean|online|offline|frozen|finetuned|shallow|deep)\b", lowered):
+            tokens.add(token)
+        return tokens
+
+    @classmethod
+    def _cross_paper_conflict_scope_ok(
+        cls,
+        left_text: str,
+        right_text: str,
+        *,
+        left_scope: set[str],
+        right_scope: set[str],
+        overlap: set[str],
+    ) -> bool:
+        generic_topic_tokens = {
+            "accuracy",
+            "anchor",
+            "benchmark",
+            "drift",
+            "improve",
+            "learning",
+            "loss",
+            "method",
+            "model",
+            "result",
+            "stable",
+            "thermodynamic",
+        }
+        meaningful_overlap = overlap - generic_topic_tokens
+        if len(meaningful_overlap) < 2 and len(overlap) < 4:
+            return False
+        if left_scope and right_scope and not (left_scope & right_scope):
+            return False
+        left_negated = bool(re.search(r"\b(not|no|never|cannot|fails?)\b", left_text.lower()))
+        right_negated = bool(re.search(r"\b(not|no|never|cannot|fails?)\b", right_text.lower()))
+        if left_negated == right_negated and len(meaningful_overlap) < 3:
+            return False
+        return True
+
+    @staticmethod
     def _compact(value: str) -> str:
         return re.sub(r"\s+", " ", value).strip()
 
@@ -818,6 +1134,9 @@ class LiteratureEngine:
 
     @staticmethod
     def _bibliography_title(line: str) -> Optional[str]:
+        modern_quoted = re.search(r"[“\"]([^”\"]+)[”\"]", line)
+        if modern_quoted:
+            return LiteratureEngine._compact(modern_quoted.group(1) or "")
         quoted = re.search(r"“([^”]+)”|\"([^\"]+)\"", line)
         if quoted:
             return LiteratureEngine._compact(quoted.group(1) or quoted.group(2) or "")

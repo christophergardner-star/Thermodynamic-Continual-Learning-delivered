@@ -30,10 +30,13 @@ from tar_lab.schemas import (
     OperatorServingState,
     KnowledgeGraphEntry,
     KnowledgeGraphState,
+    LiteratureIngestManifest,
     ProblemExecutionReport,
     PortfolioPrioritySnapshot,
     ProblemScheduleEntry,
     ProblemScheduleState,
+    ClaimConflict,
+    PaperArtifact,
     ResearchDocument,
     ResearchDecisionRecord,
     RecoveryState,
@@ -90,6 +93,10 @@ class TARStateStore:
         self.operator_serving_path = self.state_dir / "operator_serving.json"
         self.experiment_backends_dir = self.state_dir / "experiment_backends"
         self.build_attestations_dir = self.state_dir / "build_attestations"
+        self.literature_dir = self.state_dir / "literature"
+        self.literature_manifests_dir = self.literature_dir / "manifests"
+        self.literature_artifacts_path = self.literature_dir / "paper_artifacts.jsonl"
+        self.literature_conflicts_path = self.literature_dir / "claim_conflicts.json"
         self.memory_manifest_path = self.state_dir / "memory_manifest.json"
         self.alerts_path = self.state_dir / "alerts.jsonl"
         self.runtime_heartbeat_path = self.state_dir / "runtime_heartbeat.json"
@@ -105,6 +112,8 @@ class TARStateStore:
         self.publication_handoffs_dir.mkdir(parents=True, exist_ok=True)
         self.experiment_backends_dir.mkdir(parents=True, exist_ok=True)
         self.build_attestations_dir.mkdir(parents=True, exist_ok=True)
+        self.literature_dir.mkdir(parents=True, exist_ok=True)
+        self.literature_manifests_dir.mkdir(parents=True, exist_ok=True)
 
     def _atomic_write_text(self, path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,6 +123,10 @@ class TARStateStore:
 
     def _atomic_write_json(self, path: Path, payload: Dict[str, Any]) -> None:
         self._atomic_write_text(path, json.dumps(payload, indent=2))
+
+    @staticmethod
+    def _safe_literature_manifest_path(root: Path, manifest_id: str) -> Path:
+        return root / f"{manifest_id.replace(':', '__')}.json"
 
     def load_recovery(self) -> RecoveryState:
         if not self.recovery_path.exists():
@@ -395,6 +408,63 @@ class TARStateStore:
                 continue
             return attestation
         return None
+
+    def save_literature_manifest(self, manifest: LiteratureIngestManifest) -> Path:
+        path = self._safe_literature_manifest_path(self.literature_manifests_dir, manifest.manifest_id)
+        payload = manifest.model_copy(update={"manifest_path": str(path)})
+        self._atomic_write_json(path, payload.model_dump(mode="json"))
+        return path
+
+    def load_literature_manifest(self, manifest_id: str) -> Optional[LiteratureIngestManifest]:
+        path = self._safe_literature_manifest_path(self.literature_manifests_dir, manifest_id)
+        if not path.exists():
+            return None
+        return LiteratureIngestManifest.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def list_literature_manifests(self) -> List[LiteratureIngestManifest]:
+        rows: List[LiteratureIngestManifest] = []
+        for path in sorted(self.literature_manifests_dir.glob("*.json")):
+            rows.append(LiteratureIngestManifest.model_validate_json(path.read_text(encoding="utf-8")))
+        return rows
+
+    def latest_literature_manifest(self) -> Optional[LiteratureIngestManifest]:
+        latest_path: Optional[Path] = None
+        for path in self.literature_manifests_dir.glob("*.json"):
+            if latest_path is None or path.stat().st_mtime_ns > latest_path.stat().st_mtime_ns:
+                latest_path = path
+        if latest_path is None:
+            return None
+        return LiteratureIngestManifest.model_validate_json(latest_path.read_text(encoding="utf-8"))
+
+    def save_paper_artifacts(self, artifacts: List[PaperArtifact]) -> Path:
+        payload = "\n".join(item.model_dump_json() for item in artifacts)
+        if payload:
+            payload += "\n"
+        self._atomic_write_text(self.literature_artifacts_path, payload)
+        return self.literature_artifacts_path
+
+    def load_paper_artifacts(self) -> List[PaperArtifact]:
+        if not self.literature_artifacts_path.exists():
+            return []
+        rows: List[PaperArtifact] = []
+        for line in self.literature_artifacts_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(PaperArtifact.model_validate_json(line))
+        return rows
+
+    def save_literature_conflicts(self, conflicts: List[ClaimConflict]) -> Path:
+        self._atomic_write_json(
+            self.literature_conflicts_path,
+            {"conflicts": [item.model_dump(mode="json") for item in conflicts]},
+        )
+        return self.literature_conflicts_path
+
+    def load_literature_conflicts(self) -> List[ClaimConflict]:
+        if not self.literature_conflicts_path.exists():
+            return []
+        payload = json.loads(self.literature_conflicts_path.read_text(encoding="utf-8"))
+        rows = payload if isinstance(payload, list) else payload.get("conflicts", [])
+        return [ClaimConflict.model_validate(item) for item in rows]
 
     def load_memory_manifest(self) -> Optional[MemoryStoreManifest]:
         if not self.memory_manifest_path.exists():

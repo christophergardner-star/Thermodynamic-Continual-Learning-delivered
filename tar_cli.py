@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
         choices=["balanced", "falsification_first"],
     )
     parser.add_argument("--paper-path", action="append", dest="paper_paths")
+    parser.add_argument("--paper-id", dest="paper_id")
     parser.add_argument("--checkpoint-name", dest="checkpoint_name")
     parser.add_argument("--model-path", dest="model_path")
     parser.add_argument("--experiment-backend-id", dest="experiment_backend_id")
@@ -130,6 +131,10 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--rebuild-locked-image", action="store_true", dest="rebuild_locked_image")
     group.add_argument("--show-manifest", action="store_true", dest="show_manifest")
     group.add_argument("--ingest-papers", action="store_true", dest="ingest_papers")
+    group.add_argument("--literature-status", action="store_true", dest="literature_status")
+    group.add_argument("--list-paper-artifacts", action="store_true", dest="list_paper_artifacts")
+    group.add_argument("--paper-artifact", action="store_true", dest="paper_artifact")
+    group.add_argument("--literature-conflicts", action="store_true", dest="literature_conflicts")
     group.add_argument("--list-experiment-backends", action="store_true", dest="list_experiment_backends")
     group.add_argument("--experiment-backend-runtime-status", action="store_true", dest="experiment_backend_runtime_status")
     group.add_argument("--run-runtime-cycle", action="store_true", dest="run_runtime_cycle")
@@ -360,6 +365,14 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
         return orchestrator.show_manifest(manifest_id=args.manifest_id, manifest_path=args.manifest_path)
     if args.ingest_papers:
         return orchestrator.ingest_papers(args.paper_paths or []).model_dump(mode="json")
+    if args.literature_status:
+        return orchestrator.literature_status()
+    if args.list_paper_artifacts:
+        return orchestrator.list_paper_artifacts(limit=args.max_results)
+    if args.paper_artifact:
+        return orchestrator.paper_artifact(args.paper_id or "")
+    if args.literature_conflicts:
+        return orchestrator.literature_conflicts(paper_id=args.paper_id, limit=args.max_results)
     if args.list_experiment_backends:
         return {"backends": orchestrator.list_experiment_backends()}
     if args.experiment_backend_runtime_status:
@@ -459,6 +472,7 @@ def _render_status(payload: Dict[str, Any]) -> str:
     last = payload["last_three_metrics"][-1] if payload["last_three_metrics"] else {}
     gpu = payload.get("gpu", {})
     memory = payload.get("memory", {})
+    literature = payload.get("literature", {})
     lines = [
         f"Trial ID: {recovery.get('trial_id') or 'none'}",
         f"Status: {recovery.get('status')}",
@@ -491,6 +505,9 @@ def _render_status(payload: Dict[str, Any]) -> str:
         f"Evidence Debt Records: {payload.get('evidence_debt_records', 0)}",
         f"Staleness Records: {payload.get('project_staleness_records', 0)}",
         f"Publication Handoffs: {payload.get('publication_handoffs', 0)}",
+        f"Literature Artifacts: {literature.get('artifacts', 0)}",
+        f"Literature Conflicts: {literature.get('conflicts', 0)}",
+        f"Literature Manifests: {literature.get('manifests', 0)}",
         f"Latest Claim Verdict: {(payload.get('latest_claim_verdict') or {}).get('status', 'n/a')}",
         f"Benchmark: {payload.get('benchmark_name') or ', '.join(payload.get('benchmark_ids', [])) or 'n/a'}",
         f"Benchmark Tier: {payload.get('benchmark_tier', 'n/a')}",
@@ -708,6 +725,104 @@ def _render_experiment_backend_runtime_status(payload: Dict[str, Any]) -> str:
                 f"{item.get('status', 'n/a')} steps={item.get('completed_steps', 0)} "
                 f"resume={resume.get('mode', 'n/a')}"
             )
+    return "\n".join(lines)
+
+
+def _render_literature_status(payload: Dict[str, Any]) -> str:
+    latest_manifest = payload.get("latest_manifest") or {}
+    capability = payload.get("capability_report") or {}
+    lines = [
+        f"Literature Artifacts: {payload.get('artifacts', 0)}",
+        f"Literature Conflicts: {payload.get('conflicts', 0)}",
+        f"Literature Manifests: {payload.get('manifests', 0)}",
+        f"Claims: {payload.get('claims', 0)}",
+        f"Tables: {payload.get('tables', 0)}",
+        f"Figures: {payload.get('figures', 0)}",
+        f"OCR Artifacts: {payload.get('ocr_artifacts', 0)}",
+        f"Storage Path: {payload.get('storage_path', 'n/a')}",
+        f"Parser Chain: {', '.join(capability.get('parser_chain', [])) or 'n/a'}",
+        f"OCR Ready: {capability.get('ocr_ready', False)}",
+    ]
+    if latest_manifest:
+        lines.extend(
+            [
+                f"Latest Manifest: {latest_manifest.get('manifest_id', 'n/a')}",
+                f"Latest Artifact Count: {latest_manifest.get('artifact_count', 0)}",
+                f"Latest Deduplicated: {latest_manifest.get('deduplicated_existing', 0)}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _render_paper_artifact_list(payload: Dict[str, Any]) -> str:
+    artifacts = payload.get("artifacts", [])
+    if not artifacts:
+        return "No paper artifacts recorded."
+    lines = [
+        f"Paper Artifacts: {payload.get('count', len(artifacts))}",
+    ]
+    latest_manifest = payload.get("latest_manifest") or {}
+    if latest_manifest:
+        lines.append(f"Latest Manifest: {latest_manifest.get('manifest_id', 'n/a')}")
+    lines.append("")
+    lines.append("Artifacts:")
+    for item in artifacts:
+        lines.append(
+            f"- {item.get('title', 'n/a')} [{item.get('paper_id', 'n/a')}] "
+            f"claims={item.get('claims', 0)} tables={item.get('tables', 0)} "
+            f"figures={item.get('figures', 0)} parser={item.get('parser_used', 'n/a')}"
+        )
+    return "\n".join(lines)
+
+
+def _render_paper_artifact(payload: Dict[str, Any]) -> str:
+    artifact = payload.get("artifact") or {}
+    conflicts = payload.get("conflicts", [])
+    source = artifact.get("source_fingerprint") or {}
+    lines = [
+        f"Paper ID: {artifact.get('paper_id', 'n/a')}",
+        f"Title: {artifact.get('title', 'n/a')}",
+        f"Source Path: {artifact.get('canonical_source_path', artifact.get('source_path', 'n/a'))}",
+        f"Source Hash: {source.get('source_hash_sha256', 'n/a')}",
+        f"Parser Used: {artifact.get('parser_used', 'n/a')}",
+        f"OCR Used: {artifact.get('ocr_used', False)}",
+        f"Pages: {artifact.get('page_count', 0)}",
+        f"Claims: {len(artifact.get('claims', []))}",
+        f"Tables: {len(artifact.get('tables', []))}",
+        f"Figures: {len(artifact.get('figures', []))}",
+        f"Claim Clusters: {len(artifact.get('claim_clusters', []))}",
+        f"Conflict Count: {payload.get('conflict_count', len(conflicts))}",
+        f"Ingest Manifest: {artifact.get('ingest_manifest_id', 'n/a')}",
+    ]
+    if conflicts:
+        lines.append("")
+        lines.append("Conflicts:")
+        for item in conflicts[:10]:
+            lines.append(
+                f"- {item.get('conflict_kind', 'n/a')} score={item.get('score', 'n/a')} "
+                f"reason={item.get('reason', 'n/a')}"
+            )
+    return "\n".join(lines)
+
+
+def _render_literature_conflicts(payload: Dict[str, Any]) -> str:
+    conflicts = payload.get("conflicts", [])
+    if not conflicts:
+        return "No literature conflicts recorded."
+    lines = [
+        f"Conflict Count: {payload.get('count', len(conflicts))}",
+    ]
+    paper_id = payload.get("paper_id")
+    if paper_id:
+        lines.append(f"Filtered Paper ID: {paper_id}")
+    lines.append("")
+    lines.append("Conflicts:")
+    for item in conflicts:
+        lines.append(
+            f"- {item.get('left_claim_id', 'n/a')} vs {item.get('right_claim_id', 'n/a')} "
+            f"[{item.get('conflict_kind', 'n/a')}] score={item.get('score', 'n/a')} "
+            f"tokens={item.get('shared_token_count', 0)}"
+        )
     return "\n".join(lines)
 
 
@@ -1612,6 +1727,29 @@ def main() -> int:
                     host=args.host,
                     port=args.port,
                 )
+            elif args.literature_status:
+                response = send_command("literature_status", host=args.host, port=args.port)
+            elif args.list_paper_artifacts:
+                response = send_command(
+                    "list_paper_artifacts",
+                    payload={"limit": args.max_results},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.paper_artifact:
+                response = send_command(
+                    "paper_artifact",
+                    payload={"paper_id": args.paper_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.literature_conflicts:
+                response = send_command(
+                    "literature_conflicts",
+                    payload={"paper_id": args.paper_id, "limit": args.max_results},
+                    host=args.host,
+                    port=args.port,
+                )
             elif args.list_experiment_backends:
                 response = send_command("list_experiment_backends", host=args.host, port=args.port)
             elif args.experiment_backend_runtime_status:
@@ -1800,6 +1938,14 @@ def main() -> int:
             print(_render_operator_serving_status(payload))
         elif args.experiment_backend_runtime_status:
             print(_render_experiment_backend_runtime_status(payload))
+        elif args.literature_status:
+            print(_render_literature_status(payload))
+        elif args.list_paper_artifacts:
+            print(_render_paper_artifact_list(payload))
+        elif args.paper_artifact:
+            print(_render_paper_artifact(payload))
+        elif args.literature_conflicts:
+            print(_render_literature_conflicts(payload))
         elif args.create_project or args.project_status or args.pause_project or args.resume_project:
             print(_render_project_status(payload))
         elif args.list_projects:
@@ -1849,7 +1995,7 @@ def main() -> int:
             print(_render_regime(payload))
         elif args.ingest_research:
             print(f"Ingested {payload.get('indexed', 0)} research documents for topic: {payload.get('topic', '')}")
-        elif args.verify_last_trial or args.breakthrough_report or args.resolve_problem or args.prepare_science_env or args.study_problem or args.run_problem_study or args.schedule_problem_study or args.scheduler_status or args.run_scheduler_once or args.frontier_status or args.runtime_status or args.list_benchmarks or args.benchmark_status or args.prepare_payload_env or args.rebuild_locked_image or args.show_manifest or args.ingest_papers or args.list_experiment_backends or args.experiment_backend_runtime_status or args.run_runtime_cycle or args.list_alerts or args.retry_failed_job or args.cancel_job or args.sandbox_policy or args.register_checkpoint or args.list_checkpoints or args.build_inference_endpoint or args.list_endpoints or args.start_endpoint or args.stop_endpoint or args.restart_endpoint or args.endpoint_health or args.assign_role or args.select_operator_checkpoint or args.operator_serving_status or args.claim_policy or args.claim_verdict or args.research_decision_log:
+        elif args.verify_last_trial or args.breakthrough_report or args.resolve_problem or args.prepare_science_env or args.study_problem or args.run_problem_study or args.schedule_problem_study or args.scheduler_status or args.run_scheduler_once or args.frontier_status or args.runtime_status or args.list_benchmarks or args.benchmark_status or args.prepare_payload_env or args.rebuild_locked_image or args.show_manifest or args.ingest_papers or args.literature_status or args.list_paper_artifacts or args.paper_artifact or args.literature_conflicts or args.list_experiment_backends or args.experiment_backend_runtime_status or args.run_runtime_cycle or args.list_alerts or args.retry_failed_job or args.cancel_job or args.sandbox_policy or args.register_checkpoint or args.list_checkpoints or args.build_inference_endpoint or args.list_endpoints or args.start_endpoint or args.stop_endpoint or args.restart_endpoint or args.endpoint_health or args.assign_role or args.select_operator_checkpoint or args.operator_serving_status or args.claim_policy or args.claim_verdict or args.research_decision_log:
             print(json.dumps(payload, indent=2))
         else:
             print(json.dumps(payload, indent=2))

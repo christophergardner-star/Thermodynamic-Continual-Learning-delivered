@@ -235,6 +235,12 @@ Execution posture:
 
 ### `WS32`: Literature Engine Deepening
 
+Status:
+
+- completed
+- closeout:
+  [ws32_closeout.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws32_closeout.md)
+
 Purpose:
 
 - upgrade literature ingestion from section-and-claim extraction toward
@@ -242,10 +248,11 @@ Purpose:
 
 Core deliverables:
 
-- better table parsing
-- figure extraction
-- OCR fallback
+- stable content-derived paper identity
+- ingest manifests and repeat-ingest history
+- richer table and figure metadata
 - stronger claim typing and claim-to-source linkage
+- operator-visible literature artifact and conflict inspection
 
 Why it matters:
 
@@ -257,28 +264,84 @@ Execution posture:
 - laptop-first
 - pod generally not required
 
+### `WS32.5`: Loop Closure
+
+Status:
+
+- completed
+- closeout:
+  [ws32_5_closeout.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws32_5_closeout.md)
+
+Purpose:
+
+- close the remaining loop boundaries between literature, planning, operator
+  serving, and evidence-debt enforcement
+
+Core deliverables:
+
+- literature signal into Director policy
+- serving-state fallback into live hierarchy role resolution
+- evidence debt as a hard scheduling invariant
+
+Why it matters:
+
+- without loop closure, stronger retrieval and stronger runtime automation
+  would deepen disconnected components rather than a real autonomous research
+  loop
+
+Execution posture:
+
+- laptop-first
+- no pod required
+
 ### `WS33`: Scientific Retrieval And Claim Graph
 
 Purpose:
 
-- make retrieval evidence-aware, contradiction-aware, and claim-graph aware
+- make retrieval evidence-aware, contradiction-aware, and claim-graph aware on
+  top of the now-closed planning loop
 
 Core deliverables:
 
-- stronger default local embedder path
-- reranking
-- claim-memory retrieval with contradiction surfacing
-- source-confidence and uncertainty-aware retrieval logic
+- contradiction-aware retrieval scoring
+- claim-graph indexing
+- source-confidence weighting
+- evidence-budgeted retrieval feedback into evidence debt
+- no silent lexical downgrade for literature-grounded study work
 
 Why it matters:
 
-- literature ingestion without stronger retrieval leaves too much value trapped
-  in storage
+- retrieval deepening is only behavior-changing once literature can actually
+  influence planning and evidence gating
 
 Execution posture:
 
 - laptop-first
 - pod only for large-index experiments or heavy embedder comparisons
+
+### `WS34-pre`: Claim Verdict Lifecycle
+
+Purpose:
+
+- add aging and escalation logic for unresolved claim verdict states before the
+  runtime becomes more autonomous
+
+Core deliverables:
+
+- review deadlines on unresolved claim verdicts
+- staleness checks for aged provisional / insufficient-evidence states
+- scheduled escalation from unresolved verdicts into explicit falsification
+  pressure
+
+Why it matters:
+
+- durable runtime automation should not operate indefinitely against stale
+  unresolved claim states
+
+Execution posture:
+
+- laptop-first
+- no pod required
 
 ### `WS34`: Durable Lab Runtime
 
@@ -290,6 +353,7 @@ Core deliverables:
 
 - lease-based workers
 - orphan-run recovery
+- explicit recoverable-crash state
 - retry / backoff policies
 - clearer daemon and queue health surfaces
 
@@ -312,8 +376,10 @@ Purpose:
 
 Core deliverables:
 
+- universal sandbox-policy enforcement
 - read-only workspace policies where appropriate
 - capability drops
+- seccomp tightening
 - stronger container policy defaults
 - clearer security audit surfaces for autonomous execution
 
@@ -331,23 +397,35 @@ Execution posture:
 The recommended professional order is:
 
 1. `WS32`
-2. `WS33`
-3. `WS34`
-4. `WS35`
+2. `WS32.5`
+3. `WS33`
+4. `WS34-pre`
+5. `WS34`
+6. independent eval validation pass
+7. `WS35`
 
 ## Why This Order Is Correct
 
-`WS32` and `WS33` after that:
+`WS32` first:
 
-- literature and retrieval deepening matter most once execution and benchmark
-  loops can feed into them cleanly
-- `WS31` closed the benchmark-truth gap, so the next weak link is evidence
-  fidelity rather than benchmark identity
+- TAR needed stronger literature fidelity and retrieval telemetry before
+  retrieval and planning could safely consume literature state
 
-`WS34` and `WS35` last in this phase:
+`WS32.5` before `WS33`:
 
-- they are essential, but they build on the earlier Phase 4 integration work
-  rather than replacing it
+- better retrieval without loop closure would still leave planning disconnected
+- evidence debt had to become a hard scheduling gate before more durable
+  runtime autonomy was justified
+
+`WS33` after loop closure:
+
+- retrieval and claim-graph deepening now changes behavior instead of just
+  storage quality
+
+`WS34-pre`, `WS34`, and `WS35` last:
+
+- those workstreams harden autonomy and runtime behavior
+- they should follow, not precede, the integrity and loop-closure invariants
 
 ## Pod Hiring Policy
 
@@ -359,6 +437,7 @@ Pod/GPU time in Phase 4 should stay narrow and explicit.
 - docs-only closeouts
 - serving/config plumbing that can be tested locally
 - literature parsing logic
+- loop-closure wiring
 - retrieval logic
 - manifest or schema work
 
@@ -369,23 +448,27 @@ Pod/GPU time in Phase 4 should stay narrow and explicit.
 - benchmark execution at scale
 - locked-image execution validation
 - large-index or large-checkpoint inference comparisons
+- durable-runtime recovery validation
+- realistic sandbox-hardening validation
 
 ### Earliest justified pod point in Phase 4
 
 The first clearly justified remaining Phase 4 pod point is:
 
 - workload-specific and no longer immediate
-- none of `WS32` or the early `WS33` slices require a pod by default
+- neither `WS32`, `WS32.5`, `WS33`, nor `WS34-pre` require a pod by default
+- `WS34` and `WS35` are the first likely pod-backed validation points
 
 ## Immediate Next Step
 
 The next logical workstream is:
 
-- `WS32: Literature Engine Deepening`
+- `WS33: Scientific Retrieval And Claim Graph`
 
-It should start locally.
+It should start locally on top of the closed `WS32` and `WS32.5` foundation.
 
 The immediate engineering goal is:
 
-- deepen literature ingestion from section-and-claim extraction toward
-  provenance-preserving paper understanding
+- move contradiction handling and source confidence into retrieval scoring
+- promote claim/conflict structures into first-class retrieval objects
+- feed contradiction-heavy retrieval back into evidence-debt computation

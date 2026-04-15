@@ -230,6 +230,17 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
             payload = orchestrator.ingest_papers(
                 [str(item) for item in request.payload.get("paths", [])]
             ).model_dump(mode="json")
+        elif request.command == "literature_status":
+            payload = orchestrator.literature_status()
+        elif request.command == "list_paper_artifacts":
+            payload = orchestrator.list_paper_artifacts(limit=int(request.payload.get("limit", 20)))
+        elif request.command == "paper_artifact":
+            payload = orchestrator.paper_artifact(str(request.payload.get("paper_id", "")))
+        elif request.command == "literature_conflicts":
+            payload = orchestrator.literature_conflicts(
+                paper_id=request.payload.get("paper_id"),
+                limit=int(request.payload.get("limit", 20)),
+            )
         elif request.command == "list_experiment_backends":
             payload = {"backends": orchestrator.list_experiment_backends()}
         elif request.command == "experiment_backend_runtime_status":
