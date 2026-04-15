@@ -2290,6 +2290,26 @@ def _quantum_runtime_reason(runtime: dict[str, Any], template_id: str) -> str:
     return str(runtime.get("reason") or "Quantum backend unavailable.")
 
 
+def _quantum_seed_schedule(experiment: dict[str, Any]) -> list[int]:
+    tier = str(experiment.get("benchmark_tier", "validation"))
+    minimum = 5 if tier == "canonical" else 3 if tier == "validation" else 1
+    raw = experiment.get("parameter_grid", {}).get("seed", [])
+    seeds = [int(item) for item in raw] if isinstance(raw, list) else []
+    if not seeds:
+        seeds = [7]
+    defaults = [7, 18, 29, 41, 53]
+    for seed in defaults:
+        if len(seeds) >= minimum:
+            break
+        if seed not in seeds:
+            seeds.append(seed)
+    deduped: list[int] = []
+    for seed in seeds:
+        if seed not in deduped:
+            deduped.append(seed)
+    return deduped
+
+
 def _run_quantum_with_pennylane(
     qml: Any,
     pnp: Any,
@@ -2300,15 +2320,33 @@ def _run_quantum_with_pennylane(
         depths = [int(x) for x in grid.get("ansatz_depth", [2, 4, 8])]
         qubits = [int(x) for x in grid.get("qubits", [4])]
         init_scale = float(grid.get("init_scale", [0.05])[0] if isinstance(grid.get("init_scale", [0.05]), list) else grid.get("init_scale", 0.05))
-        seeds = [int(x) for x in grid.get("seed", [7, 18])]
+        seeds = _quantum_seed_schedule(experiment)
         pairs: list[tuple[int, float]] = []
+        per_seed_pairs: dict[int, list[tuple[int, float]]] = {seed: [] for seed in seeds}
         for depth in depths:
             variances = []
+            per_seed_depth: dict[int, list[float]] = {seed: [] for seed in seeds}
             for qubit_count in qubits:
-                variances.append(_estimate_gradient_variance(qml, pnp, qubit_count, depth, init_scale=init_scale, seeds=seeds))
+                seed_variances = _estimate_gradient_variance_samples(
+                    qml,
+                    pnp,
+                    qubit_count,
+                    depth,
+                    init_scale=init_scale,
+                    seeds=seeds,
+                )
+                variances.append(statistics.mean(seed_variances))
+                for seed, value in zip(seeds, seed_variances):
+                    per_seed_depth[seed].append(value)
             pairs.append((depth, statistics.mean(variances)))
+            for seed in seeds:
+                per_seed_pairs[seed].append((depth, statistics.mean(per_seed_depth[seed])))
         slope = _log_slope(pairs)
         trainability_gap = pairs[0][1] / max(pairs[-1][1], 1e-12)
+        seed_gaps = [
+            seed_pairs[0][1] / max(seed_pairs[-1][1], 1e-12)
+            for seed_pairs in per_seed_pairs.values()
+        ]
         return (
             {
                 "gradient_norm_variance": round(statistics.mean(value for _, value in pairs), 6),
@@ -2316,42 +2354,67 @@ def _run_quantum_with_pennylane(
                 "trainability_gap": round(trainability_gap, 6),
             },
             f"backend=pennylane:default.qubit qubits={qubits} ansatz_depth={depths} init_scale={init_scale} seeds={seeds}.",
+            {
+                "sample_count": len(seed_gaps),
+                "primary_metric": "trainability_gap",
+                "std_dev": statistics.pstdev(seed_gaps) if len(seed_gaps) > 1 else 0.0,
+            },
         )
 
     if experiment["template_id"] == "initialization_variance":
         init_scales = [float(x) for x in grid.get("init_scale", [0.01, 0.05, 0.1])]
-        seeds = [int(x) for x in grid.get("seed", [7, 18, 29])]
+        seeds = _quantum_seed_schedule(experiment)
         qubits = int(grid.get("qubits", [4])[0] if isinstance(grid.get("qubits", [4]), list) else grid.get("qubits", 4))
         depth = int(grid.get("ansatz_depth", [4])[0] if isinstance(grid.get("ansatz_depth", [4]), list) else grid.get("ansatz_depth", 4))
-        values = [
-            _estimate_gradient_variance(qml, pnp, qubits, depth, init_scale=scale, seeds=seeds)
-            for scale in init_scales
-        ]
+        values = []
+        per_seed_values: dict[int, list[float]] = {seed: [] for seed in seeds}
+        for scale in init_scales:
+            seed_values = _estimate_gradient_variance_samples(
+                qml,
+                pnp,
+                qubits,
+                depth,
+                init_scale=scale,
+                seeds=seeds,
+            )
+            values.append(statistics.mean(seed_values))
+            for seed, value in zip(seeds, seed_values):
+                per_seed_values[seed].append(value)
+        seed_means = [statistics.mean(values_for_seed) for values_for_seed in per_seed_values.values()]
         return (
             {
                 "gradient_norm_variance": round(statistics.mean(values), 6),
                 "seed_variance": round(statistics.pstdev(values), 6),
             },
             f"backend=pennylane:default.qubit qubits={qubits} ansatz_depth={depth} init_scale={init_scales} seeds={seeds}.",
+            {
+                "sample_count": len(seed_means),
+                "primary_metric": "gradient_norm_variance",
+                "std_dev": statistics.pstdev(seed_means) if len(seed_means) > 1 else 0.0,
+            },
         )
 
     proxy_metrics, proxy_notes, proxy_stats = _run_quantum_proxy(experiment)
     return proxy_metrics, f"backend=analytic_proxy. {' '.join(proxy_notes)}", proxy_stats
 
 
-def _run_quantum_noise_with_pennylane(qml: Any, experiment: dict[str, Any]) -> tuple[dict[str, float], str]:
+def _run_quantum_noise_with_pennylane(
+    qml: Any,
+    experiment: dict[str, Any],
+) -> tuple[dict[str, float], str] | tuple[dict[str, float], str, dict[str, Any]]:
     grid = experiment.get("parameter_grid", {})
     shots = [int(x) for x in grid.get("shots", [128, 512])]
     noise_levels = [float(x) for x in grid.get("noise_level", [0.0, 0.01, 0.05])]
     qubits = int(grid.get("qubits", [3])[0] if isinstance(grid.get("qubits", [3]), list) else grid.get("qubits", 3))
     depth = int(grid.get("ansatz_depth", [3])[0] if isinstance(grid.get("ansatz_depth", [3]), list) else grid.get("ansatz_depth", 3))
     init_scale = float(grid.get("init_scale", [0.05])[0] if isinstance(grid.get("init_scale", [0.05]), list) else grid.get("init_scale", 0.05))
-    seeds = [int(x) for x in grid.get("seed", [7, 18])]
+    seeds = _quantum_seed_schedule(experiment)
 
     config_variances: list[tuple[int, float, float]] = []
+    per_seed_config_variances: dict[int, list[tuple[int, float, float]]] = {seed: [] for seed in seeds}
     for shot in shots:
         for noise_level in noise_levels:
-            variance = _estimate_noisy_gradient_variance(
+            seed_variances = _estimate_noisy_gradient_variance_samples(
                 qml,
                 qubits=qubits,
                 depth=depth,
@@ -2360,12 +2423,21 @@ def _run_quantum_noise_with_pennylane(qml: Any, experiment: dict[str, Any]) -> t
                 shots=shot,
                 noise_level=noise_level,
             )
+            variance = statistics.mean(seed_variances)
             config_variances.append((shot, noise_level, variance))
+            for seed, seed_value in zip(seeds, seed_variances):
+                per_seed_config_variances[seed].append((shot, noise_level, seed_value))
 
     baseline_candidates = [value for shot, noise, value in config_variances if shot == max(shots) and noise == min(noise_levels)]
     baseline = max(max(baseline_candidates, default=0.0), 1e-12)
     normalized = [min(1.0, max(0.0, value / baseline)) for _, _, value in config_variances]
     min_variance = min(value for _, _, value in config_variances)
+    seed_primary_values: list[float] = []
+    for configs in per_seed_config_variances.values():
+        seed_baseline_candidates = [value for shot, noise, value in configs if shot == max(shots) and noise == min(noise_levels)]
+        seed_baseline = max(max(seed_baseline_candidates, default=0.0), 1e-12)
+        seed_normalized = [min(1.0, max(0.0, value / seed_baseline)) for _, _, value in configs]
+        seed_primary_values.append(statistics.mean(seed_normalized))
     return (
         {
             "shot_noise_robustness": round(statistics.mean(normalized), 6),
@@ -2377,10 +2449,34 @@ def _run_quantum_noise_with_pennylane(qml: Any, experiment: dict[str, Any]) -> t
             f"qubits={qubits} ansatz_depth={depth} init_scale={init_scale} "
             f"shots={shots} noise_level={noise_levels} seeds={seeds}."
         ),
+        {
+            "sample_count": len(seed_primary_values),
+            "primary_metric": "shot_noise_robustness",
+            "std_dev": statistics.pstdev(seed_primary_values) if len(seed_primary_values) > 1 else 0.0,
+        },
     )
 
 
 def _estimate_gradient_variance(qml: Any, pnp: Any, qubits: int, depth: int, init_scale: float, seeds: List[int]) -> float:
+    gradient_values = _estimate_gradient_variance_samples(
+        qml,
+        pnp,
+        qubits,
+        depth,
+        init_scale=init_scale,
+        seeds=seeds,
+    )
+    return max(1e-12, statistics.mean(gradient_values))
+
+
+def _estimate_gradient_variance_samples(
+    qml: Any,
+    pnp: Any,
+    qubits: int,
+    depth: int,
+    init_scale: float,
+    seeds: List[int],
+) -> list[float]:
     gradient_values: list[float] = []
     for seed in seeds:
         rng = np.random.default_rng(seed)
@@ -2405,7 +2501,7 @@ def _estimate_gradient_variance(qml: Any, pnp: Any, qubits: int, depth: int, ini
         grads = qml.grad(cost)(weights)
         flat = np.asarray(grads).reshape(-1)
         gradient_values.append(float(np.var(flat)))
-    return max(1e-12, statistics.mean(gradient_values))
+    return [max(1e-12, value) for value in gradient_values]
 
 
 def _estimate_noisy_gradient_variance(
@@ -2418,6 +2514,28 @@ def _estimate_noisy_gradient_variance(
     shots: int,
     noise_level: float,
 ) -> float:
+    gradient_values = _estimate_noisy_gradient_variance_samples(
+        qml,
+        qubits=qubits,
+        depth=depth,
+        init_scale=init_scale,
+        seeds=seeds,
+        shots=shots,
+        noise_level=noise_level,
+    )
+    return max(1e-12, statistics.mean(gradient_values))
+
+
+def _estimate_noisy_gradient_variance_samples(
+    qml: Any,
+    *,
+    qubits: int,
+    depth: int,
+    init_scale: float,
+    seeds: List[int],
+    shots: int,
+    noise_level: float,
+) -> list[float]:
     dev = qml.device("default.mixed", wires=qubits, shots=shots)
 
     @qml.qnode(dev)
@@ -2454,7 +2572,7 @@ def _estimate_noisy_gradient_variance(
                 minus[layer, wire] -= epsilon
                 grads.append((evaluate(plus) - evaluate(minus)) / (2.0 * epsilon))
         gradient_values.append(float(np.var(np.asarray(grads, dtype=np.float64))))
-    return max(1e-12, statistics.mean(gradient_values))
+    return [max(1e-12, value) for value in gradient_values]
 
 
 def _softmax(logits: np.ndarray) -> np.ndarray:

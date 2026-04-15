@@ -1,0 +1,95 @@
+{
+  "pack_id": "ws31-validation-pack-v1",
+  "phase": "phase4",
+  "workstream": "WS31",
+  "frozen_at_commit": "42181db",
+  "execution_mode": "local_only",
+  "rationale": "First bounded WS31 pack. Validation-tier only, non-proxy, statistically ready benchmark suites selected under the three-profile cap.",
+  "hard_limits": {
+    "max_profiles": 3,
+    "max_benchmark_suites": 6,
+    "max_experiment_cells": 18,
+    "max_tiers": 2,
+    "target_wall_time_hours": 6.0
+  },
+  "suites": [
+    {
+      "profile_id": "generic_ml",
+      "benchmark_family": "cross_validation",
+      "benchmark_id": "breast_cancer_validation",
+      "tier": "validation",
+      "template_id": "baseline_sweep",
+      "primary_metric": "accuracy",
+      "required_seed_runs": 3,
+      "proxy_allowed": false,
+      "canonical_comparable": false,
+      "expected_benchmark_alignment": "aligned",
+      "expected_proxy_benchmark_used": false,
+      "expected_statistically_ready": true,
+      "local_observed_elapsed_s": 3.112
+    },
+    {
+      "profile_id": "computer_vision",
+      "benchmark_family": "transfer_comparison",
+      "benchmark_id": "digits_transfer_validation",
+      "tier": "validation",
+      "template_id": "backbone_transfer",
+      "primary_metric": "top1_accuracy",
+      "required_seed_runs": 3,
+      "proxy_allowed": false,
+      "canonical_comparable": false,
+      "expected_benchmark_alignment": "aligned",
+      "expected_proxy_benchmark_used": false,
+      "expected_statistically_ready": true,
+      "local_observed_elapsed_s": 1.751
+    },
+    {
+      "profile_id": "reinforcement_learning",
+      "benchmark_family": "exploration_sweep",
+      "benchmark_id": "cartpole_exploration_validation",
+      "tier": "validation",
+      "template_id": "exploration_ablation",
+      "primary_metric": "episodic_return",
+      "required_seed_runs": 3,
+      "proxy_allowed": false,
+      "canonical_comparable": false,
+      "expected_benchmark_alignment": "aligned",
+      "expected_proxy_benchmark_used": false,
+      "expected_statistically_ready": true,
+      "local_observed_elapsed_s": 0.413
+    }
+  ],
+  "reserve_candidates": [
+    {
+      "profile_id": "graph_ml",
+      "benchmark_family": "heterophily_control",
+      "benchmark_id": "karate_heterophily_validation",
+      "tier": "validation",
+      "template_id": "heterophily_ablation",
+      "primary_metric": "node_accuracy",
+      "required_seed_runs": 3,
+      "local_observed_elapsed_s": 2.964,
+      "note": "Viable reserve suite; excluded only to preserve the three-profile cap."
+    }
+  ],
+  "local_runtime_assessment": {
+    "observed_single_pass_elapsed_s": 5.276,
+    "linear_18_cell_upper_bound_s": 31.656,
+    "pod_trigger_exceeds_90_minutes": false,
+    "pod_trigger_requires_unstable_local_runtime": false,
+    "pod_justified_now": false
+  },
+  "required_outputs": [
+    "frozen benchmark-pack manifest",
+    "per-benchmark run manifest",
+    "per-experiment statistical summaries",
+    "execution-level aggregate statistical summaries",
+    "artifact bundle copied back locally"
+  ],
+  "stop_rules": [
+    "abort if more than 20% of experiment cells fail structurally",
+    "abort if any suite falls back to proxy mode",
+    "abort if any suite misses its required seed count",
+    "abort if CI reporting is missing for a suite that claims readiness"
+  ]
+}

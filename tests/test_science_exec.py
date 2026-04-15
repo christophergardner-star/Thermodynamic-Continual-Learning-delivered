@@ -196,6 +196,74 @@ def test_qml_canonical_depth_and_init_use_real_backend_when_available(monkeypatc
     assert all(item.execution_mode != "analytic_proxy" for item in report.experiments)
 
 
+def test_qml_canonical_statistical_summary_can_be_ready_with_five_seed_evidence(monkeypatch, tmp_path: Path):
+    registry = ScienceProfileRegistry(str(REPO_ROOT))
+    profile = registry.get("quantum_ml")
+    spec = registry.resolve_benchmark_suite(profile, "depth_trainability_curve", tier="canonical")
+    availability = registry.benchmark_availability(spec)
+
+    monkeypatch.setattr(
+        science_exec,
+        "_load_quantum_runtime",
+        lambda: {
+            "qml": object(),
+            "pnp": object(),
+            "pennylane_ready": True,
+            "noise_ready": True,
+            "reason": "ready",
+            "noise_reason": "ready",
+        },
+    )
+    monkeypatch.setattr(
+        science_exec,
+        "_run_quantum_with_pennylane",
+        lambda qml, pnp, experiment: (
+            {"gradient_norm_variance": 0.22, "barren_plateau_slope": -0.09, "trainability_gap": 1.95},
+            "backend=pennylane:default.qubit qubits=[4] ansatz_depth=[2, 4, 8] init_scale=0.05 seeds=[7, 18, 29, 41, 53].",
+            {"sample_count": 5, "primary_metric": "trainability_gap", "std_dev": 0.08},
+        ),
+    )
+
+    payload = {
+        "problem_id": "qml-canonical-stats-ready",
+        "problem": "Validate canonical QML statistical readiness",
+        "profile_id": profile.profile_id,
+        "domain": profile.domain,
+        "benchmark_tier": "canonical",
+        "requested_benchmark": spec.benchmark_id,
+        "canonical_only": True,
+        "no_proxy_benchmarks": True,
+        "environment": {"validation_imports": []},
+        "benchmark_availability": [availability.model_dump(mode="json")],
+        "experiments": [
+            {
+                "template_id": "ansatz_depth_sweep",
+                "name": "Ansatz Depth Sweep",
+                "benchmark": "depth_trainability_curve",
+                "benchmark_tier": "canonical",
+                "benchmark_spec": spec.model_dump(mode="json"),
+                "benchmark_availability": availability.model_dump(mode="json"),
+                "metrics": ["gradient_norm_variance", "barren_plateau_slope", "trainability_gap"],
+                "parameter_grid": {"seed": [7, 18, 29, 41, 53]},
+                "success_criteria": [],
+            }
+        ],
+    }
+
+    report = execute_study_payload(payload, tmp_path / "qml_canonical_stats_ready.json")
+    assert report.status == "completed"
+    assert report.canonical_comparable
+    assert report.benchmark_statistical_summary is not None
+    assert report.benchmark_statistical_summary.statistically_ready
+    summary = report.experiments[0].statistical_summary
+    assert summary is not None
+    assert summary.statistically_ready
+    assert summary.sample_count == 5
+    assert summary.primary_metric == "trainability_gap"
+    assert summary.metrics[0].ci95_low is not None
+    assert summary.metrics[0].ci95_high is not None
+
+
 def test_qml_noise_validation_uses_real_backend_when_available(monkeypatch, tmp_path: Path):
     registry = ScienceProfileRegistry(str(REPO_ROOT))
     profile = registry.get("quantum_ml")
