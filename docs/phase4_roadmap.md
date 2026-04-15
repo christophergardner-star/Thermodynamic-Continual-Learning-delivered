@@ -216,6 +216,9 @@ Execution posture:
 - mixed
 - local for harness design and reporting
 - pod for real benchmark execution at scale
+- bounded pod use only after
+  [ws31_benchmark_scale_criteria.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws31_benchmark_scale_criteria.md)
+  is satisfied
 
 ### `WS32`: Literature Engine Deepening
 
