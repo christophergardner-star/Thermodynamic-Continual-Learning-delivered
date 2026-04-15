@@ -651,6 +651,7 @@ class VectorVault:
                 score=round(score, 6),
                 document=item.document,
                 metadata=dict(item.metadata),
+                source_confidence=self.reranker._source_confidence(item.metadata),
             )
             for score, item in scored[:n_results]
         ]
@@ -895,6 +896,7 @@ class VectorVault:
         annotated: list[MemorySearchHit] = []
         for hit in hits:
             metadata = dict(hit.metadata)
+            contradiction_surfaced = False
             if metadata.get("kind") == "paper_claim":
                 claim_id = str(metadata.get("claim_id", ""))
                 cluster = claim_to_cluster.get(claim_id)
@@ -904,6 +906,7 @@ class VectorVault:
                     related_conflicts = claim_to_conflicts.get(claim_id, [])
                     if related_conflicts:
                         metadata["contradictory_claims"] = [item.model_dump(mode="json") for item in related_conflicts]
+                        contradiction_surfaced = True
                 metadata["evidence_trace"] = self._build_evidence_trace(hit.model_copy(update={"metadata": metadata})).model_dump(mode="json")
             elif metadata.get("kind") == "claim_cluster":
                 cluster_id = str(metadata.get("cluster_id", ""))
@@ -914,6 +917,7 @@ class VectorVault:
                         for left, right in cluster.contradiction_pairs[:3]
                     ]
                     metadata["contradiction_count"] = len(cluster.contradiction_pairs)
+                    contradiction_surfaced = len(cluster.contradiction_pairs) > 0
                 metadata["evidence_trace"] = self._build_evidence_trace(hit.model_copy(update={"metadata": metadata})).model_dump(mode="json")
             elif metadata.get("kind") == "claim_conflict":
                 metadata["contradictory_claims"] = [
@@ -924,7 +928,16 @@ class VectorVault:
                     }
                 ]
                 metadata["evidence_trace"] = self._build_evidence_trace(hit.model_copy(update={"metadata": metadata})).model_dump(mode="json")
-            annotated.append(hit.model_copy(update={"metadata": metadata}))
+                contradiction_surfaced = True
+            annotated.append(
+                hit.model_copy(
+                    update={
+                        "metadata": metadata,
+                        "source_confidence": self.reranker._source_confidence(metadata),
+                        "contradiction_surfaced": contradiction_surfaced,
+                    }
+                )
+            )
         return annotated
 
     def build_evidence_traces(self, hits: list[MemorySearchHit]) -> list[EvidenceTrace]:

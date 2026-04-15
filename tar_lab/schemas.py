@@ -441,6 +441,8 @@ class MemorySearchHit(StrictModel):
     score: float
     document: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    source_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    contradiction_surfaced: bool = False
 
 
 class ResearchDocument(StrictModel):
@@ -661,13 +663,15 @@ class ProblemStudyReport(StrictModel):
     cited_research_ids: List[str] = Field(default_factory=list)
     retrieved_memory_ids: List[str] = Field(default_factory=list)
     retrieval_mode: Literal["semantic", "lexical_fallback"] = "lexical_fallback"
+    retrieval_conflict_count: int = Field(default=0, ge=0)
     evidence_bundle: Optional[EvidenceBundle] = None
     hypotheses: List[HypothesisRecord] = Field(default_factory=list)
     contradiction_review: Optional[ContradictionReview] = None
     experiments: List[ProblemExperimentPlan] = Field(default_factory=list)
     environment: ScienceEnvironmentBundle
     next_action: str
-    status: Literal["planned", "environment_ready", "build_failed"] = "planned"
+    notes: List[str] = Field(default_factory=list)
+    status: Literal["planned", "environment_ready", "build_failed", "retrieval_degraded"] = "planned"
 
 
 class ProblemExperimentResult(StrictModel):

@@ -1229,6 +1229,21 @@ class TAROrchestrator:
             "details": details or {},
         }
 
+    def _retrieval_mode_summary(self, *, limit: int = 20) -> dict[str, Any]:
+        studies = list(self.store.iter_problem_studies())[-max(1, limit):]
+        breakdown = {"semantic": 0, "lexical_fallback": 0}
+        degraded = 0
+        for study in studies:
+            mode = study.retrieval_mode
+            breakdown[mode] = breakdown.get(mode, 0) + 1
+            if study.status == "retrieval_degraded":
+                degraded += 1
+        return {
+            "window": len(studies),
+            "retrieval_mode_breakdown": breakdown,
+            "degraded_retrieval_studies": degraded,
+        }
+
     def operator_view(self, *, include_blocked: bool = True, limit: int = 5, mode: str = "balanced") -> dict[str, Any]:
         portfolio, priorities, evidence_debts, stale_records = self._evaluate_portfolio(
             include_blocked=include_blocked,
@@ -1242,6 +1257,7 @@ class TAROrchestrator:
             persist=False,
         )
         promotion_blocked = [item.model_dump(mode="json") for item in evidence_debts if item.promotion_blocked][: max(1, limit)]
+        retrieval_summary = self._retrieval_mode_summary(limit=20)
         return {
             "generated_at": self._project_now(),
             "project_counts": {
@@ -1273,6 +1289,9 @@ class TAROrchestrator:
                 if item.resume_candidate
             ][: max(1, limit)],
             "promotion_blocked_projects": promotion_blocked,
+            "retrieval_mode_breakdown": retrieval_summary["retrieval_mode_breakdown"],
+            "degraded_retrieval_studies": retrieval_summary["degraded_retrieval_studies"],
+            "recent_study_window": retrieval_summary["window"],
             "latest_portfolio_decision": self.store.latest_portfolio_decision().model_dump(mode="json")
             if self.store.latest_portfolio_decision()
             else None,
@@ -2651,6 +2670,54 @@ class TAROrchestrator:
             return 0.0
         return 0.5
 
+    def _retrieval_conflict_hits(self, memory_hits: list[MemorySearchHit]) -> list[MemorySearchHit]:
+        conflict_hits: list[MemorySearchHit] = []
+        for hit in memory_hits:
+            metadata = hit.metadata or {}
+            kind = str(metadata.get("kind", ""))
+            contradiction_count = 0
+            for key in ("contradiction_count", "contradiction_pair_count", "conflict_count"):
+                value = metadata.get(key)
+                try:
+                    contradiction_count = max(contradiction_count, int(value))
+                except (TypeError, ValueError):
+                    continue
+            if kind == "claim_conflict":
+                conflict_hits.append(hit)
+                continue
+            if kind == "claim_cluster" and contradiction_count > 0:
+                conflict_hits.append(hit)
+                continue
+            contradictory_claims = metadata.get("contradictory_claims")
+            if isinstance(contradictory_claims, list) and contradictory_claims:
+                conflict_hits.append(hit)
+        return conflict_hits
+
+    def _update_evidence_debt_from_retrieval(
+        self,
+        project_id: str,
+        conflict_hits: list[MemorySearchHit],
+    ) -> Optional[EvidenceDebtRecord]:
+        if not conflict_hits:
+            return None
+        project = self.store.get_research_project(project_id)
+        if project is None:
+            return None
+        record = self._compute_evidence_debt(project)
+        self.store.append_evidence_debt_record(record)
+        self.store.append_audit_event(
+            "research_evidence",
+            "retrieval_conflict_pressure",
+            {
+                "project_id": project_id,
+                "conflict_hits": len(conflict_hits),
+                "falsification_gap": record.falsification_gap,
+                "overall_debt": record.overall_debt,
+                "promotion_blocked": record.promotion_blocked,
+            },
+        )
+        return record
+
     def _compute_evidence_debt(self, project: ResearchProject) -> EvidenceDebtRecord:
         thread = self._project_thread(project)
         latest_study = self._latest_project_study(project.project_id)
@@ -2682,6 +2749,12 @@ class TAROrchestrator:
                 rationale.append("falsification coverage remains incomplete")
             else:
                 falsification_gap = 0.1
+        retrieval_conflict_count = latest_study.retrieval_conflict_count if latest_study is not None else 0
+        if retrieval_conflict_count > 0:
+            falsification_gap = min(1.0, falsification_gap + min(0.5, 0.1 * retrieval_conflict_count))
+            rationale.append(
+                f"retrieval surfaced {retrieval_conflict_count} contradiction-bearing evidence hit(s); falsification pressure increased"
+            )
 
         replication_gap = 0.0
         if thread is not None and thread.confidence_state in {"provisional", "supported"}:
@@ -3860,12 +3933,21 @@ class TAROrchestrator:
         research = self.ingest_research(topic=problem, max_results=max_results)
         self._sync_memory()
         retrieval_mode: str = "lexical_fallback"
+        retrieval_degraded = False
+        retrieval_note: Optional[str] = None
         try:
-            memory_hits = self.vault.search(problem, n_results=5, require_research_grade=True) if self.vault is not None else []
             if self.vault is not None:
+                memory_hits = self.vault.search(problem, n_results=5, require_research_grade=True)
                 retrieval_mode = "semantic"
+            else:
+                retrieval_degraded = True
+                retrieval_note = "Retrieval degraded to lexical fallback. Semantic search unavailable."
+                memory_hits = []
         except Exception:
+            retrieval_degraded = True
+            retrieval_note = "Retrieval degraded to lexical fallback. Semantic search unavailable."
             memory_hits = self.vault.search(problem, n_results=5) if self.vault is not None else []
+        conflict_hits = self._retrieval_conflict_hits(memory_hits)
         evidence_bundle = build_evidence_bundle(problem, memory_hits)
         bundle = self.problem_engine.prepare_environment(
             problem,
@@ -3906,10 +3988,14 @@ class TAROrchestrator:
                 "hypotheses": build_hypotheses(problem, evidence_bundle, benchmark_ids=report.benchmark_ids),
                 "contradiction_review": evidence_bundle.contradiction_review,
                 "retrieval_mode": retrieval_mode,
+                "retrieval_conflict_count": len(conflict_hits),
+                "notes": [retrieval_note] if retrieval_note else [],
             }
         )
         if build_env and bundle.build_status == "failed":
             report = report.model_copy(update={"status": "build_failed"})
+        elif retrieval_degraded:
+            report = report.model_copy(update={"status": "retrieval_degraded"})
         planning_minutes = max(
             0.0,
             (datetime.now(timezone.utc) - started_at).total_seconds() / 60.0,
@@ -3923,6 +4009,8 @@ class TAROrchestrator:
             wall_clock_minutes=planning_minutes,
         )
         self.store.append_problem_study(report)
+        if report.project_id is not None:
+            self._update_evidence_debt_from_retrieval(report.project_id, conflict_hits)
         Path(report.environment.study_plan_path).write_text(
             report.model_dump_json(indent=2),
             encoding="utf-8",
@@ -4799,6 +4887,7 @@ class TAROrchestrator:
         payload["latest_claim_verdict"] = latest_claim_verdict.model_dump(mode="json") if latest_claim_verdict else None
         latest_problem_execution = self.store.latest_problem_execution()
         latest_problem_study = self.store.latest_problem_study()
+        retrieval_summary = self._retrieval_mode_summary(limit=20)
         benchmark_ids = (
             latest_problem_execution.benchmark_ids
             if latest_problem_execution is not None
@@ -4839,6 +4928,9 @@ class TAROrchestrator:
             if latest_problem_execution is not None
             else (latest_problem_study.canonical_comparable if latest_problem_study is not None else False)
         )
+        payload["retrieval_mode_breakdown"] = retrieval_summary["retrieval_mode_breakdown"]
+        payload["degraded_retrieval_studies"] = retrieval_summary["degraded_retrieval_studies"]
+        payload["recent_study_window"] = retrieval_summary["window"]
         payload["literature"] = self.literature_status()
         payload["memory"] = self.vault.stats() if self.vault is not None else {"error": self.memory_error}
         if self.memory_error:

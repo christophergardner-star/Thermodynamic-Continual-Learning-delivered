@@ -95,10 +95,13 @@ def test_ws32_retrieval_mode_records_lexical_fallback():
             )
 
             assert report.retrieval_mode == "lexical_fallback"
+            assert report.status == "retrieval_degraded"
+            assert any("Retrieval degraded to lexical fallback" in note for note in report.notes)
             assert fallback_vault.study_modes == ["lexical_fallback"]
             persisted = orchestrator.store.latest_problem_study(report.problem_id)
             assert persisted is not None
             assert persisted.retrieval_mode == "lexical_fallback"
+            assert persisted.status == "retrieval_degraded"
         finally:
             orchestrator.shutdown()
 

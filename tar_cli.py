@@ -473,6 +473,7 @@ def _render_status(payload: Dict[str, Any]) -> str:
     gpu = payload.get("gpu", {})
     memory = payload.get("memory", {})
     literature = payload.get("literature", {})
+    retrieval = payload.get("retrieval_mode_breakdown", {})
     lines = [
         f"Trial ID: {recovery.get('trial_id') or 'none'}",
         f"Status: {recovery.get('status')}",
@@ -508,6 +509,7 @@ def _render_status(payload: Dict[str, Any]) -> str:
         f"Literature Artifacts: {literature.get('artifacts', 0)}",
         f"Literature Conflicts: {literature.get('conflicts', 0)}",
         f"Literature Manifests: {literature.get('manifests', 0)}",
+        f"Retrieval Modes: semantic={retrieval.get('semantic', 0)} lexical_fallback={retrieval.get('lexical_fallback', 0)} degraded={payload.get('degraded_retrieval_studies', 0)} window={payload.get('recent_study_window', 0)}",
         f"Latest Claim Verdict: {(payload.get('latest_claim_verdict') or {}).get('status', 'n/a')}",
         f"Benchmark: {payload.get('benchmark_name') or ', '.join(payload.get('benchmark_ids', [])) or 'n/a'}",
         f"Benchmark Tier: {payload.get('benchmark_tier', 'n/a')}",
@@ -906,10 +908,12 @@ def _render_next_action(payload: Dict[str, Any]) -> str:
 def _render_operator_view(payload: Dict[str, Any]) -> str:
     counts = payload.get("project_counts") or {}
     health = payload.get("portfolio_health") or {}
+    retrieval = payload.get("retrieval_mode_breakdown") or {}
     lines = [
         f"Generated At: {payload.get('generated_at', 'n/a')}",
         f"Projects: total={counts.get('total', 0)} active={counts.get('active', 0)} paused={counts.get('paused', 0)} blocked={counts.get('blocked', 0)} stale={counts.get('stale', 0)}",
         f"Portfolio Health: selected={health.get('selected_project_id', 'n/a')} resume_candidates={health.get('resume_candidates', 0)} promotion_blocked={health.get('promotion_blocked_projects', 0)}",
+        f"Recent Retrieval Modes: semantic={retrieval.get('semantic', 0)} lexical_fallback={retrieval.get('lexical_fallback', 0)} degraded={payload.get('degraded_retrieval_studies', 0)} window={payload.get('recent_study_window', 0)}",
         "",
         "Active Projects:",
     ]

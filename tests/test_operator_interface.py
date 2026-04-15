@@ -5,7 +5,7 @@ import dashboard
 import tar_cli
 from tar_lab.control import handle_request
 from tar_lab.orchestrator import TAROrchestrator
-from tar_lab.schemas import ClaimAcceptancePolicy, ClaimVerdict, ControlRequest
+from tar_lab.schemas import ClaimAcceptancePolicy, ClaimVerdict, ControlRequest, LiteratureCapabilityReport, MemorySearchHit
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -234,5 +234,68 @@ def test_ws29_backend_runtime_surfaces_in_control_and_dashboard():
             )
             assert context["experiment_backend_runtime_status"]["counts"]["total"] >= 1
             assert context["experiment_backend_runtime_status"]["latest"]["trial_name"] == "trial-backend-runtime"
+        finally:
+            orchestrator.shutdown()
+
+
+def test_ws33_operator_view_surfaces_degraded_retrieval_counts():
+    class _FallbackVault:
+        def search(self, query: str, n_results: int = 5, kind=None, require_research_grade: bool = False):
+            if require_research_grade:
+                raise RuntimeError("semantic retrieval unavailable")
+            return [
+                MemorySearchHit(
+                    document_id="paper_claim:degraded",
+                    score=0.61,
+                    document="Lexical fallback evidence for degraded retrieval accounting.",
+                    metadata={"kind": "paper_claim", "paper_id": "paper-degraded", "claim_id": "claim:degraded"},
+                )
+            ]
+
+        def index_problem_study(self, report) -> None:
+            return None
+
+        def stats(self) -> dict:
+            return {"state": "degraded", "collection_name": "fallback", "embedder": "lexical", "embedding_dim": 0}
+
+        def capability_report(self) -> LiteratureCapabilityReport:
+            return LiteratureCapabilityReport(
+                semantic_model="lexical-fallback",
+                semantic_ready=False,
+                reranker="scientific-hybrid-reranker",
+                reranker_ready=True,
+                notes=["semantic retrieval unavailable"],
+            )
+
+        def close(self) -> None:
+            return None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _copy_science_profiles(tmp)
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            if orchestrator.vault is not None:
+                orchestrator.vault.close()
+            orchestrator.vault = _FallbackVault()  # type: ignore[assignment]
+            orchestrator.memory_indexer = None
+
+            orchestrator.study_problem(
+                "Investigate degraded retrieval surfacing",
+                build_env=False,
+                max_results=0,
+            )
+
+            operator_view = handle_request(
+                orchestrator,
+                ControlRequest(command="operator_view", payload={"limit": 5, "include_blocked": True}),
+            )
+            status_payload = orchestrator.status()
+
+            assert operator_view.ok is True
+            assert operator_view.payload["retrieval_mode_breakdown"]["lexical_fallback"] >= 1
+            assert operator_view.payload["degraded_retrieval_studies"] >= 1
+            assert status_payload["degraded_retrieval_studies"] >= 1
+            assert "Recent Retrieval Modes:" in tar_cli._render_operator_view(operator_view.payload)
+            assert "Retrieval Modes:" in tar_cli._render_status(status_payload)
         finally:
             orchestrator.shutdown()
