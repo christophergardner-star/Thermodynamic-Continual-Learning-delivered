@@ -37,6 +37,10 @@ from tar_lab.schemas import (
     ProblemExecutionReport,
     ProblemExperimentResult,
 )
+from tar_lab.benchmark_stats import (
+    build_benchmark_statistical_summary,
+    build_execution_statistical_summary,
+)
 from tar_lab.thermoobserver import compute_participation_ratio
 
 
@@ -231,6 +235,7 @@ def _make_result(
     metrics: dict[str, float],
     notes: list[str],
     proxy_benchmark_used: bool,
+    statistical_input: Optional[dict[str, Any]] = None,
     artifact_paths: Optional[list[str]] = None,
 ) -> ProblemExperimentResult:
     return ProblemExperimentResult(
@@ -263,9 +268,24 @@ def _make_result(
         execution_mode=execution_mode,
         status=status,  # type: ignore[arg-type]
         metrics=metrics,
+        statistical_summary=build_benchmark_statistical_summary(
+            spec,
+            metrics,
+            statistical_input=statistical_input,
+        ),
         artifact_paths=artifact_paths or [],
         notes=notes,
     )
+
+
+def _coerce_executor_result(
+    result: tuple[dict[str, float], list[str]] | tuple[dict[str, float], list[str], dict[str, Any]],
+) -> tuple[dict[str, float], list[str], Optional[dict[str, Any]]]:
+    if len(result) == 2:
+        metrics, notes = result
+        return metrics, notes, None
+    metrics, notes, statistical_input = result
+    return metrics, notes, statistical_input
 
 
 def execute_study_payload(payload: dict[str, Any], artifact_path: Path) -> ProblemExecutionReport:
@@ -299,6 +319,7 @@ def execute_study_payload(payload: dict[str, Any], artifact_path: Path) -> Probl
             imports_failed=imports_failed,
             benchmark_availability=[BenchmarkAvailability.model_validate(item) for item in benchmark_availability],
             experiments=[],
+            benchmark_statistical_summary=build_execution_statistical_summary([]),
             summary="Dependency validation failed before experiment execution.",
             recommended_next_step="Build the locked science environment and rerun the study.",
             artifact_path=str(artifact_path),
@@ -365,6 +386,7 @@ def execute_study_payload(payload: dict[str, Any], artifact_path: Path) -> Probl
         imports_failed=imports_failed,
         benchmark_availability=[BenchmarkAvailability.model_validate(item) for item in benchmark_availability],
         experiments=experiments,
+        benchmark_statistical_summary=build_execution_statistical_summary(experiments),
         summary=summary,
         recommended_next_step=" ".join(notes),
         artifact_path=str(artifact_path),
@@ -415,10 +437,11 @@ def _execute_deep_learning(payload: dict[str, Any]) -> tuple[list[ProblemExperim
             experiments.append(gated)
             continue
         template_id = experiment["template_id"]
+        statistical_input = None
         if template_id == "optimizer_ablation":
-            metrics, notes = _run_optimizer_ablation(experiment)
+            metrics, notes, statistical_input = _coerce_executor_result(_run_optimizer_ablation(experiment))
         elif template_id == "depth_width_scale":
-            metrics, notes = _run_depth_width_scale(experiment)
+            metrics, notes, statistical_input = _coerce_executor_result(_run_depth_width_scale(experiment))
         else:
             metrics = {}
             notes = ["No deep-learning executor was registered for this template."]
@@ -438,6 +461,7 @@ def _execute_deep_learning(payload: dict[str, Any]) -> tuple[list[ProblemExperim
                 metrics=metrics,
                 notes=notes,
                 proxy_benchmark_used=spec.proxy_allowed,
+                statistical_input=statistical_input,
             )
         )
     return experiments, [
@@ -454,10 +478,11 @@ def _execute_natural_language_processing(payload: dict[str, Any]) -> tuple[list[
             experiments.append(gated)
             continue
         template_id = experiment["template_id"]
+        statistical_input = None
         if template_id == "prompt_retrieval_ablation":
-            metrics, notes = _run_prompt_retrieval_ablation(experiment)
+            metrics, notes, statistical_input = _coerce_executor_result(_run_prompt_retrieval_ablation(experiment))
         elif template_id == "length_generalization":
-            metrics, notes = _run_length_generalization(experiment)
+            metrics, notes, statistical_input = _coerce_executor_result(_run_length_generalization(experiment))
         else:
             metrics = {}
             notes = ["No NLP executor was registered for this template."]
@@ -477,6 +502,7 @@ def _execute_natural_language_processing(payload: dict[str, Any]) -> tuple[list[
                 metrics=metrics,
                 notes=notes,
                 proxy_benchmark_used=spec.proxy_allowed,
+                statistical_input=statistical_input,
             )
         )
     return experiments, [
@@ -493,10 +519,11 @@ def _execute_reinforcement_learning(payload: dict[str, Any]) -> tuple[list[Probl
             experiments.append(gated)
             continue
         template_id = experiment["template_id"]
+        statistical_input = None
         if template_id == "exploration_ablation":
-            metrics, notes = _run_exploration_ablation(experiment)
+            metrics, notes, statistical_input = _coerce_executor_result(_run_exploration_ablation(experiment))
         elif template_id == "offline_online_gap":
-            metrics, notes = _run_offline_online_gap(experiment)
+            metrics, notes, statistical_input = _coerce_executor_result(_run_offline_online_gap(experiment))
         else:
             metrics = {}
             notes = ["No RL executor was registered for this template."]
@@ -516,6 +543,7 @@ def _execute_reinforcement_learning(payload: dict[str, Any]) -> tuple[list[Probl
                 metrics=metrics,
                 notes=notes,
                 proxy_benchmark_used=spec.proxy_allowed,
+                statistical_input=statistical_input,
             )
         )
     return experiments, [
@@ -532,10 +560,11 @@ def _execute_computer_vision(payload: dict[str, Any]) -> tuple[list[ProblemExper
             experiments.append(gated)
             continue
         template_id = experiment["template_id"]
+        statistical_input = None
         if template_id == "augmentation_robustness":
-            metrics, notes = _run_augmentation_robustness(experiment)
+            metrics, notes, statistical_input = _coerce_executor_result(_run_augmentation_robustness(experiment))
         elif template_id == "backbone_transfer":
-            metrics, notes = _run_backbone_transfer(experiment)
+            metrics, notes, statistical_input = _coerce_executor_result(_run_backbone_transfer(experiment))
         else:
             metrics = {}
             notes = ["No computer-vision executor was registered for this template."]
@@ -555,6 +584,7 @@ def _execute_computer_vision(payload: dict[str, Any]) -> tuple[list[ProblemExper
                 metrics=metrics,
                 notes=notes,
                 proxy_benchmark_used=spec.proxy_allowed,
+                statistical_input=statistical_input,
             )
         )
     return experiments, [
@@ -571,10 +601,11 @@ def _execute_graph_ml(payload: dict[str, Any]) -> tuple[list[ProblemExperimentRe
             experiments.append(gated)
             continue
         template_id = experiment["template_id"]
+        statistical_input = None
         if template_id == "depth_oversmoothing":
-            metrics, notes = _run_depth_oversmoothing(experiment)
+            metrics, notes, statistical_input = _coerce_executor_result(_run_depth_oversmoothing(experiment))
         elif template_id == "heterophily_ablation":
-            metrics, notes = _run_heterophily_ablation(experiment)
+            metrics, notes, statistical_input = _coerce_executor_result(_run_heterophily_ablation(experiment))
         else:
             metrics = {}
             notes = ["No graph-ML executor was registered for this template."]
@@ -594,6 +625,7 @@ def _execute_graph_ml(payload: dict[str, Any]) -> tuple[list[ProblemExperimentRe
                 metrics=metrics,
                 notes=notes,
                 proxy_benchmark_used=spec.proxy_allowed,
+                statistical_input=statistical_input,
             )
         )
     return experiments, [
@@ -610,10 +642,11 @@ def _execute_generic_ml(payload: dict[str, Any]) -> tuple[list[ProblemExperiment
             experiments.append(gated)
             continue
         template_id = experiment["template_id"]
+        statistical_input = None
         if template_id == "baseline_sweep":
-            metrics, notes = _run_generic_baseline_sweep(experiment)
+            metrics, notes, statistical_input = _coerce_executor_result(_run_generic_baseline_sweep(experiment))
         elif template_id == "calibration_check":
-            metrics, notes = _run_generic_calibration_check(experiment)
+            metrics, notes, statistical_input = _coerce_executor_result(_run_generic_calibration_check(experiment))
         else:
             metrics = {}
             notes = ["No generic-ML executor was registered for this template."]
@@ -633,6 +666,7 @@ def _execute_generic_ml(payload: dict[str, Any]) -> tuple[list[ProblemExperiment
                 metrics=metrics,
                 notes=notes,
                 proxy_benchmark_used=spec.proxy_allowed,
+                statistical_input=statistical_input,
             )
         )
     return experiments, [
@@ -932,7 +966,9 @@ def _make_classification_dataset(
     )
 
 
-def _run_generic_baseline_sweep(experiment: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
+def _run_generic_baseline_sweep(
+    experiment: dict[str, Any]
+) -> tuple[dict[str, float], list[str], dict[str, Any]]:
     grid = experiment.get("parameter_grid", {})
     learning_rates = [float(item) for item in grid.get("learning_rate", [0.001, 0.0003])]
     batch_sizes = [int(item) for item in grid.get("batch_size", [32, 64])]
@@ -966,10 +1002,17 @@ def _run_generic_baseline_sweep(experiment: dict[str, Any]) -> tuple[dict[str, f
             f"Best learning_rate={best['learning_rate']:.4g} batch_size={best['batch_size']}.",
             "The sweep uses a real tabular classification loop with measured F1 and seed variance.",
         ],
+        {
+            "sample_count": len(seeded),
+            "primary_metric": "accuracy",
+            "std_dev": statistics.pstdev(seeded),
+        },
     )
 
 
-def _run_generic_calibration_check(experiment: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
+def _run_generic_calibration_check(
+    experiment: dict[str, Any]
+) -> tuple[dict[str, float], list[str], dict[str, Any]]:
     temperature_flags = [bool(item) for item in experiment.get("parameter_grid", {}).get("temperature_scaling", [False, True])]
     train_x, train_y, calib_x, calib_y, val_x, val_y = _make_tabular_calibration_dataset(seed=23)
     model = _fit_tabular_model(train_x, train_y, learning_rate=0.001, batch_size=48, seed=23, steps=20)
@@ -1007,6 +1050,10 @@ def _run_generic_calibration_check(experiment: dict[str, Any]) -> tuple[dict[str
             f"Best temperature_scaling={best['temperature_scaling']} temperature={best['temperature']:.3f}.",
             "Calibration is measured on a held-out split rather than inferred from training loss.",
         ],
+        {
+            "sample_count": 1,
+            "primary_metric": "calibration_ece",
+        },
     )
 
 
@@ -1150,7 +1197,9 @@ def _run_augmentation_robustness(experiment: dict[str, Any]) -> tuple[dict[str, 
     )
 
 
-def _run_backbone_transfer(experiment: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
+def _run_backbone_transfer(
+    experiment: dict[str, Any]
+) -> tuple[dict[str, float], list[str], dict[str, Any]]:
     backbones = [str(item) for item in experiment.get("parameter_grid", {}).get("backbone", ["resnet18", "resnet50", "vit_tiny"])]
     trials = []
     for backbone in backbones:
@@ -1181,6 +1230,11 @@ def _run_backbone_transfer(experiment: dict[str, Any]) -> tuple[dict[str, float]
             f"Best backbone={best['backbone']}.",
             "Backbone transfer is evaluated with real tiny CNN and patch-based image models.",
         ],
+        {
+            "sample_count": 3,
+            "primary_metric": "top1_accuracy",
+            "std_dev": best["seed_variance"],
+        },
     )
 
 
@@ -1354,7 +1408,9 @@ def _run_depth_oversmoothing(experiment: dict[str, Any]) -> tuple[dict[str, floa
     )
 
 
-def _run_heterophily_ablation(experiment: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
+def _run_heterophily_ablation(
+    experiment: dict[str, Any]
+) -> tuple[dict[str, float], list[str], dict[str, Any]]:
     grid = experiment.get("parameter_grid", {})
     rewirings = [str(item) for item in grid.get("rewiring", ["off", "knn", "attention"])]
     normalizations = [str(item) for item in grid.get("normalization", ["batch", "pairnorm"])]
@@ -1390,6 +1446,11 @@ def _run_heterophily_ablation(experiment: dict[str, Any]) -> tuple[dict[str, flo
             f"Best rewiring={best['rewiring']} normalization={best['normalization']}.",
             "The heterophily probe uses a real message-passing graph benchmark with rewiring and normalization controls.",
         ],
+        {
+            "sample_count": 3,
+            "primary_metric": "node_accuracy",
+            "std_dev": best["seed_variance"],
+        },
     )
 
 
@@ -1861,7 +1922,9 @@ def _build_sequence_dataset(
     return sequences
 
 
-def _run_exploration_ablation(experiment: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
+def _run_exploration_ablation(
+    experiment: dict[str, Any]
+) -> tuple[dict[str, float], list[str], dict[str, Any]]:
     grid = experiment.get("parameter_grid", {})
     entropy_values = [float(item) for item in grid.get("entropy_coef", [0.0, 0.01, 0.05])]
     algorithms = [str(item) for item in grid.get("algorithm", ["ppo", "a2c"])]
@@ -1897,6 +1960,11 @@ def _run_exploration_ablation(experiment: dict[str, Any]) -> tuple[dict[str, flo
             f"Best algorithm={best['algorithm']} entropy_coef={best['entropy_coef']:.4f}.",
             "The benchmark uses a real multi-armed bandit policy-gradient loop rather than score synthesis.",
         ],
+        {
+            "sample_count": 3,
+            "primary_metric": "episodic_return",
+            "std_dev": best["seed_variance"],
+        },
     )
 
 
@@ -2016,26 +2084,31 @@ def _execute_quantum_ml(payload: dict[str, Any]) -> tuple[list[ProblemExperiment
             continue
         template_id = experiment["template_id"]
         requested_tier = _benchmark_tier(payload, experiment)
+        statistical_input = None
         try:
             if template_id in {"ansatz_depth_sweep", "initialization_variance"} and runtime["pennylane_ready"]:
-                metrics, settings_note = _run_quantum_with_pennylane(runtime["qml"], runtime["pnp"], experiment)
+                metrics, settings_note, statistical_input = _coerce_executor_result(
+                    _run_quantum_with_pennylane(runtime["qml"], runtime["pnp"], experiment)
+                )
                 mode = "pennylane_backend"
                 notes = [
                     "Executed with PennyLane default.qubit backend.",
                     settings_note,
                 ]
             elif template_id == "noise_shot_ablation" and runtime["noise_ready"]:
-                metrics, settings_note = _run_quantum_noise_with_pennylane(runtime["qml"], experiment)
+                metrics, settings_note, statistical_input = _coerce_executor_result(
+                    _run_quantum_noise_with_pennylane(runtime["qml"], experiment)
+                )
                 mode = "pennylane_noise_backend"
                 notes = [
                     "Executed with PennyLane default.mixed backend under finite-shot noisy simulation.",
                     settings_note,
                 ]
             elif requested_tier == "smoke" and spec.proxy_allowed:
-                metrics = _run_quantum_proxy(experiment)
+                metrics, notes, statistical_input = _coerce_executor_result(_run_quantum_proxy(experiment))
                 mode = "analytic_proxy"
                 notes = [
-                    "Executed with analytic proxy metrics on the explicit smoke path.",
+                    *notes,
                     "Canonical and validation QML tiers require a real PennyLane backend and will refuse instead of downgrading.",
                 ]
             else:
@@ -2067,6 +2140,7 @@ def _execute_quantum_ml(payload: dict[str, Any]) -> tuple[list[ProblemExperiment
                     metrics=metrics,
                     notes=notes,
                     proxy_benchmark_used=(mode == "analytic_proxy"),
+                    statistical_input=statistical_input,
                 )
             )
         except Exception as exc:  # pragma: no cover - defensive
@@ -2091,7 +2165,9 @@ def _execute_quantum_ml(payload: dict[str, Any]) -> tuple[list[ProblemExperiment
     return experiments, next_notes
 
 
-def _run_quantum_proxy(experiment: dict[str, Any]) -> dict[str, float]:
+def _run_quantum_proxy(
+    experiment: dict[str, Any]
+) -> tuple[dict[str, float], list[str], dict[str, Any]]:
     grid = experiment.get("parameter_grid", {})
     depths = [int(x) for x in grid.get("ansatz_depth", [2, 4, 8, 12])]
     qubits = [int(x) for x in grid.get("qubits", [4, 8])]
@@ -2109,21 +2185,36 @@ def _run_quantum_proxy(experiment: dict[str, Any]) -> dict[str, float]:
             by_depth[depth] = statistics.mean(variances)
         slope = _log_slope(sorted(by_depth.items()))
         trainability_gap = by_depth[min(depths)] / max(by_depth[max(depths)], 1e-12)
-        return {
-            "gradient_norm_variance": round(statistics.mean(by_depth.values()), 6),
-            "barren_plateau_slope": round(slope, 6),
-            "trainability_gap": round(trainability_gap, 6),
-        }
+        return (
+            {
+                "gradient_norm_variance": round(statistics.mean(by_depth.values()), 6),
+                "barren_plateau_slope": round(slope, 6),
+                "trainability_gap": round(trainability_gap, 6),
+            },
+            ["Executed with analytic proxy metrics on the explicit smoke path."],
+            {
+                "sample_count": 1,
+                "primary_metric": "trainability_gap",
+            },
+        )
 
     if experiment["template_id"] == "initialization_variance":
         values = []
         for scale in init_scales:
             value = scale / (1.0 + 4.0 * scale)
             values.append(value)
-        return {
-            "gradient_norm_variance": round(statistics.mean(values), 6),
-            "seed_variance": round(statistics.pstdev(values), 6),
-        }
+        return (
+            {
+                "gradient_norm_variance": round(statistics.mean(values), 6),
+                "seed_variance": round(statistics.pstdev(values), 6),
+            },
+            ["Executed with analytic proxy metrics on the explicit smoke path."],
+            {
+                "sample_count": len(values),
+                "primary_metric": "gradient_norm_variance",
+                "std_dev": statistics.pstdev(values),
+            },
+        )
 
     if experiment["template_id"] == "noise_shot_ablation":
         robustness_scores = []
@@ -2133,13 +2224,28 @@ def _run_quantum_proxy(experiment: dict[str, Any]) -> dict[str, float]:
                 signal = 1.0 / math.sqrt(max(1, shot))
                 robustness_scores.append(max(0.0, 1.0 - 10.0 * noise) * (1.0 / (1.0 + signal)))
                 trainability.append((1.0 - noise) / (1.0 + signal))
-        return {
-            "shot_noise_robustness": round(statistics.mean(robustness_scores), 6),
-            "gradient_norm_variance": round(statistics.mean(trainability) * 0.05, 6),
-            "trainability_gap": round(max(trainability) / max(min(trainability), 1e-12), 6),
-        }
+        return (
+            {
+                "shot_noise_robustness": round(statistics.mean(robustness_scores), 6),
+                "gradient_norm_variance": round(statistics.mean(trainability) * 0.05, 6),
+                "trainability_gap": round(max(trainability) / max(min(trainability), 1e-12), 6),
+            },
+            ["Executed with analytic proxy metrics on the explicit smoke path."],
+            {
+                "sample_count": len(robustness_scores),
+                "primary_metric": "shot_noise_robustness",
+                "std_dev": statistics.pstdev(robustness_scores),
+            },
+        )
 
-    return {"gradient_norm_variance": 0.0}
+    return (
+        {"gradient_norm_variance": 0.0},
+        ["Executed with analytic proxy metrics on the explicit smoke path."],
+        {
+            "sample_count": 1,
+            "primary_metric": "gradient_norm_variance",
+        },
+    )
 
 
 def _load_quantum_runtime() -> dict[str, Any]:
@@ -2184,7 +2290,11 @@ def _quantum_runtime_reason(runtime: dict[str, Any], template_id: str) -> str:
     return str(runtime.get("reason") or "Quantum backend unavailable.")
 
 
-def _run_quantum_with_pennylane(qml: Any, pnp: Any, experiment: dict[str, Any]) -> tuple[dict[str, float], str]:
+def _run_quantum_with_pennylane(
+    qml: Any,
+    pnp: Any,
+    experiment: dict[str, Any],
+) -> tuple[dict[str, float], str] | tuple[dict[str, float], str, dict[str, Any]]:
     grid = experiment.get("parameter_grid", {})
     if experiment["template_id"] == "ansatz_depth_sweep":
         depths = [int(x) for x in grid.get("ansatz_depth", [2, 4, 8])]
@@ -2225,7 +2335,8 @@ def _run_quantum_with_pennylane(qml: Any, pnp: Any, experiment: dict[str, Any]) 
             f"backend=pennylane:default.qubit qubits={qubits} ansatz_depth={depth} init_scale={init_scales} seeds={seeds}.",
         )
 
-    return _run_quantum_proxy(experiment), "backend=analytic_proxy."
+    proxy_metrics, proxy_notes, proxy_stats = _run_quantum_proxy(experiment)
+    return proxy_metrics, f"backend=analytic_proxy. {' '.join(proxy_notes)}", proxy_stats
 
 
 def _run_quantum_noise_with_pennylane(qml: Any, experiment: dict[str, Any]) -> tuple[dict[str, float], str]:

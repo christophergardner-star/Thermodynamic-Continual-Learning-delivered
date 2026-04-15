@@ -21,6 +21,7 @@ from tar_lab.schemas import (
     ScienceExperimentTemplate,
     ScienceProfile,
 )
+from tar_lab.benchmark_stats import default_recommended_seed_runs, default_statistical_validation_required
 
 
 def _slugify(text: str, max_len: int = 48) -> str:
@@ -144,6 +145,14 @@ class ScienceProfileRegistry:
                         update={
                             "truth_status": truth_status,
                             "canonical_comparable": bool(truth_status == "canonical_ready" and suite.tier == "canonical"),
+                            "recommended_seed_runs": max(
+                                suite.recommended_seed_runs,
+                                default_recommended_seed_runs(suite.tier),
+                            ),
+                            "statistical_validation_required": (
+                                suite.statistical_validation_required
+                                or default_statistical_validation_required(suite.tier)
+                            ),
                             "notes": notes,
                         }
                     )

@@ -487,6 +487,8 @@ class BenchmarkSpec(StrictModel):
     required_imports: List[str] = Field(default_factory=list)
     requires_download: bool = False
     proxy_allowed: bool = True
+    recommended_seed_runs: int = Field(default=1, ge=1)
+    statistical_validation_required: bool = False
     notes: List[str] = Field(default_factory=list)
 
 
@@ -499,6 +501,34 @@ class BenchmarkAvailability(StrictModel):
     canonical_ready: bool = False
     reason: Optional[str] = None
     missing_imports: List[str] = Field(default_factory=list)
+
+
+class BenchmarkMetricStatistic(StrictModel):
+    metric_name: str
+    mean: float
+    std_dev: Optional[float] = None
+    ci95_low: Optional[float] = None
+    ci95_high: Optional[float] = None
+    sample_count: int = Field(default=1, ge=1)
+
+
+class BenchmarkStatisticalSummary(StrictModel):
+    statistically_ready: bool = False
+    sample_count: int = Field(default=1, ge=1)
+    recommended_seed_runs: int = Field(default=1, ge=1)
+    significance_level: float = Field(default=0.05, gt=0.0, lt=1.0)
+    primary_metric: Optional[str] = None
+    metrics: List[BenchmarkMetricStatistic] = Field(default_factory=list)
+    notes: List[str] = Field(default_factory=list)
+
+
+class BenchmarkExecutionStatisticalSummary(StrictModel):
+    experiment_count: int = Field(default=0, ge=0)
+    completed_experiment_count: int = Field(default=0, ge=0)
+    statistically_ready_experiment_count: int = Field(default=0, ge=0)
+    canonical_ready_completed_count: int = Field(default=0, ge=0)
+    statistically_ready: bool = False
+    notes: List[str] = Field(default_factory=list)
 
 
 class ScienceProfile(StrictModel):
@@ -644,6 +674,7 @@ class ProblemExperimentResult(StrictModel):
     execution_mode: str
     status: Literal["completed", "failed", "skipped"]
     metrics: Dict[str, float] = Field(default_factory=dict)
+    statistical_summary: Optional[BenchmarkStatisticalSummary] = None
     artifact_paths: List[str] = Field(default_factory=list)
     notes: List[str] = Field(default_factory=list)
 
@@ -671,6 +702,7 @@ class ProblemExecutionReport(StrictModel):
     imports_failed: List[Dict[str, str]] = Field(default_factory=list)
     benchmark_availability: List[BenchmarkAvailability] = Field(default_factory=list)
     experiments: List[ProblemExperimentResult] = Field(default_factory=list)
+    benchmark_statistical_summary: Optional[BenchmarkExecutionStatisticalSummary] = None
     image_tag: Optional[str] = None
     manifest_path: Optional[str] = None
     manifest_hash: Optional[str] = None
