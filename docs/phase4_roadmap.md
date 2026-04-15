@@ -197,15 +197,16 @@ Status:
 
 Status:
 
-- active
+- completed
 - QML canonical slice complete
 - generic_ml canonical split complete
 - graph_ml canonical split complete
 - computer_vision canonical split complete
 - deep_learning canonical split complete
+- natural_language_processing canonical split complete
 - reinforcement_learning canonical slice assessed and still refused
-- remaining scope:
-  [ws31_non_qml_canonical_alignment_plan.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws31_non_qml_canonical_alignment_plan.md)
+- closeout:
+  [ws31_closeout.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws31_closeout.md)
 
 Purpose:
 
@@ -329,31 +330,19 @@ Execution posture:
 
 The recommended professional order is:
 
-1. `WS30`
-2. `WS31`
-3. `WS32`
-4. `WS33`
-5. `WS34`
-6. `WS35`
+1. `WS32`
+2. `WS33`
+3. `WS34`
+4. `WS35`
 
 ## Why This Order Is Correct
-
-`WS30` next:
-
-- `WS29` closed the first real backend-runtime gap
-- the next weak link is now reproducible environment adoption and build truth
-- locked execution policy needs to catch up to the already-strong planning,
-  evaluation, serving, and backend layers
-
-`WS31` before deeper retrieval/runtime work:
-
-- external benchmark truth should sharpen live-science claims before TAR scales
-  into a more autonomous runtime posture
 
 `WS32` and `WS33` after that:
 
 - literature and retrieval deepening matter most once execution and benchmark
   loops can feed into them cleanly
+- `WS31` closed the benchmark-truth gap, so the next weak link is evidence
+  fidelity rather than benchmark identity
 
 `WS34` and `WS35` last in this phase:
 
@@ -385,17 +374,18 @@ Pod/GPU time in Phase 4 should stay narrow and explicit.
 
 The first clearly justified remaining Phase 4 pod point is:
 
-- `WS30`
+- workload-specific and no longer immediate
+- none of `WS32` or the early `WS33` slices require a pod by default
 
 ## Immediate Next Step
 
 The next logical workstream is:
 
-- `WS30: Locked Payload Adoption And Build Attestation`
+- `WS32: Literature Engine Deepening`
 
 It should start locally.
 
 The immediate engineering goal is:
 
-- make locked payload and build provenance operational policy for real runs
-  before broader benchmark and retrieval scale-up
+- deepen literature ingestion from section-and-claim extraction toward
+  provenance-preserving paper understanding

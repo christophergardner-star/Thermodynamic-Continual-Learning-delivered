@@ -2,7 +2,7 @@
 
 ## Decision
 
-`WS31` remains **open**.
+`WS31` is now **closed**.
 
 What is closed inside `WS31`:
 
@@ -13,14 +13,16 @@ What is closed inside `WS31`:
 - second non-QML canonical split in `graph_ml`
 - third non-QML canonical split in `computer_vision`
 - fourth non-QML canonical split in `deep_learning`
+- fifth non-QML canonical split in `natural_language_processing`
 - `reinforcement_learning` assessed and still fully refused
 
-What remains open:
+What remains explicit after closure:
 
-- non-QML canonical executor alignment
+- a carry-forward refusal policy for the still-unresolved canonical suites
 
-That means `WS31` is no longer blocked by benchmark statistics. It is now
-blocked by **domain-specific canonical benchmark coverage** outside `quantum_ml`.
+That means `WS31` is no longer blocked by benchmark statistics, and it no
+longer needs another bounded alignment slice to make its benchmark-truth claim
+credible.
 
 ## Current Canonical State
 
@@ -60,6 +62,13 @@ These suites are now:
     `5`-seed statistical summary
   - `cifar10_scaling_canonical`: still truthfully refused until the executor
     implements a real CIFAR-10 scaling benchmark
+- `natural_language_processing`
+  - `cnn_dailymail_summarization`: canonical-ready, real executor path, real
+    `5`-seed statistical summary
+  - `beir_fiqa_canonical`: still truthfully refused until the executor covers
+    a truthful BEIR FiQA retrieval benchmark path
+  - `longbench_narrativeqa_canonical`: still truthfully refused until the
+    executor covers a truthful LongBench NarrativeQA benchmark path
 
 ### Still Fully Refused After Assessment
 
@@ -70,21 +79,22 @@ These suites are now:
   - `minari_offline_online_transfer`: still refused because there is no
     truthful Minari offline-to-online CartPole benchmark path yet
 
-### Still Truthfully Refused
+### Profiles With Remaining Truthful Canonical Refusals
 
+- `generic_ml`
+- `graph_ml`
 - `computer_vision`
 - `deep_learning`
-- `graph_ml`
 - `natural_language_processing`
 - `reinforcement_learning`
 
 These profiles still have canonical suites registered, but the registry
-correctly marks them unsupported because the named canonical executors are not
-yet truly aligned to the claimed datasets/backends.
+correctly marks the unresolved suites unsupported because the named canonical
+executors are not yet truly aligned to the claimed datasets or backends.
 
-## What “Non-QML Canonical Alignment” Means
+## What Non-QML Canonical Alignment Means
 
-For each remaining profile, TAR must move from:
+For each remaining suite, TAR must move from:
 
 - canonical suite exists in the registry
 - canonical suite is truthfully refused
@@ -97,47 +107,29 @@ to:
 - canonical suite produces benchmark-specific statistical summaries
 - canonical suite is genuinely canonical-comparable
 
-## Priority Order
+## Alignment Order Used
 
-The correct order is not “all domains at once.”
-
-Use this priority:
+The local alignment order used so far is:
 
 1. `generic_ml`
 2. `graph_ml`
 3. `computer_vision`
 4. `deep_learning`
-5. `reinforcement_learning`
+5. `reinforcement_learning` assessment
 6. `natural_language_processing`
 
-Reason:
+That order was correct because it forced TAR to prove easier non-QML canonical
+paths before promoting the heavier NLP slice.
 
-- `generic_ml` and `graph_ml` are structurally simpler
-- they are the best next canonical alignment targets without dragging in heavy
-  external serving or large dataset stacks too early
-- `natural_language_processing` should come later because its canonical claims
-  are the easiest to overstate and the hardest to make honest cheaply
+## Closure Basis
 
-## Next Local Slice
+`WS31` closes on this basis:
 
-The next exact `WS31` slice should be:
-
-### `WS31-Slice-Next: Natural Language Processing Canonical Alignment`
-
-Target:
-
-- `beir_fiqa_canonical`
-- `longbench_narrativeqa_canonical`
-- `cnn_dailymail_summarization`
-
-Required local deliverables:
-
-- honest canonical availability contract
-- real canonical executor path or explicit continued refusal
-- canonical pack candidate definition
-- regression tests proving:
-  - canonical suite is still refused if unresolved
-  - canonical suite becomes `canonical_ready` only when the executor is truly aligned
+- QML canonical is proven with real `5`-seed readiness
+- five non-QML canonical-aligned paths are proven
+- the remaining unsupported suites stay explicitly refused
+- the repo no longer carries ambiguous benchmark-availability claims for the
+  unresolved canonical paths
 
 ## Pod Policy
 
@@ -145,18 +137,16 @@ Still **no pod now**.
 
 Reason:
 
-- the next step is executor-alignment design and local truthfulness work
-- that is code and harness work, not scale work
-- hiring a pod before non-QML canonical alignment exists would repeat the same
-  mistake the scale criteria were written to prevent
+- the next step is no longer WS31 benchmark execution
+- that is code and benchmark-truth governance work, not scale work
+- hiring a pod before the remaining canonical scope is frozen would repeat the
+  same mistake the scale criteria were written to prevent
 
 ## Exit Condition For WS31
 
-`WS31` should close only when:
+`WS31` closes because:
 
 - QML canonical is proven
-- at least one non-QML profile has a real canonical-aligned executor path
+- multiple non-QML profiles now have real canonical-aligned executor paths
 - broader unsupported canonical suites remain explicitly refused rather than
   ambiguously named
-
-If that non-QML milestone is not reached, `WS31` stays open.

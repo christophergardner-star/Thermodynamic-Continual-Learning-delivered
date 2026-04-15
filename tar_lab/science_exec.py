@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import statistics
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -494,12 +495,14 @@ def _execute_natural_language_processing(payload: dict[str, Any]) -> tuple[list[
             metrics, notes, statistical_input = _coerce_executor_result(_run_prompt_retrieval_ablation(experiment))
         elif template_id == "length_generalization":
             metrics, notes, statistical_input = _coerce_executor_result(_run_length_generalization(experiment))
+        elif template_id == "summarization_faithfulness":
+            metrics, notes, statistical_input = _coerce_executor_result(_run_summarization_faithfulness(experiment))
         else:
             metrics = {}
             notes = ["No NLP executor was registered for this template."]
             status = "failed"
             execution_mode = "executor_missing"
-        if template_id in {"prompt_retrieval_ablation", "length_generalization"}:
+        if template_id in {"prompt_retrieval_ablation", "length_generalization", "summarization_faithfulness"}:
             status = "completed"
             execution_mode = "nlp_benchmark"
         experiments.append(
@@ -2220,6 +2223,71 @@ def _run_length_generalization(experiment: dict[str, Any]) -> tuple[dict[str, fl
     )
 
 
+def _run_summarization_faithfulness(
+    experiment: dict[str, Any]
+) -> tuple[dict[str, float], list[str], dict[str, Any]]:
+    spec = _benchmark_spec(experiment)
+    if spec.benchmark_id != "cnn_dailymail_summarization" or spec.tier != "canonical":
+        raise RuntimeError("summarization_faithfulness is only aligned for cnn_dailymail_summarization")
+    summary_sentence_options = [int(item) for item in experiment.get("parameter_grid", {}).get("summary_sentences", [2, 3])]
+    examples = _load_cnn_dailymail_summarization_dataset()
+    trials = []
+    for summary_sentences in summary_sentence_options:
+        seeded = []
+        for seed in (7, 18, 29, 41, 53):
+            sample = _sample_cnn_dailymail_examples(examples, seed=seed, sample_size=min(8, len(examples)))
+            rouge_scores: list[float] = []
+            faithfulness_scores: list[float] = []
+            confidences: list[float] = []
+            correctness: list[int] = []
+            for item in sample:
+                summary = _extractive_summarize(item["article"], max_sentences=summary_sentences)
+                rouge = _rouge_l_f1(summary, item["highlights"])
+                faithfulness = _extractive_faithfulness(summary, item["article"])
+                confidence = min(0.95, 0.45 + 0.4 * faithfulness + 0.2 * rouge)
+                correct = 1 if rouge >= 0.18 and faithfulness >= 0.92 else 0
+                rouge_scores.append(rouge)
+                faithfulness_scores.append(faithfulness)
+                confidences.append(confidence)
+                correctness.append(correct)
+            seeded.append(
+                {
+                    "rouge": statistics.fmean(rouge_scores),
+                    "faithfulness": statistics.fmean(faithfulness_scores),
+                    "calibration_ece": _expected_calibration_error(confidences, correctness),
+                }
+            )
+        trials.append(
+            {
+                "summary_sentences": summary_sentences,
+                "rouge": statistics.fmean(item["rouge"] for item in seeded),
+                "faithfulness": statistics.fmean(item["faithfulness"] for item in seeded),
+                "calibration_ece": statistics.fmean(item["calibration_ece"] for item in seeded),
+                "rouge_std": statistics.pstdev(item["rouge"] for item in seeded),
+                "score": statistics.fmean(item["rouge"] for item in seeded)
+                + 0.4 * statistics.fmean(item["faithfulness"] for item in seeded)
+                - 0.5 * statistics.fmean(item["calibration_ece"] for item in seeded),
+            }
+        )
+    best = max(trials, key=lambda item: item["score"])
+    return (
+        {
+            "rouge": round(float(best["rouge"]), 6),
+            "faithfulness": round(float(best["faithfulness"]), 6),
+            "calibration_ece": round(float(best["calibration_ece"]), 6),
+        },
+        [
+            f"Best summary_sentences={int(best['summary_sentences'])}.",
+            "Canonical summarization used real CNN/DailyMail articles with an extractive baseline and five seeded sample batches.",
+        ],
+        {
+            "sample_count": 5,
+            "primary_metric": "rouge",
+            "std_dev": float(best["rouge_std"]),
+        },
+    )
+
+
 def _nlp_retrieval_benchmark() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     if hf_load_dataset is not None and DownloadConfig is not None:
         try:
@@ -2284,6 +2352,49 @@ def _nlp_retrieval_benchmark() -> tuple[list[dict[str, str]], list[dict[str, str
         {"question": "Which retrieval method handles paraphrased queries better than lexical overlap alone?", "answer": "dense retrieval"},
     ]
     return docs, queries
+
+
+def _load_cnn_dailymail_summarization_dataset(limit: int = 64) -> list[dict[str, str]]:
+    if hf_load_dataset is None:
+        raise RuntimeError("CNN/DailyMail canonical benchmark requires the datasets package")
+    records = hf_load_dataset("cnn_dailymail", "3.0.0", split="validation")
+    examples: list[dict[str, str]] = []
+    for row in records.select(range(min(limit, len(records)))):
+        article = str(row.get("article", "")).strip()
+        highlights = str(row.get("highlights", "")).strip()
+        if not article or not highlights:
+            continue
+        examples.append({"article": article, "highlights": highlights})
+    if len(examples) < 8:
+        raise RuntimeError("CNN/DailyMail canonical benchmark requires at least 8 usable validation examples")
+    return examples
+
+
+def _sample_cnn_dailymail_examples(
+    examples: list[dict[str, str]],
+    *,
+    seed: int,
+    sample_size: int,
+) -> list[dict[str, str]]:
+    rng = np.random.default_rng(seed)
+    indices = rng.choice(len(examples), size=min(sample_size, len(examples)), replace=False)
+    return [examples[int(index)] for index in indices]
+
+
+def _extractive_summarize(article: str, *, max_sentences: int) -> str:
+    sentences = [item.strip() for item in re.split(r"(?<=[.!?])\s+", article) if item.strip()]
+    if not sentences:
+        return article.strip()
+    return " ".join(sentences[: max(1, max_sentences)]).strip()
+
+
+def _extractive_faithfulness(summary: str, article: str) -> float:
+    summary_tokens = [token for token in _tokenize(summary) if token]
+    if not summary_tokens:
+        return 0.0
+    article_terms = set(_tokenize(article))
+    supported = sum(1 for token in summary_tokens if token in article_terms)
+    return float(supported / max(len(summary_tokens), 1))
 
 
 def _retrieve_document(question: str, docs: list[dict[str, str]], mode: str) -> tuple[dict[str, str] | None, float]:

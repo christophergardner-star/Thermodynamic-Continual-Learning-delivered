@@ -26,17 +26,20 @@ What remained weak was benchmark statistics:
 
 `WS31` closes that gap in stages.
 
-Current state after the first bounded benchmark packs:
+Final WS31 state:
 
 - statistical-contract slice: complete
 - bounded validation pack: complete
 - bounded canonical QML pack: complete
-- generic_ml canonical split: partially aligned
-- graph_ml canonical split: partially aligned
-- computer_vision canonical split: partially aligned
-- deep_learning canonical split: partially aligned
+- generic_ml canonical split: complete
+- graph_ml canonical split: complete
+- computer_vision canonical split: complete
+- deep_learning canonical split: complete
+- natural_language_processing canonical split: complete
 - reinforcement_learning canonical slice assessed and still refused
-- remaining open scope: broader non-QML canonical executor alignment
+- closeout decision: `WS31` closes with QML plus five non-QML
+  canonical-aligned paths and explicit refusal for the remaining unsupported
+  suites
 
 ## Core Hypothesis
 
@@ -167,7 +170,7 @@ Pod is justified only when:
 
 ### Slice 3
 
-- keep `WS31` open for non-QML canonical executor alignment
+- extend `WS31` into non-QML canonical executor alignment
 - record `generic_ml/openml_adult_calibration` as the first aligned non-QML
   canonical path
 - keep `generic_ml/openml_cc18_classification` explicitly refused until the
@@ -184,8 +187,20 @@ Pod is justified only when:
   non-QML canonical path
 - keep `deep_learning/cifar10_scaling_canonical` explicitly refused until the
   real CIFAR-10 scaling executor exists
+- record `natural_language_processing/cnn_dailymail_summarization` as the
+  fifth aligned non-QML canonical path
+- keep `natural_language_processing/beir_fiqa_canonical` explicitly refused
+  until the executor covers a truthful BEIR FiQA retrieval path
+- keep
+  `natural_language_processing/longbench_narrativeqa_canonical` explicitly
+  refused until the executor covers a truthful LongBench NarrativeQA path
 - record `reinforcement_learning` as assessed but still fully refused pending a
   specific Minari benchmark path
-- prioritize the heavier NLP slice next
 - preserve truthful refusal for unsupported canonical suites until the executor
   path is genuinely aligned
+
+### Closure
+
+- close `WS31` once QML plus five non-QML canonical-aligned paths are proven
+- carry the remaining unresolved canonical suites forward as explicit refusals,
+  not as open benchmark-truth ambiguity

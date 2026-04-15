@@ -45,7 +45,7 @@ BENCHMARK_TRUTH_OVERRIDES: dict[str, dict[str, BenchmarkTruthStatus]] = {
     "natural_language_processing": {
         "beir_fiqa_canonical": "unsupported",
         "longbench_narrativeqa_canonical": "unsupported",
-        "cnn_dailymail_summarization": "unsupported",
+        "cnn_dailymail_summarization": "canonical_ready",
     },
     "computer_vision": {
         "cifar10_c_corruption": "unsupported",
@@ -116,6 +116,17 @@ def _truth_status_note(profile_id: str, suite: BenchmarkSpec, truth_status: Benc
                 "Benchmark 'minari_offline_online_transfer' remains registered for planning, but the current "
                 "reinforcement_learning executor does not yet implement a truthful Minari offline-to-online "
                 "CartPole benchmark."
+            )
+        if profile_id == "natural_language_processing" and suite.benchmark_id == "beir_fiqa_canonical":
+            return (
+                "Benchmark 'beir_fiqa_canonical' remains registered for planning, but the current "
+                "natural_language_processing executor does not yet implement a truthful BEIR FiQA retrieval stack."
+            )
+        if profile_id == "natural_language_processing" and suite.benchmark_id == "longbench_narrativeqa_canonical":
+            return (
+                "Benchmark 'longbench_narrativeqa_canonical' remains registered for planning, but the current "
+                "natural_language_processing executor still uses a synthetic length probe instead of the real "
+                "LongBench NarrativeQA benchmark."
             )
         return (
             f"Benchmark '{suite.benchmark_id}' remains registered for planning, but the current {profile_id} executor "

@@ -124,6 +124,16 @@
       "metrics": ["perplexity", "calibration_ece"],
       "parameter_grid": {"sequence_length": [256, 512, 1024]},
       "success_criteria": ["metric degradation curve becomes flatter"]
+    },
+    {
+      "template_id": "summarization_faithfulness",
+      "name": "Summarization Faithfulness",
+      "hypothesis": "The failure mode is grounded summarization drift rather than raw generation collapse.",
+      "benchmark": "summarization_grounding",
+      "benchmark_family": "summarization_grounding",
+      "metrics": ["rouge", "faithfulness", "calibration_ece"],
+      "parameter_grid": {"summary_sentences": [2, 3]},
+      "success_criteria": ["rouge improves without a faithfulness drop"]
     }
   ],
   "safety_rules": ["locked_profile_only", "no_host_installs", "container_only_resolution"]

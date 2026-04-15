@@ -730,3 +730,123 @@ def test_reinforcement_learning_canonical_offline_online_stays_refused(tmp_path:
     assert report.benchmark_alignment == "refused"
     assert report.benchmark_truth_statuses == ["unsupported"]
     assert report.experiments[0].execution_mode == "truth_refusal"
+
+
+def test_nlp_canonical_cnn_dailymail_uses_real_dataset_path(monkeypatch, tmp_path: Path):
+    registry = ScienceProfileRegistry(str(REPO_ROOT))
+    profile = registry.get("natural_language_processing")
+    spec = registry.resolve_benchmark_suite(profile, "summarization_grounding", tier="canonical")
+    availability = registry.benchmark_availability(spec).model_copy(
+        update={"imports_ready": True, "dataset_ready": True, "canonical_ready": True, "reason": None}
+    )
+
+    examples = [
+        {
+            "article": (
+                "OpenAI shipped a new evaluation harness today. "
+                "The harness improved reliability on held-out checks. "
+                "Engineers measured stronger benchmark honesty after the release."
+            ),
+            "highlights": "OpenAI shipped a new evaluation harness today. The harness improved reliability on held-out checks.",
+        },
+        {
+            "article": (
+                "Researchers rebuilt the operator stack with stronger controls. "
+                "The updated workflow reduced parse failures in production. "
+                "Managers approved the rollout after validation finished."
+            ),
+            "highlights": "Researchers rebuilt the operator stack with stronger controls. The updated workflow reduced parse failures in production.",
+        },
+        {
+            "article": (
+                "A team benchmarked retrieval prompts against a new baseline. "
+                "Dense retrieval improved question answering under paraphrase. "
+                "The study kept hallucination rates low after tuning."
+            ),
+            "highlights": "Dense retrieval improved question answering under paraphrase. The study kept hallucination rates low after tuning.",
+        },
+        {
+            "article": (
+                "Developers aligned the serving layer with the trained operator model. "
+                "Health checks passed after the endpoint restart. "
+                "The deployment stayed stable through the final verification run."
+            ),
+            "highlights": "Developers aligned the serving layer with the trained operator model. Health checks passed after the endpoint restart.",
+        },
+        {
+            "article": (
+                "The benchmark pack remained laptop-safe across repeated runs. "
+                "Statistical summaries stayed consistent at five seeds. "
+                "The team deferred pod use because local execution was sufficient."
+            ),
+            "highlights": "The benchmark pack remained laptop-safe across repeated runs. Statistical summaries stayed consistent at five seeds.",
+        },
+        {
+            "article": (
+                "A graph benchmark used the Roman Empire dataset for heterophily analysis. "
+                "The executor evaluated five official splits without proxy fallback. "
+                "Accuracy stayed stable under rewiring changes."
+            ),
+            "highlights": "The executor evaluated five official splits without proxy fallback. Accuracy stayed stable under rewiring changes.",
+        },
+        {
+            "article": (
+                "A CIFAR-10 optimizer benchmark compared AdamW and SGD. "
+                "Five seeded runs were required before claiming readiness. "
+                "The calibrated model preserved representation quality."
+            ),
+            "highlights": "A CIFAR-10 optimizer benchmark compared AdamW and SGD. Five seeded runs were required before claiming readiness.",
+        },
+        {
+            "article": (
+                "The publication handoff package now captures accepted claims and open questions. "
+                "Writers can inspect limitations before drafting a manuscript. "
+                "Benchmark truth remains attached to the evidence bundle."
+            ),
+            "highlights": "Writers can inspect limitations before drafting a manuscript. Benchmark truth remains attached to the evidence bundle.",
+        },
+    ]
+
+    monkeypatch.setattr(science_exec, "_load_cnn_dailymail_summarization_dataset", lambda limit=64: list(examples))
+
+    payload = {
+        "problem_id": "nlp-canonical-cnn-dm",
+        "problem": "Investigate summarization grounding in NLP",
+        "profile_id": profile.profile_id,
+        "domain": profile.domain,
+        "benchmark_tier": "canonical",
+        "requested_benchmark": spec.benchmark_id,
+        "canonical_only": True,
+        "no_proxy_benchmarks": True,
+        "environment": {"validation_imports": []},
+        "benchmark_availability": [availability.model_dump(mode="json")],
+        "experiments": [
+            {
+                "template_id": "summarization_faithfulness",
+                "name": "Summarization Faithfulness",
+                "benchmark": "summarization_grounding",
+                "benchmark_tier": "canonical",
+                "benchmark_spec": spec.model_dump(mode="json"),
+                "benchmark_availability": availability.model_dump(mode="json"),
+                "metrics": ["rouge", "faithfulness", "calibration_ece"],
+                "parameter_grid": {"summary_sentences": [2, 3]},
+                "success_criteria": [],
+            }
+        ],
+    }
+
+    report = execute_study_payload(payload, tmp_path / "nlp_canonical_cnn_dm.json")
+    assert report.status == "completed"
+    assert report.canonical_comparable
+    assert report.benchmark_alignment == "aligned"
+    assert report.benchmark_truth_statuses == ["canonical_ready"]
+    experiment = report.experiments[0]
+    assert experiment.execution_mode == "nlp_benchmark"
+    assert not experiment.proxy_benchmark_used
+    assert experiment.benchmark_id == "cnn_dailymail_summarization"
+    assert experiment.statistical_summary is not None
+    assert experiment.statistical_summary.statistically_ready
+    assert experiment.statistical_summary.sample_count == 5
+    assert experiment.statistical_summary.primary_metric == "rouge"
+    assert experiment.statistical_summary.metrics[0].ci95_low is not None
+    assert experiment.statistical_summary.metrics[0].ci95_high is not None

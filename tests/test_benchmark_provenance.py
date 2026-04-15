@@ -268,3 +268,28 @@ def test_reinforcement_learning_canonical_suites_stay_refused(monkeypatch):
     assert offline_spec.truth_status == "unsupported"
     assert not offline.canonical_ready
     assert offline.reason == "registered benchmark is not yet executor-aligned and must be refused"
+
+
+def test_nlp_canonical_availability_splits_ready_and_refused(monkeypatch):
+    monkeypatch.setenv("TAR_ALLOW_DATA_DOWNLOAD", "1")
+    monkeypatch.setattr(science_profiles, "_validate_modules", lambda modules: (True, []))
+    registry = ScienceProfileRegistry(str(REPO_ROOT))
+    profile = registry.get("natural_language_processing")
+
+    refused_spec = registry.resolve_benchmark_suite(profile, "retrieval_prompt_ablation", tier="canonical")
+    ready_spec = registry.resolve_benchmark_suite(profile, "summarization_grounding", tier="canonical")
+
+    refused = registry.benchmark_availability(refused_spec)
+    ready = registry.benchmark_availability(ready_spec)
+
+    assert refused_spec.benchmark_id == "beir_fiqa_canonical"
+    assert refused_spec.truth_status == "unsupported"
+    assert not refused.canonical_ready
+    assert refused.reason == "registered benchmark is not yet executor-aligned and must be refused"
+
+    assert ready_spec.benchmark_id == "cnn_dailymail_summarization"
+    assert ready_spec.truth_status == "canonical_ready"
+    assert ready.imports_ready
+    assert ready.dataset_ready
+    assert ready.canonical_ready
+    assert ready.reason is None
