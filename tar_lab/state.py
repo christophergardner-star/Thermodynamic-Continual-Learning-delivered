@@ -385,8 +385,8 @@ class TARStateStore:
         trial_id: Optional[str] = None,
         problem_id: Optional[str] = None,
     ) -> Optional[BuildAttestation]:
-        rows = self.list_build_attestations()
-        for attestation in reversed(rows):
+        rows = sorted(self.list_build_attestations(), key=lambda item: (item.built_at, item.attestation_id), reverse=True)
+        for attestation in rows:
             if scope_kind is not None and attestation.scope_kind != scope_kind:
                 continue
             if trial_id is not None and attestation.trial_id != trial_id:

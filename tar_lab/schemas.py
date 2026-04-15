@@ -255,6 +255,7 @@ class DataBundleProvenance(StrictModel):
 class DatasetShard(StrictModel):
     shard_index: int = Field(ge=0)
     path: str
+    container_path: Optional[str] = None
     records: int = Field(ge=0)
 
 
@@ -413,7 +414,7 @@ class TrainingPayloadConfig(StrictModel):
     @field_validator("test_split")
     @classmethod
     def validate_split_sum(cls, value: float, info: Any) -> float:
-        data = info.data
+        data = info.data or {}
         train = float(data.get("train_split", 0.0))
         val = float(data.get("val_split", 0.0))
         total = train + val + value

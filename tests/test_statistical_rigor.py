@@ -4,11 +4,12 @@ from pathlib import Path
 
 import torch
 
+from tar_lab import train_template as train_template_module
 from tar_lab.data_manager import DataManager
 from tar_lab.governor import ThermodynamicGovernor
 from tar_lab.schemas import GovernorMetrics, GovernorThresholds, TrainingPayloadConfig
 from tar_lab.thermoobserver import StatAccumulator, compute_activation_covariance, compute_participation_ratio
-from tar_lab.train_template import run_payload
+from tar_lab.train_template import load_or_create_anchor, run_payload
 
 
 def test_smoothed_dpr_has_lower_variance_than_batchwise_estimate():
@@ -84,3 +85,60 @@ def test_dry_run_uses_tiny_execution_backbone_for_large_requested_model():
         summary = run_payload(config, dry_run=True)
         assert summary["requested_payload_model"] == "deepseek-ai/deepseek-coder-1.3b-base"
         assert summary["payload_model"] == "__tiny_gpt2__"
+
+
+def test_run_payload_falls_back_to_cpu_when_cuda_is_unusable(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        manager = DataManager(tmp)
+        manager.prepare_dual_stream(force=True)
+        config = TrainingPayloadConfig(
+            trial_id="trial-cuda-fallback",
+            backend_id="asc_text",
+            strategy_family="elastic_anchor",
+            anchor_path=str(Path(tmp) / "anchors" / "anchor.pt"),
+            alpha=0.02,
+            eta=0.005,
+            fim_lambda=0.1,
+            bregman_budget=0.2,
+            drift_budget=0.05,
+            batch_size=1,
+            steps=2,
+            seed=5,
+            log_path=str(Path(tmp) / "logs" / "thermo_metrics.jsonl"),
+            output_dir=str(Path(tmp) / "tar_runs" / "trial-cuda-fallback" / "output"),
+            anchor_manifest_path=str(manager.store.dataset_manifest_path("anchor")),
+            research_manifest_path=str(manager.store.dataset_manifest_path("research")),
+            governor_thresholds=GovernorThresholds(),
+            protected_layers=["transformer.wte"],
+            mutable_layers=["transformer.h.0"],
+            notes={"base_model_name": "__tiny_gpt2__", "max_seq_len": 24, "n_embd": 24, "n_layer": 1, "n_head": 2},
+        )
+
+        original_zeros = train_template_module.torch.zeros
+
+        def fake_zeros(*args, **kwargs):
+            device = kwargs.get("device")
+            if device == "cuda":
+                raise RuntimeError("cuda unsupported on host")
+            return original_zeros(*args, **kwargs)
+
+        monkeypatch.setattr(train_template_module.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(train_template_module.torch.cuda, "is_current_stream_capturing", lambda: False)
+        monkeypatch.setattr(train_template_module.torch, "zeros", fake_zeros)
+
+        summary = run_payload(config, dry_run=True)
+
+        assert summary["device"] == "cpu"
+        assert "cuda unsupported on host" in str(summary["device_fallback_reason"])
+
+
+def test_load_or_create_anchor_regenerates_incompatible_anchor():
+    with tempfile.TemporaryDirectory() as tmp:
+        anchor_path = Path(tmp) / "anchors" / "anchor.pt"
+        anchor_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"legacy.weight": torch.ones(2, 2)}, anchor_path)
+
+        model = train_template_module.TinyAnchorNet(4)
+        anchor = load_or_create_anchor(model, anchor_path)
+
+        assert set(anchor.keys()) == set(model.state_dict().keys())

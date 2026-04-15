@@ -381,7 +381,11 @@ class TAROrchestrator:
         heartbeat = self.runtime_daemon.load_heartbeat()
         payload_env = self.payload_environment.load()
         sandbox_policy = self.sandbox_policy()
-        build_attestation = self.store.latest_build_attestation(scope_kind="payload_environment")
+        build_attestation = (
+            payload_env.build_attestation
+            if payload_env is not None and payload_env.build_attestation is not None
+            else self.store.latest_build_attestation(scope_kind="payload_environment")
+        )
         return {
             "heartbeat": heartbeat.model_dump(mode="json") if heartbeat is not None else None,
             "active_leases": [item.model_dump(mode="json") for item in schedules if item.status in {"leased", "running"}],

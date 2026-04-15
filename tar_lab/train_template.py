@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import torch
@@ -41,6 +42,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True)
     parser.add_argument("--dry_run", action="store_true")
     return parser.parse_args()
+
+
+def _resolve_execution_device() -> tuple[torch.device, Optional[str]]:
+    if not torch.cuda.is_available():
+        return torch.device("cpu"), None
+    try:
+        torch.zeros(1, device="cuda")
+        return torch.device("cuda"), None
+    except Exception as exc:  # pragma: no cover - depends on host CUDA stack
+        return torch.device("cpu"), str(exc)
 
 
 def load_config(path: str) -> TrainingPayloadConfig:
@@ -87,14 +98,22 @@ def _validate_payload_provenance(config: TrainingPayloadConfig) -> None:
 
 
 def load_or_create_anchor(model: nn.Module, anchor_path: Path) -> Dict[str, torch.Tensor]:
+    expected = {name: tensor.detach().clone().cpu() for name, tensor in model.state_dict().items()}
     if anchor_path.exists():
         raw = torch.load(anchor_path, map_location="cpu")
         if isinstance(raw, dict):
-            return {k: v.detach().clone().cpu() for k, v in raw.items()}
-    anchor = {name: tensor.detach().clone().cpu() for name, tensor in model.state_dict().items()}
+            loaded = {k: v.detach().clone().cpu() for k, v in raw.items()}
+            compatible = True
+            for name, tensor in expected.items():
+                candidate = loaded.get(name)
+                if candidate is None or tuple(candidate.shape) != tuple(tensor.shape):
+                    compatible = False
+                    break
+            if compatible:
+                return {name: loaded[name] for name in expected}
     anchor_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(anchor, anchor_path)
-    return anchor
+    torch.save(expected, anchor_path)
+    return expected
 
 
 def sample_batch(batch_size: int, feature_dim: int, strategy_family: str, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
@@ -221,13 +240,33 @@ def _iter_manifest_rows(manifest: DatasetManifest | None) -> Iterable[dict[str, 
         return []
     rows: list[dict[str, Any]] = []
     for shard in manifest.shards:
-        path = Path(shard.path)
+        path = _resolve_manifest_shard_path(manifest, shard.path, shard.container_path)
         if not path.exists():
             continue
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 rows.append(json.loads(line))
     return rows
+
+
+def _resolve_manifest_shard_path(
+    manifest: DatasetManifest,
+    host_path: str,
+    container_path: Optional[str],
+) -> Path:
+    primary = Path(host_path)
+    if primary.exists():
+        return primary
+    if container_path:
+        container_candidate = Path(container_path)
+        if container_candidate.exists():
+            return container_candidate
+    fallback_root = Path(os.environ.get("TAR_CONTAINER_DATA_DIR", "/data"))
+    shard_name = PureWindowsPath(host_path).name or primary.name
+    fallback = fallback_root / manifest.stream_name / shard_name
+    if fallback.exists():
+        return fallback
+    return primary
 
 
 def _load_sequences(manifest: DatasetManifest | None) -> list[list[int]]:
@@ -983,7 +1022,7 @@ def _run_asc_text_payload(
 
 
 def run_payload(config: TrainingPayloadConfig, dry_run: bool = False) -> dict[str, Any]:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device, device_fallback_reason = _resolve_execution_device()
     output_dir = Path(config.output_dir)
     log_path = Path(config.log_path)
     anchor_manifest = load_manifest(config.anchor_manifest_path)
@@ -992,7 +1031,7 @@ def run_payload(config: TrainingPayloadConfig, dry_run: bool = False) -> dict[st
     _validate_payload_provenance(config)
 
     if config.backend_id == "toy_anchor":
-        return _run_toy_payload(
+        summary = _run_toy_payload(
             config,
             dry_run=dry_run,
             device=device,
@@ -1001,27 +1040,32 @@ def run_payload(config: TrainingPayloadConfig, dry_run: bool = False) -> dict[st
             anchor_manifest=anchor_manifest,
             research_manifest=research_manifest,
         )
-    if config.backend_id in {"asc_cv", "asc_rl", "asc_qml"}:
-        return run_multimodal_backend(
+    elif config.backend_id in {"asc_cv", "asc_rl", "asc_qml"}:
+        summary = run_multimodal_backend(
             config=config,
             dry_run=dry_run,
             device=device,
             output_dir=output_dir,
             log_path=log_path,
         )
-    if config.backend_id != "asc_text":
+    elif config.backend_id != "asc_text":
         raise ScientificValidityError(
             f"Backend '{config.backend_id}' is not a scientifically valid tar_lab.train_template execution path."
         )
-    return _run_asc_text_payload(
-        config,
-        dry_run=dry_run,
-        device=device,
-        output_dir=output_dir,
-        log_path=log_path,
-        anchor_manifest=anchor_manifest,
-        research_manifest=research_manifest,
-    )
+    else:
+        summary = _run_asc_text_payload(
+            config,
+            dry_run=dry_run,
+            device=device,
+            output_dir=output_dir,
+            log_path=log_path,
+            anchor_manifest=anchor_manifest,
+            research_manifest=research_manifest,
+        )
+
+    summary["device"] = str(device)
+    summary["device_fallback_reason"] = device_fallback_reason
+    return summary
 
 
 def main() -> int:

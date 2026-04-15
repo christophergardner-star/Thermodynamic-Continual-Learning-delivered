@@ -66,6 +66,40 @@ def test_build_payload_environment_records_image_metadata(monkeypatch):
         assert build.digest_source == "docker_inspect"
 
 
+def test_pull_image_short_circuits_when_image_exists_locally(monkeypatch):
+    runner = DockerRunner(docker_bin="docker-custom")
+    monkeypatch.setattr(runner, "_image_exists_locally", lambda image: True)
+    monkeypatch.setattr(
+        "tar_lab.docker_runner.subprocess.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("pull should not be attempted")),
+    )
+
+    assert runner.pull_image("tar-payload:locked") == 0
+
+
+def test_build_payload_environment_reuses_existing_local_image(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        builder = PayloadEnvironmentBuilder(tmp)
+        report = builder.prepare().model_copy(update={"build_status": "built"})
+        runner = DockerRunner(docker_bin="docker-custom")
+        monkeypatch.setattr(runner, "_image_exists_locally", lambda image: True)
+        monkeypatch.setattr(
+            runner,
+            "_inspect_image_metadata",
+            lambda image_tag: (f"{image_tag}@sha256:cached", "sha256:cached", "docker_inspect"),
+        )
+        monkeypatch.setattr(
+            "tar_lab.docker_runner.subprocess.run",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("docker build should not run")),
+        )
+
+        build = runner.build_payload_environment(report, dry_run=False)
+
+        assert build.returncode == 0
+        assert build.stdout == "reused_local_image"
+        assert build.image_digest == f"{report.image_tag}@sha256:cached"
+
+
 def test_compose_runtime_command_refuses_workspace_write_in_production():
     runner = DockerRunner(docker_bin="docker")
     runtime = RuntimeSpec(

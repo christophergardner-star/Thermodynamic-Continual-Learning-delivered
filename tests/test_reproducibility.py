@@ -1,12 +1,14 @@
 import tempfile
 from importlib import metadata
 from pathlib import Path
+from types import SimpleNamespace
 
 from tar_lab import reproducibility as reproducibility_module
 from tar_lab.orchestrator import TAROrchestrator
 from tar_lab.docker_runner import BuildResult
 from tar_lab.reproducibility import PayloadEnvironmentBuilder
-from tar_lab.schemas import ScienceEnvironmentBundle
+from tar_lab.schemas import BuildAttestation, DependencyPackageRecord, ScienceEnvironmentBundle, TrainingPayloadConfig
+from tar_lab.state import TARStateStore
 
 
 def _copy_science_profiles(tmp: str) -> None:
@@ -31,6 +33,9 @@ def test_payload_environment_builder_writes_locked_manifests():
         assert Path(report.manifest_path).exists()
         manifest_path = Path(tmp) / "tar_state" / "manifests" / f"{report.run_manifest.manifest_id}.json"
         assert manifest_path.exists()
+        dockerfile = Path(report.dockerfile_path).read_text(encoding="utf-8")
+        assert "pip uninstall -y torchvision torchaudio" in dockerfile
+        assert "TRANSFORMERS_NO_TORCHVISION=1" in dockerfile
 
 
 def test_payload_environment_builder_manifest_hash_is_stable():
@@ -47,6 +52,79 @@ def test_payload_environment_builder_manifest_hash_is_stable():
         assert first.image_manifest.hash_sha256 == second.image_manifest.hash_sha256
         assert first.run_manifest.hash_sha256 == second.run_manifest.hash_sha256
         assert first.image_manifest.dependency_lock.hash_sha256 == second.image_manifest.dependency_lock.hash_sha256
+
+
+def test_payload_environment_builder_prefers_target_image_resolution(monkeypatch):
+    def fake_target_resolve(specs, *, base_image, required):
+        assert base_image == "pytorch/pytorch:latest"
+        assert required is True
+        return [
+            DependencyPackageRecord(
+                requested_spec=spec,
+                normalized_name=PayloadEnvironmentBuilder._extract_package_name(spec) or spec,
+                resolved_spec=f"{PayloadEnvironmentBuilder._extract_package_name(spec)}==1.2.3",
+                version="1.2.3",
+                required=True,
+                resolution_status="pinned",
+            )
+            for spec in specs
+        ]
+
+    def fake_host_version(name: str) -> str:
+        return "9.9.9"
+
+    monkeypatch.setenv("TAR_TARGET_IMAGE_LOCKING", "auto")
+    monkeypatch.setattr(reproducibility_module.metadata, "version", fake_host_version)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        builder = PayloadEnvironmentBuilder(tmp)
+        monkeypatch.setattr(builder, "_resolve_package_records_in_image", fake_target_resolve)
+        report = builder.prepare()
+
+        assert report.reproducibility_complete is True
+        assert all(package.endswith("==1.2.3") for package in report.packages)
+
+
+def test_payload_environment_builder_reuses_existing_locked_payload_packages(monkeypatch):
+    versions = {
+        "datasets": "4.8.4",
+        "numpy": "2.2.6",
+        "peft": "0.18.1",
+        "pydantic": "2.13.0",
+        "sentence-transformers": "5.4.0",
+        "torch": "2.11.0",
+        "transformers": "5.5.4",
+    }
+
+    def fake_target_resolve(specs, *, base_image, required):
+        return [
+            DependencyPackageRecord(
+                requested_spec=spec,
+                normalized_name=PayloadEnvironmentBuilder._extract_package_name(spec) or spec,
+                resolved_spec=f"{PayloadEnvironmentBuilder._extract_package_name(spec)}=={versions[PayloadEnvironmentBuilder._extract_package_name(spec)]}",
+                version=versions[PayloadEnvironmentBuilder._extract_package_name(spec)],
+                required=required,
+                resolution_status="pinned",
+            )
+            for spec in specs
+        ]
+
+    monkeypatch.setenv("TAR_TARGET_IMAGE_LOCKING", "auto")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        builder = PayloadEnvironmentBuilder(tmp)
+        monkeypatch.setattr(builder, "_resolve_package_records_in_image", fake_target_resolve)
+        first = builder.prepare()
+
+        monkeypatch.setattr(
+            builder,
+            "_resolve_package_records_in_image",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("existing lock should be reused")),
+        )
+        second = builder.prepare()
+
+        assert first.packages == second.packages
+        assert second.reproducibility_complete is True
 
 
 def test_payload_environment_builder_fails_closed_when_package_version_missing(monkeypatch):
@@ -71,6 +149,117 @@ def test_payload_environment_builder_fails_closed_when_package_version_missing(m
         assert "peft" in report.lock_incomplete_reason
         assert all("==" in package for package in report.packages)
         assert Path(report.manifest_path).exists()
+
+
+def test_payload_environment_builder_preserves_build_attestation_when_lock_is_unchanged():
+    with tempfile.TemporaryDirectory() as tmp:
+        builder = PayloadEnvironmentBuilder(tmp)
+        first = builder.prepare()
+        first = builder.attach_payload_build_attestation(
+            first,
+            build_result=BuildResult(
+                mode="subprocess",
+                command=["docker", "build", "-t", first.image_tag],
+                image_tag=first.image_tag,
+                returncode=0,
+                stdout="built",
+                stderr="",
+                image_digest=f"{first.image_tag}@sha256:abc123",
+                image_id="sha256:image123",
+                digest_source="docker_inspect",
+            ),
+        )
+
+        second = builder.prepare()
+
+        assert second.build_status == "built"
+        assert second.build_attestation is not None
+        assert second.build_attestation_path == first.build_attestation_path
+        assert second.build_attestation.attestation_id == first.build_attestation.attestation_id
+
+
+def test_payload_environment_builder_preserves_build_attestation_when_tar_runs_change():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        builder = PayloadEnvironmentBuilder(tmp)
+        first = builder.prepare()
+        first = builder.attach_payload_build_attestation(
+            first,
+            build_result=BuildResult(
+                mode="subprocess",
+                command=["docker", "build", "-t", first.image_tag],
+                image_tag=first.image_tag,
+                returncode=0,
+                stdout="built",
+                stderr="",
+                image_digest=f"{first.image_tag}@sha256:def456",
+                image_id="sha256:image456",
+                digest_source="docker_inspect",
+            ),
+        )
+
+        trial_dir = root / "tar_runs" / "trial-1"
+        trial_dir.mkdir(parents=True, exist_ok=True)
+        (trial_dir / "config.json").write_text("{\"generated\": true}\n", encoding="utf-8")
+
+        second = builder.prepare()
+
+        assert second.build_status == "built"
+        assert second.build_attestation is not None
+        assert second.build_attestation_path == first.build_attestation_path
+        assert second.build_attestation.attestation_id == first.build_attestation.attestation_id
+
+
+def test_payload_environment_builder_preserves_build_attestation_when_source_only_changes():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "notes.md").write_text("before\n", encoding="utf-8")
+        builder = PayloadEnvironmentBuilder(tmp)
+        first = builder.prepare()
+        first = builder.attach_payload_build_attestation(
+            first,
+            build_result=BuildResult(
+                mode="subprocess",
+                command=["docker", "build", "-t", first.image_tag],
+                image_tag=first.image_tag,
+                returncode=0,
+                stdout="built",
+                stderr="",
+                image_digest=f"{first.image_tag}@sha256:ghi789",
+                image_id="sha256:image789",
+                digest_source="docker_inspect",
+            ),
+        )
+
+        (root / "notes.md").write_text("after\n", encoding="utf-8")
+        second = builder.prepare()
+
+        assert second.build_status == "built"
+        assert second.build_attestation is not None
+        assert second.build_attestation_path == first.build_attestation_path
+        assert second.build_attestation.attestation_id == first.build_attestation.attestation_id
+
+
+def test_workspace_source_hash_ignores_generated_artifact_trees():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "app.py").write_text("print('ok')\n", encoding="utf-8")
+        (root / ".venv").mkdir(parents=True, exist_ok=True)
+        (root / ".venv" / "noise.py").write_text("print('noise')\n", encoding="utf-8")
+        (root / "training_artifacts").mkdir(parents=True, exist_ok=True)
+        (root / "training_artifacts" / "metadata.json").write_text("{\"ignored\": true}\n", encoding="utf-8")
+        (root / "tar_runs").mkdir(parents=True, exist_ok=True)
+        (root / "tar_runs" / "config.json").write_text("{\"generated\": true}\n", encoding="utf-8")
+
+        builder = PayloadEnvironmentBuilder(tmp)
+        first = builder._workspace_source_hash()
+
+        (root / ".venv" / "noise.py").write_text("print('different')\n", encoding="utf-8")
+        (root / "training_artifacts" / "metadata.json").write_text("{\"ignored\": false}\n", encoding="utf-8")
+        (root / "tar_runs" / "config.json").write_text("{\"generated\": false}\n", encoding="utf-8")
+        second = builder._workspace_source_hash()
+
+        assert first == second
 
 
 def test_science_bundle_lock_fails_closed_when_requirement_cannot_be_pinned(monkeypatch):
@@ -231,3 +420,44 @@ def test_prepare_science_environment_build_attaches_build_attestation():
             assert Path(bundle.build_attestation_path).exists()
         finally:
             orchestrator.shutdown()
+
+
+def test_training_payload_split_validator_handles_missing_info_data():
+    assert TrainingPayloadConfig.validate_split_sum(0.15, SimpleNamespace(data=None)) == 0.15
+
+
+def test_latest_build_attestation_prefers_newest_built_at():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = TARStateStore(tmp)
+        older = BuildAttestation(
+            attestation_id="build-zolder",
+            scope_kind="payload_environment",
+            image_tag="tar-payload:locked",
+            build_command=["docker", "build"],
+            builder_backend="subprocess",
+            build_status="built",
+            image_manifest_hash="hash-older",
+            dependency_lock_hash="lock",
+            environment_fingerprint_id="env-older",
+            built_at="2026-04-13T10:00:00+00:00",
+        )
+        newer = BuildAttestation(
+            attestation_id="build-anewer",
+            scope_kind="payload_environment",
+            image_tag="tar-payload:locked",
+            build_command=["docker", "build"],
+            builder_backend="subprocess",
+            build_status="built",
+            image_manifest_hash="hash-newer",
+            dependency_lock_hash="lock",
+            environment_fingerprint_id="env-newer",
+            built_at="2026-04-15T10:00:00+00:00",
+        )
+
+        store.save_build_attestation(older)
+        store.save_build_attestation(newer)
+
+        latest = store.latest_build_attestation(scope_kind="payload_environment")
+
+        assert latest is not None
+        assert latest.attestation_id == "build-anewer"

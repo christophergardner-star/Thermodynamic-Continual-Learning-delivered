@@ -306,6 +306,19 @@ class DockerRunner:
         command = self._normalize_docker_command(report.image_manifest.build_command)
         if dry_run:
             return BuildResult(mode="dry_run", command=command, image_tag=report.image_tag)
+        if report.build_status == "built" and self._image_exists_locally(report.image_tag):
+            image_digest, image_id, digest_source = self._inspect_image_metadata(report.image_tag)
+            return BuildResult(
+                mode="subprocess",
+                command=command,
+                image_tag=report.image_tag,
+                returncode=0,
+                stdout="reused_local_image",
+                stderr="",
+                image_digest=image_digest,
+                image_id=image_id,
+                digest_source=digest_source,
+            )
         proc = subprocess.run(command, capture_output=True, text=True, check=False)
         image_digest = None
         image_id = None
@@ -391,6 +404,8 @@ class DockerRunner:
         )
 
     def pull_image(self, image: str) -> Optional[int]:
+        if self._image_exists_locally(image):
+            return 0
         if docker is not None:
             client = docker.from_env()
             client.images.pull(image)
@@ -567,6 +582,18 @@ class DockerRunner:
         image_id = first.get("Id")
         image_digest = repo_digests[0] if repo_digests else None
         return image_digest, image_id, "docker_inspect"
+
+    def _image_exists_locally(self, image_tag: str) -> bool:
+        if docker is not None:
+            try:
+                client = docker.from_env()
+                client.images.get(image_tag)
+                return True
+            except Exception:
+                pass
+        inspect_cmd = [self.docker_bin, "image", "inspect", image_tag]
+        proc = subprocess.run(inspect_cmd, capture_output=True, text=True, check=False)
+        return proc.returncode == 0
 
     @staticmethod
     def _require_locked_runtime(runtime: RuntimeSpec) -> None:

@@ -12,10 +12,12 @@ from tar_lab.schemas import (
     DataBundleProvenance,
     DataProvenance,
     DatasetManifest,
+    DatasetShard,
     DatasetSourceConfig,
     PreparedDataBundle,
     TokenizerProvenance,
 )
+from tar_lab.train_template import _load_sequences
 
 
 def _research_safe_bundle(tmp: str) -> PreparedDataBundle:
@@ -149,6 +151,54 @@ def test_manifest_logs_tokenizer_vocab_and_provenance_completeness():
         assert manifest.provenance_complete
         assert manifest.provenance.provenance_complete
         assert manifest.provenance.tokenizer_provenance is not None
+        assert manifest.shards
+        assert manifest.shards[0].container_path == "/data/anchor/shard_0000.jsonl"
+
+
+def test_train_template_loads_manifest_rows_from_container_fallback(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        container_root = Path(tmp) / "container_data"
+        shard_dir = container_root / "anchor"
+        shard_dir.mkdir(parents=True, exist_ok=True)
+        shard_path = shard_dir / "shard_0000.jsonl"
+        shard_path.write_text(
+            '{"record_id":"row-1","token_ids":[4,5,6],"length":3}\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("TAR_CONTAINER_DATA_DIR", str(container_root))
+        manifest = DatasetManifest(
+            stream_name="anchor",
+            tokenizer_id="unit-test-tokenizer",
+            records=1,
+            shards=[
+                DatasetShard(
+                    shard_index=0,
+                    path=r"C:\missing\anchor\shard_0000.jsonl",
+                    container_path=str(shard_path),
+                    records=1,
+                )
+            ],
+            source=DatasetSourceConfig(name="local-anchor", mode="OFFLINE_FALLBACK"),
+        )
+
+        sequences = _load_sequences(manifest)
+
+        assert sequences == [[4, 5, 6]]
+
+
+def test_manifest_without_container_paths_is_treated_as_stale():
+    with tempfile.TemporaryDirectory() as tmp:
+        manager = DataManager(tmp)
+        source = DatasetSourceConfig(name="local-anchor", subset="mini", split="train", mode="OFFLINE_FALLBACK")
+        manifest = DatasetManifest(
+            stream_name="anchor",
+            tokenizer_id="unit-test-tokenizer",
+            records=1,
+            shards=[DatasetShard(shard_index=0, path=r"C:\legacy\shard_0000.jsonl", records=1)],
+            source=source,
+        )
+
+        assert manager._manifest_matches_request(manifest, source, tokenizer_id=None, run_intent="control") is False
 
 
 def test_status_reports_data_purity_and_research_grade(monkeypatch):

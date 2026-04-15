@@ -210,6 +210,7 @@ class DataManager:
                 DatasetShard(
                     shard_index=shard_index,
                     path=str(shard_path),
+                    container_path=f"{self.container_data_dir()}/{stream_name}/{shard_path.name}",
                     records=len(chunk),
                 )
             )
@@ -676,6 +677,8 @@ class DataManager:
         tokenizer_id: Optional[str],
         run_intent: RunIntent,
     ) -> bool:
+        if any(not shard.container_path for shard in manifest.shards):
+            return False
         if manifest.source.name != source.name or manifest.source.subset != source.subset or manifest.source.split != source.split:
             return False
         if manifest.source.mode != source.mode or manifest.source.sampling_strategy != source.sampling_strategy:
