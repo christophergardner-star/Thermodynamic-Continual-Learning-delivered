@@ -1,5 +1,13 @@
 # Phase 4 Roadmap
 
+Authoritative follow-on planning after the Phase 4 audit is now tracked in:
+
+- [phase5_roadmap.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/phase5_roadmap.md)
+
+Use this file for the Phase 4 system-integration context and the current
+WS32/WS32.5/WS33 dependency chain. Use `phase5_roadmap.md` for the detailed
+post-audit execution plan from `WS32-close` through `WS39`.
+
 This is the authoritative forward roadmap after completion of:
 
 - `WS1-WS7` foundation phase

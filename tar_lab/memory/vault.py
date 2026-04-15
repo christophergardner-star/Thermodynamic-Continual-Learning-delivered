@@ -120,13 +120,24 @@ class ScientificReranker:
         top_k: int,
     ) -> list[tuple[float, "RetrievedDocument"]]:
         scored: list[tuple[float, RetrievedDocument]] = []
+        query_contradiction = self._query_wants_contradictions(query)
         for candidate in candidates:
             dense = VectorVault._cosine(query_embedding, candidate.embedding)
             lexical = VectorVault._lexical_score(query, candidate.document)
             coverage = VectorVault._coverage_score(query, candidate.document)
             kind_bonus = self._kind_bonus(candidate.metadata)
             evidence_bonus = self._evidence_bonus(candidate.metadata)
-            score = (0.52 * dense) + (0.20 * lexical) + (0.18 * coverage) + kind_bonus + evidence_bonus
+            source_confidence = self._source_confidence(candidate.metadata)
+            contradiction_bonus = self._contradiction_bonus(candidate.metadata, query_wants_contradictions=query_contradiction)
+            score = (
+                (0.46 * dense)
+                + (0.18 * lexical)
+                + (0.16 * coverage)
+                + kind_bonus
+                + evidence_bonus
+                + (0.12 * source_confidence)
+                + contradiction_bonus
+            )
             scored.append((score, candidate))
         scored.sort(key=lambda item: item[0], reverse=True)
         return scored[:top_k]
@@ -134,6 +145,10 @@ class ScientificReranker:
     @staticmethod
     def _kind_bonus(metadata: dict[str, Any]) -> float:
         kind = str(metadata.get("kind", ""))
+        if kind == "claim_conflict":
+            return 0.11
+        if kind == "claim_cluster":
+            return 0.09
         if kind == "paper_claim":
             return 0.08
         if kind in {"paper_section", "paper_table", "paper_figure", "paper_bibliography"}:
@@ -150,6 +165,36 @@ class ScientificReranker:
         if metadata.get("source_excerpt"):
             bonus += 0.02
         return bonus
+
+    @staticmethod
+    def _source_confidence(metadata: dict[str, Any]) -> float:
+        value = metadata.get("source_confidence", 0.0)
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _query_wants_contradictions(query: str) -> bool:
+        lowered = query.lower()
+        return any(token in lowered for token in ("contradict", "conflict", "tension", "disagree", "versus", "vs", "compare"))
+
+    @staticmethod
+    def _contradiction_bonus(metadata: dict[str, Any], *, query_wants_contradictions: bool) -> float:
+        kind = str(metadata.get("kind", ""))
+        contradiction_count = 0
+        for key in ("contradiction_count", "contradiction_pair_count", "conflict_count"):
+            value = metadata.get(key)
+            try:
+                contradiction_count = max(contradiction_count, int(value))
+            except (TypeError, ValueError):
+                continue
+        if kind == "claim_conflict":
+            return 0.14 if query_wants_contradictions else 0.06
+        if contradiction_count <= 0:
+            return 0.0
+        base = min(0.10, 0.02 * contradiction_count)
+        return base + (0.04 if query_wants_contradictions else 0.0)
 
 
 @dataclass
@@ -388,6 +433,7 @@ class VectorVault:
             "source_name": document.source_name,
             "published_at": document.published_at or "",
             "url": document.url,
+            "source_confidence": 0.45,
         }
         self._upsert(f"research:{document.document_id}", text, metadata)
 
@@ -409,6 +455,7 @@ class VectorVault:
                 "span_start": claim.span_start if claim.span_start is not None else -1,
                 "span_end": claim.span_end if claim.span_end is not None else -1,
                 "evidence_kind": claim.evidence_kind,
+                "source_confidence": min(1.0, 0.52 + (0.06 * len(claim.citation_entry_ids))),
             }
             self._upsert(f"paper_claim:{claim.claim_id}", text, metadata)
         for section in artifact.sections:
@@ -423,6 +470,7 @@ class VectorVault:
                 "page_end": section.page_end or -1,
                 "source_path": artifact.source_path,
                 "source_excerpt": section.text[:320],
+                "source_confidence": 0.42,
             }
             self._upsert(f"paper_section:{artifact.paper_id}:{section.section_id}", text, metadata)
         for entry in artifact.bibliography:
@@ -436,6 +484,7 @@ class VectorVault:
                 "page_number": entry.page_number or -1,
                 "source_path": artifact.source_path,
                 "source_excerpt": entry.source_excerpt or entry.raw_text[:320],
+                "source_confidence": 0.5,
             }
             self._upsert(f"paper_bibliography:{entry.entry_id}", text, metadata)
         for table in artifact.tables:
@@ -449,6 +498,7 @@ class VectorVault:
                 "page_number": table.page_number or -1,
                 "source_path": artifact.source_path,
                 "source_excerpt": table.context_excerpt or table.raw_text[:320],
+                "source_confidence": 0.48,
             }
             self._upsert(f"paper_table:{table.table_id}", text, metadata)
         for figure in artifact.figures:
@@ -463,6 +513,7 @@ class VectorVault:
                 "source": figure.source,
                 "source_path": artifact.source_path,
                 "source_excerpt": figure.context_excerpt or figure.raw_text[:320],
+                "source_confidence": 0.4 if figure.source == "ocr" else 0.46,
             }
             self._upsert(f"paper_figure:{figure.figure_id}", text, metadata)
         summary = f"{artifact.title}. {artifact.abstract} Sections: {'; '.join(section.heading for section in artifact.sections[:6])}"
@@ -476,6 +527,7 @@ class VectorVault:
                 "source_path": artifact.source_path,
                 "ocr_used": artifact.ocr_used,
                 "parser_used": artifact.parser_used or "",
+                "source_confidence": 0.5,
             },
         )
         self._refresh_claim_clusters()
@@ -691,6 +743,7 @@ class VectorVault:
         if not claims:
             self.claim_clusters_path.write_text("[]", encoding="utf-8")
             self.claim_conflicts_path.write_text("[]", encoding="utf-8")
+            self._clear_claim_graph_index()
             return
 
         parent = list(range(len(claims)))
@@ -768,11 +821,69 @@ class VectorVault:
             json.dumps([item.model_dump(mode="json") for item in conflicts], indent=2),
             encoding="utf-8",
         )
+        self._index_claim_graph(clusters, conflicts)
+
+    def _clear_claim_graph_index(self) -> None:
+        for kind in ("claim_cluster", "claim_conflict"):
+            try:
+                self.collection.delete(where={"kind": kind})
+            except Exception:
+                pass
+
+    def _index_claim_graph(self, clusters: list[ClaimCluster], conflicts: list[ClaimConflict]) -> None:
+        self._clear_claim_graph_index()
+        for cluster in clusters:
+            contradiction_count = len(cluster.contradiction_pairs)
+            text = (
+                f"Claim cluster {cluster.cluster_id}. "
+                f"Topics: {', '.join(cluster.topic_terms)}. "
+                f"Claims: {', '.join(cluster.claim_ids[:8])}. "
+                f"Contradiction pairs: {contradiction_count}. "
+                f"Polarity distribution: {json.dumps(cluster.polarity_distribution, sort_keys=True)}."
+            )
+            metadata = {
+                "kind": "claim_cluster",
+                "cluster_id": cluster.cluster_id,
+                "claim_ids": json.dumps(cluster.claim_ids),
+                "topic_terms": json.dumps(cluster.topic_terms),
+                "cross_paper": cluster.cross_paper,
+                "paper_count": cluster.paper_count,
+                "evidence_count": cluster.evidence_count,
+                "contradiction_pair_count": contradiction_count,
+                "source_confidence": min(1.0, 0.45 + (0.05 * min(cluster.evidence_count, 5))),
+            }
+            self._upsert(f"claim_cluster:{cluster.cluster_id}", text, metadata)
+        for conflict in conflicts:
+            text = (
+                f"Claim conflict {conflict.left_claim_id} versus {conflict.right_claim_id}. "
+                f"Reason: {conflict.reason}. "
+                f"Topics: {', '.join(conflict.topic_terms)}."
+            )
+            metadata = {
+                "kind": "claim_conflict",
+                "left_claim_id": conflict.left_claim_id,
+                "right_claim_id": conflict.right_claim_id,
+                "left_paper_id": conflict.left_paper_id or "",
+                "right_paper_id": conflict.right_paper_id or "",
+                "conflict_kind": conflict.conflict_kind,
+                "topic_terms": json.dumps(conflict.topic_terms),
+                "shared_token_count": conflict.shared_token_count,
+                "conflict_score": conflict.score,
+                "contradiction_count": 1,
+                "source_confidence": max(0.5, min(1.0, conflict.score)),
+                "source_excerpt": conflict.reason,
+            }
+            self._upsert(
+                self._stable_id("claim_conflict", f"{conflict.left_claim_id}|{conflict.right_claim_id}"),
+                text,
+                metadata,
+            )
 
     def _annotate_hits_with_contradictions(self, hits: list[MemorySearchHit]) -> list[MemorySearchHit]:
         clusters = self._load_claim_clusters()
         conflicts = self._load_claim_conflicts()
         claim_to_cluster: dict[str, ClaimCluster] = {}
+        cluster_by_id = {cluster.cluster_id: cluster for cluster in clusters}
         for cluster in clusters:
             for claim_id in cluster.claim_ids:
                 claim_to_cluster[claim_id] = cluster
@@ -793,7 +904,26 @@ class VectorVault:
                     related_conflicts = claim_to_conflicts.get(claim_id, [])
                     if related_conflicts:
                         metadata["contradictory_claims"] = [item.model_dump(mode="json") for item in related_conflicts]
-                metadata["evidence_trace"] = self._build_evidence_trace(hit).model_dump(mode="json")
+                metadata["evidence_trace"] = self._build_evidence_trace(hit.model_copy(update={"metadata": metadata})).model_dump(mode="json")
+            elif metadata.get("kind") == "claim_cluster":
+                cluster_id = str(metadata.get("cluster_id", ""))
+                cluster = cluster_by_id.get(cluster_id)
+                if cluster is not None:
+                    metadata["contradiction_summary"] = [
+                        f"{left} vs {right}"
+                        for left, right in cluster.contradiction_pairs[:3]
+                    ]
+                    metadata["contradiction_count"] = len(cluster.contradiction_pairs)
+                metadata["evidence_trace"] = self._build_evidence_trace(hit.model_copy(update={"metadata": metadata})).model_dump(mode="json")
+            elif metadata.get("kind") == "claim_conflict":
+                metadata["contradictory_claims"] = [
+                    {
+                        "left_claim_id": metadata.get("left_claim_id"),
+                        "right_claim_id": metadata.get("right_claim_id"),
+                        "reason": metadata.get("source_excerpt") or metadata.get("reason") or "claim conflict",
+                    }
+                ]
+                metadata["evidence_trace"] = self._build_evidence_trace(hit.model_copy(update={"metadata": metadata})).model_dump(mode="json")
             annotated.append(hit.model_copy(update={"metadata": metadata}))
         return annotated
 
@@ -870,7 +1000,7 @@ class VectorVault:
     def _build_evidence_trace(self, hit: MemorySearchHit) -> EvidenceTrace:
         metadata = hit.metadata or {}
         contradictions = metadata.get("contradictory_claims") or []
-        contradiction_summary = [
+        contradiction_summary = metadata.get("contradiction_summary") or [
             f"{item.get('left_claim_id')} vs {item.get('right_claim_id')}: {item.get('reason')}"
             for item in contradictions[:3]
             if isinstance(item, dict)
@@ -891,8 +1021,8 @@ class VectorVault:
             source_path=metadata.get("source_path"),
             excerpt=str(metadata.get("source_excerpt") or hit.document[:320]),
             bibliography_entry_ids=[str(item) for item in bibliography_ids if item],
-            contradiction_count=len(contradictions),
-            contradiction_summary=contradiction_summary,
+            contradiction_count=max(len(contradictions), int(metadata.get("contradiction_count", 0) or 0)),
+            contradiction_summary=[str(item) for item in contradiction_summary],
         )
 
     @staticmethod

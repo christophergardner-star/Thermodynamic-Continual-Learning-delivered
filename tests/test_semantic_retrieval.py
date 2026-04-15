@@ -90,6 +90,67 @@ def test_vault_retrieves_physics_claim_with_semantic_embedder(monkeypatch):
             vault.close()
 
 
+def test_vault_indexes_claim_graph_and_surfaces_conflict_hit(monkeypatch):
+    import tar_lab.memory.vault as vault_module
+
+    monkeypatch.setattr(vault_module, "SentenceTransformer", FakeSentenceTransformer)
+    with tempfile.TemporaryDirectory() as tmp:
+        vault = VectorVault(tmp)
+        try:
+            claim_a = ResearchClaim(
+                claim_id="claim-a",
+                paper_id="paper-a",
+                section_id="section:0",
+                label="fact",
+                text="Entropy production increases under irreversible drift.",
+                polarity="positive",
+                page_number=1,
+            )
+            claim_b = ResearchClaim(
+                claim_id="claim-b",
+                paper_id="paper-b",
+                section_id="section:0",
+                label="fact",
+                text="Entropy production does not increase under irreversible drift.",
+                polarity="negative",
+                page_number=2,
+            )
+            artifact_a = PaperArtifact(
+                paper_id="paper-a",
+                source_path="paper-a.pdf",
+                title="Physics Paper A",
+                sections=[PaperSection(section_id="section:0", heading="Results", text=claim_a.text, page_start=1, page_end=1)],
+                claims=[claim_a],
+            )
+            artifact_b = PaperArtifact(
+                paper_id="paper-b",
+                source_path="paper-b.pdf",
+                title="Physics Paper B",
+                sections=[PaperSection(section_id="section:0", heading="Results", text=claim_b.text, page_start=2, page_end=2)],
+                claims=[claim_b],
+            )
+            vault.index_paper_artifact(artifact_a)
+            vault.index_paper_artifact(artifact_b)
+
+            stats = vault.stats()
+            assert stats["claim_clusters"] >= 1
+            assert stats["claim_conflicts"] >= 1
+
+            hits = vault.search(
+                "Find contradiction or conflict about entropy production under irreversible drift.",
+                n_results=3,
+                require_research_grade=True,
+            )
+
+            assert hits
+            conflict_hit = next((hit for hit in hits if hit.metadata.get("kind") == "claim_conflict"), None)
+            assert conflict_hit is not None
+            assert float(conflict_hit.metadata["source_confidence"]) >= 0.5
+            assert conflict_hit.metadata["evidence_trace"]["contradiction_count"] >= 1
+        finally:
+            vault.close()
+
+
 def test_literature_engine_extracts_pdf_string_with_page_attribution(monkeypatch):
     def fake_read_pdf_pages(self, path: Path):
         return (
