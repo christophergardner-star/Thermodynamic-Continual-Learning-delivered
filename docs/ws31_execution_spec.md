@@ -26,6 +26,18 @@ What remained weak was benchmark statistics:
 
 `WS31` closes that gap in stages.
 
+Current state after the first bounded benchmark packs:
+
+- statistical-contract slice: complete
+- bounded validation pack: complete
+- bounded canonical QML pack: complete
+- generic_ml canonical split: partially aligned
+- graph_ml canonical split: partially aligned
+- computer_vision canonical split: partially aligned
+- deep_learning canonical split: partially aligned
+- reinforcement_learning canonical slice assessed and still refused
+- remaining open scope: broader non-QML canonical executor alignment
+
 ## Core Hypothesis
 
 If TAR attaches benchmark-specific statistical summaries to experiment and
@@ -152,3 +164,28 @@ Pod is justified only when:
 
 - decide whether real benchmark scale justifies a pod
 - only then run bounded multi-seed benchmark sessions
+
+### Slice 3
+
+- keep `WS31` open for non-QML canonical executor alignment
+- record `generic_ml/openml_adult_calibration` as the first aligned non-QML
+  canonical path
+- keep `generic_ml/openml_cc18_classification` explicitly refused until the
+  full CC18 executor exists
+- record `graph_ml/roman_empire_heterophily_canonical` as the second aligned
+  non-QML canonical path
+- keep `graph_ml/cora_depth_canonical` explicitly refused until the real Cora
+  depth executor exists
+- record `computer_vision/imagenette_transfer_canonical` as the third aligned
+  non-QML canonical path
+- keep `computer_vision/cifar10_c_corruption` explicitly refused until the
+  true CIFAR-10-C corruption suite is wired
+- record `deep_learning/cifar10_optimizer_canonical` as the fourth aligned
+  non-QML canonical path
+- keep `deep_learning/cifar10_scaling_canonical` explicitly refused until the
+  real CIFAR-10 scaling executor exists
+- record `reinforcement_learning` as assessed but still fully refused pending a
+  specific Minari benchmark path
+- prioritize the heavier NLP slice next
+- preserve truthful refusal for unsupported canonical suites until the executor
+  path is genuinely aligned

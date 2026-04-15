@@ -36,10 +36,10 @@ def _utc_stamp() -> str:
 BENCHMARK_TRUTH_OVERRIDES: dict[str, dict[str, BenchmarkTruthStatus]] = {
     "generic_ml": {
         "openml_cc18_classification": "unsupported",
-        "openml_adult_calibration": "unsupported",
+        "openml_adult_calibration": "canonical_ready",
     },
     "deep_learning": {
-        "cifar10_optimizer_canonical": "unsupported",
+        "cifar10_optimizer_canonical": "canonical_ready",
         "cifar10_scaling_canonical": "unsupported",
     },
     "natural_language_processing": {
@@ -49,7 +49,7 @@ BENCHMARK_TRUTH_OVERRIDES: dict[str, dict[str, BenchmarkTruthStatus]] = {
     },
     "computer_vision": {
         "cifar10_c_corruption": "unsupported",
-        "imagenette_transfer_canonical": "unsupported",
+        "imagenette_transfer_canonical": "canonical_ready",
     },
     "reinforcement_learning": {
         "minari_cartpole_exploration": "unsupported",
@@ -57,7 +57,7 @@ BENCHMARK_TRUTH_OVERRIDES: dict[str, dict[str, BenchmarkTruthStatus]] = {
     },
     "graph_ml": {
         "cora_depth_canonical": "unsupported",
-        "roman_empire_heterophily_canonical": "unsupported",
+        "roman_empire_heterophily_canonical": "canonical_ready",
     },
     "quantum_ml": {
         "pennylane_barren_plateau_canonical": "canonical_ready",
@@ -83,6 +83,40 @@ def _truth_status_note(profile_id: str, suite: BenchmarkSpec, truth_status: Benc
     if truth_status == "canonical_ready":
         return None
     if suite.tier == "canonical":
+        if profile_id == "generic_ml" and suite.benchmark_id == "openml_cc18_classification":
+            return (
+                "Benchmark 'openml_cc18_classification' remains registered for planning, but the current generic_ml "
+                "executor only supports single-dataset canonical tabular runs and does not yet cover the full CC18 suite."
+            )
+        if profile_id == "graph_ml" and suite.benchmark_id == "cora_depth_canonical":
+            return (
+                "Benchmark 'cora_depth_canonical' remains registered for planning, but the current graph_ml executor "
+                "only has a real canonical path for Roman Empire heterophily and does not yet implement a truthful "
+                "Cora depth benchmark."
+            )
+        if profile_id == "computer_vision" and suite.benchmark_id == "cifar10_c_corruption":
+            return (
+                "Benchmark 'cifar10_c_corruption' remains registered for planning, but the current computer_vision "
+                "executor does not yet load the true CIFAR-10-C corruption suite and must refuse publication-grade claims."
+            )
+        if profile_id == "deep_learning" and suite.benchmark_id == "cifar10_scaling_canonical":
+            return (
+                "Benchmark 'cifar10_scaling_canonical' remains registered for planning, but the current deep_learning "
+                "executor only has a real CIFAR-10 optimizer comparison path and does not yet implement a truthful "
+                "scaling benchmark."
+            )
+        if profile_id == "reinforcement_learning" and suite.benchmark_id == "minari_cartpole_exploration":
+            return (
+                "Benchmark 'minari_cartpole_exploration' remains registered for planning, but the current "
+                "reinforcement_learning executor still uses a synthetic bandit exploration probe and does not yet "
+                "load a specific Minari CartPole dataset."
+            )
+        if profile_id == "reinforcement_learning" and suite.benchmark_id == "minari_offline_online_transfer":
+            return (
+                "Benchmark 'minari_offline_online_transfer' remains registered for planning, but the current "
+                "reinforcement_learning executor does not yet implement a truthful Minari offline-to-online "
+                "CartPole benchmark."
+            )
         return (
             f"Benchmark '{suite.benchmark_id}' remains registered for planning, but the current {profile_id} executor "
             "is not yet aligned to the named canonical benchmark and must refuse publication-grade claims."

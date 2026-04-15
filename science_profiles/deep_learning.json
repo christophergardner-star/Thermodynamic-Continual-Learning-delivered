@@ -9,8 +9,10 @@
   "pip_packages": [
     {"name": "numpy"},
     {"name": "scipy"},
+    {"name": "datasets"},
     {"name": "matplotlib"},
     {"name": "pandas"},
+    {"name": "Pillow"},
     {"name": "torchmetrics"},
     {"name": "einops"}
   ],
@@ -50,7 +52,7 @@
       "dataset_or_env": "huggingface:cifar10",
       "metric_protocol": ["loss", "accuracy", "gradient_norm", "calibration_ece"],
       "canonical_comparable": true,
-      "required_imports": ["numpy", "torch", "datasets"],
+      "required_imports": ["numpy", "torch", "datasets", "PIL"],
       "requires_download": true,
       "proxy_allowed": false
     },

@@ -18,10 +18,21 @@ except ImportError:  # pragma: no cover - optional dependency
     nx = None  # type: ignore[assignment]
 
 try:
-    from sklearn.datasets import load_breast_cancer, load_digits  # type: ignore
+    from sklearn.datasets import fetch_openml, load_breast_cancer, load_digits  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
+    fetch_openml = None  # type: ignore[assignment]
     load_breast_cancer = None  # type: ignore[assignment]
     load_digits = None  # type: ignore[assignment]
+
+try:
+    import pandas as pd  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    pd = None  # type: ignore[assignment]
+
+try:
+    from torch_geometric.datasets import HeterophilousGraphDataset  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    HeterophilousGraphDataset = None  # type: ignore[assignment]
 
 try:
     from datasets import DownloadConfig, load_dataset as hf_load_dataset  # type: ignore
@@ -719,9 +730,9 @@ class _TinyResidualBlock(nn.Module):
 
 
 class _TinyVisionResNet(nn.Module):
-    def __init__(self, channels: int = 12, blocks: int = 2, num_classes: int = 3):
+    def __init__(self, channels: int = 12, blocks: int = 2, num_classes: int = 3, input_channels: int = 1):
         super().__init__()
-        self.stem = nn.Conv2d(1, channels, kernel_size=3, padding=1)
+        self.stem = nn.Conv2d(input_channels, channels, kernel_size=3, padding=1)
         self.blocks = nn.Sequential(*[_TinyResidualBlock(channels) for _ in range(max(1, blocks))])
         self.head = nn.Linear(channels, num_classes)
 
@@ -733,10 +744,17 @@ class _TinyVisionResNet(nn.Module):
 
 
 class _TinyPatchVisionModel(nn.Module):
-    def __init__(self, image_size: int = 8, patch_size: int = 2, hidden_dim: int = 24, num_classes: int = 3):
+    def __init__(
+        self,
+        image_size: int = 8,
+        patch_size: int = 2,
+        hidden_dim: int = 24,
+        num_classes: int = 3,
+        input_channels: int = 1,
+    ):
         super().__init__()
         self.patch_size = patch_size
-        patch_dim = patch_size * patch_size
+        patch_dim = patch_size * patch_size * input_channels
         self.embed = nn.Linear(patch_dim, hidden_dim)
         self.encoder = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -748,7 +766,7 @@ class _TinyPatchVisionModel(nn.Module):
 
     def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         patches = images.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
-        patches = patches.contiguous().view(images.shape[0], -1, self.patch_size * self.patch_size)
+        patches = patches.contiguous().view(images.shape[0], -1, images.shape[1] * self.patch_size * self.patch_size)
         embedded = self.embed(patches)
         encoded = self.encoder(embedded)
         feats = encoded.mean(dim=1)
@@ -777,6 +795,9 @@ class _SimpleGraphNet(nn.Module):
 
 
 def _run_optimizer_ablation(experiment: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
+    spec = _benchmark_spec(experiment)
+    if spec.benchmark_id == "cifar10_optimizer_canonical" and spec.tier == "canonical":
+        return _run_cifar10_optimizer_ablation(experiment)
     grid = experiment.get("parameter_grid", {})
     optimizers = [str(item) for item in grid.get("optimizer", ["adamw", "sgd", "lion"])]
     weight_decays = [float(item) for item in grid.get("weight_decay", [0.0, 0.01])]
@@ -807,6 +828,65 @@ def _run_optimizer_ablation(experiment: dict[str, Any]) -> tuple[dict[str, float
             f"Best optimizer={best['optimizer']} with weight_decay={best['weight_decay']:.4f}.",
             "The benchmark uses a real tiny classification loop rather than synthetic metric generation.",
         ],
+    )
+
+
+def _run_cifar10_optimizer_ablation(
+    experiment: dict[str, Any]
+) -> tuple[dict[str, float], list[str], dict[str, Any]]:
+    train_x, train_y, val_x, val_y = _load_cifar10_canonical_dataset()
+    grid = experiment.get("parameter_grid", {})
+    optimizers = [str(item) for item in grid.get("optimizer", ["adamw", "sgd", "lion"])]
+    weight_decays = [float(item) for item in grid.get("weight_decay", [0.0, 0.01])]
+    trials = []
+    for optimizer_name in optimizers:
+        for weight_decay in weight_decays:
+            seeded = [
+                _train_cifar10_optimizer_model_on_dataset(
+                    train_x=train_x,
+                    train_y=train_y,
+                    val_x=val_x,
+                    val_y=val_y,
+                    optimizer_name=optimizer_name,
+                    weight_decay=weight_decay,
+                    seed=seed,
+                    steps=12,
+                )
+                for seed in (7, 18, 29, 41, 53)
+            ]
+            accuracies = [item["accuracy"] for item in seeded]
+            trials.append(
+                {
+                    "optimizer": optimizer_name,
+                    "weight_decay": weight_decay,
+                    "loss": statistics.fmean(item["loss"] for item in seeded),
+                    "accuracy": statistics.fmean(accuracies),
+                    "gradient_norm": statistics.fmean(item["gradient_norm"] for item in seeded),
+                    "calibration_ece": statistics.fmean(item["calibration_ece"] for item in seeded),
+                    "effective_dimensionality": statistics.fmean(item["effective_dimensionality"] for item in seeded),
+                    "accuracy_std": statistics.pstdev(accuracies),
+                }
+            )
+    best = max(trials, key=lambda item: item["accuracy"] - item["loss"] - item["calibration_ece"])
+    gap = max(item["accuracy"] for item in trials) - min(item["accuracy"] for item in trials)
+    return (
+        {
+            "loss": round(float(best["loss"]), 6),
+            "accuracy": round(float(best["accuracy"]), 6),
+            "gradient_norm": round(float(best["gradient_norm"]), 6),
+            "calibration_ece": round(float(best["calibration_ece"]), 6),
+            "effective_dimensionality": round(float(best["effective_dimensionality"]), 6),
+            "optimizer_sensitivity": round(gap, 6),
+        },
+        [
+            f"Best optimizer={best['optimizer']} with weight_decay={float(best['weight_decay']):.4f}.",
+            "Canonical optimizer comparison used the real CIFAR-10 dataset with five seeded runs.",
+        ],
+        {
+            "sample_count": 5,
+            "primary_metric": "accuracy",
+            "std_dev": float(best["accuracy_std"]),
+        },
     )
 
 
@@ -1013,7 +1093,10 @@ def _run_generic_baseline_sweep(
 def _run_generic_calibration_check(
     experiment: dict[str, Any]
 ) -> tuple[dict[str, float], list[str], dict[str, Any]]:
+    spec = _benchmark_spec(experiment)
     temperature_flags = [bool(item) for item in experiment.get("parameter_grid", {}).get("temperature_scaling", [False, True])]
+    if spec.benchmark_id == "openml_adult_calibration" and spec.tier == "canonical":
+        return _run_generic_openml_adult_calibration_check(temperature_flags)
     train_x, train_y, calib_x, calib_y, val_x, val_y = _make_tabular_calibration_dataset(seed=23)
     model = _fit_tabular_model(train_x, train_y, learning_rate=0.001, batch_size=48, seed=23, steps=20)
     results = []
@@ -1054,6 +1137,113 @@ def _run_generic_calibration_check(
             "sample_count": 1,
             "primary_metric": "calibration_ece",
         },
+    )
+
+
+def _run_generic_openml_adult_calibration_check(
+    temperature_flags: list[bool],
+) -> tuple[dict[str, float], list[str], dict[str, Any]]:
+    seeded_results: list[dict[str, float | bool]] = []
+    for seed in (7, 18, 29, 41, 53):
+        train_x, train_y, calib_x, calib_y, val_x, val_y = _make_openml_adult_calibration_dataset(seed=seed)
+        model = _fit_tabular_model(train_x, train_y, learning_rate=0.001, batch_size=64, seed=seed, steps=24)
+        with torch.no_grad():
+            calib_logits, _ = model(calib_x)
+            val_logits, _ = model(val_x)
+        candidate_results: list[dict[str, float | bool]] = []
+        for use_temperature in temperature_flags:
+            temperature = _fit_temperature(calib_logits, calib_y) if use_temperature else 1.0
+            scaled_logits = val_logits / temperature
+            probs = torch.softmax(scaled_logits, dim=-1)
+            positive_probs = probs[:, 1].tolist()
+            preds = probs.argmax(dim=-1)
+            accuracy = float((preds == val_y).float().mean().item())
+            ece = _expected_calibration_error(probs.max(dim=-1).values.tolist(), (preds == val_y).int().tolist())
+            auroc = _binary_auroc(positive_probs, val_y.tolist())
+            candidate_results.append(
+                {
+                    "temperature_scaling": use_temperature,
+                    "temperature": float(temperature),
+                    "accuracy": accuracy,
+                    "calibration_ece": ece,
+                    "auroc": auroc,
+                    "score": auroc + accuracy - ece,
+                }
+            )
+        seeded_results.append(max(candidate_results, key=lambda item: float(item["score"])))
+
+    calibration_values = [float(item["calibration_ece"]) for item in seeded_results]
+    accuracy_values = [float(item["accuracy"]) for item in seeded_results]
+    auroc_values = [float(item["auroc"]) for item in seeded_results]
+    temperature_scaled_runs = sum(1 for item in seeded_results if bool(item["temperature_scaling"]))
+    mean_temperature = statistics.fmean(float(item["temperature"]) for item in seeded_results)
+    return (
+        {
+            "calibration_ece": round(statistics.fmean(calibration_values), 6),
+            "accuracy": round(statistics.fmean(accuracy_values), 6),
+            "auroc": round(statistics.fmean(auroc_values), 6),
+        },
+        [
+            (
+                "Canonical Adult calibration used the OpenML Adult dataset with real one-hot encoded categorical "
+                "features and five independent seeds."
+            ),
+            (
+                f"Temperature scaling won on {temperature_scaled_runs}/{len(seeded_results)} seeds; "
+                f"mean selected temperature={mean_temperature:.3f}."
+            ),
+        ],
+        {
+            "sample_count": len(seeded_results),
+            "primary_metric": "calibration_ece",
+            "std_dev": statistics.pstdev(calibration_values),
+        },
+    )
+
+
+def _make_openml_adult_calibration_dataset(
+    *,
+    seed: int,
+    train_size: int = 1024,
+    calib_size: int = 512,
+    val_size: int = 1024,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if fetch_openml is None or pd is None:
+        raise RuntimeError("OpenML Adult canonical calibration requires sklearn and pandas")
+    dataset = fetch_openml(name="adult", version=2, as_frame=True)
+    frame = dataset.frame.copy()
+    target_name = str(dataset.target.name or "class")
+    frame = frame.replace("?", pd.NA).dropna(axis=0)
+    labels = (frame[target_name].astype(str).str.strip() == ">50K").astype(np.int64).to_numpy()
+    feature_frame = frame.drop(columns=[target_name])
+    numeric = feature_frame.select_dtypes(include=["number", "bool"]).astype(np.float32)
+    categorical = feature_frame.select_dtypes(exclude=["number", "bool"]).astype(str)
+    encoded = pd.get_dummies(categorical, dummy_na=False, dtype=np.float32)
+    combined = pd.concat([numeric, encoded], axis=1)
+    xs = combined.to_numpy(dtype=np.float32)
+    mean = xs.mean(axis=0, keepdims=True)
+    std = xs.std(axis=0, keepdims=True)
+    xs = (xs - mean) / np.clip(std, 1e-6, None)
+
+    required = train_size + calib_size + val_size
+    if xs.shape[0] < required:
+        raise RuntimeError(
+            f"OpenML Adult canonical calibration requires {required} rows after cleaning, found {xs.shape[0]}"
+        )
+
+    indices = np.arange(xs.shape[0])
+    rng = np.random.default_rng(seed)
+    rng.shuffle(indices)
+    train_idx = indices[:train_size]
+    calib_idx = indices[train_size : train_size + calib_size]
+    val_idx = indices[train_size + calib_size : required]
+    return (
+        torch.from_numpy(xs[train_idx]),
+        torch.from_numpy(labels[train_idx]),
+        torch.from_numpy(xs[calib_idx]),
+        torch.from_numpy(labels[calib_idx]),
+        torch.from_numpy(xs[val_idx]),
+        torch.from_numpy(labels[val_idx]),
     )
 
 
@@ -1200,6 +1390,9 @@ def _run_augmentation_robustness(experiment: dict[str, Any]) -> tuple[dict[str, 
 def _run_backbone_transfer(
     experiment: dict[str, Any]
 ) -> tuple[dict[str, float], list[str], dict[str, Any]]:
+    spec = _benchmark_spec(experiment)
+    if spec.benchmark_id == "imagenette_transfer_canonical" and spec.tier == "canonical":
+        return _run_imagenette_backbone_transfer(experiment)
     backbones = [str(item) for item in experiment.get("parameter_grid", {}).get("backbone", ["resnet18", "resnet50", "vit_tiny"])]
     trials = []
     for backbone in backbones:
@@ -1232,6 +1425,54 @@ def _run_backbone_transfer(
         ],
         {
             "sample_count": 3,
+            "primary_metric": "top1_accuracy",
+            "std_dev": best["seed_variance"],
+        },
+    )
+
+
+def _run_imagenette_backbone_transfer(
+    experiment: dict[str, Any]
+) -> tuple[dict[str, float], list[str], dict[str, Any]]:
+    backbones = [str(item) for item in experiment.get("parameter_grid", {}).get("backbone", ["resnet18", "resnet50", "vit_tiny"])]
+    train_x, train_y, val_x, val_y = _load_imagenette_canonical_dataset()
+    trials = []
+    for backbone in backbones:
+        seeded = [
+            _train_vision_model_on_dataset(
+                train_x=train_x,
+                train_y=train_y,
+                val_x=val_x,
+                val_y=val_y,
+                backbone=backbone,
+                augmentation="baseline",
+                severities=[0],
+                seed=seed,
+                steps=16,
+                num_classes=int(train_y.max().item()) + 1,
+                input_channels=int(train_x.shape[1]),
+            )["top1_accuracy"]
+            for seed in (7, 18, 29, 41, 53)
+        ]
+        trials.append(
+            {
+                "backbone": backbone,
+                "top1_accuracy": statistics.fmean(seeded),
+                "seed_variance": statistics.pstdev(seeded),
+            }
+        )
+    best = max(trials, key=lambda item: item["top1_accuracy"] - 0.5 * item["seed_variance"])
+    return (
+        {
+            "top1_accuracy": round(best["top1_accuracy"], 6),
+            "seed_variance": round(best["seed_variance"], 6),
+        },
+        [
+            f"Best backbone={best['backbone']}.",
+            "Canonical transfer used the real Imagenette 160px dataset with five seeded backbone comparisons.",
+        ],
+        {
+            "sample_count": 5,
             "primary_metric": "top1_accuracy",
             "std_dev": best["seed_variance"],
         },
@@ -1288,11 +1529,28 @@ def _make_vision_dataset(
 
 
 def _build_vision_model(backbone: str) -> nn.Module:
+    return _build_vision_model_for_dataset(backbone, input_channels=1, num_classes=3, image_size=8)
+
+
+def _build_vision_model_for_dataset(
+    backbone: str,
+    *,
+    input_channels: int,
+    num_classes: int,
+    image_size: int,
+) -> nn.Module:
     if backbone == "resnet50":
-        return _TinyVisionResNet(channels=16, blocks=3, num_classes=3)
+        return _TinyVisionResNet(channels=16, blocks=3, num_classes=num_classes, input_channels=input_channels)
     if backbone == "vit_tiny":
-        return _TinyPatchVisionModel(hidden_dim=32, num_classes=3)
-    return _TinyVisionResNet(channels=12, blocks=2, num_classes=3)
+        patch_size = 4 if image_size >= 16 else 2
+        return _TinyPatchVisionModel(
+            image_size=image_size,
+            patch_size=patch_size,
+            hidden_dim=32,
+            num_classes=num_classes,
+            input_channels=input_channels,
+        )
+    return _TinyVisionResNet(channels=12, blocks=2, num_classes=num_classes, input_channels=input_channels)
 
 
 def _train_vision_model(
@@ -1306,7 +1564,43 @@ def _train_vision_model(
     torch.manual_seed(seed)
     np.random.seed(seed)
     train_x, train_y, val_x, val_y = _make_vision_dataset(seed=seed)
-    model = _build_vision_model(backbone)
+    return _train_vision_model_on_dataset(
+        train_x=train_x,
+        train_y=train_y,
+        val_x=val_x,
+        val_y=val_y,
+        backbone=backbone,
+        augmentation=augmentation,
+        severities=severities,
+        seed=seed,
+        steps=steps,
+        num_classes=3,
+        input_channels=1,
+    )
+
+
+def _train_vision_model_on_dataset(
+    *,
+    train_x: torch.Tensor,
+    train_y: torch.Tensor,
+    val_x: torch.Tensor,
+    val_y: torch.Tensor,
+    backbone: str,
+    augmentation: str,
+    severities: Sequence[int],
+    seed: int,
+    steps: int,
+    num_classes: int,
+    input_channels: int,
+) -> dict[str, float]:
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    model = _build_vision_model_for_dataset(
+        backbone,
+        input_channels=input_channels,
+        num_classes=num_classes,
+        image_size=int(train_x.shape[-1]),
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01, weight_decay=0.0)
     rng = np.random.default_rng(seed)
     for _ in range(steps):
@@ -1344,6 +1638,129 @@ def _train_vision_model(
         "corruption_robustness": float(statistics.mean(corrupted_scores)) if corrupted_scores else clean_acc,
         "calibration_ece": ece,
     }
+
+
+def _train_cifar10_optimizer_model_on_dataset(
+    *,
+    train_x: torch.Tensor,
+    train_y: torch.Tensor,
+    val_x: torch.Tensor,
+    val_y: torch.Tensor,
+    optimizer_name: str,
+    weight_decay: float,
+    seed: int,
+    steps: int,
+) -> dict[str, float]:
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    model = _build_vision_model_for_dataset(
+        "resnet18",
+        input_channels=int(train_x.shape[1]),
+        num_classes=int(train_y.max().item()) + 1,
+        image_size=int(train_x.shape[-1]),
+    )
+    optimizer: torch.optim.Optimizer | None
+    lion_state: list[torch.Tensor] | None = None
+    if optimizer_name == "adamw":
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.01, weight_decay=weight_decay)
+    elif optimizer_name == "sgd":
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.03, momentum=0.9, weight_decay=weight_decay)
+    else:
+        optimizer = None
+        lion_state = [torch.zeros_like(param) for param in model.parameters()]
+
+    rng = np.random.default_rng(seed)
+    gradient_history: list[float] = []
+    for _ in range(steps):
+        batch_size = min(64, train_x.shape[0])
+        indices = torch.tensor(rng.choice(train_x.shape[0], size=batch_size, replace=False), dtype=torch.long)
+        batch_x = train_x[indices]
+        batch_y = train_y[indices]
+        logits, _ = model(batch_x)
+        loss = F.cross_entropy(logits, batch_y)
+        loss.backward()
+        grad_norm = math.sqrt(
+            sum(float(param.grad.detach().pow(2).sum().item()) for param in model.parameters() if param.grad is not None)
+        )
+        gradient_history.append(grad_norm)
+        if optimizer is not None:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+        else:
+            assert lion_state is not None
+            _lion_style_step(model, lion_state, lr=0.008, weight_decay=weight_decay)
+
+    model.eval()
+    with torch.no_grad():
+        logits, feats = model(val_x)
+        probs = torch.softmax(logits, dim=-1)
+        predictions = probs.argmax(dim=-1)
+        loss = float(F.cross_entropy(logits, val_y).item())
+        accuracy = float((predictions == val_y).float().mean().item())
+        ece = _expected_calibration_error(
+            probs.max(dim=-1).values.tolist(),
+            (predictions == val_y).int().tolist(),
+        )
+        dimensionality = float(compute_participation_ratio(feats))
+    return {
+        "loss": loss,
+        "accuracy": accuracy,
+        "gradient_norm": float(statistics.fmean(gradient_history)) if gradient_history else 0.0,
+        "calibration_ece": ece,
+        "effective_dimensionality": dimensionality,
+    }
+
+
+def _load_imagenette_canonical_dataset(
+    *,
+    train_size: int = 600,
+    val_size: int = 300,
+    image_size: int = 32,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if hf_load_dataset is None:
+        raise RuntimeError("Imagenette canonical benchmark requires the datasets package")
+    train_records = hf_load_dataset("frgfm/imagenette", "160px", split="train")
+    val_records = hf_load_dataset("frgfm/imagenette", "160px", split="validation")
+
+    def _convert(records: Any, limit: int) -> tuple[torch.Tensor, torch.Tensor]:
+        images: list[np.ndarray] = []
+        labels: list[int] = []
+        for record in records.select(range(min(limit, len(records)))):
+            image = record["image"].convert("RGB").resize((image_size, image_size))
+            array = np.asarray(image, dtype=np.float32) / 255.0
+            images.append(np.transpose(array, (2, 0, 1)))
+            labels.append(int(record["label"]))
+        return torch.from_numpy(np.stack(images, axis=0)), torch.tensor(labels, dtype=torch.long)
+
+    train_x, train_y = _convert(train_records, train_size)
+    val_x, val_y = _convert(val_records, val_size)
+    return train_x, train_y, val_x, val_y
+
+
+def _load_cifar10_canonical_dataset(
+    *,
+    train_size: int = 1200,
+    val_size: int = 400,
+    image_size: int = 32,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if hf_load_dataset is None:
+        raise RuntimeError("CIFAR-10 canonical benchmark requires the datasets package")
+    train_records = hf_load_dataset("cifar10", split="train")
+    val_records = hf_load_dataset("cifar10", split="test")
+
+    def _convert(records: Any, limit: int) -> tuple[torch.Tensor, torch.Tensor]:
+        images: list[np.ndarray] = []
+        labels: list[int] = []
+        for record in records.select(range(min(limit, len(records)))):
+            image = record["img"].convert("RGB").resize((image_size, image_size))
+            array = np.asarray(image, dtype=np.float32) / 255.0
+            images.append(np.transpose(array, (2, 0, 1)))
+            labels.append(int(record["label"]))
+        return torch.from_numpy(np.stack(images, axis=0)), torch.tensor(labels, dtype=torch.long)
+
+    train_x, train_y = _convert(train_records, train_size)
+    val_x, val_y = _convert(val_records, val_size)
+    return train_x, train_y, val_x, val_y
 
 
 def _augment_vision_batch(images: torch.Tensor, rng: np.random.Generator) -> torch.Tensor:
@@ -1411,6 +1828,9 @@ def _run_depth_oversmoothing(experiment: dict[str, Any]) -> tuple[dict[str, floa
 def _run_heterophily_ablation(
     experiment: dict[str, Any]
 ) -> tuple[dict[str, float], list[str], dict[str, Any]]:
+    spec = _benchmark_spec(experiment)
+    if spec.benchmark_id == "roman_empire_heterophily_canonical" and spec.tier == "canonical":
+        return _run_roman_empire_heterophily_ablation(experiment)
     grid = experiment.get("parameter_grid", {})
     rewirings = [str(item) for item in grid.get("rewiring", ["off", "knn", "attention"])]
     normalizations = [str(item) for item in grid.get("normalization", ["batch", "pairnorm"])]
@@ -1452,6 +1872,97 @@ def _run_heterophily_ablation(
             "std_dev": best["seed_variance"],
         },
     )
+
+
+def _run_roman_empire_heterophily_ablation(
+    experiment: dict[str, Any]
+) -> tuple[dict[str, float], list[str], dict[str, Any]]:
+    adjacency, features, labels, splits = _load_roman_empire_canonical_dataset()
+    grid = experiment.get("parameter_grid", {})
+    rewirings = [str(item) for item in grid.get("rewiring", ["off", "knn", "attention"])]
+    normalizations = [str(item) for item in grid.get("normalization", ["batch", "pairnorm"])]
+    trials = []
+    for rewiring in rewirings:
+        for normalization in normalizations:
+            split_accuracies = [
+                _train_graph_model_on_real_dataset(
+                    adjacency=adjacency,
+                    features=features,
+                    labels=labels,
+                    train_mask=train_mask,
+                    val_mask=val_mask,
+                    test_mask=test_mask,
+                    rewiring=rewiring,
+                    normalization=normalization,
+                    layers=4,
+                    seed=seed,
+                    steps=28,
+                )
+                for seed, (train_mask, val_mask, test_mask) in enumerate(splits[:5], start=7)
+            ]
+            trials.append(
+                {
+                    "rewiring": rewiring,
+                    "normalization": normalization,
+                    "node_accuracy": statistics.fmean(split_accuracies),
+                    "seed_variance": statistics.pstdev(split_accuracies),
+                }
+            )
+    best = max(trials, key=lambda item: item["node_accuracy"] - 0.5 * item["seed_variance"])
+    return (
+        {
+            "node_accuracy": round(best["node_accuracy"], 6),
+            "seed_variance": round(best["seed_variance"], 6),
+        },
+        [
+            f"Best rewiring={best['rewiring']} normalization={best['normalization']}.",
+            (
+                "Canonical heterophily used the Roman Empire graph via torch_geometric "
+                "HeterophilousGraphDataset and evaluated five official splits."
+            ),
+        ],
+        {
+            "sample_count": min(5, len(splits)),
+            "primary_metric": "node_accuracy",
+            "std_dev": best["seed_variance"],
+        },
+    )
+
+
+def _load_roman_empire_canonical_dataset(
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]]:
+    if HeterophilousGraphDataset is None:
+        raise RuntimeError("Roman Empire canonical benchmark requires torch_geometric")
+    root = Path(".tar_cache") / "graph_benchmarks"
+    dataset = HeterophilousGraphDataset(root=str(root), name="Roman-empire")
+    data = dataset[0]
+    features = data.x.detach().float()
+    labels = data.y.detach().long()
+    adjacency = _edge_index_to_normalized_adjacency(data.edge_index.detach().long(), features.shape[0])
+    train_masks = _coerce_graph_split_masks(data.train_mask)
+    val_masks = _coerce_graph_split_masks(data.val_mask)
+    test_masks = _coerce_graph_split_masks(data.test_mask)
+    split_count = min(train_masks.shape[1], val_masks.shape[1], test_masks.shape[1], 5)
+    splits = [
+        (train_masks[:, index], val_masks[:, index], test_masks[:, index])
+        for index in range(split_count)
+    ]
+    return adjacency, features, labels, splits
+
+
+def _coerce_graph_split_masks(mask: torch.Tensor) -> torch.Tensor:
+    tensor = mask.detach().bool()
+    if tensor.dim() == 1:
+        tensor = tensor.unsqueeze(-1)
+    return tensor
+
+
+def _edge_index_to_normalized_adjacency(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    adjacency = torch.zeros((num_nodes, num_nodes), dtype=torch.float32)
+    adjacency[edge_index[0], edge_index[1]] = 1.0
+    adjacency = torch.maximum(adjacency, adjacency.T)
+    adjacency.fill_diagonal_(1.0)
+    return torch.from_numpy(_normalize_adjacency(adjacency.numpy()))
 
 
 def _make_graph_dataset(
@@ -1555,6 +2066,49 @@ def _train_graph_model(
         "oversmoothing_gap": oversmoothing_gap,
         "representation_dimensionality": dimensionality,
     }
+
+
+def _train_graph_model_on_real_dataset(
+    *,
+    adjacency: torch.Tensor,
+    features: torch.Tensor,
+    labels: torch.Tensor,
+    train_mask: torch.Tensor,
+    val_mask: torch.Tensor,
+    test_mask: torch.Tensor,
+    rewiring: str,
+    normalization: str,
+    layers: int,
+    seed: int,
+    steps: int,
+) -> float:
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    model = _SimpleGraphNet(input_dim=features.shape[1], hidden_dim=24, layers=layers, num_classes=int(labels.max().item()) + 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.02, weight_decay=0.0)
+    rewired_adjacency = _apply_graph_rewiring(adjacency, features, rewiring)
+    best_state: dict[str, torch.Tensor] | None = None
+    best_val_accuracy = -1.0
+    for _ in range(steps):
+        logits, _ = model(rewired_adjacency, features, normalization=normalization)
+        loss = F.cross_entropy(logits[train_mask], labels[train_mask])
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        with torch.no_grad():
+            logits, _ = model(rewired_adjacency, features, normalization=normalization)
+            val_predictions = logits[val_mask].argmax(dim=-1)
+            val_accuracy = float((val_predictions == labels[val_mask]).float().mean().item())
+        if val_accuracy >= best_val_accuracy:
+            best_val_accuracy = val_accuracy
+            best_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    model.eval()
+    with torch.no_grad():
+        logits, _ = model(rewired_adjacency, features, normalization=normalization)
+        test_predictions = logits[test_mask].argmax(dim=-1)
+        return float((test_predictions == labels[test_mask]).float().mean().item())
 
 
 def _apply_graph_rewiring(adjacency: torch.Tensor, features: torch.Tensor, rewiring: str) -> torch.Tensor:

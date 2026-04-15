@@ -87,7 +87,7 @@
       "dataset_or_env": "openml:adult",
       "metric_protocol": ["calibration_ece", "accuracy", "auroc"],
       "canonical_comparable": true,
-      "required_imports": ["numpy", "torch"],
+      "required_imports": ["numpy", "torch", "sklearn", "pandas"],
       "requires_download": true,
       "proxy_allowed": false
     }

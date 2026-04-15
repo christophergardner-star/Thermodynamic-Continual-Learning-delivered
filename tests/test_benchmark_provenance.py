@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 import tar_lab.science_exec as science_exec
+import tar_lab.science_profiles as science_profiles
 from tar_lab.orchestrator import TAROrchestrator
 from tar_lab.science_exec import execute_study_payload
 from tar_lab.science_profiles import ScienceProfileRegistry
@@ -144,3 +145,126 @@ def test_qml_canonical_report_preserves_truth_status_and_comparability(monkeypat
     assert report.benchmark_alignment == "aligned"
     assert report.experiments[0].benchmark_truth_status == "canonical_ready"
     assert report.experiments[0].execution_mode == "pennylane_noise_backend"
+
+
+def test_generic_ml_canonical_availability_splits_ready_and_refused(monkeypatch):
+    monkeypatch.setenv("TAR_ALLOW_DATA_DOWNLOAD", "1")
+    monkeypatch.setattr(science_profiles, "_validate_modules", lambda modules: (True, []))
+    registry = ScienceProfileRegistry(str(REPO_ROOT))
+    profile = registry.get("generic_ml")
+
+    refused_spec = registry.resolve_benchmark_suite(profile, "cross_validation", tier="canonical")
+    ready_spec = registry.resolve_benchmark_suite(profile, "holdout_calibration", tier="canonical")
+
+    refused = registry.benchmark_availability(refused_spec)
+    ready = registry.benchmark_availability(ready_spec)
+
+    assert refused_spec.benchmark_id == "openml_cc18_classification"
+    assert refused_spec.truth_status == "unsupported"
+    assert not refused.canonical_ready
+    assert refused.reason == "registered benchmark is not yet executor-aligned and must be refused"
+
+    assert ready_spec.benchmark_id == "openml_adult_calibration"
+    assert ready_spec.truth_status == "canonical_ready"
+    assert ready.imports_ready
+    assert ready.dataset_ready
+    assert ready.canonical_ready
+    assert ready.reason is None
+
+
+def test_graph_ml_canonical_availability_splits_ready_and_refused(monkeypatch):
+    monkeypatch.setenv("TAR_ALLOW_DATA_DOWNLOAD", "1")
+    monkeypatch.setattr(science_profiles, "_validate_modules", lambda modules: (True, []))
+    registry = ScienceProfileRegistry(str(REPO_ROOT))
+    profile = registry.get("graph_ml")
+
+    refused_spec = registry.resolve_benchmark_suite(profile, "depth_sweep", tier="canonical")
+    ready_spec = registry.resolve_benchmark_suite(profile, "heterophily_control", tier="canonical")
+
+    refused = registry.benchmark_availability(refused_spec)
+    ready = registry.benchmark_availability(ready_spec)
+
+    assert refused_spec.benchmark_id == "cora_depth_canonical"
+    assert refused_spec.truth_status == "unsupported"
+    assert not refused.canonical_ready
+    assert refused.reason == "registered benchmark is not yet executor-aligned and must be refused"
+
+    assert ready_spec.benchmark_id == "roman_empire_heterophily_canonical"
+    assert ready_spec.truth_status == "canonical_ready"
+    assert ready.imports_ready
+    assert ready.dataset_ready
+    assert ready.canonical_ready
+    assert ready.reason is None
+
+
+def test_computer_vision_canonical_availability_splits_ready_and_refused(monkeypatch):
+    monkeypatch.setenv("TAR_ALLOW_DATA_DOWNLOAD", "1")
+    monkeypatch.setattr(science_profiles, "_validate_modules", lambda modules: (True, []))
+    registry = ScienceProfileRegistry(str(REPO_ROOT))
+    profile = registry.get("computer_vision")
+
+    refused_spec = registry.resolve_benchmark_suite(profile, "corruption_robustness", tier="canonical")
+    ready_spec = registry.resolve_benchmark_suite(profile, "transfer_comparison", tier="canonical")
+
+    refused = registry.benchmark_availability(refused_spec)
+    ready = registry.benchmark_availability(ready_spec)
+
+    assert refused_spec.benchmark_id == "cifar10_c_corruption"
+    assert refused_spec.truth_status == "unsupported"
+    assert not refused.canonical_ready
+    assert refused.reason == "registered benchmark is not yet executor-aligned and must be refused"
+
+    assert ready_spec.benchmark_id == "imagenette_transfer_canonical"
+    assert ready_spec.truth_status == "canonical_ready"
+    assert ready.imports_ready
+    assert ready.dataset_ready
+    assert ready.canonical_ready
+    assert ready.reason is None
+
+
+def test_deep_learning_canonical_availability_splits_ready_and_refused(monkeypatch):
+    monkeypatch.setenv("TAR_ALLOW_DATA_DOWNLOAD", "1")
+    monkeypatch.setattr(science_profiles, "_validate_modules", lambda modules: (True, []))
+    registry = ScienceProfileRegistry(str(REPO_ROOT))
+    profile = registry.get("deep_learning")
+
+    ready_spec = registry.resolve_benchmark_suite(profile, "optimizer_comparison", tier="canonical")
+    refused_spec = registry.resolve_benchmark_suite(profile, "scaling_law_probe", tier="canonical")
+
+    ready = registry.benchmark_availability(ready_spec)
+    refused = registry.benchmark_availability(refused_spec)
+
+    assert ready_spec.benchmark_id == "cifar10_optimizer_canonical"
+    assert ready_spec.truth_status == "canonical_ready"
+    assert ready.imports_ready
+    assert ready.dataset_ready
+    assert ready.canonical_ready
+    assert ready.reason is None
+
+    assert refused_spec.benchmark_id == "cifar10_scaling_canonical"
+    assert refused_spec.truth_status == "unsupported"
+    assert not refused.canonical_ready
+    assert refused.reason == "registered benchmark is not yet executor-aligned and must be refused"
+
+
+def test_reinforcement_learning_canonical_suites_stay_refused(monkeypatch):
+    monkeypatch.setenv("TAR_ALLOW_DATA_DOWNLOAD", "1")
+    monkeypatch.setattr(science_profiles, "_validate_modules", lambda modules: (True, []))
+    registry = ScienceProfileRegistry(str(REPO_ROOT))
+    profile = registry.get("reinforcement_learning")
+
+    exploration_spec = registry.resolve_benchmark_suite(profile, "exploration_sweep", tier="canonical")
+    offline_spec = registry.resolve_benchmark_suite(profile, "offline_online_transfer", tier="canonical")
+
+    exploration = registry.benchmark_availability(exploration_spec)
+    offline = registry.benchmark_availability(offline_spec)
+
+    assert exploration_spec.benchmark_id == "minari_cartpole_exploration"
+    assert exploration_spec.truth_status == "unsupported"
+    assert not exploration.canonical_ready
+    assert exploration.reason == "registered benchmark is not yet executor-aligned and must be refused"
+
+    assert offline_spec.benchmark_id == "minari_offline_online_transfer"
+    assert offline_spec.truth_status == "unsupported"
+    assert not offline.canonical_ready
+    assert offline.reason == "registered benchmark is not yet executor-aligned and must be refused"

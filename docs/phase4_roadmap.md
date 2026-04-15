@@ -195,6 +195,18 @@ Status:
 
 ### `WS31`: Canonical Benchmark Harnesses And Statistical Validation
 
+Status:
+
+- active
+- QML canonical slice complete
+- generic_ml canonical split complete
+- graph_ml canonical split complete
+- computer_vision canonical split complete
+- deep_learning canonical split complete
+- reinforcement_learning canonical slice assessed and still refused
+- remaining scope:
+  [ws31_non_qml_canonical_alignment_plan.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws31_non_qml_canonical_alignment_plan.md)
+
 Purpose:
 
 - move from internal eval strength to domain-canonical benchmark validation

@@ -85,7 +85,7 @@
       "dataset_or_env": "external:roman_empire",
       "metric_protocol": ["node_accuracy", "seed_variance"],
       "canonical_comparable": true,
-      "required_imports": ["numpy", "torch", "networkx"],
+      "required_imports": ["numpy", "torch", "networkx", "torch_geometric"],
       "requires_download": true,
       "proxy_allowed": false
     }

@@ -9,6 +9,7 @@
   "pip_packages": [
     {"name": "numpy"},
     {"name": "scipy"},
+    {"name": "datasets"},
     {"name": "matplotlib"},
     {"name": "opencv-python"},
     {"name": "Pillow"},
@@ -86,7 +87,7 @@
       "dataset_or_env": "external:imagenette2-160",
       "metric_protocol": ["top1_accuracy", "seed_variance"],
       "canonical_comparable": true,
-      "required_imports": ["numpy", "torch"],
+      "required_imports": ["numpy", "torch", "datasets", "PIL"],
       "requires_download": true,
       "proxy_allowed": false
     }
