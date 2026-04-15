@@ -506,6 +506,7 @@ class TAROrchestrator:
         sandbox_policy = self.sandbox_policy()
         runtime_policy = self.store.load_runtime_policy()
         verdict_summary = self._claim_verdict_lifecycle_summary(limit=20)
+        queue_health = self.queue_health()
         build_attestation = (
             payload_env.build_attestation
             if payload_env is not None and payload_env.build_attestation is not None
@@ -515,6 +516,7 @@ class TAROrchestrator:
             "heartbeat": heartbeat.model_dump(mode="json") if heartbeat is not None else None,
             "active_leases": [item.model_dump(mode="json") for item in schedules if item.status in {"leased", "running"}],
             "retry_waiting": [item.model_dump(mode="json") for item in schedules if item.status == "retry_wait"],
+            "recoverable_crashes": [item.model_dump(mode="json") for item in schedules if item.status == "recoverable_crash"],
             "terminal_failures": [item.model_dump(mode="json") for item in schedules if item.status == "failed_terminal"],
             "alerts": [item.model_dump(mode="json") for item in self.store.latest_alerts(20)],
             "safe_execution_mode": self.safe_execution_mode,
@@ -523,6 +525,7 @@ class TAROrchestrator:
             "claim_verdict_lifecycle": verdict_summary["counts"],
             "recent_verdict_window": verdict_summary["window"],
             "escalated_verdict_ids": verdict_summary["escalated_verdict_ids"],
+            "queue_health": queue_health,
             "payload_image": payload_env.image_tag if payload_env is not None else None,
             "manifest_hash": payload_env.run_manifest.hash_sha256 if payload_env and payload_env.run_manifest else None,
             "reproducibility_complete": bool(payload_env is not None and payload_env.reproducibility_complete),
@@ -579,13 +582,20 @@ class TAROrchestrator:
                 "reprioritize_scheduled_jobs",
                 {"updated_schedule_ids": [item.schedule_id for item in reprioritized]},
             )
+        orphaned = self.recover_orphaned_runs()
         heartbeat = self.runtime_daemon.run_cycle(max_jobs=max_jobs, stale_after_s=stale_after_s)
         escalated_verdicts = self._age_claim_verdicts()
-        if escalated_verdicts:
+        if orphaned or escalated_verdicts:
+            notes = list(heartbeat.notes)
+            if orphaned:
+                notes.append(f"orphan_recoveries={len(orphaned)}")
+            if escalated_verdicts:
+                notes.append(f"escalated_verdicts={len(escalated_verdicts)}")
             heartbeat = heartbeat.model_copy(
                 update={
+                    "stale_cleanups": heartbeat.stale_cleanups + len(orphaned),
                     "escalated_verdicts": escalated_verdicts,
-                    "notes": [*heartbeat.notes, f"escalated_verdicts={len(escalated_verdicts)}"],
+                    "notes": notes,
                 }
             )
             self.runtime_daemon.heartbeat_path.write_text(heartbeat.model_dump_json(indent=2), encoding="utf-8")
@@ -602,10 +612,167 @@ class TAROrchestrator:
         self.store.append_audit_event("runtime", "retry_failed_job", entry.model_dump(mode="json"))
         return entry
 
+    def confirm_recovery(self, schedule_id: str) -> ProblemScheduleEntry:
+        entry = self.scheduler.confirm_recovery(schedule_id)
+        self.store.append_audit_event("runtime", "confirm_recovery", entry.model_dump(mode="json"))
+        return entry
+
     def cancel_job(self, schedule_id: str) -> ProblemScheduleEntry:
         entry = self.scheduler.cancel_job(schedule_id)
         self.store.append_audit_event("runtime", "cancel_job", entry.model_dump(mode="json"))
         return entry
+
+    def _active_process_commands(self) -> list[str]:
+        try:
+            if os.name == "nt":
+                result = subprocess.run(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-Command",
+                        "Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            else:
+                result = subprocess.run(
+                    ["ps", "-ax", "-o", "command="],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+        except Exception:
+            return []
+        if result.returncode != 0:
+            return []
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    def _schedule_has_active_owner(
+        self,
+        schedule_id: str,
+        *,
+        process_commands: Optional[list[str]] = None,
+    ) -> bool:
+        if schedule_id in self.scheduler.active_schedule_ids():
+            return True
+        commands = process_commands if process_commands is not None else self._active_process_commands()
+        return any(schedule_id in command for command in commands)
+
+    def recover_orphaned_runs(self) -> list[ProblemScheduleEntry]:
+        now_dt = datetime.now(timezone.utc)
+        entries = list(self.store.iter_problem_schedules())
+        active_rows = [item for item in entries if item.status in {"running", "leased"} and item.lease is not None]
+        process_commands = self._active_process_commands() if active_rows else []
+        recovered: list[ProblemScheduleEntry] = []
+        for entry in active_rows:
+            if entry.status not in {"running", "leased"} or entry.lease is None:
+                continue
+            heartbeat_at = self._parse_timestamp(entry.lease.heartbeat_at)
+            if heartbeat_at is None:
+                continue
+            stale_after = timedelta(seconds=max(1, entry.lease.heartbeat_interval_s * 3))
+            if heartbeat_at + stale_after > now_dt:
+                continue
+            if self._schedule_has_active_owner(entry.schedule_id, process_commands=process_commands):
+                continue
+            updated = self.store.update_problem_schedule(
+                entry.schedule_id,
+                status="recoverable_crash",
+                lease=None,
+                last_error="orphan_detected",
+                crash_provenance="orphan_detected",
+                crash_at=now_dt.replace(microsecond=0).isoformat(),
+                recovery_required=True,
+            )
+            if updated is None:
+                continue
+            recovered.append(updated)
+            alert = AlertRecord(
+                alert_id=self._continuity_id("alert"),
+                severity="critical",
+                source="runtime",
+                message=f"Orphaned schedule detected for {entry.schedule_id}",
+                related_schedule_id=entry.schedule_id,
+                metadata={
+                    "status": "recoverable_crash",
+                    "problem_id": entry.problem_id,
+                    "reason": "orphan_detected",
+                },
+            )
+            self.store.append_alert(alert)
+            refreshed = self.store.get_problem_schedule(entry.schedule_id)
+            if refreshed is not None:
+                self.store.update_problem_schedule(
+                    entry.schedule_id,
+                    alert_ids=[*refreshed.alert_ids, alert.alert_id],
+                )
+            self.store.append_audit_event(
+                "runtime",
+                "recover_orphaned_run",
+                {
+                    "schedule_id": entry.schedule_id,
+                    "problem_id": entry.problem_id,
+                    "heartbeat_at": entry.lease.heartbeat_at,
+                },
+            )
+        return recovered
+
+    def queue_health(self) -> dict[str, Any]:
+        entries = list(self.store.iter_problem_schedules())
+        now_dt = datetime.now(timezone.utc)
+        active_rows = [item for item in entries if item.status in {"leased", "running"} and item.lease is not None]
+        process_commands = self._active_process_commands() if active_rows else []
+        stale_lease_count = 0
+        orphan_count = 0
+        oldest_pending_age_minutes = 0.0
+        pending_statuses = {"scheduled", "leased", "running", "retry_wait", "recoverable_crash"}
+        pending_ages: list[float] = []
+        completed_at: list[datetime] = []
+        failed_at: list[datetime] = []
+
+        for entry in entries:
+            if entry.status in pending_statuses:
+                created_at = self._parse_timestamp(entry.created_at)
+                if created_at is not None:
+                    pending_ages.append(max(0.0, (now_dt - created_at).total_seconds() / 60.0))
+            if entry.status == "completed":
+                last = self._parse_timestamp(entry.last_execution_at or entry.created_at)
+                if last is not None:
+                    completed_at.append(last)
+            if entry.status in {"failed_terminal", "recoverable_crash"}:
+                last_failed = self._parse_timestamp(entry.crash_at or entry.last_execution_at or entry.created_at)
+                if last_failed is not None:
+                    failed_at.append(last_failed)
+            if entry.status in {"leased", "running"} and entry.lease is not None:
+                heartbeat_at = self._parse_timestamp(entry.lease.heartbeat_at)
+                expires_at = self._parse_timestamp(entry.lease.expires_at)
+                if heartbeat_at is not None and heartbeat_at + timedelta(seconds=max(1, entry.lease.heartbeat_interval_s * 3)) <= now_dt:
+                    stale_lease_count += 1
+                    if not self._schedule_has_active_owner(entry.schedule_id, process_commands=process_commands):
+                        orphan_count += 1
+                elif expires_at is not None and expires_at <= now_dt:
+                    stale_lease_count += 1
+
+        if pending_ages:
+            oldest_pending_age_minutes = round(max(pending_ages), 3)
+
+        return {
+            "scheduled": len([item for item in entries if item.status == "scheduled"]),
+            "leased": len([item for item in entries if item.status == "leased"]),
+            "running": len([item for item in entries if item.status == "running"]),
+            "recoverable_crash": len([item for item in entries if item.status == "recoverable_crash"]),
+            "retry_wait": len([item for item in entries if item.status == "retry_wait"]),
+            "failed_terminal": len([item for item in entries if item.status == "failed_terminal"]),
+            "stale_lease_count": stale_lease_count,
+            "orphan_count": orphan_count,
+            "oldest_pending_age_minutes": oldest_pending_age_minutes,
+            "last_completed_at": max(completed_at).replace(microsecond=0).isoformat() if completed_at else None,
+            "last_failed_at": max(failed_at).replace(microsecond=0).isoformat() if failed_at else None,
+        }
 
     def sandbox_policy(self) -> dict[str, Any]:
         policy = self.payload_environment.default_sandbox_policy(artifact_dir="/workspace/tar_runs")
@@ -5088,6 +5255,7 @@ class TAROrchestrator:
         payload["recent_verdict_window"] = runtime_payload.get("recent_verdict_window", 0)
         payload["escalated_verdict_ids"] = runtime_payload.get("escalated_verdict_ids", [])
         payload["runtime_policy"] = runtime_payload.get("runtime_policy", {})
+        payload["queue_health"] = runtime_payload.get("queue_health", {})
         payload["literature"] = self.literature_status()
         payload["memory"] = self.vault.stats() if self.vault is not None else {"error": self.memory_error}
         if self.memory_error:

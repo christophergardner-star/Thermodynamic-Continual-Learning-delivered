@@ -103,7 +103,16 @@ ExperimentBackendRunStatus = Literal["planned", "running", "completed", "failed"
 BenchmarkTier = Literal["smoke", "validation", "canonical"]
 BenchmarkTruthStatus = Literal["canonical_ready", "validation_only", "smoke_only", "unsupported"]
 BenchmarkAlignment = Literal["aligned", "downgraded", "refused", "mixed"]
-ScheduleStatus = Literal["scheduled", "leased", "running", "retry_wait", "completed", "failed_terminal", "cancelled"]
+ScheduleStatus = Literal[
+    "scheduled",
+    "leased",
+    "running",
+    "retry_wait",
+    "recoverable_crash",
+    "completed",
+    "failed_terminal",
+    "cancelled",
+]
 AlertSeverity = Literal["info", "warning", "error", "critical"]
 SandboxExecutionMode = Literal["docker_only"]
 SandboxNetworkPolicy = Literal["off", "restricted", "profile_required"]
@@ -772,6 +781,10 @@ class ProblemScheduleEntry(StrictModel):
     last_error: Optional[str] = None
     last_manifest_path: Optional[str] = None
     terminal_failure_reason: Optional[str] = None
+    crash_provenance: Optional[str] = None
+    crash_at: Optional[str] = None
+    recovery_required: bool = False
+    recovery_confirmed_at: Optional[str] = None
     alert_ids: List[str] = Field(default_factory=list)
 
 
@@ -1901,6 +1914,7 @@ class RuntimeLease(StrictModel):
     heartbeat_at: str = Field(default_factory=utc_now_iso)
     expires_at: str
     attempt: int = Field(default=1, ge=1)
+    heartbeat_interval_s: int = Field(default=30, ge=1)
 
 
 class AlertRecord(StrictModel):
@@ -2043,6 +2057,7 @@ class ControlRequest(StrictModel):
         "status",
         "frontier_status",
         "runtime_status",
+        "queue_health",
         "dry_run",
         "pivot",
         "explain_last_fail",
@@ -2100,6 +2115,7 @@ class ControlRequest(StrictModel):
         "run_runtime_cycle",
         "list_alerts",
         "retry_failed_job",
+        "confirm_recovery",
         "cancel_job",
         "sandbox_policy",
         "register_checkpoint",

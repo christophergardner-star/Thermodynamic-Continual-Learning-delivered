@@ -371,6 +371,10 @@ Purpose:
 
 - move TAR from a robust single-node runtime into a resilient lab service
 
+Current execution record:
+
+- active local spec: `docs/ws34_execution_spec.md`
+
 Core deliverables:
 
 - lease-based workers

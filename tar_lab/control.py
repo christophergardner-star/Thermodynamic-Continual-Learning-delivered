@@ -20,6 +20,8 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
             payload = orchestrator.frontier_status().model_dump(mode="json")
         elif request.command == "runtime_status":
             payload = orchestrator.runtime_status()
+        elif request.command == "queue_health":
+            payload = orchestrator.queue_health()
         elif request.command == "dry_run":
             payload = orchestrator.run_dry_run(
                 force_fail_fast=bool(request.payload.get("force_fail_fast", False))
@@ -258,6 +260,8 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
             payload = orchestrator.list_alerts(count=int(request.payload.get("count", 20)))
         elif request.command == "retry_failed_job":
             payload = orchestrator.retry_failed_job(str(request.payload.get("schedule_id", ""))).model_dump(mode="json")
+        elif request.command == "confirm_recovery":
+            payload = orchestrator.confirm_recovery(str(request.payload.get("schedule_id", ""))).model_dump(mode="json")
         elif request.command == "cancel_job":
             payload = orchestrator.cancel_job(str(request.payload.get("schedule_id", ""))).model_dump(mode="json")
         elif request.command == "sandbox_policy":

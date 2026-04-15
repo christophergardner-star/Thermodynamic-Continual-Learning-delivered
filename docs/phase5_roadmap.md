@@ -232,6 +232,7 @@ Status:
 
 - laptop-first
 - pod required for realistic crash/recovery validation
+- active local spec: `docs/ws34_execution_spec.md`
 
 Deliverable 1: `recoverable_crash` state
 

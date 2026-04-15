@@ -112,6 +112,7 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--status", action="store_true")
     group.add_argument("--frontier-status", action="store_true", dest="frontier_status")
     group.add_argument("--runtime-status", action="store_true", dest="runtime_status")
+    group.add_argument("--queue-health", action="store_true", dest="queue_health")
     group.add_argument("--dry-run", action="store_true", dest="dry_run")
     group.add_argument("--live-docker-test", action="store_true", dest="live_docker_test")
     group.add_argument("--check-regime", action="store_true", dest="check_regime")
@@ -140,6 +141,7 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--run-runtime-cycle", action="store_true", dest="run_runtime_cycle")
     group.add_argument("--list-alerts", action="store_true", dest="list_alerts")
     group.add_argument("--retry-failed-job", action="store_true", dest="retry_failed_job")
+    group.add_argument("--confirm-recovery", action="store_true", dest="confirm_recovery")
     group.add_argument("--cancel-job", action="store_true", dest="cancel_job")
     group.add_argument("--sandbox-policy", action="store_true", dest="sandbox_policy")
     group.add_argument("--register-checkpoint", action="store_true", dest="register_checkpoint")
@@ -195,6 +197,8 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
         return orchestrator.frontier_status().model_dump(mode="json")
     if args.runtime_status:
         return orchestrator.runtime_status()
+    if args.queue_health:
+        return orchestrator.queue_health()
     if args.dry_run:
         return orchestrator.run_dry_run(force_fail_fast=args.force_fail_fast).model_dump(mode="json")
     if args.live_docker_test:
@@ -387,6 +391,8 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
         return orchestrator.list_alerts(count=args.alert_count)
     if args.retry_failed_job:
         return orchestrator.retry_failed_job(args.schedule_id or "").model_dump(mode="json")
+    if args.confirm_recovery:
+        return orchestrator.confirm_recovery(args.schedule_id or "").model_dump(mode="json")
     if args.cancel_job:
         return orchestrator.cancel_job(args.schedule_id or "").model_dump(mode="json")
     if args.sandbox_policy:
@@ -474,6 +480,7 @@ def _render_status(payload: Dict[str, Any]) -> str:
     memory = payload.get("memory", {})
     literature = payload.get("literature", {})
     retrieval = payload.get("retrieval_mode_breakdown", {})
+    queue = payload.get("queue_health", {})
     lines = [
         f"Trial ID: {recovery.get('trial_id') or 'none'}",
         f"Status: {recovery.get('status')}",
@@ -510,6 +517,7 @@ def _render_status(payload: Dict[str, Any]) -> str:
         f"Literature Conflicts: {literature.get('conflicts', 0)}",
         f"Literature Manifests: {literature.get('manifests', 0)}",
         f"Retrieval Modes: semantic={retrieval.get('semantic', 0)} lexical_fallback={retrieval.get('lexical_fallback', 0)} degraded={payload.get('degraded_retrieval_studies', 0)} window={payload.get('recent_study_window', 0)}",
+        f"Queue Health: scheduled={queue.get('scheduled', 0)} leased={queue.get('leased', 0)} running={queue.get('running', 0)} recoverable_crash={queue.get('recoverable_crash', 0)} retry_wait={queue.get('retry_wait', 0)} failed_terminal={queue.get('failed_terminal', 0)}",
         f"Latest Claim Verdict: {(payload.get('latest_claim_verdict') or {}).get('status', 'n/a')}",
         f"Benchmark: {payload.get('benchmark_name') or ', '.join(payload.get('benchmark_ids', [])) or 'n/a'}",
         f"Benchmark Tier: {payload.get('benchmark_tier', 'n/a')}",
@@ -611,6 +619,7 @@ def _render_runtime_status(payload: Dict[str, Any]) -> str:
     sandbox = payload.get("sandbox_policy", {})
     policy = payload.get("runtime_policy", {})
     verdicts = payload.get("claim_verdict_lifecycle", {})
+    queue = payload.get("queue_health", {})
     lines = [
         f"Sandbox Mode: {payload.get('safe_execution_mode', 'n/a')}",
         f"Sandbox Profile: {sandbox.get('profile', 'n/a')}",
@@ -626,6 +635,7 @@ def _render_runtime_status(payload: Dict[str, Any]) -> str:
         f"Terminal Failures: {len(payload.get('terminal_failures', []))}",
         f"Alert Count: {len(payload.get('alerts', []))}",
         f"Verdict Lifecycle: active={verdicts.get('active', 0)} aging={verdicts.get('aging', 0)} escalated={verdicts.get('escalated', 0)} resolved={verdicts.get('resolved', 0)} window={payload.get('recent_verdict_window', 0)}",
+        f"Queue Health: scheduled={queue.get('scheduled', 0)} leased={queue.get('leased', 0)} running={queue.get('running', 0)} recoverable_crash={queue.get('recoverable_crash', 0)} retry_wait={queue.get('retry_wait', 0)} failed_terminal={queue.get('failed_terminal', 0)}",
     ]
     escalated = payload.get("escalated_verdict_ids") or []
     if escalated:
@@ -633,6 +643,24 @@ def _render_runtime_status(payload: Dict[str, Any]) -> str:
     if payload.get("lock_incomplete_reason"):
         lines.append(f"Lock Warning: {payload['lock_incomplete_reason']}")
     return "\n".join(lines)
+
+
+def _render_queue_health(payload: Dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            f"Scheduled: {payload.get('scheduled', 0)}",
+            f"Leased: {payload.get('leased', 0)}",
+            f"Running: {payload.get('running', 0)}",
+            f"Recoverable Crashes: {payload.get('recoverable_crash', 0)}",
+            f"Retry Waiting: {payload.get('retry_wait', 0)}",
+            f"Terminal Failures: {payload.get('failed_terminal', 0)}",
+            f"Stale Leases: {payload.get('stale_lease_count', 0)}",
+            f"Orphans: {payload.get('orphan_count', 0)}",
+            f"Oldest Pending Age Minutes: {payload.get('oldest_pending_age_minutes', 0.0)}",
+            f"Last Completed At: {payload.get('last_completed_at', 'n/a')}",
+            f"Last Failed At: {payload.get('last_failed_at', 'n/a')}",
+        ]
+    )
 
 
 def _render_endpoint_record(endpoint: Dict[str, Any]) -> str:
@@ -1395,6 +1423,8 @@ def main() -> int:
                 response = send_command("frontier_status", host=args.host, port=args.port)
             elif args.runtime_status:
                 response = send_command("runtime_status", host=args.host, port=args.port)
+            elif args.queue_health:
+                response = send_command("queue_health", host=args.host, port=args.port)
             elif args.dry_run:
                 response = send_command("dry_run", payload={"force_fail_fast": args.force_fail_fast}, host=args.host, port=args.port)
             elif args.live_docker_test:
@@ -1801,6 +1831,13 @@ def main() -> int:
                     host=args.host,
                     port=args.port,
                 )
+            elif args.confirm_recovery:
+                response = send_command(
+                    "confirm_recovery",
+                    payload={"schedule_id": args.schedule_id},
+                    host=args.host,
+                    port=args.port,
+                )
             elif args.cancel_job:
                 response = send_command(
                     "cancel_job",
@@ -1945,6 +1982,8 @@ def main() -> int:
             print(_render_status(payload))
         elif args.runtime_status:
             print(_render_runtime_status(payload))
+        elif args.queue_health:
+            print(_render_queue_health(payload))
         elif args.sandbox_policy:
             print(_render_sandbox_policy(payload))
         elif args.list_endpoints:
@@ -2012,7 +2051,7 @@ def main() -> int:
             print(_render_regime(payload))
         elif args.ingest_research:
             print(f"Ingested {payload.get('indexed', 0)} research documents for topic: {payload.get('topic', '')}")
-        elif args.verify_last_trial or args.breakthrough_report or args.resolve_problem or args.prepare_science_env or args.study_problem or args.run_problem_study or args.schedule_problem_study or args.scheduler_status or args.run_scheduler_once or args.frontier_status or args.runtime_status or args.list_benchmarks or args.benchmark_status or args.prepare_payload_env or args.rebuild_locked_image or args.show_manifest or args.ingest_papers or args.literature_status or args.list_paper_artifacts or args.paper_artifact or args.literature_conflicts or args.list_experiment_backends or args.experiment_backend_runtime_status or args.run_runtime_cycle or args.list_alerts or args.retry_failed_job or args.cancel_job or args.sandbox_policy or args.register_checkpoint or args.list_checkpoints or args.build_inference_endpoint or args.list_endpoints or args.start_endpoint or args.stop_endpoint or args.restart_endpoint or args.endpoint_health or args.assign_role or args.select_operator_checkpoint or args.operator_serving_status or args.claim_policy or args.claim_verdict or args.research_decision_log:
+        elif args.verify_last_trial or args.breakthrough_report or args.resolve_problem or args.prepare_science_env or args.study_problem or args.run_problem_study or args.schedule_problem_study or args.scheduler_status or args.run_scheduler_once or args.frontier_status or args.runtime_status or args.queue_health or args.list_benchmarks or args.benchmark_status or args.prepare_payload_env or args.rebuild_locked_image or args.show_manifest or args.ingest_papers or args.literature_status or args.list_paper_artifacts or args.paper_artifact or args.literature_conflicts or args.list_experiment_backends or args.experiment_backend_runtime_status or args.run_runtime_cycle or args.list_alerts or args.retry_failed_job or args.confirm_recovery or args.cancel_job or args.sandbox_policy or args.register_checkpoint or args.list_checkpoints or args.build_inference_endpoint or args.list_endpoints or args.start_endpoint or args.stop_endpoint or args.restart_endpoint or args.endpoint_health or args.assign_role or args.select_operator_checkpoint or args.operator_serving_status or args.claim_policy or args.claim_verdict or args.research_decision_log:
             print(json.dumps(payload, indent=2))
         else:
             print(json.dumps(payload, indent=2))

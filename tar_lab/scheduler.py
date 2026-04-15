@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import threading
 from typing import Callable, Optional
 
 from tar_lab.schemas import (
@@ -51,6 +52,8 @@ class ProblemStudyScheduler:
         self.store = store
         self.execute_callback = execute_callback
         self.worker_id = worker_id
+        self._active_schedule_ids: set[str] = set()
+        self._active_schedule_lock = threading.Lock()
 
     def schedule(
         self,
@@ -99,9 +102,18 @@ class ProblemStudyScheduler:
         entries = list(self.store.iter_problem_schedules())
         return {
             "total": len(entries),
-            "active": len([item for item in entries if item.status in {"scheduled", "leased", "running", "retry_wait"}]),
+            "active": len(
+                [
+                    item
+                    for item in entries
+                    if item.status in {"scheduled", "leased", "running", "retry_wait", "recoverable_crash"}
+                ]
+            ),
+            "scheduled": len([item for item in entries if item.status == "scheduled"]),
             "leased": len([item for item in entries if item.status == "leased"]),
+            "running": len([item for item in entries if item.status == "running"]),
             "retry_wait": len([item for item in entries if item.status == "retry_wait"]),
+            "recoverable_crash": len([item for item in entries if item.status == "recoverable_crash"]),
             "terminal_failures": len([item for item in entries if item.status == "failed_terminal"]),
             "entries": [item.model_dump(mode="json") for item in entries],
         }
@@ -112,6 +124,7 @@ class ProblemStudyScheduler:
         max_jobs: int = 1,
         now: Optional[datetime] = None,
         lease_timeout_s: int = 300,
+        lease_heartbeat_interval_s: int = 30,
     ) -> SchedulerCycleReport:
         now_dt = (now or _utc_now()).astimezone(timezone.utc)
         due_entries = sorted(
@@ -131,7 +144,12 @@ class ProblemStudyScheduler:
         retry_wait_count = 0
 
         for entry in due_entries[: max(1, max_jobs)]:
-            leased = self._acquire_lease(entry, now_dt, lease_timeout_s=lease_timeout_s)
+            leased = self._acquire_lease(
+                entry,
+                now_dt,
+                lease_timeout_s=lease_timeout_s,
+                heartbeat_interval_s=lease_heartbeat_interval_s,
+            )
             if leased is None:
                 continue
             leased_count += 1
@@ -145,6 +163,14 @@ class ProblemStudyScheduler:
             if running is None:
                 continue
 
+            self._mark_active(running.schedule_id)
+            heartbeat_stop = threading.Event()
+            heartbeat_thread = self._start_lease_heartbeat(
+                running.schedule_id,
+                stop_event=heartbeat_stop,
+                lease_timeout_s=lease_timeout_s,
+            )
+            updated: Optional[ProblemScheduleEntry] = None
             try:
                 report = self.execute_callback(running.problem_id, running.use_docker, running.build_env)
                 updated, entry_alerts = self._finalize_after_report(running, report, now_dt)
@@ -166,8 +192,14 @@ class ProblemStudyScheduler:
                     retry_wait_count += 1
                 else:
                     failed_ids.append(updated.schedule_id)
+            finally:
+                heartbeat_stop.set()
+                if heartbeat_thread is not None:
+                    heartbeat_thread.join(timeout=2.0)
+                self._mark_inactive(running.schedule_id)
 
-            updated_entries.append(updated)
+            if updated is not None:
+                updated_entries.append(updated)
 
         return SchedulerCycleReport(
             started_at=now_dt.replace(microsecond=0).isoformat(),
@@ -187,6 +219,10 @@ class ProblemStudyScheduler:
         entry = self.store.get_problem_schedule(schedule_id)
         if entry is None:
             raise RuntimeError(f"Unknown schedule: {schedule_id}")
+        if entry.status == "recoverable_crash" and entry.recovery_required:
+            raise RuntimeError(
+                f"Schedule {schedule_id} is awaiting explicit recovery confirmation."
+            )
         updated = self.store.update_problem_schedule(
             schedule_id,
             status="scheduled",
@@ -194,6 +230,25 @@ class ProblemStudyScheduler:
             lease=None,
             last_error=None,
             terminal_failure_reason=None,
+        )
+        if updated is None:
+            raise RuntimeError(f"Unable to update schedule: {schedule_id}")
+        return updated
+
+    def confirm_recovery(self, schedule_id: str) -> ProblemScheduleEntry:
+        entry = self.store.get_problem_schedule(schedule_id)
+        if entry is None:
+            raise RuntimeError(f"Unknown schedule: {schedule_id}")
+        if entry.status != "recoverable_crash":
+            raise RuntimeError(f"Schedule {schedule_id} is not awaiting recovery.")
+        updated = self.store.update_problem_schedule(
+            schedule_id,
+            status="scheduled",
+            next_run_at=utc_now_iso(),
+            retry_after=None,
+            lease=None,
+            recovery_required=False,
+            recovery_confirmed_at=utc_now_iso(),
         )
         if updated is None:
             raise RuntimeError(f"Unable to update schedule: {schedule_id}")
@@ -239,13 +294,21 @@ class ProblemStudyScheduler:
             return retry_at is not None and retry_at <= now_dt
         return False
 
-    def _acquire_lease(self, entry: ProblemScheduleEntry, now_dt: datetime, *, lease_timeout_s: int) -> Optional[ProblemScheduleEntry]:
+    def _acquire_lease(
+        self,
+        entry: ProblemScheduleEntry,
+        now_dt: datetime,
+        *,
+        lease_timeout_s: int,
+        heartbeat_interval_s: int,
+    ) -> Optional[ProblemScheduleEntry]:
         if entry.status not in {"scheduled", "retry_wait"}:
             return None
         lease = RuntimeLease(
             owner_id=self.worker_id,
             expires_at=(now_dt + timedelta(seconds=max(30, lease_timeout_s))).replace(microsecond=0).isoformat(),
             attempt=entry.attempt_count + 1,
+            heartbeat_interval_s=max(1, heartbeat_interval_s),
         )
         return self.store.update_problem_schedule(
             entry.schedule_id,
@@ -253,6 +316,7 @@ class ProblemStudyScheduler:
             lease=lease,
             attempt_count=entry.attempt_count + 1,
             retry_after=None,
+            recovery_required=False,
         )
 
     def _finalize_after_report(
@@ -290,6 +354,8 @@ class ProblemStudyScheduler:
             if updated is None:
                 raise RuntimeError(f"Unable to update schedule: {entry.schedule_id}")
             return updated, []
+        if self._looks_like_recoverable_crash(report.summary):
+            return self._mark_recoverable_crash(entry, error=report.summary, now_dt=now_dt, report=report)
         return self._promote_retry_or_terminal(entry, error=report.summary, now_dt=now_dt, report=report)
 
     def _finalize_after_exception(
@@ -298,7 +364,118 @@ class ProblemStudyScheduler:
         error: str,
         now_dt: datetime,
     ) -> tuple[ProblemScheduleEntry, list[str]]:
+        if self._looks_like_recoverable_crash(error):
+            return self._mark_recoverable_crash(entry, error=error, now_dt=now_dt)
         return self._promote_retry_or_terminal(entry, error=error, now_dt=now_dt, severity="error")
+
+    def active_schedule_ids(self) -> set[str]:
+        with self._active_schedule_lock:
+            return set(self._active_schedule_ids)
+
+    def _mark_active(self, schedule_id: str) -> None:
+        with self._active_schedule_lock:
+            self._active_schedule_ids.add(schedule_id)
+
+    def _mark_inactive(self, schedule_id: str) -> None:
+        with self._active_schedule_lock:
+            self._active_schedule_ids.discard(schedule_id)
+
+    def _start_lease_heartbeat(
+        self,
+        schedule_id: str,
+        *,
+        stop_event: threading.Event,
+        lease_timeout_s: int,
+    ) -> Optional[threading.Thread]:
+        entry = self.store.get_problem_schedule(schedule_id)
+        if entry is None or entry.lease is None:
+            return None
+        interval = max(1, entry.lease.heartbeat_interval_s)
+
+        def _loop() -> None:
+            while not stop_event.wait(interval):
+                current = self.store.get_problem_schedule(schedule_id)
+                if current is None or current.status not in {"leased", "running"} or current.lease is None:
+                    return
+                now_dt = _utc_now()
+                renewed = current.lease.model_copy(
+                    update={
+                        "heartbeat_at": now_dt.replace(microsecond=0).isoformat(),
+                        "expires_at": (now_dt + timedelta(seconds=max(30, lease_timeout_s))).replace(microsecond=0).isoformat(),
+                    }
+                )
+                self.store.update_problem_schedule(schedule_id, lease=renewed)
+
+        thread = threading.Thread(
+            target=_loop,
+            name=f"lease-heartbeat-{schedule_id}",
+            daemon=True,
+        )
+        thread.start()
+        return thread
+
+    def _looks_like_recoverable_crash(self, error: str) -> bool:
+        normalized = (error or "").lower()
+        crash_markers = (
+            "out of memory",
+            "cuda error",
+            "cudnn",
+            "sigkill",
+            "killed",
+            "container exit",
+            "exit code 137",
+            "exit code 139",
+            "gpu error",
+        )
+        return any(marker in normalized for marker in crash_markers)
+
+    def _mark_recoverable_crash(
+        self,
+        entry: ProblemScheduleEntry,
+        *,
+        error: str,
+        now_dt: datetime,
+        report: Optional[ProblemExecutionReport] = None,
+    ) -> tuple[ProblemScheduleEntry, list[str]]:
+        alert = AlertRecord(
+            alert_id=_alert_id(entry.schedule_id),
+            severity="critical",
+            source="scheduler",
+            message=error,
+            related_schedule_id=entry.schedule_id,
+            related_manifest_id=(
+                Path(report.manifest_path).stem
+                if report is not None and report.manifest_path
+                else (Path(entry.last_manifest_path).stem if entry.last_manifest_path else None)
+            ),
+            metadata={
+                "status": "recoverable_crash",
+                "attempt_count": entry.attempt_count,
+                "problem_id": entry.problem_id,
+                "recovery_required": True,
+            },
+        )
+        self.store.append_alert(alert)
+        updated = self.store.update_problem_schedule(
+            entry.schedule_id,
+            status="recoverable_crash",
+            retry_after=None,
+            lease=None,
+            last_execution_at=utc_now_iso(),
+            last_error=error,
+            last_report_path=report.artifact_path if report is not None else entry.last_report_path,
+            last_report_status=report.status if report is not None else entry.last_report_status,
+            last_summary=report.summary if report is not None else entry.last_summary,
+            last_manifest_path=report.manifest_path if report is not None else entry.last_manifest_path,
+            crash_provenance=error,
+            crash_at=now_dt.replace(microsecond=0).isoformat(),
+            recovery_required=True,
+            terminal_failure_reason=None,
+            alert_ids=[*entry.alert_ids, alert.alert_id],
+        )
+        if updated is None:
+            raise RuntimeError(f"Unable to update schedule: {entry.schedule_id}")
+        return updated, [alert.alert_id]
 
     def _promote_retry_or_terminal(
         self,

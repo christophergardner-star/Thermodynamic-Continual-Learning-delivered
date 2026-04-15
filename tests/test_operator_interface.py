@@ -337,3 +337,46 @@ def test_ws34_pre_operator_and_runtime_surfaces_verdict_lifecycle():
             assert "Escalated Verdict IDs:" in tar_cli._render_runtime_status(runtime)
         finally:
             orchestrator.shutdown()
+
+
+def test_ws34_queue_health_surfaces_recoverable_crashes():
+    with tempfile.TemporaryDirectory() as tmp:
+        _copy_science_profiles(tmp)
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            study = orchestrator.study_problem(
+                "Investigate queue health surfacing",
+                build_env=False,
+                max_results=0,
+            )
+            entry = orchestrator.schedule_problem_study(problem_id=study.problem_id, delay_s=0, max_runs=1)
+            orchestrator.store.update_problem_schedule(
+                entry.schedule_id,
+                status="recoverable_crash",
+                lease=None,
+                last_error="CUDA out of memory",
+                crash_provenance="CUDA out of memory",
+                crash_at="2026-04-15T10:00:00+00:00",
+                recovery_required=True,
+            )
+
+            queue_response = handle_request(
+                orchestrator,
+                ControlRequest(command="queue_health", payload={}),
+            )
+            runtime = orchestrator.runtime_status()
+            context = dashboard.build_dashboard_context(
+                orchestrator,
+                include_blocked=True,
+                max_results=5,
+                selected_project_id="",
+            )
+
+            assert queue_response.ok is True
+            assert queue_response.payload["recoverable_crash"] >= 1
+            assert runtime["queue_health"]["recoverable_crash"] >= 1
+            assert context["status"]["runtime"]["queue_health"]["recoverable_crash"] >= 1
+            assert "Recoverable Crashes:" in tar_cli._render_queue_health(queue_response.payload)
+            assert "Queue Health:" in tar_cli._render_runtime_status(runtime)
+        finally:
+            orchestrator.shutdown()

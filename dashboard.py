@@ -329,6 +329,7 @@ def _render_infrastructure_tab(context: dict[str, Any]) -> None:
     sandbox_policy = runtime.get("sandbox_policy", {})
     runtime_policy = runtime.get("runtime_policy", {})
     verdicts = runtime.get("claim_verdict_lifecycle", {})
+    queue_health = runtime.get("queue_health", {})
     endpoints = status.get("endpoints", [])
     role_assignments = status.get("role_assignments", [])
     operator_serving = status.get("operator_serving", {})
@@ -351,14 +352,21 @@ def _render_infrastructure_tab(context: dict[str, Any]) -> None:
     endpoint_col2.metric("Role Assignments", len(role_assignments))
     endpoint_col3.metric("Operator Mode", operator_state.get("mode", "n/a"))
     endpoint_col4.metric("Resumable Backends", backend_counts.get("resumable", 0))
-    endpoint_col5.metric("Payload Build", runtime.get("payload_build_status", "n/a"))
+    endpoint_col5.metric("Recoverable Crashes", queue_health.get("recoverable_crash", 0))
     endpoint_col6.metric("Verdict Aging Days", runtime_policy.get("verdict_aging_days", 0))
+
+    queue_col1, queue_col2, queue_col3, queue_col4 = st.columns(4)
+    queue_col1.metric("Queue Orphans", queue_health.get("orphan_count", 0))
+    queue_col2.metric("Stale Leases", queue_health.get("stale_lease_count", 0))
+    queue_col3.metric("Running Jobs", queue_health.get("running", 0))
+    queue_col4.metric("Oldest Pending (min)", queue_health.get("oldest_pending_age_minutes", 0.0))
 
     infra_left, infra_right = st.columns(2)
     with infra_left:
         _show_json("Runtime", runtime, "No runtime state recorded.")
         _show_json("Sandbox Policy", sandbox_policy, "No sandbox policy recorded.")
     with infra_right:
+        _show_json("Queue Health", queue_health, "No queue health recorded.")
         _show_json("Build Attestation", build_attestation, "No build attestation recorded.")
         _show_json("Operator Serving", operator_serving, "No operator serving state recorded.")
         _show_json("Inference Endpoints", endpoints, "No managed inference endpoints registered.")
