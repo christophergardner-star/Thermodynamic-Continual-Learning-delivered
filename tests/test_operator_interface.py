@@ -299,3 +299,41 @@ def test_ws33_operator_view_surfaces_degraded_retrieval_counts():
             assert "Retrieval Modes:" in tar_cli._render_status(status_payload)
         finally:
             orchestrator.shutdown()
+
+
+def test_ws34_pre_operator_and_runtime_surfaces_verdict_lifecycle():
+    with tempfile.TemporaryDirectory() as tmp:
+        _copy_science_profiles(tmp)
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            project, study, verdict = _seed_ws21_project(orchestrator)
+            aged = verdict.model_copy(
+                update={
+                    "lifecycle_status": "escalated",
+                    "review_required_before": "2026-04-01T00:00:00+00:00",
+                    "escalated_at": "2026-04-02T00:00:00+00:00",
+                    "escalation_reason": "verdict_timeout",
+                }
+            )
+            orchestrator.store.upsert_claim_verdict(aged)
+            runtime_policy = orchestrator.store.load_runtime_policy()
+            operator_view = orchestrator.operator_view(include_blocked=True, limit=5)
+            runtime = orchestrator.runtime_status()
+            context = dashboard.build_dashboard_context(
+                orchestrator,
+                include_blocked=True,
+                max_results=5,
+                selected_project_id=project.project_id,
+            )
+
+            assert operator_view["claim_verdict_lifecycle"]["escalated"] >= 1
+            assert aged.verdict_id in operator_view["escalated_verdict_ids"]
+            assert runtime["runtime_policy"]["verdict_aging_days"] == runtime_policy.verdict_aging_days
+            assert runtime["claim_verdict_lifecycle"]["escalated"] >= 1
+            assert aged.verdict_id in runtime["escalated_verdict_ids"]
+            assert context["status"]["runtime"]["claim_verdict_lifecycle"]["escalated"] >= 1
+            assert "Verdict Lifecycle:" in tar_cli._render_operator_view(operator_view)
+            assert "Verdict Aging Days:" in tar_cli._render_runtime_status(runtime)
+            assert "Escalated Verdict IDs:" in tar_cli._render_runtime_status(runtime)
+        finally:
+            orchestrator.shutdown()

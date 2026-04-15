@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import re
@@ -504,6 +504,8 @@ class TAROrchestrator:
         heartbeat = self.runtime_daemon.load_heartbeat()
         payload_env = self.payload_environment.load()
         sandbox_policy = self.sandbox_policy()
+        runtime_policy = self.store.load_runtime_policy()
+        verdict_summary = self._claim_verdict_lifecycle_summary(limit=20)
         build_attestation = (
             payload_env.build_attestation
             if payload_env is not None and payload_env.build_attestation is not None
@@ -517,6 +519,10 @@ class TAROrchestrator:
             "alerts": [item.model_dump(mode="json") for item in self.store.latest_alerts(20)],
             "safe_execution_mode": self.safe_execution_mode,
             "sandbox_policy": sandbox_policy,
+            "runtime_policy": runtime_policy.model_dump(mode="json"),
+            "claim_verdict_lifecycle": verdict_summary["counts"],
+            "recent_verdict_window": verdict_summary["window"],
+            "escalated_verdict_ids": verdict_summary["escalated_verdict_ids"],
             "payload_image": payload_env.image_tag if payload_env is not None else None,
             "manifest_hash": payload_env.run_manifest.hash_sha256 if payload_env and payload_env.run_manifest else None,
             "reproducibility_complete": bool(payload_env is not None and payload_env.reproducibility_complete),
@@ -574,6 +580,15 @@ class TAROrchestrator:
                 {"updated_schedule_ids": [item.schedule_id for item in reprioritized]},
             )
         heartbeat = self.runtime_daemon.run_cycle(max_jobs=max_jobs, stale_after_s=stale_after_s)
+        escalated_verdicts = self._age_claim_verdicts()
+        if escalated_verdicts:
+            heartbeat = heartbeat.model_copy(
+                update={
+                    "escalated_verdicts": escalated_verdicts,
+                    "notes": [*heartbeat.notes, f"escalated_verdicts={len(escalated_verdicts)}"],
+                }
+            )
+            self.runtime_daemon.heartbeat_path.write_text(heartbeat.model_dump_json(indent=2), encoding="utf-8")
         self.store.append_audit_event(
             "runtime",
             "run_cycle",
@@ -599,6 +614,9 @@ class TAROrchestrator:
         payload["read_only_mount_count"] = len(policy.read_only_mounts)
         payload["writable_mount_count"] = len(policy.writable_mounts)
         return payload
+
+    def runtime_policy(self) -> dict[str, Any]:
+        return self.store.load_runtime_policy().model_dump(mode="json")
 
     def _project_now(self) -> str:
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -1244,6 +1262,21 @@ class TAROrchestrator:
             "degraded_retrieval_studies": degraded,
         }
 
+    def _claim_verdict_lifecycle_summary(self, *, limit: int = 20) -> dict[str, Any]:
+        verdicts = list(self.store.iter_claim_verdicts())[-max(1, limit):]
+        counts = {"active": 0, "aging": 0, "escalated": 0, "resolved": 0}
+        escalated_verdict_ids: list[str] = []
+        for verdict in verdicts:
+            lifecycle = verdict.lifecycle_status
+            counts[lifecycle] = counts.get(lifecycle, 0) + 1
+            if lifecycle == "escalated":
+                escalated_verdict_ids.append(verdict.verdict_id)
+        return {
+            "window": len(verdicts),
+            "counts": counts,
+            "escalated_verdict_ids": escalated_verdict_ids,
+        }
+
     def operator_view(self, *, include_blocked: bool = True, limit: int = 5, mode: str = "balanced") -> dict[str, Any]:
         portfolio, priorities, evidence_debts, stale_records = self._evaluate_portfolio(
             include_blocked=include_blocked,
@@ -1258,6 +1291,7 @@ class TAROrchestrator:
         )
         promotion_blocked = [item.model_dump(mode="json") for item in evidence_debts if item.promotion_blocked][: max(1, limit)]
         retrieval_summary = self._retrieval_mode_summary(limit=20)
+        verdict_summary = self._claim_verdict_lifecycle_summary(limit=20)
         return {
             "generated_at": self._project_now(),
             "project_counts": {
@@ -1292,6 +1326,9 @@ class TAROrchestrator:
             "retrieval_mode_breakdown": retrieval_summary["retrieval_mode_breakdown"],
             "degraded_retrieval_studies": retrieval_summary["degraded_retrieval_studies"],
             "recent_study_window": retrieval_summary["window"],
+            "claim_verdict_lifecycle": verdict_summary["counts"],
+            "recent_verdict_window": verdict_summary["window"],
+            "escalated_verdict_ids": verdict_summary["escalated_verdict_ids"],
             "latest_portfolio_decision": self.store.latest_portfolio_decision().model_dump(mode="json")
             if self.store.latest_portfolio_decision()
             else None,
@@ -2646,6 +2683,111 @@ class TAROrchestrator:
     def _project_last_progress_at(self, project: ResearchProject) -> Optional[str]:
         return project.updated_at or project.created_at
 
+    def _project_for_problem(self, problem_id: Optional[str]) -> Optional[ResearchProject]:
+        if not problem_id:
+            return None
+        for study in reversed(list(self.store.iter_problem_studies())):
+            if study.problem_id == problem_id and study.project_id:
+                return self.store.get_research_project(study.project_id)
+        return None
+
+    def _ensure_verdict_followup_question(
+        self,
+        project: ResearchProject,
+        verdict: ClaimVerdict,
+    ) -> ResearchProject:
+        thread = self._project_thread(project)
+        if thread is None:
+            return project
+        existing = next(
+            (
+                item
+                for item in project.open_questions
+                if item.uncertainty_type == "unresolved_verdict" and verdict.verdict_id in item.question
+            ),
+            None,
+        )
+        if existing is not None:
+            return project
+        question = ResearchOpenQuestion(
+            question_id=self._continuity_id("question"),
+            project_id=project.project_id,
+            thread_id=thread.thread_id,
+            question=(
+                f"Resolve aged claim verdict {verdict.verdict_id} for trial {verdict.trial_id} "
+                "before further promotion or autonomous scheduling."
+            ),
+            importance=max(0.7, verdict.confidence or 0.0),
+            uncertainty_type="unresolved_verdict",
+            blocking=True,
+            status="open",
+        )
+        updated_thread = thread.model_copy(
+            update={
+                "open_question_ids": [*thread.open_question_ids, question.question_id],
+                "updated_at": self._project_now(),
+            }
+        )
+        updated_project = project.model_copy(update={"open_questions": [*project.open_questions, question]})
+        updated_project = self._replace_project_thread(updated_project, updated_thread)
+        return self._persist_project(
+            updated_project,
+            latest_evidence_summary=project.latest_decision_summary,
+            blockers=["aged_claim_verdict"],
+        )
+
+    def _age_claim_verdicts(self) -> list[str]:
+        policy = self.store.load_runtime_policy()
+        threshold_days = max(1, policy.verdict_aging_days)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        escalated: list[str] = []
+        for verdict in list(self.store.iter_claim_verdicts()):
+            updates: dict[str, Any] = {}
+            created_at = self._parse_timestamp(verdict.created_at)
+            if created_at is None:
+                continue
+            if verdict.status in {"accepted", "rejected", "contradicted"}:
+                if verdict.lifecycle_status != "resolved":
+                    updates["lifecycle_status"] = "resolved"
+                if updates:
+                    self.store.upsert_claim_verdict(verdict.model_copy(update=updates))
+                continue
+            deadline_dt = self._parse_timestamp(verdict.review_required_before) if verdict.review_required_before else None
+            if deadline_dt is None:
+                deadline_dt = created_at.astimezone(timezone.utc) + timedelta(days=threshold_days)
+                updates["review_required_before"] = deadline_dt.replace(microsecond=0).isoformat()
+            if now >= deadline_dt.astimezone(timezone.utc):
+                if verdict.lifecycle_status != "escalated":
+                    updates.update(
+                        {
+                            "lifecycle_status": "escalated",
+                            "escalated_at": now.isoformat(),
+                            "escalation_reason": "verdict_timeout",
+                        }
+                    )
+                    updated_verdict = verdict.model_copy(update=updates)
+                    self.store.upsert_claim_verdict(updated_verdict)
+                    project = self._project_for_problem(updated_verdict.benchmark_problem_id)
+                    if project is not None:
+                        self._ensure_verdict_followup_question(project, updated_verdict)
+                    self.store.append_audit_event(
+                        "claim_verdict",
+                        "escalate",
+                        {
+                            "verdict_id": updated_verdict.verdict_id,
+                            "trial_id": updated_verdict.trial_id,
+                            "benchmark_problem_id": updated_verdict.benchmark_problem_id,
+                            "review_required_before": updated_verdict.review_required_before,
+                        },
+                    )
+                    escalated.append(updated_verdict.verdict_id)
+                continue
+            if verdict.lifecycle_status != "aging":
+                updates["lifecycle_status"] = "aging"
+            if updates:
+                self.store.upsert_claim_verdict(verdict.model_copy(update=updates))
+        return escalated
+
     def _project_benchmark_readiness(self, project: ResearchProject) -> float:
         latest_execution = self._latest_project_execution(project.project_id)
         if latest_execution is not None:
@@ -2858,6 +3000,12 @@ class TAROrchestrator:
         else:
             level = "fresh"
 
+        verdicts = self._project_claim_verdicts(project.project_id)
+        if any(item.lifecycle_status == "escalated" for item in verdicts):
+            level = "critical"
+        elif level == "fresh" and any(item.lifecycle_status == "aging" for item in verdicts):
+            level = "watch"
+
         resume_candidate = (
             project.status in {"paused", "blocked"}
             and level in {"stale", "critical"}
@@ -2881,6 +3029,10 @@ class TAROrchestrator:
             reason = "project has gone stale and should be reviewed for resume or deferral"
         elif level == "critical":
             reason = "project has been inactive for too long and needs explicit action"
+        if any(item.lifecycle_status == "escalated" for item in verdicts):
+            reason = "project has an escalated unresolved claim verdict that requires review"
+        elif any(item.lifecycle_status == "aging" for item in verdicts) and level == "watch":
+            reason = "project has aging unresolved claim verdicts that should be reviewed soon"
         if resume_candidate:
             reason = "project is stale but resume-worthy under the current budget and dependency state"
         if closure_candidate:
@@ -4928,9 +5080,14 @@ class TAROrchestrator:
             if latest_problem_execution is not None
             else (latest_problem_study.canonical_comparable if latest_problem_study is not None else False)
         )
+        runtime_payload = self.runtime_status()
         payload["retrieval_mode_breakdown"] = retrieval_summary["retrieval_mode_breakdown"]
         payload["degraded_retrieval_studies"] = retrieval_summary["degraded_retrieval_studies"]
         payload["recent_study_window"] = retrieval_summary["window"]
+        payload["claim_verdict_lifecycle"] = runtime_payload.get("claim_verdict_lifecycle", {})
+        payload["recent_verdict_window"] = runtime_payload.get("recent_verdict_window", 0)
+        payload["escalated_verdict_ids"] = runtime_payload.get("escalated_verdict_ids", [])
+        payload["runtime_policy"] = runtime_payload.get("runtime_policy", {})
         payload["literature"] = self.literature_status()
         payload["memory"] = self.vault.stats() if self.vault is not None else {"error": self.memory_error}
         if self.memory_error:
@@ -4938,7 +5095,7 @@ class TAROrchestrator:
         payload["memory_warning"] = self.memory_error
         payload["regime"] = self.check_regime()
         payload["frontier"] = self.frontier_status().model_dump(mode="json")
-        payload["runtime"] = self.runtime_status()
+        payload["runtime"] = runtime_payload
         return payload
 
     def check_regime(self) -> Dict[str, Any]:

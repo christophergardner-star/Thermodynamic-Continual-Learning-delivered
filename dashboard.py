@@ -174,13 +174,22 @@ def _render_operator_tab(context: dict[str, Any]) -> None:
     portfolio_review = context["portfolio_review"]
     counts = operator_view.get("project_counts", {})
     health = operator_view.get("portfolio_health", {})
+    retrieval = operator_view.get("retrieval_mode_breakdown", {})
+    verdicts = operator_view.get("claim_verdict_lifecycle", {})
 
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.metric("Total", counts.get("total", 0))
     col2.metric("Active", counts.get("active", 0))
     col3.metric("Blocked", counts.get("blocked", 0))
     col4.metric("Stale", counts.get("stale", 0))
     col5.metric("Resume Candidates", health.get("resume_candidates", 0))
+    col6.metric("Escalated Verdicts", verdicts.get("escalated", 0))
+
+    ret1, ret2, ret3, ret4 = st.columns(4)
+    ret1.metric("Semantic Studies", retrieval.get("semantic", 0))
+    ret2.metric("Lexical Fallback", retrieval.get("lexical_fallback", 0))
+    ret3.metric("Degraded Studies", operator_view.get("degraded_retrieval_studies", 0))
+    ret4.metric("Aging Verdicts", verdicts.get("aging", 0))
 
     left, right = st.columns(2)
     with left:
@@ -318,6 +327,8 @@ def _render_infrastructure_tab(context: dict[str, Any]) -> None:
     status = context["status"]
     runtime = status.get("runtime", {})
     sandbox_policy = runtime.get("sandbox_policy", {})
+    runtime_policy = runtime.get("runtime_policy", {})
+    verdicts = runtime.get("claim_verdict_lifecycle", {})
     endpoints = status.get("endpoints", [])
     role_assignments = status.get("role_assignments", [])
     operator_serving = status.get("operator_serving", {})
@@ -327,19 +338,21 @@ def _render_infrastructure_tab(context: dict[str, Any]) -> None:
     backend_records = backend_runtime.get("records", [])
     build_attestation = runtime.get("build_attestation", {})
 
-    runtime_col1, runtime_col2, runtime_col3, runtime_col4, runtime_col5 = st.columns(5)
+    runtime_col1, runtime_col2, runtime_col3, runtime_col4, runtime_col5, runtime_col6 = st.columns(6)
     runtime_col1.metric("Reproducible", status.get("reproducibility_complete", False))
     runtime_col2.metric("Active Leases", len(runtime.get("active_leases", [])))
     runtime_col3.metric("Retry Waiting", len(runtime.get("retry_waiting", [])))
     runtime_col4.metric("Alerts", len(runtime.get("alerts", [])))
     runtime_col5.metric("Backend Runs", backend_counts.get("total", 0))
+    runtime_col6.metric("Escalated Verdicts", verdicts.get("escalated", 0))
 
-    endpoint_col1, endpoint_col2, endpoint_col3, endpoint_col4, endpoint_col5 = st.columns(5)
+    endpoint_col1, endpoint_col2, endpoint_col3, endpoint_col4, endpoint_col5, endpoint_col6 = st.columns(6)
     endpoint_col1.metric("Endpoints", len(endpoints))
     endpoint_col2.metric("Role Assignments", len(role_assignments))
     endpoint_col3.metric("Operator Mode", operator_state.get("mode", "n/a"))
     endpoint_col4.metric("Resumable Backends", backend_counts.get("resumable", 0))
     endpoint_col5.metric("Payload Build", runtime.get("payload_build_status", "n/a"))
+    endpoint_col6.metric("Verdict Aging Days", runtime_policy.get("verdict_aging_days", 0))
 
     infra_left, infra_right = st.columns(2)
     with infra_left:

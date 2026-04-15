@@ -304,6 +304,12 @@ Execution posture:
 
 ### `WS33`: Scientific Retrieval And Claim Graph
 
+Status:
+
+- completed
+- closeout:
+  [ws33_closeout.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws33_closeout.md)
+
 Purpose:
 
 - make retrieval evidence-aware, contradiction-aware, and claim-graph aware on
@@ -328,6 +334,14 @@ Execution posture:
 - pod only for large-index experiments or heavy embedder comparisons
 
 ### `WS34-pre`: Claim Verdict Lifecycle
+
+Status:
+
+- completed
+- execution spec:
+  [ws34_pre_execution_spec.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws34_pre_execution_spec.md)
+- closeout:
+  [ws34_pre_closeout.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws34_pre_closeout.md)
 
 Purpose:
 

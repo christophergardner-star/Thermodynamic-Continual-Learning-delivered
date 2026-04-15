@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 
@@ -7,12 +8,15 @@ from tar_lab.schemas import (
     CalibrationBin,
     CalibrationReport,
     ClaimAcceptancePolicy,
+    ClaimVerdict,
     MemorySearchHit,
     ProblemExecutionReport,
     ProblemStudyReport,
+    RuntimeHeartbeat,
     ScienceEnvironmentBundle,
     SeedRunResult,
     SeedVarianceReport,
+    TARRuntimePolicy,
     VerificationReport,
 )
 
@@ -120,10 +124,19 @@ def _problem_execution_report(
     )
 
 
-def _problem_study_report(workspace: str, problem_id: str, *, canonical_comparable: bool) -> ProblemStudyReport:
+def _problem_study_report(
+    workspace: str,
+    problem_id: str,
+    *,
+    canonical_comparable: bool,
+    project_id: str | None = None,
+    thread_id: str | None = None,
+) -> ProblemStudyReport:
     workspace_path = Path(workspace)
     return ProblemStudyReport(
         problem_id=problem_id,
+        project_id=project_id,
+        thread_id=thread_id,
         problem=f"Problem {problem_id}",
         profile_id="deep_learning",
         domain="deep_learning",
@@ -302,5 +315,102 @@ def test_claim_verdict_provenance_fields_are_populated():
             assert decision.trial_id == "trial-1"
             assert decision.problem_id == "problem-a"
             assert decision.claim_verdict_id == verdict.verdict_id
+        finally:
+            orchestrator.shutdown()
+
+
+def test_age_claim_verdicts_escalates_old_provisional_and_creates_open_question():
+    with tempfile.TemporaryDirectory() as tmp:
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            _configure_orchestrator(orchestrator)
+            project = orchestrator.create_project("Investigate aged verdict handling")
+            thread = project.hypothesis_threads[0]
+            study = _problem_study_report(
+                tmp,
+                "problem-aged",
+                canonical_comparable=False,
+                project_id=project.project_id,
+                thread_id=thread.thread_id,
+            )
+            orchestrator.store.append_problem_study(study)
+            orchestrator.store.save_runtime_policy(TARRuntimePolicy(verdict_aging_days=14))
+            verdict = ClaimVerdict(
+                verdict_id="verdict-aged-1",
+                trial_id="trial-aged-1",
+                created_at=(datetime.now(timezone.utc) - timedelta(days=15)).replace(microsecond=0).isoformat(),
+                status="provisional",
+                rationale=["Awaiting further evidence review."],
+                policy=ClaimAcceptancePolicy(min_supporting_sources=0),
+                verification_report_trial_id="trial-aged-1",
+                benchmark_problem_id=study.problem_id,
+                verdict_inputs_complete=True,
+                linkage_status="exact",
+            )
+            orchestrator.store.append_claim_verdict(verdict)
+
+            escalated = orchestrator._age_claim_verdicts()
+            updated = next(
+                item for item in orchestrator.store.iter_claim_verdicts() if item.verdict_id == verdict.verdict_id
+            )
+            refreshed_project = orchestrator.store.get_research_project(project.project_id)
+
+            assert verdict.verdict_id in escalated
+            assert updated.lifecycle_status == "escalated"
+            assert updated.escalation_reason == "verdict_timeout"
+            assert updated.escalated_at is not None
+            assert updated.review_required_before is not None
+            assert refreshed_project is not None
+            assert any(item.uncertainty_type == "unresolved_verdict" for item in refreshed_project.open_questions)
+        finally:
+            orchestrator.shutdown()
+
+
+def test_run_runtime_cycle_reports_escalated_verdict_ids():
+    with tempfile.TemporaryDirectory() as tmp:
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            _configure_orchestrator(orchestrator)
+            project = orchestrator.create_project("Investigate runtime verdict escalation")
+            thread = project.hypothesis_threads[0]
+            study = _problem_study_report(
+                tmp,
+                "problem-runtime-aged",
+                canonical_comparable=False,
+                project_id=project.project_id,
+                thread_id=thread.thread_id,
+            )
+            orchestrator.store.append_problem_study(study)
+            orchestrator.store.save_runtime_policy(TARRuntimePolicy(verdict_aging_days=3))
+            verdict = ClaimVerdict(
+                verdict_id="verdict-runtime-aged-1",
+                trial_id="trial-runtime-aged-1",
+                created_at=(datetime.now(timezone.utc) - timedelta(days=4)).replace(microsecond=0).isoformat(),
+                status="insufficient_evidence",
+                rationale=["Evidence remains incomplete."],
+                policy=ClaimAcceptancePolicy(min_supporting_sources=0),
+                verification_report_trial_id="trial-runtime-aged-1",
+                benchmark_problem_id=study.problem_id,
+            )
+            orchestrator.store.append_claim_verdict(verdict)
+            orchestrator.runtime_daemon.run_cycle = lambda **kwargs: RuntimeHeartbeat(  # type: ignore[assignment]
+                started_at="2026-04-15T10:00:00+00:00",
+                finished_at="2026-04-15T10:00:01+00:00",
+                status="completed",
+                executed_jobs=0,
+                stale_cleanups=0,
+                failed_jobs=0,
+                active_leases=0,
+                retry_waiting=0,
+                alert_count=0,
+                notes=["runtime cycle started"],
+            )
+
+            heartbeat = orchestrator.run_runtime_cycle(max_jobs=1)
+            persisted = orchestrator.runtime_daemon.load_heartbeat()
+
+            assert verdict.verdict_id in heartbeat.escalated_verdicts
+            assert persisted is not None
+            assert verdict.verdict_id in persisted.escalated_verdicts
         finally:
             orchestrator.shutdown()

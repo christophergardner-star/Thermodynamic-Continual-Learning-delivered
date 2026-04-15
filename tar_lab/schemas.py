@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now_iso() -> str:
@@ -940,6 +940,18 @@ class ClaimVerdict(StrictModel):
     canonical_benchmark_required: bool = False
     canonical_benchmark_satisfied: bool = False
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    review_required_before: Optional[str] = None
+    escalated_at: Optional[str] = None
+    escalation_reason: Optional[str] = None
+    lifecycle_status: Literal["active", "aging", "escalated", "resolved"] = "active"
+
+    @model_validator(mode="after")
+    def normalize_lifecycle(self) -> "ClaimVerdict":
+        if self.status in {"accepted", "rejected", "contradicted"} and self.lifecycle_status == "active":
+            self.lifecycle_status = "resolved"
+        if self.escalated_at and self.lifecycle_status in {"active", "aging"}:
+            self.lifecycle_status = "escalated"
+        return self
 
 
 class ResearchBudgetLedger(StrictModel):
@@ -1867,6 +1879,7 @@ class RuntimeHeartbeat(StrictModel):
     active_leases: int = Field(default=0, ge=0)
     retry_waiting: int = Field(default=0, ge=0)
     alert_count: int = Field(default=0, ge=0)
+    escalated_verdicts: List[str] = Field(default_factory=list)
     notes: List[str] = Field(default_factory=list)
 
 
@@ -1875,6 +1888,11 @@ class RetryPolicy(StrictModel):
     base_delay_s: int = Field(default=30, ge=1)
     backoff_multiplier: float = Field(default=2.0, ge=1.0)
     max_delay_s: int = Field(default=900, ge=1)
+
+
+class TARRuntimePolicy(StrictModel):
+    policy_version: str = "ws34_pre.v1"
+    verdict_aging_days: int = Field(default=14, ge=1)
 
 
 class RuntimeLease(StrictModel):

@@ -609,10 +609,13 @@ def _render_sandbox_policy(payload: Dict[str, Any]) -> str:
 
 def _render_runtime_status(payload: Dict[str, Any]) -> str:
     sandbox = payload.get("sandbox_policy", {})
+    policy = payload.get("runtime_policy", {})
+    verdicts = payload.get("claim_verdict_lifecycle", {})
     lines = [
         f"Sandbox Mode: {payload.get('safe_execution_mode', 'n/a')}",
         f"Sandbox Profile: {sandbox.get('profile', 'n/a')}",
         f"Dev Override Active: {sandbox.get('dev_override_active', False)}",
+        f"Verdict Aging Days: {policy.get('verdict_aging_days', 'n/a')}",
         f"Payload Image: {payload.get('payload_image', 'n/a')}",
         f"Manifest Hash: {payload.get('manifest_hash', 'n/a')}",
         f"Reproducibility Complete: {payload.get('reproducibility_complete', False)}",
@@ -622,7 +625,11 @@ def _render_runtime_status(payload: Dict[str, Any]) -> str:
         f"Retry Waiting: {len(payload.get('retry_waiting', []))}",
         f"Terminal Failures: {len(payload.get('terminal_failures', []))}",
         f"Alert Count: {len(payload.get('alerts', []))}",
+        f"Verdict Lifecycle: active={verdicts.get('active', 0)} aging={verdicts.get('aging', 0)} escalated={verdicts.get('escalated', 0)} resolved={verdicts.get('resolved', 0)} window={payload.get('recent_verdict_window', 0)}",
     ]
+    escalated = payload.get("escalated_verdict_ids") or []
+    if escalated:
+        lines.append(f"Escalated Verdict IDs: {', '.join(escalated)}")
     if payload.get("lock_incomplete_reason"):
         lines.append(f"Lock Warning: {payload['lock_incomplete_reason']}")
     return "\n".join(lines)
@@ -909,11 +916,13 @@ def _render_operator_view(payload: Dict[str, Any]) -> str:
     counts = payload.get("project_counts") or {}
     health = payload.get("portfolio_health") or {}
     retrieval = payload.get("retrieval_mode_breakdown") or {}
+    verdicts = payload.get("claim_verdict_lifecycle") or {}
     lines = [
         f"Generated At: {payload.get('generated_at', 'n/a')}",
         f"Projects: total={counts.get('total', 0)} active={counts.get('active', 0)} paused={counts.get('paused', 0)} blocked={counts.get('blocked', 0)} stale={counts.get('stale', 0)}",
         f"Portfolio Health: selected={health.get('selected_project_id', 'n/a')} resume_candidates={health.get('resume_candidates', 0)} promotion_blocked={health.get('promotion_blocked_projects', 0)}",
         f"Recent Retrieval Modes: semantic={retrieval.get('semantic', 0)} lexical_fallback={retrieval.get('lexical_fallback', 0)} degraded={payload.get('degraded_retrieval_studies', 0)} window={payload.get('recent_study_window', 0)}",
+        f"Verdict Lifecycle: active={verdicts.get('active', 0)} aging={verdicts.get('aging', 0)} escalated={verdicts.get('escalated', 0)} resolved={verdicts.get('resolved', 0)} window={payload.get('recent_verdict_window', 0)}",
         "",
         "Active Projects:",
     ]
@@ -939,6 +948,10 @@ def _render_operator_view(payload: Dict[str, Any]) -> str:
             "Promotion Blocked Projects: "
             + ", ".join(item.get("project_id", "n/a") for item in promotion_blocked)
         )
+    escalated = payload.get("escalated_verdict_ids") or []
+    if escalated:
+        lines.append("")
+        lines.append("Escalated Verdicts: " + ", ".join(escalated))
     return "\n".join(lines)
 
 

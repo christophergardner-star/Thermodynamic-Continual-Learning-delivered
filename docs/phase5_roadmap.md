@@ -148,8 +148,9 @@ Commit title:
 
 Status:
 
-- laptop-first
-- no pod for core work
+- completed
+- closeout:
+  [ws33_closeout.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws33_closeout.md)
 
 Deliverable 1: contradiction-aware retrieval scoring
 
@@ -196,8 +197,11 @@ Acceptance criteria:
 
 Status:
 
-- small focused pass
-- laptop-only
+- completed
+- execution spec:
+  [ws34_pre_execution_spec.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws34_pre_execution_spec.md)
+- closeout:
+  [ws34_pre_closeout.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws34_pre_closeout.md)
 
 Deliverable:
 

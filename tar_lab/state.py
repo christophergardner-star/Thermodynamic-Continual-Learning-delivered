@@ -49,6 +49,7 @@ from tar_lab.schemas import (
     ResearchProject,
     ResearchProjectState,
     StrategistPlan,
+    TARRuntimePolicy,
     TrainingPayloadConfig,
     VerificationReport,
 )
@@ -86,6 +87,7 @@ class TARStateStore:
         self.portfolio_decisions_path = self.state_dir / "portfolio_decisions.jsonl"
         self.publication_handoffs_path = self.state_dir / "publication_handoffs.jsonl"
         self.publication_handoffs_dir = self.state_dir / "publication_handoffs"
+        self.runtime_policy_path = self.policies_dir / "runtime_policy.json"
         self.checkpoint_registry_path = self.state_dir / "checkpoint_registry.json"
         self.endpoint_registry_path = self.state_dir / "inference_endpoints.json"
         self.endpoints_dir = self.state_dir / "endpoints"
@@ -240,6 +242,23 @@ class TARStateStore:
         with self.claim_verdicts_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(verdict.model_dump(mode="json")) + "\n")
 
+    def upsert_claim_verdict(self, verdict: ClaimVerdict) -> None:
+        rows = list(self.iter_claim_verdicts())
+        replaced = False
+        updated_rows: List[ClaimVerdict] = []
+        for item in rows:
+            if item.verdict_id == verdict.verdict_id:
+                updated_rows.append(verdict)
+                replaced = True
+            else:
+                updated_rows.append(item)
+        if not replaced:
+            updated_rows.append(verdict)
+        content = ""
+        if updated_rows:
+            content = "\n".join(json.dumps(item.model_dump(mode="json")) for item in updated_rows) + "\n"
+        self._atomic_write_text(self.claim_verdicts_path, content)
+
     def iter_claim_verdicts(self) -> Iterable[ClaimVerdict]:
         if not self.claim_verdicts_path.exists():
             return []
@@ -255,6 +274,16 @@ class TARStateStore:
             if trial_id is None or verdict.trial_id == trial_id:
                 return verdict
         return None
+
+    def load_runtime_policy(self) -> TARRuntimePolicy:
+        if not self.runtime_policy_path.exists():
+            policy = TARRuntimePolicy()
+            self.save_runtime_policy(policy)
+            return policy
+        return TARRuntimePolicy.model_validate_json(self.runtime_policy_path.read_text(encoding="utf-8"))
+
+    def save_runtime_policy(self, policy: TARRuntimePolicy) -> None:
+        self._atomic_write_json(self.runtime_policy_path, policy.model_dump(mode="json"))
 
     def append_research_decision(self, record: ResearchDecisionRecord) -> None:
         with self.research_decisions_path.open("a", encoding="utf-8") as handle:
