@@ -1,0 +1,33 @@
+{
+  "ws26_test_split": "dataset_artifacts/tar_master_dataset_ws26_merged_v1/tar_master_dataset_test.jsonl",
+  "ws27_dataset": "dataset_artifacts/tar_master_dataset_ws27_branch_v1/tar_master_dataset.jsonl",
+  "internal_eval_pack_dirs": [
+    "eval_artifacts/tar_operator_eval_ws27r1_probe_v1",
+    "eval_artifacts/tar_operator_eval_ws27r1_ws26_regression_v1"
+  ],
+  "eval_pack_dir": "eval_artifacts/tar_operator_eval_external_v1",
+  "output_dir": "eval_artifacts/tar_operator_eval_runs/ws27r2_external_eval_v1",
+  "eval_version": "tar-operator-eval-external-v1",
+  "selection": {
+    "held_out_family_quotas": {
+      "decision_rationale": 4,
+      "endpoint_observability_diagnosis": 3,
+      "portfolio_governance": 5
+    },
+    "include_literature_items": true,
+    "max_items": 16
+  },
+  "runtime": {
+    "base_model": "Qwen/Qwen2.5-7B-Instruct",
+    "adapter_path": "training_artifacts/ws27r2_qwen25_7b_refine_run1/final_adapter",
+    "served_model_name": "tar-operator-ws27r2-external",
+    "host": "127.0.0.1",
+    "port": 8827,
+    "base_url": null,
+    "spawn_local_endpoint": true,
+    "max_new_tokens": 160,
+    "temperature": 0.0,
+    "startup_timeout_s": 1800,
+    "request_timeout_s": 600
+  }
+}

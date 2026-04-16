@@ -1,0 +1,75 @@
+{
+  "eval_version": "tar-operator-eval-external-v1",
+  "files": {
+    "eval_items": {
+      "path": "eval_items.jsonl",
+      "records": 16,
+      "sha256": "1c2e3dc332a89e5bb1e50b0ab0885dc9017753fbe50175003a588734ae0d8b51",
+      "size_bytes": 38134
+    }
+  },
+  "internal_eval_exclusions": [
+    {
+      "path": "C:\\Users\\Chris\\contLRN\\Thermodynamic-Continual-Learning-delivered\\eval_artifacts\\tar_operator_eval_ws27r1_probe_v1"
+    },
+    {
+      "path": "C:\\Users\\Chris\\contLRN\\Thermodynamic-Continual-Learning-delivered\\eval_artifacts\\tar_operator_eval_ws27r1_ws26_regression_v1"
+    }
+  ],
+  "items": 16,
+  "literature_sources": [
+    {
+      "arxiv_id": "2407.12883",
+      "paper_title": "BRIGHT: A Realistic and Challenging Benchmark for Reasoning-Intensive Retrieval",
+      "paper_url": "https://arxiv.org/abs/2407.12883",
+      "title_present_in_ws27_branch": false
+    },
+    {
+      "arxiv_id": "2402.07630",
+      "paper_title": "G-Retriever: Retrieval-Augmented Generation for Textual Graph Understanding and Question Answering",
+      "paper_url": "https://arxiv.org/abs/2402.07630",
+      "title_present_in_ws27_branch": false
+    },
+    {
+      "arxiv_id": "2401.17585",
+      "paper_title": "Propagation and Pitfalls: Reasoning-based Assessment of Knowledge Editing through Counterfactual Tasks",
+      "paper_url": "https://arxiv.org/abs/2401.17585",
+      "title_present_in_ws27_branch": false
+    },
+    {
+      "arxiv_id": "2407.06992",
+      "paper_title": "Robust Neural Information Retrieval: An Adversarial and Out-of-distribution Perspective",
+      "paper_url": "https://arxiv.org/abs/2407.06992",
+      "title_present_in_ws27_branch": false
+    }
+  ],
+  "manifest_sha256": "5f109fff09e87a970a9faf020264fae7e833453cc79de4a1e04300ef3044cecd",
+  "sealed_at": "2026-04-16T12:57:32Z",
+  "selection": {
+    "held_out_family_quotas": {
+      "decision_rationale": 4,
+      "endpoint_observability_diagnosis": 3,
+      "portfolio_governance": 5
+    },
+    "include_literature_items": true,
+    "max_items": 16
+  },
+  "source_dataset": {
+    "ws26_test_sha256": "956ae7c0e11e3748f3d272b839b3f12de2c174180d4d8b96bde176f7dca1b137",
+    "ws26_test_split": "C:\\Users\\Chris\\contLRN\\Thermodynamic-Continual-Learning-delivered\\dataset_artifacts\\tar_master_dataset_ws26_merged_v1\\tar_master_dataset_test.jsonl",
+    "ws27_dataset": "C:\\Users\\Chris\\contLRN\\Thermodynamic-Continual-Learning-delivered\\dataset_artifacts\\tar_master_dataset_ws27_branch_v1\\tar_master_dataset.jsonl",
+    "ws27_dataset_sha256": "da879a72fcda90d61ee54dc1a2ffecd66f1b34daf9bf391cd88eb1593b19cd2a"
+  },
+  "source_kinds": {
+    "arxiv_abstract": 4,
+    "endpoint_record": 3,
+    "portfolio_decision": 5,
+    "research_decision": 4
+  },
+  "task_families": {
+    "decision_rationale": 4,
+    "endpoint_observability_diagnosis": 3,
+    "literature_grounded_reasoning": 4,
+    "portfolio_governance": 5
+  }
+}
