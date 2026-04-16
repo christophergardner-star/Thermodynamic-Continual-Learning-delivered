@@ -265,8 +265,9 @@ Acceptance criteria:
 
 Status:
 
-- laptop-first
-- pod required for Docker hardening validation
+- completed
+- closeout:
+  [ws35_closeout.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws35_closeout.md)
 
 Deliverable 1: universal sandbox policy
 
@@ -299,6 +300,7 @@ Acceptance criteria:
 
 Status:
 
+- next active item
 - methodological obligation
 - laptop-only
 
@@ -484,9 +486,9 @@ Additional dependency notes:
 | `tests/test_agenda_engine.py` | `WS39` | agenda engine tests |
 | `tests/test_autonomous_cycle.py` | `WS39` | full-loop integration test |
 
-## Completion Picture
+## Completion Picture — Phase 5
 
-When this roadmap is complete, TAR will be able to:
+When Phase 5 is complete, TAR will be able to:
 
 - read new literature and identify open problems
 - create and promote research projects with bounded human oversight

@@ -400,6 +400,12 @@ Purpose:
 - harden generated-code and live experiment execution further so the system can
   be trusted under broader autonomy
 
+Status:
+
+- completed
+- closeout:
+  [ws35_closeout.md](C:/Users/Chris/contLRN/Thermodynamic-Continual-Learning-delivered/docs/ws35_closeout.md)
+
 Core deliverables:
 
 - universal sandbox-policy enforcement
@@ -427,8 +433,8 @@ The recommended professional order is:
 3. `WS33`
 4. `WS34-pre`
 5. `WS34`
-6. independent eval validation pass
-7. `WS35`
+6. `WS35`
+7. independent eval validation pass
 
 ## Why This Order Is Correct
 
@@ -489,12 +495,12 @@ The first clearly justified remaining Phase 4 pod point is:
 
 The next logical workstream is:
 
-- `WS33: Scientific Retrieval And Claim Graph`
+- independent eval validation pass
 
-It should start locally on top of the closed `WS32` and `WS32.5` foundation.
+It should run locally on top of the closed `WS35` hardening result.
 
 The immediate engineering goal is:
 
-- move contradiction handling and source confidence into retrieval scoring
-- promote claim/conflict structures into first-class retrieval objects
-- feed contradiction-heavy retrieval back into evidence-debt computation
+- build a sealed external eval slice
+- score `WS27R2` with an independent scorer
+- compare the external slice honestly against the internal WS27R1 pack
