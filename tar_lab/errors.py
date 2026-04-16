@@ -13,3 +13,7 @@ class MemoryRebuildRequiredError(MemoryIntegrityError):
 class ReproducibilityLockError(RuntimeError):
     """Raised when TAR cannot produce or use a fully pinned reproducibility manifest."""
 
+
+class ExecutionPolicyViolation(RuntimeError):
+    """Raised when TAR attempts a prohibited unsandboxed execution path."""
+

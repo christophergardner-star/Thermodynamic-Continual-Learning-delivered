@@ -12,7 +12,12 @@ import torch
 
 from tar_lab.data_manager import DataManager
 from tar_lab.docker_runner import DockerRunner
-from tar_lab.errors import MemoryIntegrityError, ReproducibilityLockError, ScientificValidityError
+from tar_lab.errors import (
+    ExecutionPolicyViolation,
+    MemoryIntegrityError,
+    ReproducibilityLockError,
+    ScientificValidityError,
+)
 from tar_lab.experiment_backends import ExperimentBackendRegistry
 from tar_lab.governor import ThermodynamicGovernor
 from tar_lab.hardware import NvidiaSMI
@@ -94,6 +99,7 @@ from tar_lab.schemas import (
     SchedulerCycleReport,
     SelfCorrectionNote,
     ScienceEnvironmentBundle,
+    TARExecutionPolicy,
     TrainingPayloadConfig,
     VerificationReport,
 )
@@ -130,6 +136,7 @@ class TAROrchestrator:
         self.payload_environment = PayloadEnvironmentBuilder(workspace)
         self.inference_bridge = InferenceBridge(workspace)
         self.safe_execution_mode = "docker_container_only"
+        self.execution_policy: TARExecutionPolicy = self.store.load_execution_policy()
         self.vault: Optional[VectorVault] = None
         self.memory_indexer: Optional[MemoryIndexer] = None
         self.memory_error: Optional[str] = None
@@ -155,6 +162,52 @@ class TAROrchestrator:
     def _ensure_recent_metrics(self) -> None:
         if len(self.store.tail_metrics(3)) < 3:
             self.seed_mock_metrics()
+
+    def _execution_path_allowed_unsandboxed(self, source_path: str) -> bool:
+        return source_path in set(self.execution_policy.allowed_unsandboxed_paths)
+
+    def _assert_execution_policy(
+        self,
+        *,
+        execution_kind: str,
+        source_path: str,
+        sandboxed: bool,
+        deliberate_exception_reason: Optional[str] = None,
+    ) -> None:
+        if sandboxed or self._execution_path_allowed_unsandboxed(source_path):
+            return
+        if execution_kind == "trusted_internal":
+            if deliberate_exception_reason:
+                return
+            raise ExecutionPolicyViolation(
+                f"Unsandboxed trusted internal execution requires an explicit documented exception: {source_path}"
+            )
+        if execution_kind == "generated_code" and self.execution_policy.require_sandbox_for_generated_code:
+            raise ExecutionPolicyViolation(
+                f"Execution policy {self.execution_policy.policy_version} forbids unsandboxed generated code: {source_path}"
+            )
+        if execution_kind == "external_code" and self.execution_policy.require_sandbox_for_external_code:
+            raise ExecutionPolicyViolation(
+                f"Execution policy {self.execution_policy.policy_version} forbids unsandboxed external code: {source_path}"
+            )
+
+    def _run_subprocess(
+        self,
+        command: list[str],
+        *,
+        source_path: str,
+        execution_kind: str,
+        sandboxed: bool = False,
+        deliberate_exception_reason: Optional[str] = None,
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess[Any]:
+        self._assert_execution_policy(
+            execution_kind=execution_kind,
+            source_path=source_path,
+            sandboxed=sandboxed,
+            deliberate_exception_reason=deliberate_exception_reason,
+        )
+        return subprocess.run(command, **kwargs)
 
     def _resolve_run_intent(self, *, dry_run: bool) -> RunIntent:
         raw = str(os.environ.get("TAR_RUN_INTENT", "control" if dry_run else "research")).strip().lower()
@@ -449,6 +502,11 @@ class TAROrchestrator:
 
     def rebuild_locked_image(self) -> PayloadEnvironmentReport:
         report = self.payload_environment.prepare()
+        self._assert_execution_policy(
+            execution_kind="external_code",
+            source_path="tar_lab.docker_runner.build_payload_environment",
+            sandboxed=True,
+        )
         build = self.docker_runner.build_payload_environment(report, dry_run=False)
         report = report.model_copy(
             update={
@@ -520,6 +578,7 @@ class TAROrchestrator:
             "terminal_failures": [item.model_dump(mode="json") for item in schedules if item.status == "failed_terminal"],
             "alerts": [item.model_dump(mode="json") for item in self.store.latest_alerts(20)],
             "safe_execution_mode": self.safe_execution_mode,
+            "execution_policy": self.execution_policy.model_dump(mode="json"),
             "sandbox_policy": sandbox_policy,
             "runtime_policy": runtime_policy.model_dump(mode="json"),
             "claim_verdict_lifecycle": verdict_summary["counts"],
@@ -625,21 +684,29 @@ class TAROrchestrator:
     def _active_process_commands(self) -> list[str]:
         try:
             if os.name == "nt":
-                result = subprocess.run(
+                # execution_policy: deliberate_exception - reason: trusted internal host process inspection.
+                result = self._run_subprocess(
                     [
                         "powershell",
                         "-NoProfile",
                         "-Command",
                         "Get-CimInstance Win32_Process | Select-Object -ExpandProperty CommandLine",
                     ],
+                    source_path="tar_lab.orchestrator._active_process_commands",
+                    execution_kind="trusted_internal",
+                    deliberate_exception_reason="trusted internal host process inspection",
                     capture_output=True,
                     text=True,
                     timeout=10,
                     check=False,
                 )
             else:
-                result = subprocess.run(
+                # execution_policy: deliberate_exception - reason: trusted internal host process inspection.
+                result = self._run_subprocess(
                     ["ps", "-ax", "-o", "command="],
+                    source_path="tar_lab.orchestrator._active_process_commands",
+                    execution_kind="trusted_internal",
+                    deliberate_exception_reason="trusted internal host process inspection",
                     capture_output=True,
                     text=True,
                     timeout=10,
@@ -4203,6 +4270,11 @@ class TAROrchestrator:
         )
         bundle = self.payload_environment.lock_science_bundle(bundle)
         if build:
+            self._assert_execution_policy(
+                execution_kind="external_code",
+                source_path="tar_lab.docker_runner.build_science_environment",
+                sandboxed=True,
+            )
             build_result = self.docker_runner.build_science_environment(bundle, dry_run=False)
             bundle = bundle.model_copy(
                 update={
@@ -4278,6 +4350,11 @@ class TAROrchestrator:
         )
         bundle = self.payload_environment.lock_science_bundle(bundle)
         if build_env:
+            self._assert_execution_policy(
+                execution_kind="external_code",
+                source_path="tar_lab.docker_runner.build_science_environment",
+                sandboxed=True,
+            )
             build_result = self.docker_runner.build_science_environment(bundle, dry_run=False)
             bundle = bundle.model_copy(
                 update={
@@ -4444,6 +4521,11 @@ class TAROrchestrator:
 
         if use_docker:
             if build_env or bundle.build_status not in {"built"}:
+                self._assert_execution_policy(
+                    execution_kind="external_code",
+                    source_path="tar_lab.docker_runner.build_science_environment",
+                    sandboxed=True,
+                )
                 build_result = self.docker_runner.build_science_environment(bundle, dry_run=False)
                 bundle = bundle.model_copy(
                     update={
@@ -4495,6 +4577,11 @@ class TAROrchestrator:
                     if self.vault is not None:
                         self.vault.index_problem_execution(report)
                     return report
+            self._assert_execution_policy(
+                execution_kind="external_code",
+                source_path="tar_lab.docker_runner.run_science_environment",
+                sandboxed=True,
+            )
             run_result = self.docker_runner.run_science_environment(bundle, dry_run=False)
             if run_result.returncode != 0 and not execution_report_path.exists():
                 report = ProblemExecutionReport(
@@ -4536,7 +4623,8 @@ class TAROrchestrator:
                     self.vault.index_problem_execution(report)
                 return report
         else:
-            proc = subprocess.run(
+            # execution_policy: deliberate_exception - reason: trusted internal TAR study runner.
+            proc = self._run_subprocess(
                 (
                     [
                         sys.executable,
@@ -4553,6 +4641,9 @@ class TAROrchestrator:
                     + (["--canonical-only"] if study.canonical_only else [])
                     + (["--no-proxy-benchmarks"] if study.no_proxy_benchmarks else [])
                 ),
+                source_path="tar_lab.problem_runner",
+                execution_kind="trusted_internal",
+                deliberate_exception_reason="trusted internal TAR study runner",
                 capture_output=True,
                 text=True,
                 check=False,
@@ -5105,6 +5196,11 @@ class TAROrchestrator:
                 task.runtime.gpu_target_temp_c,
                 apply=True,
             )
+            self._assert_execution_policy(
+                execution_kind="external_code",
+                source_path="tar_lab.docker_runner.live_test",
+                sandboxed=True,
+            )
             launch = self.docker_runner.live_test(task)
             launched = launch.returncode in (None, 0)
             if launched:
@@ -5190,6 +5286,7 @@ class TAROrchestrator:
         payload["unresolved_dependencies"] = list(payload_env.unresolved_packages) if payload_env is not None else []
         payload["lock_incomplete_reason"] = payload_env.lock_incomplete_reason if payload_env is not None else None
         payload["safe_execution_mode"] = self.safe_execution_mode
+        payload["execution_policy"] = self.execution_policy.model_dump(mode="json")
         payload["sandbox_profile"] = sandbox_policy.get("profile", "production")
         payload["sandbox_read_only_mounts"] = list(sandbox_policy.get("read_only_mounts", []))
         payload["sandbox_writable_mounts"] = list(sandbox_policy.get("writable_mounts", []))

@@ -1806,6 +1806,9 @@ class SandboxPolicy(StrictModel):
     allowed_mounts: List[str] = Field(default_factory=list)
     read_only_mounts: List[str] = Field(default_factory=list)
     writable_mounts: List[str] = Field(default_factory=list)
+    seccomp_profile_path: Optional[str] = None
+    capability_drop: List[str] = Field(default_factory=lambda: ["ALL"])
+    workspace_read_only: bool = True
     cpu_limit: int = Field(default=1, ge=1)
     memory_limit_gb: int = Field(default=1, ge=1)
     timeout_s: int = Field(default=30, ge=1)
@@ -1829,6 +1832,7 @@ class SandboxExecutionReport(StrictModel):
     command: List[str] = Field(default_factory=list)
     sandbox_policy: SandboxPolicy
     artifacts: List[ExecutionArtifact] = Field(default_factory=list)
+    sandbox_audit_log: List[str] = Field(default_factory=list)
 
 
 class RunManifest(StrictModel):
@@ -1906,6 +1910,13 @@ class RetryPolicy(StrictModel):
 class TARRuntimePolicy(StrictModel):
     policy_version: str = "ws34_pre.v1"
     verdict_aging_days: int = Field(default=14, ge=1)
+
+
+class TARExecutionPolicy(StrictModel):
+    require_sandbox_for_generated_code: bool = True
+    require_sandbox_for_external_code: bool = True
+    allowed_unsandboxed_paths: List[str] = Field(default_factory=list)
+    policy_version: str = "ws35.v1"
 
 
 class RuntimeLease(StrictModel):

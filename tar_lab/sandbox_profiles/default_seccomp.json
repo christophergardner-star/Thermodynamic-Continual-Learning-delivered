@@ -1,0 +1,26 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": [
+    "SCMP_ARCH_X86_64",
+    "SCMP_ARCH_X86",
+    "SCMP_ARCH_X32"
+  ],
+  "syscalls": [
+    {
+      "names": [
+        "ptrace",
+        "mount",
+        "reboot",
+        "kexec_load",
+        "init_module",
+        "finit_module",
+        "delete_module",
+        "create_module",
+        "pivot_root",
+        "chroot",
+        "syslog"
+      ],
+      "action": "SCMP_ACT_ERRNO"
+    }
+  ]
+}

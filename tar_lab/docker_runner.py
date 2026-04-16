@@ -4,13 +4,19 @@ import json
 import math
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import which
 from typing import List, Optional
 
 from tar_lab.errors import ReproducibilityLockError
-from tar_lab.schemas import PayloadEnvironmentReport, RuntimeSpec, ScienceEnvironmentBundle, ScoutTask
+from tar_lab.schemas import (
+    PayloadEnvironmentReport,
+    RuntimeSpec,
+    SandboxPolicy,
+    ScienceEnvironmentBundle,
+    ScoutTask,
+)
 
 try:
     import docker  # type: ignore
@@ -28,6 +34,7 @@ class LaunchResult:
     probe_output: Optional[str] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
+    sandbox_audit_log: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -49,6 +56,7 @@ class CommandResult:
     returncode: Optional[int] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
+    sandbox_audit_log: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -60,6 +68,9 @@ class EngineLimits:
 class DockerRunner:
     def __init__(self, docker_bin: Optional[str] = None):
         self.docker_bin = docker_bin or self.resolve_docker_bin()
+        self.default_seccomp_profile_path = str(
+            (Path(__file__).resolve().parent / "sandbox_profiles" / "default_seccomp.json").resolve()
+        )
 
     @staticmethod
     def resolve_docker_bin() -> str:
@@ -195,12 +206,17 @@ class DockerRunner:
         container_name: str,
     ) -> List[str]:
         self._validate_runtime_mounts(runtime)
+        sandbox_policy = self._runtime_sandbox_policy(runtime)
         full_command = [
             self.docker_bin,
             "run",
             "--rm",
             "--name",
             container_name,
+        ]
+        full_command.extend(self._sandbox_cli_flags(sandbox_policy))
+        full_command.extend(
+            [
             "--memory",
             f"{runtime.memory_limit_gb}g",
             "--cpus",
@@ -211,7 +227,8 @@ class DockerRunner:
             "none" if runtime.network_policy in {"none", "restricted"} else "bridge",
             "-w",
             runtime.working_dir,
-        ]
+            ]
+        )
         if runtime.image_locked and runtime.image_manifest_path:
             full_command.extend(["-e", f"TAR_IMAGE_MANIFEST={runtime.image_manifest_path}"])
         if runtime.run_manifest_path:
@@ -348,15 +365,19 @@ class DockerRunner:
                 returncode=1,
                 stderr=bundle.lock_incomplete_reason or "Science environment is not reproducibility-locked.",
             )
+        sandbox_policy = bundle.sandbox_policy or self._science_bundle_fallback_policy(bundle)
         command = self._normalize_docker_command(bundle.run_command)
+        command = self._apply_sandbox_policy_to_command(command, sandbox_policy)
+        audit_log = self._sandbox_audit_log(sandbox_policy)
         if dry_run:
-            return CommandResult(command=command)
+            return CommandResult(command=command, sandbox_audit_log=audit_log)
         proc = subprocess.run(command, capture_output=True, text=True, check=False)
         return CommandResult(
             command=command,
             returncode=proc.returncode,
             stdout=proc.stdout,
             stderr=proc.stderr,
+            sandbox_audit_log=audit_log,
         )
 
     def container_name(self, trial_id: str) -> str:
@@ -369,13 +390,19 @@ class DockerRunner:
         command = self.compose_command(task)
         name = self.container_name(task.trial_id)
         if dry_run:
-            return LaunchResult(mode="dry_run", command=command, container_name=name)
+            return LaunchResult(
+                mode="dry_run",
+                command=command,
+                container_name=name,
+                sandbox_audit_log=self._sandbox_audit_log(self._runtime_sandbox_policy(runtime)),
+            )
 
         if docker is not None:
             client = docker.from_env()
             volumes = self._docker_volume_bindings(runtime)
             environment = self._docker_environment(runtime)
             cpu_quota = int(runtime.cpu_limit * 100000)
+            sandbox_policy = self._runtime_sandbox_policy(runtime)
             container = client.containers.run(
                 runtime.image,
                 task.command,
@@ -389,11 +416,20 @@ class DockerRunner:
                 mem_limit=f"{runtime.memory_limit_gb}g",
                 cpu_quota=cpu_quota,
                 cpu_period=100000,
+                read_only=sandbox_policy.workspace_read_only,
+                tmpfs={"/tmp": ""},
+                cap_drop=list(sandbox_policy.capability_drop),
+                security_opt=self._docker_sdk_security_opts(sandbox_policy),
                 device_requests=[
                     docker.types.DeviceRequest(device_ids=[str(runtime.gpu_index)], capabilities=[["gpu"]])
                 ],
             )
-            return LaunchResult(mode="docker_sdk", command=command, container_name=container.name)
+            return LaunchResult(
+                mode="docker_sdk",
+                command=command,
+                container_name=container.name,
+                sandbox_audit_log=self._sandbox_audit_log(sandbox_policy),
+            )
 
         proc = subprocess.run(command, capture_output=True, text=True, check=False)
         return LaunchResult(
@@ -401,6 +437,7 @@ class DockerRunner:
             command=command,
             container_name=name,
             returncode=proc.returncode,
+            sandbox_audit_log=self._sandbox_audit_log(self._runtime_sandbox_policy(runtime)),
         )
 
     def pull_image(self, image: str) -> Optional[int]:
@@ -420,6 +457,7 @@ class DockerRunner:
         if docker is not None:
             client = docker.from_env()
             volumes = self._docker_volume_bindings(runtime)
+            sandbox_policy = self._runtime_sandbox_policy(runtime)
             result = client.containers.run(
                 runtime.image,
                 probe_command,
@@ -431,6 +469,10 @@ class DockerRunner:
                 network_mode=self._docker_network_mode(runtime),
                 mem_limit=f"{runtime.memory_limit_gb}g",
                 nano_cpus=int(runtime.cpu_limit * 1_000_000_000),
+                read_only=sandbox_policy.workspace_read_only,
+                tmpfs={"/tmp": ""},
+                cap_drop=list(sandbox_policy.capability_drop),
+                security_opt=self._docker_sdk_security_opts(sandbox_policy),
                 device_requests=[
                     docker.types.DeviceRequest(device_ids=[str(runtime.gpu_index)], capabilities=[["gpu"]])
                 ],
@@ -473,6 +515,7 @@ class DockerRunner:
             volumes = self._docker_volume_bindings(runtime)
             environment = self._docker_environment(runtime)
             nano_cpus = int(runtime.cpu_limit * 1_000_000_000)
+            sandbox_policy = self._runtime_sandbox_policy(runtime)
             result = client.containers.run(
                 runtime.image,
                 task.command,
@@ -485,6 +528,10 @@ class DockerRunner:
                 network_mode=self._docker_network_mode(runtime),
                 mem_limit=f"{runtime.memory_limit_gb}g",
                 nano_cpus=nano_cpus,
+                read_only=sandbox_policy.workspace_read_only,
+                tmpfs={"/tmp": ""},
+                cap_drop=list(sandbox_policy.capability_drop),
+                security_opt=self._docker_sdk_security_opts(sandbox_policy),
                 device_requests=[
                     docker.types.DeviceRequest(device_ids=[str(runtime.gpu_index)], capabilities=[["gpu"]])
                 ],
@@ -498,6 +545,7 @@ class DockerRunner:
                 gpu_visible=True,
                 probe_output=probe_output,
                 stdout=stdout,
+                sandbox_audit_log=self._sandbox_audit_log(sandbox_policy),
             )
 
         proc = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -510,6 +558,7 @@ class DockerRunner:
             probe_output=probe_output,
             stdout=proc.stdout,
             stderr=proc.stderr,
+            sandbox_audit_log=self._sandbox_audit_log(self._runtime_sandbox_policy(runtime)),
         )
 
     def panic_kill(self, dry_run: bool = False) -> List[List[str]]:
@@ -548,6 +597,99 @@ class DockerRunner:
     @staticmethod
     def _docker_network_mode(runtime: RuntimeSpec) -> str:
         return "none" if runtime.network_policy in {"none", "restricted"} else "bridge"
+
+    def _runtime_sandbox_policy(self, runtime: RuntimeSpec) -> SandboxPolicy:
+        read_only_mounts = list(runtime.read_only_volumes.values())
+        writable_mounts = list(runtime.volumes.values())
+        workspace_read_only = runtime.sandbox_profile != "dev_override"
+        return SandboxPolicy(
+            mode="docker_only",
+            profile=runtime.sandbox_profile,  # type: ignore[arg-type]
+            network_policy="off" if runtime.network_policy in {"none", "restricted"} else "restricted",
+            allowed_mounts=sorted(dict.fromkeys([*read_only_mounts, *writable_mounts])),
+            read_only_mounts=read_only_mounts,
+            writable_mounts=writable_mounts,
+            seccomp_profile_path=self.default_seccomp_profile_path,
+            capability_drop=["ALL"],
+            workspace_read_only=workspace_read_only,
+            cpu_limit=runtime.cpu_limit,
+            memory_limit_gb=runtime.memory_limit_gb,
+            workspace_root=runtime.working_dir,
+        )
+
+    @staticmethod
+    def _science_bundle_fallback_policy(bundle: ScienceEnvironmentBundle) -> SandboxPolicy:
+        artifact_dir = str(Path(bundle.execution_report_path).parent).replace("\\", "/")
+        return SandboxPolicy(
+            mode="docker_only",
+            profile="production",
+            network_policy="off",
+            allowed_mounts=["/workspace", artifact_dir],
+            read_only_mounts=["/workspace"],
+            writable_mounts=[artifact_dir],
+            seccomp_profile_path=str(
+                (Path(__file__).resolve().parent / "sandbox_profiles" / "default_seccomp.json").resolve()
+            ),
+            capability_drop=["ALL"],
+            workspace_read_only=True,
+            cpu_limit=1,
+            memory_limit_gb=1,
+            artifact_dir=artifact_dir,
+            workspace_root="/workspace",
+        )
+
+    def _apply_sandbox_policy_to_command(self, command: List[str], sandbox_policy: SandboxPolicy) -> List[str]:
+        normalized = list(command)
+        first = Path(normalized[0]).name.lower() if normalized else ""
+        if len(normalized) < 2 or (first != Path(self.docker_bin).name.lower() and not first.startswith("docker")):
+            return normalized
+        if normalized[1] != "run":
+            return normalized
+        flags = self._sandbox_cli_flags(sandbox_policy)
+        updated = [normalized[0], normalized[1], *flags, *normalized[2:]]
+        return self._ensure_workspace_mount_read_only(updated, sandbox_policy)
+
+    @staticmethod
+    def _ensure_workspace_mount_read_only(command: List[str], sandbox_policy: SandboxPolicy) -> List[str]:
+        if not sandbox_policy.workspace_read_only:
+            return command
+        workspace_root = (sandbox_policy.workspace_root or "/workspace").rstrip("/")
+        updated = list(command)
+        index = 0
+        while index < len(updated) - 1:
+            if updated[index] == "-v":
+                mount_spec = updated[index + 1]
+                parts = mount_spec.split(":")
+                if len(parts) >= 2 and parts[1].rstrip("/") == workspace_root and (len(parts) < 3 or parts[2] != "ro"):
+                    updated[index + 1] = f"{parts[0]}:{parts[1]}:ro"
+            index += 1
+        return updated
+
+    def _sandbox_cli_flags(self, sandbox_policy: SandboxPolicy) -> List[str]:
+        flags: List[str] = []
+        if sandbox_policy.workspace_read_only:
+            flags.extend(["--read-only", "--tmpfs", "/tmp"])
+        for capability in sandbox_policy.capability_drop:
+            flags.extend(["--cap-drop", capability])
+        flags.extend(["--security-opt", "no-new-privileges"])
+        seccomp_path = sandbox_policy.seccomp_profile_path or self.default_seccomp_profile_path
+        flags.extend(["--security-opt", f"seccomp={seccomp_path}"])
+        return flags
+
+    def _docker_sdk_security_opts(self, sandbox_policy: SandboxPolicy) -> List[str]:
+        seccomp_path = sandbox_policy.seccomp_profile_path or self.default_seccomp_profile_path
+        return ["no-new-privileges", f"seccomp={seccomp_path}"]
+
+    @staticmethod
+    def _sandbox_audit_log(sandbox_policy: SandboxPolicy) -> List[str]:
+        return [
+            f"workspace_mount={'read-only' if sandbox_policy.workspace_read_only else 'read-write'}:{sandbox_policy.workspace_root or '/workspace'}",
+            f"writable_mounts={','.join(sandbox_policy.writable_mounts)}",
+            f"read_only_mounts={','.join(sandbox_policy.read_only_mounts)}",
+            f"capability_drop={','.join(sandbox_policy.capability_drop)}",
+            "security_opt=no-new-privileges",
+            f"seccomp={sandbox_policy.seccomp_profile_path}",
+        ]
 
     def _normalize_docker_command(self, command: List[str]) -> List[str]:
         if command and Path(command[0]).name.lower().startswith("docker"):

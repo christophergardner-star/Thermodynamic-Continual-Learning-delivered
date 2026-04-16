@@ -49,6 +49,7 @@ from tar_lab.schemas import (
     ResearchProject,
     ResearchProjectState,
     StrategistPlan,
+    TARExecutionPolicy,
     TARRuntimePolicy,
     TrainingPayloadConfig,
     VerificationReport,
@@ -88,6 +89,7 @@ class TARStateStore:
         self.publication_handoffs_path = self.state_dir / "publication_handoffs.jsonl"
         self.publication_handoffs_dir = self.state_dir / "publication_handoffs"
         self.runtime_policy_path = self.policies_dir / "runtime_policy.json"
+        self.execution_policy_path = self.policies_dir / "execution_policy.json"
         self.checkpoint_registry_path = self.state_dir / "checkpoint_registry.json"
         self.endpoint_registry_path = self.state_dir / "inference_endpoints.json"
         self.endpoints_dir = self.state_dir / "endpoints"
@@ -284,6 +286,16 @@ class TARStateStore:
 
     def save_runtime_policy(self, policy: TARRuntimePolicy) -> None:
         self._atomic_write_json(self.runtime_policy_path, policy.model_dump(mode="json"))
+
+    def load_execution_policy(self) -> TARExecutionPolicy:
+        if not self.execution_policy_path.exists():
+            policy = TARExecutionPolicy()
+            self.save_execution_policy(policy)
+            return policy
+        return TARExecutionPolicy.model_validate_json(self.execution_policy_path.read_text(encoding="utf-8"))
+
+    def save_execution_policy(self, policy: TARExecutionPolicy) -> None:
+        self._atomic_write_json(self.execution_policy_path, policy.model_dump(mode="json"))
 
     def append_research_decision(self, record: ResearchDecisionRecord) -> None:
         with self.research_decisions_path.open("a", encoding="utf-8") as handle:
