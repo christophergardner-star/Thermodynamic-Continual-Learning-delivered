@@ -55,6 +55,32 @@ def _rewrite_agenda_subcommand(argv: list[str]) -> list[str]:
     return argv
 
 
+def _rewrite_routing_subcommand(argv: list[str]) -> list[str]:
+    if not argv or argv[0] != "routing":
+        return argv
+    if len(argv) == 1:
+        return argv
+    action = argv[1]
+    rest = argv[2:]
+    if action == "summary":
+        return ["--routing-summary", *rest]
+    if action == "log":
+        return ["--routing-log", *rest]
+    return argv
+
+
+def _rewrite_frontier_config_subcommand(argv: list[str]) -> list[str]:
+    if not argv or argv[0] != "frontier-config":
+        return argv
+    if len(argv) == 1:
+        return argv
+    action = argv[1]
+    rest = argv[2:]
+    if action == "show":
+        return ["--load-frontier-config", *rest]
+    return argv
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="TAR command and control CLI")
     parser.add_argument("--workspace", default=str(Path(__file__).resolve().parent))
@@ -213,6 +239,9 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--deploy-improved-adapter", action="store_true", dest="deploy_improved_adapter")
     group.add_argument("--self-improvement-status", action="store_true", dest="self_improvement_status")
     group.add_argument("--resume-self-improvement", action="store_true", dest="resume_self_improvement")
+    group.add_argument("--routing-summary", action="store_true", dest="routing_summary")
+    group.add_argument("--routing-log", action="store_true", dest="routing_log")
+    group.add_argument("--load-frontier-config", action="store_true", dest="load_frontier_config")
     group.add_argument("--run-agenda-review", action="store_true", dest="run_agenda_review")
     group.add_argument("--agenda-status", action="store_true", dest="agenda_status")
     group.add_argument("--list-agenda-decisions", action="store_true", dest="list_agenda_decisions")
@@ -294,6 +323,8 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--panic", action="store_true")
     argv = _rewrite_family_subcommand(sys.argv[1:])
     argv = _rewrite_agenda_subcommand(argv)
+    argv = _rewrite_routing_subcommand(argv)
+    argv = _rewrite_frontier_config_subcommand(argv)
     return parser.parse_args(argv)
 
 
@@ -401,6 +432,13 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
         return orchestrator.self_improvement_status().model_dump(mode="json")
     if args.resume_self_improvement:
         return orchestrator.resume_self_improvement(args.cycle_id or "").model_dump(mode="json")
+    if args.routing_summary:
+        return orchestrator.get_routing_summary().model_dump(mode="json")
+    if args.routing_log:
+        return {"records": orchestrator.get_routing_log()}
+    if args.load_frontier_config:
+        config = orchestrator.load_frontier_config()
+        return {"config": config.model_dump(mode="json") if config is not None else None}
     if args.run_agenda_review:
         return orchestrator.run_agenda_review().model_dump(mode="json")
     if args.agenda_status:
@@ -2011,6 +2049,12 @@ def main() -> int:
                     host=args.host,
                     port=args.port,
                 )
+            elif args.routing_summary:
+                response = send_command("routing_summary", host=args.host, port=args.port)
+            elif args.routing_log:
+                response = send_command("routing_log", host=args.host, port=args.port)
+            elif args.load_frontier_config:
+                response = send_command("load_frontier_config", host=args.host, port=args.port)
             elif args.run_agenda_review:
                 response = send_command("run_agenda_review", host=args.host, port=args.port)
             elif args.agenda_status:
@@ -2677,6 +2721,9 @@ def main() -> int:
             or args.deploy_improved_adapter
             or args.self_improvement_status
             or args.resume_self_improvement
+            or args.routing_summary
+            or args.routing_log
+            or args.load_frontier_config
             or args.run_agenda_review
             or args.agenda_status
             or args.list_agenda_decisions

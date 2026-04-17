@@ -163,6 +163,13 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
             payload = orchestrator.resume_self_improvement(
                 str(request.payload.get("cycle_id", ""))
             ).model_dump(mode="json")
+        elif request.command == "routing_summary":
+            payload = orchestrator.get_routing_summary().model_dump(mode="json")
+        elif request.command == "routing_log":
+            payload = {"records": orchestrator.get_routing_log()}
+        elif request.command == "load_frontier_config":
+            config = orchestrator.load_frontier_config()
+            payload = {"config": config.model_dump(mode="json") if config is not None else None}
         elif request.command == "run_agenda_review":
             payload = orchestrator.run_agenda_review().model_dump(mode="json")
         elif request.command == "agenda_status":

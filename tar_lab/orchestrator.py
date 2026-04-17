@@ -25,7 +25,7 @@ from tar_lab.generative_director import GenerativeDirector
 from tar_lab.governor import ThermodynamicGovernor
 from tar_lab.hardware import NvidiaSMI
 from tar_lab.hierarchy import DirectorDraft, LocalOpenAIRole, TriModelHierarchy
-from tar_lab.hierarchy import build_evidence_bundle, build_hypotheses
+from tar_lab.hierarchy import build_evidence_bundle, build_hypotheses, get_frontier_config_from_workspace
 from tar_lab.inference_bridge import InferenceBridge
 from tar_lab.literature_engine import LiteratureEngine
 from tar_lab.memory import MemoryIndexer, VectorVault
@@ -58,6 +58,7 @@ from tar_lab.schemas import (
     FalsificationPlan,
     FalsificationTest,
     FalsificationTrigger,
+    FrontierModelConfig,
     FrozenAnchorPackManifest,
     FrontierGapRecord,
     FrontierGapScanReport,
@@ -114,6 +115,7 @@ from tar_lab.schemas import (
     RunIntent,
     RetrainRecord,
     RuntimeHeartbeat,
+    RoutingSummary,
     SandboxPolicy,
     SchedulerCycleReport,
     SelfImprovementCycleRecord,
@@ -225,11 +227,25 @@ class TAROrchestrator:
         )
 
     def _family_operator_role(self) -> Optional[LocalOpenAIRole]:
-        if self.hierarchy.director_config is None:
+        config = self.hierarchy.director_config
+        frontier_config = self.load_frontier_config()
+        if frontier_config is not None:
+            from tar_lab.model_router import ModelRouter
+
+            router = ModelRouter(self.workspace, frontier_config)
+            config = router.select_config("generative_director_proposal")
+            router.log_call(
+                decision_type="generative_director_proposal",
+                tier_selected=config.model_tier,
+                model_id=config.model,
+                tokens_in=0,
+                tokens_out=0,
+            )
+        if config is None:
             return None
         return LocalOpenAIRole(
             "director",
-            self.hierarchy.director_config,
+            config,
             DirectorDraft,
             client_factory=self.hierarchy.client_factory,
         )
@@ -751,6 +767,32 @@ class TAROrchestrator:
 
     def resume_self_improvement(self, cycle_id: str) -> SelfImprovementCycleRecord:
         return self._self_improvement_engine().resume_self_improvement(cycle_id)
+
+    def load_frontier_config(self) -> Optional[FrontierModelConfig]:
+        return get_frontier_config_from_workspace(str(self.workspace))
+
+    def save_frontier_config(self, config: FrontierModelConfig) -> None:
+        path = Path(self.workspace) / "tar_state" / "frontier_model_config.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(config.model_dump_json(indent=2), encoding="utf-8")
+
+    def get_routing_summary(self) -> RoutingSummary:
+        from tar_lab.model_router import ModelRouter
+
+        frontier_config = self.load_frontier_config()
+        if frontier_config is None:
+            return RoutingSummary()
+        router = ModelRouter(str(self.workspace), frontier_config)
+        return router.get_summary()
+
+    def get_routing_log(self) -> list[dict[str, Any]]:
+        from tar_lab.model_router import ModelRouter
+
+        frontier_config = self.load_frontier_config()
+        if frontier_config is None:
+            return []
+        router = ModelRouter(str(self.workspace), frontier_config)
+        return [item.model_dump(mode="json") for item in router.load_log()]
 
     def run_agenda_review(self) -> AgendaReviewRecord:
         from tar_lab.agenda import AgendaEngine

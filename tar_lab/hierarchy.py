@@ -13,6 +13,7 @@ from tar_lab.schemas import (
     DirectorPolicy,
     EvidenceTrace,
     EvidenceBundle,
+    FrontierModelConfig,
     GovernorMetrics,
     GovernorThresholds,
     HypothesisRecord,
@@ -380,6 +381,40 @@ def _role_config_from_serving_state(role: str, workspace: str = ".") -> Optional
         temperature=float(os.environ.get(f"TAR_{role_key}_TEMPERATURE") or os.environ.get("TAR_LLM_TEMPERATURE", "0.0")),
         timeout_s=float(os.environ.get(f"TAR_{role_key}_TIMEOUT_S") or os.environ.get("TAR_LLM_TIMEOUT_S", "120")),
         max_retries=int(os.environ.get(f"TAR_{role_key}_MAX_RETRIES") or os.environ.get("TAR_LLM_MAX_RETRIES", "3")),
+    )
+
+
+def _select_tier_for_decision(
+    decision_type: str,
+    frontier_config: FrontierModelConfig,
+) -> LocalLLMConfig:
+    """
+    Standalone helper — selects LocalLLMConfig by decision type.
+    Used by roles that have access to FrontierModelConfig.
+    """
+    from tar_lab.model_router import ModelRouter
+
+    router = ModelRouter(
+        workspace_root=".",
+        config=frontier_config,
+    )
+    return router.select_config(decision_type)
+
+
+def get_frontier_config_from_workspace(
+    workspace_root: str,
+) -> Optional[FrontierModelConfig]:
+    """
+    Loads FrontierModelConfig from tar_state/frontier_model_config.json
+    if present. Returns None when not configured.
+    """
+    from pathlib import Path
+
+    path = Path(workspace_root) / "tar_state" / "frontier_model_config.json"
+    if not path.exists():
+        return None
+    return FrontierModelConfig.model_validate_json(
+        path.read_text(encoding="utf-8")
     )
 
 
@@ -764,6 +799,7 @@ class TriModelHierarchy:
         allow_rule_fallback: bool = True,
     ):
         self.workspace = workspace
+        self.frontier_model_config = get_frontier_config_from_workspace(workspace)
         self.director_config = director_config or _role_config_from_env("director") or _role_config_from_serving_state("director", workspace=workspace)
         self.strategist_config = strategist_config or _role_config_from_env("strategist") or _role_config_from_serving_state("strategist", workspace=workspace)
         self.scout_config = scout_config or _role_config_from_env("scout") or _role_config_from_serving_state("scout", workspace=workspace)
@@ -776,7 +812,27 @@ class TriModelHierarchy:
 
     @property
     def live_enabled(self) -> bool:
-        return all((self.director_config, self.strategist_config, self.scout_config))
+        return self.frontier_model_config is not None or all((self.director_config, self.strategist_config, self.scout_config))
+
+    def _select_role_config(
+        self,
+        decision_type: str,
+        fallback_config: Optional[LocalLLMConfig],
+    ) -> Optional[LocalLLMConfig]:
+        if self.frontier_model_config is None:
+            return fallback_config
+        from tar_lab.model_router import ModelRouter
+
+        router = ModelRouter(self.workspace, self.frontier_model_config)
+        selected = router.select_config(decision_type)
+        router.log_call(
+            decision_type=decision_type,
+            tier_selected=selected.model_tier,
+            model_id=selected.model,
+            tokens_in=0,
+            tokens_out=0,
+        )
+        return selected or fallback_config
 
     def produce_bundle(
         self,
@@ -830,9 +886,14 @@ class TriModelHierarchy:
         expected_q = _quantitative_justification(recent)
         memory_hits = memory_hits or []
 
-        director = LocalOpenAIRole("director", self.director_config, DirectorDraft, self.client_factory)
-        strategist = LocalOpenAIRole("strategist", self.strategist_config, StrategistDraft, self.client_factory)
-        scout = LocalOpenAIRole("scout", self.scout_config, ScoutDraft, self.client_factory)
+        director_config = self._select_role_config("director_propose", self.director_config)
+        strategist_config = self._select_role_config("strategist_plan", self.strategist_config)
+        scout_config = self._select_role_config("scout_reasoning", self.scout_config)
+        if director_config is None or strategist_config is None or scout_config is None:
+            raise RuntimeError("Live hierarchy requires role configuration for director, strategist, and scout.")
+        director = LocalOpenAIRole("director", director_config, DirectorDraft, self.client_factory)
+        strategist = LocalOpenAIRole("strategist", strategist_config, StrategistDraft, self.client_factory)
+        scout = LocalOpenAIRole("scout", scout_config, ScoutDraft, self.client_factory)
 
         director_prompt = self._director_prompt(
             trial_id=trial_id,
@@ -960,7 +1021,10 @@ class TriModelHierarchy:
 
         recent = store.tail_metrics(3)
         recovery = store.load_recovery()
-        director = LocalOpenAIRole("director_chat", self.director_config, DirectorChatDraft, self.client_factory)
+        director_config = self._select_role_config("director_chat", self.director_config)
+        if director_config is None:
+            return self.rule_director.chat(prompt, store=store, memory_hits=memory_hits)
+        director = LocalOpenAIRole("director_chat", director_config, DirectorChatDraft, self.client_factory)
         raw = director.generate(
             system_prompt=(
                 "You are the TAR Director. Return JSON only. Summarize lab state using quantitative language. "
@@ -1004,7 +1068,15 @@ class TriModelHierarchy:
                 memory_hits=memory_hits,
             )
 
-        director = LocalOpenAIRole("director_self_correction", self.director_config, SelfCorrectionDraft, self.client_factory)
+        director_config = self._select_role_config("director_self_correction", self.director_config)
+        if director_config is None:
+            return self.rule_director.self_correction(
+                trial_id=trial_id,
+                outcome=outcome,
+                metrics=metrics,
+                memory_hits=memory_hits,
+            )
+        director = LocalOpenAIRole("director_self_correction", director_config, SelfCorrectionDraft, self.client_factory)
         draft = director.generate(
             system_prompt=(
                 "You are the TAR Director. Return JSON only. Explain run outcome using E, sigma, rho, D_PR, and equilibrium state. "

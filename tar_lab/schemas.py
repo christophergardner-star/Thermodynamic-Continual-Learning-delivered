@@ -93,6 +93,46 @@ class LocalLLMConfig(StrictModel):
     temperature: float = 0.0
     timeout_s: float = Field(default=120.0, gt=0.0)
     max_retries: int = Field(default=3, ge=1, le=10)
+    model_tier: Literal["efficient", "frontier"] = "efficient"
+    cost_per_token_input: float = Field(default=0.0, ge=0.0)
+    cost_per_token_output: float = Field(default=0.0, ge=0.0)
+    context_window: int = Field(default=8192, ge=1)
+    supports_tool_use: bool = True
+
+
+class FrontierModelConfig(StrictModel):
+    frontier_role_config: LocalLLMConfig
+    efficient_role_config: LocalLLMConfig
+    routing_policy: Literal["stakes_aware", "always_frontier", "always_efficient"] = "stakes_aware"
+    max_frontier_budget_usd: float = Field(default=0.0, ge=0.0)
+    frontier_decisions: List[str] = Field(
+        default_factory=lambda: [
+            "director_propose",
+            "breakthrough_review",
+            "falsification_plan",
+            "generative_director_proposal",
+        ]
+    )
+
+
+class ModelRoutingRecord(StrictModel):
+    record_id: str
+    decision_type: str
+    tier_selected: Literal["efficient", "frontier"]
+    model_id: str
+    tokens_in: int = Field(default=0, ge=0)
+    tokens_out: int = Field(default=0, ge=0)
+    cost_usd: float = Field(default=0.0, ge=0.0)
+    budget_remaining_usd: Optional[float] = None
+    timestamp_utc: str = Field(default_factory=utc_now_iso)
+
+
+class RoutingSummary(StrictModel):
+    frontier_calls: int = Field(default=0, ge=0)
+    efficient_calls: int = Field(default=0, ge=0)
+    total_cost_usd: float = Field(default=0.0, ge=0.0)
+    budget_remaining_usd: Optional[float] = None
+    budget_exhausted: bool = False
 
 
 DataAccessMode = Literal["OFFLINE_FALLBACK", "CACHED_REAL", "DOWNLOAD_REAL"]
@@ -2336,6 +2376,9 @@ class ControlRequest(StrictModel):
         "deploy_improved_adapter",
         "self_improvement_status",
         "resume_self_improvement",
+        "routing_summary",
+        "routing_log",
+        "load_frontier_config",
         "run_agenda_review",
         "agenda_status",
         "list_agenda_decisions",
