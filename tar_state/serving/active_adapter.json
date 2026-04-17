@@ -1,0 +1,8 @@
+{
+  "adapter_path": "tar_state/adapters/ws38-r1-3c1d3e41",
+  "retrain_id": "retrain-875509b2",
+  "cycle_id": "cycle-fcf4699b",
+  "delta_id": "delta-ed119024",
+  "deployed_at": "2026-04-17T21:36:58+00:00",
+  "base_model_id": "Qwen/Qwen2.5-7B-Instruct"
+}
