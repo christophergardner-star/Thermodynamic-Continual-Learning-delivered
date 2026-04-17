@@ -80,6 +80,43 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
                 str(request.payload.get("reason", "")),
                 note=request.payload.get("note"),
             ).model_dump(mode="json")
+        elif request.command == "propose_experiment_family":
+            payload = orchestrator.propose_experiment_family(
+                str(request.payload.get("objective_slug", "")),
+                str(request.payload.get("trigger_reason", "manual")),
+            ).model_dump(mode="json")
+        elif request.command == "list_family_proposals":
+            payload = {
+                "proposals": [
+                    item.model_dump(mode="json")
+                    for item in orchestrator.list_family_proposals()
+                ]
+            }
+        elif request.command == "approve_family_proposal":
+            payload = orchestrator.approve_family_proposal(
+                str(request.payload.get("proposal_id", "")),
+            ).model_dump(mode="json")
+        elif request.command == "reject_family_proposal":
+            orchestrator.reject_family_proposal(
+                str(request.payload.get("proposal_id", "")),
+                str(request.payload.get("reason", "operator_rejected")),
+            )
+            payload = {
+                "proposal_id": str(request.payload.get("proposal_id", "")),
+                "status": "rejected",
+                "reason": str(request.payload.get("reason", "operator_rejected")),
+            }
+        elif request.command == "run_family_feasibility":
+            payload = orchestrator.run_family_feasibility(
+                str(request.payload.get("proposal_id", "")),
+            ).model_dump(mode="json")
+        elif request.command == "list_registered_families":
+            payload = {
+                "families": [
+                    item.model_dump(mode="json")
+                    for item in orchestrator.list_registered_families()
+                ]
+            }
         elif request.command == "verify_last_trial":
             payload = orchestrator.verify_last_trial(
                 trial_id=request.payload.get("trial_id"),

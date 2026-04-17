@@ -22,6 +22,7 @@ from tar_lab.schemas import (
     FalsificationPlan,
     FrontierGapRecord,
     FrontierGapScanReport,
+    GenerativeDirectorProposal,
     ImageManifest,
     MemoryStoreManifest,
     PortfolioDecision,
@@ -47,9 +48,11 @@ from tar_lab.schemas import (
     RunManifest,
     ScoutTask,
     ProblemStudyReport,
+    ProposedExperimentFamily,
     ResearchPortfolio,
     ResearchProject,
     ResearchProjectState,
+    RegisteredFamilyState,
     StrategistPlan,
     TARExecutionPolicy,
     TARRuntimePolicy,
@@ -82,6 +85,8 @@ class TARStateStore:
         self.research_projects_path = self.state_dir / "research_projects.json"
         self.frontier_gaps_path = self.state_dir / "frontier_gaps.jsonl"
         self.gap_scan_reports_path = self.state_dir / "gap_scan_reports.jsonl"
+        self.registered_families_path = self.state_dir / "registered_families.json"
+        self.family_proposals_path = self.state_dir / "family_proposals.json"
         self.research_portfolio_path = self.state_dir / "research_portfolio.json"
         self.priority_snapshots_path = self.state_dir / "priority_snapshots.jsonl"
         self.budget_allocations_path = self.state_dir / "budget_allocations.jsonl"
@@ -260,6 +265,44 @@ class TARStateStore:
             if line.strip():
                 rows.append(FrontierGapScanReport.model_validate_json(line))
         return rows
+
+    def load_registered_families(self) -> RegisteredFamilyState:
+        if not self.registered_families_path.exists():
+            state = RegisteredFamilyState()
+            self.save_registered_families(state)
+            return state
+        return RegisteredFamilyState.model_validate_json(
+            self.registered_families_path.read_text(encoding="utf-8")
+        )
+
+    def save_registered_families(self, state: RegisteredFamilyState) -> None:
+        self._atomic_write_json(
+            self.registered_families_path,
+            state.model_dump(mode="json"),
+        )
+
+    def load_family_proposals(self) -> List[GenerativeDirectorProposal]:
+        if not self.family_proposals_path.exists():
+            return []
+        payload = json.loads(self.family_proposals_path.read_text(encoding="utf-8"))
+        rows = payload if isinstance(payload, list) else payload.get("entries", [])
+        return [GenerativeDirectorProposal.model_validate(item) for item in rows]
+
+    def save_family_proposal(self, proposal: GenerativeDirectorProposal) -> None:
+        proposals = [item for item in self.load_family_proposals() if item.proposal_id != proposal.proposal_id]
+        proposals.append(proposal)
+        proposals.sort(key=lambda item: (item.created_at, item.proposal_id))
+        self._atomic_write_text(
+            self.family_proposals_path,
+            json.dumps([item.model_dump(mode="json") for item in proposals], indent=2),
+        )
+
+    def get_approved_families(self) -> List[ProposedExperimentFamily]:
+        return [
+            family
+            for family in self.load_registered_families().entries
+            if family.status == "approved"
+        ]
 
     def append_verification_report(self, report: VerificationReport) -> None:
         with self.verification_reports_path.open("a", encoding="utf-8") as handle:

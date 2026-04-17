@@ -20,9 +20,10 @@ from tar_lab.errors import (
     ScientificValidityError,
 )
 from tar_lab.experiment_backends import ExperimentBackendRegistry
+from tar_lab.generative_director import GenerativeDirector
 from tar_lab.governor import ThermodynamicGovernor
 from tar_lab.hardware import NvidiaSMI
-from tar_lab.hierarchy import TriModelHierarchy
+from tar_lab.hierarchy import DirectorDraft, LocalOpenAIRole, TriModelHierarchy
 from tar_lab.hierarchy import build_evidence_bundle, build_hypotheses
 from tar_lab.inference_bridge import InferenceBridge
 from tar_lab.literature_engine import LiteratureEngine
@@ -42,6 +43,7 @@ from tar_lab.schemas import (
     ClaimVerdict,
     CheckpointRecord,
     ContradictionReview,
+    DirectorPolicy,
     DryRunReport,
     EvidenceDebtRecord,
     EndpointRecord,
@@ -53,6 +55,7 @@ from tar_lab.schemas import (
     FrontierGapScanReport,
     FrontierStatus,
     FailureAutopsy,
+    GenerativeDirectorProposal,
     GovernorDecision,
     GovernorMetrics,
     InferenceEndpointPlan,
@@ -73,12 +76,14 @@ from tar_lab.schemas import (
     ProblemScheduleEntry,
     ProblemResolutionReport,
     ProblemStudyReport,
+    ProposedExperimentFamily,
     PublicationAlternativeBundle,
     PublicationBenchmarkAttachment,
     PublicationClaimBundle,
     PublicationHandoffPackage,
     PublicationLineageEntry,
     PreparedDataBundle,
+    QuantitativeJustification,
     ResearchActionStatus,
     ResearchBudgetLedger,
     ResearchDocument,
@@ -173,6 +178,75 @@ class TAROrchestrator:
     def _ensure_recent_metrics(self) -> None:
         if len(self.store.tail_metrics(3)) < 3:
             self.seed_mock_metrics()
+
+    def _proposal_policy_stub(self, objective_slug: str) -> DirectorPolicy:
+        self._ensure_recent_metrics()
+        recent = self.store.tail_metrics(3)
+        recovery = self.store.load_recovery()
+        latest = recent[-1]
+        return DirectorPolicy(
+            trial_id=self._continuity_id("family-proposal"),
+            objective_slug=objective_slug,
+            anchor_path=recovery.last_anchor_path or "anchors/thermodynamic_anchor.safetensors",
+            experiment_family=(
+                recovery.last_strategy_family
+                if recovery.last_strategy_family in {"elastic_anchor", "ou_drift_jitter", "layer_freeze"}
+                else "elastic_anchor"
+            ),
+            pivot_required=True,
+            failure_streak=max(GenerativeDirector.PROPOSAL_TRIGGER_STREAK, recovery.consecutive_fail_fast),
+            quantitative_justification=QuantitativeJustification(
+                energy_e=latest.energy_e,
+                entropy_sigma=latest.entropy_sigma,
+                drift_rho=latest.drift_rho,
+                grad_norm=latest.grad_norm,
+                regime_rho=latest.regime_rho,
+                effective_dimensionality=latest.effective_dimensionality,
+                effective_dimensionality_std_err=latest.effective_dimensionality_std_err,
+                equilibrium_fraction=latest.equilibrium_fraction,
+                energy_slope=recent[-1].energy_e - recent[0].energy_e,
+                entropy_slope=recent[-1].entropy_sigma - recent[0].entropy_sigma,
+                drift_slope=recent[-1].drift_rho - recent[0].drift_rho,
+                dimensionality_slope=recent[-1].effective_dimensionality - recent[0].effective_dimensionality,
+            ),
+            data_anchor=recent,
+        )
+
+    def _family_operator_role(self) -> Optional[LocalOpenAIRole]:
+        if self.hierarchy.director_config is None:
+            return None
+        return LocalOpenAIRole(
+            "director",
+            self.hierarchy.director_config,
+            DirectorDraft,
+            client_factory=self.hierarchy.client_factory,
+        )
+
+    def _get_family_proposal(self, proposal_id: str) -> GenerativeDirectorProposal:
+        for proposal in self.store.load_family_proposals():
+            if proposal.proposal_id == proposal_id:
+                return proposal
+        raise RuntimeError(f"Unknown family proposal: {proposal_id}")
+
+    @staticmethod
+    def _apply_family_config_delta(plan: Any, config_delta: Dict[str, Any]) -> Any:
+        hyperparameters = dict(getattr(plan, "hyperparameters", {}))
+        updates: Dict[str, Any] = {}
+        for key, value in config_delta.items():
+            if key == "hyperparameters" and isinstance(value, dict):
+                hyperparameters.update(value)
+            elif key == "fim_lambda_multiplier" and isinstance(value, (int, float)):
+                updates["fim_lambda"] = float(plan.fim_lambda) * float(value)
+            elif key == "drift_budget_multiplier" and isinstance(value, (int, float)):
+                updates["drift_budget"] = float(plan.drift_budget) * float(value)
+            elif key == "bregman_budget_multiplier" and isinstance(value, (int, float)):
+                updates["bregman_budget"] = float(plan.bregman_budget) * float(value)
+            elif key in {"fim_lambda", "bregman_budget", "drift_budget", "protected_layers", "mutable_layers"}:
+                updates[key] = value
+            else:
+                hyperparameters[key] = value
+        updates["hyperparameters"] = hyperparameters
+        return plan.model_copy(update=updates)
 
     def _execution_path_allowed_unsandboxed(self, source_path: str) -> bool:
         return source_path in set(self.execution_policy.allowed_unsandboxed_paths)
@@ -435,6 +509,130 @@ class TAROrchestrator:
         )
         self._sync_memory()
         return policy, plan, task
+
+    def propose_experiment_family(
+        self,
+        objective_slug: str,
+        trigger_reason: str,
+    ) -> GenerativeDirectorProposal:
+        policy = self._proposal_policy_stub(objective_slug)
+        proposal = GenerativeDirector(
+            workspace_root=self.workspace,
+            operator_role=self._family_operator_role(),
+        ).propose_family(policy, trigger_reason)
+        self.store.save_family_proposal(proposal)
+        self.store.append_audit_event(
+            "family_proposal",
+            "propose_experiment_family",
+            {
+                "proposal_id": proposal.proposal_id,
+                "objective_slug": objective_slug,
+                "family_id": proposal.proposed_family.family_id,
+                "family_name": proposal.proposed_family.name,
+                "operator_available": proposal.operator_available,
+            },
+        )
+        return proposal
+
+    def run_family_feasibility(self, proposal_id: str) -> ProposedExperimentFamily:
+        proposal = self._get_family_proposal(proposal_id)
+        running_family = proposal.proposed_family.model_copy(
+            update={
+                "status": "feasibility_running",
+                "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            }
+        )
+        running_proposal = proposal.model_copy(update={"proposed_family": running_family})
+        self.store.save_family_proposal(running_proposal)
+        try:
+            policy = self._proposal_policy_stub(proposal.objective_slug)
+            plan = self.hierarchy.rule_strategist.propose(policy, memory_hits=[])
+            feasible_plan = self._apply_family_config_delta(plan, running_family.config_delta)
+            task = self.hierarchy.rule_scout.propose(feasible_plan, workspace=self.workspace, dry_run=True)
+            updated_family = running_family.model_copy(
+                update={
+                    "status": "approved",
+                    "feasibility_note": "dry_run_feasibility_passed",
+                    "feasibility_trial_id": task.trial_id,
+                    "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                }
+            )
+        except Exception as exc:
+            updated_family = running_family.model_copy(
+                update={
+                    "status": "feasibility_failed",
+                    "feasibility_note": str(exc),
+                    "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                }
+            )
+        self.store.save_family_proposal(
+            running_proposal.model_copy(update={"proposed_family": updated_family})
+        )
+        self.store.append_audit_event(
+            "family_proposal",
+            "run_family_feasibility",
+            {
+                "proposal_id": proposal_id,
+                "family_id": updated_family.family_id,
+                "status": updated_family.status,
+                "feasibility_trial_id": updated_family.feasibility_trial_id,
+            },
+        )
+        return updated_family
+
+    def approve_family_proposal(self, proposal_id: str) -> ProposedExperimentFamily:
+        proposal = self._get_family_proposal(proposal_id)
+        approved_family = proposal.proposed_family.model_copy(
+            update={
+                "status": "approved",
+                "approved_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            }
+        )
+        self.store.save_family_proposal(
+            proposal.model_copy(update={"proposed_family": approved_family})
+        )
+        registered = self.store.load_registered_families()
+        entries = [item for item in registered.entries if item.family_id != approved_family.family_id]
+        entries.append(approved_family)
+        self.store.save_registered_families(registered.model_copy(update={"entries": entries}))
+        self.store.append_audit_event(
+            "family_proposal",
+            "approve_family_proposal",
+            {"proposal_id": proposal_id, "family_id": approved_family.family_id},
+        )
+        return approved_family
+
+    def reject_family_proposal(self, proposal_id: str, reason: str) -> None:
+        proposal = self._get_family_proposal(proposal_id)
+        rejected_family = proposal.proposed_family.model_copy(
+            update={
+                "status": "rejected",
+                "rejection_reason": reason,
+                "rejected_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            }
+        )
+        self.store.save_family_proposal(
+            proposal.model_copy(update={"proposed_family": rejected_family})
+        )
+        self.store.append_audit_event(
+            "family_proposal",
+            "reject_family_proposal",
+            {"proposal_id": proposal_id, "family_id": rejected_family.family_id, "reason": reason},
+        )
+
+    def list_family_proposals(self) -> list[GenerativeDirectorProposal]:
+        proposals = self.store.load_family_proposals()
+        return sorted(proposals, key=lambda item: (item.created_at, item.proposal_id), reverse=True)
+
+    def list_registered_families(self) -> list[ProposedExperimentFamily]:
+        families = self.store.get_approved_families()
+        return sorted(
+            families,
+            key=lambda item: (item.approved_at or "", item.updated_at, item.created_at, item.family_id),
+            reverse=True,
+        )
 
     def ingest_research(self, topic: str = "frontier ai", max_results: int = 6) -> ResearchIngestReport:
         report = self.research_ingestor.ingest(topic=topic, max_results=max_results)

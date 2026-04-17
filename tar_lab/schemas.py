@@ -208,6 +208,13 @@ PublicationLineageEventType = Literal[
     "falsification_plan",
     "portfolio_decision",
 ]
+FamilyProposalStatus = Literal[
+    "pending",
+    "feasibility_running",
+    "feasibility_failed",
+    "approved",
+    "rejected",
+]
 
 
 class DatasetSourceConfig(StrictModel):
@@ -376,6 +383,37 @@ class ScoutTask(StrictModel):
     payload_config_path: Optional[str] = None
     run_manifest_path: Optional[str] = None
     dry_run: bool = False
+
+
+class ProposedExperimentFamily(StrictModel):
+    family_id: str
+    name: str
+    description: str
+    config_delta: Dict[str, Any] = Field(default_factory=dict)
+    rationale: str
+    proposed_by: Literal["operator", "rule_heuristic"] = "rule_heuristic"
+    status: FamilyProposalStatus = "pending"
+    feasibility_note: Optional[str] = None
+    feasibility_trial_id: Optional[str] = None
+    approved_at: Optional[str] = None
+    rejected_at: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
+class GenerativeDirectorProposal(StrictModel):
+    proposal_id: str
+    objective_slug: str
+    trigger_reason: str
+    proposed_family: ProposedExperimentFamily
+    operator_available: bool = False
+    operator_prompt_used: Optional[str] = None
+    created_at: str = Field(default_factory=utc_now_iso)
+
+
+class RegisteredFamilyState(StrictModel):
+    entries: List[ProposedExperimentFamily] = Field(default_factory=list)
 
 
 class BackendProvenance(StrictModel):
@@ -2128,6 +2166,12 @@ class ControlRequest(StrictModel):
         "propose_projects_from_gaps",
         "promote_gap_project",
         "reject_gap_project",
+        "propose_experiment_family",
+        "list_family_proposals",
+        "approve_family_proposal",
+        "reject_family_proposal",
+        "run_family_feasibility",
+        "list_registered_families",
         "verify_last_trial",
         "breakthrough_report",
         "resolve_problem",

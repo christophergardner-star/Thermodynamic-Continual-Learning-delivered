@@ -3,10 +3,33 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Any, Dict
 
 from tar_lab.control import DEFAULT_HOST, DEFAULT_PORT, TARControlServer, send_command
 from tar_lab.orchestrator import TAROrchestrator
+
+
+def _rewrite_family_subcommand(argv: list[str]) -> list[str]:
+    if not argv or argv[0] != "families":
+        return argv
+    if len(argv) == 1:
+        return argv
+    action = argv[1]
+    rest = argv[2:]
+    if action == "propose":
+        return ["--propose-experiment-family", *rest]
+    if action == "list-proposals":
+        return ["--list-family-proposals", *rest]
+    if action == "approve" and rest:
+        return ["--approve-family-proposal", "--proposal-id", rest[0], *rest[1:]]
+    if action == "reject" and rest:
+        return ["--reject-family-proposal", "--proposal-id", rest[0], *rest[1:]]
+    if action == "feasibility" and rest:
+        return ["--run-family-feasibility", "--proposal-id", rest[0], *rest[1:]]
+    if action == "list-registered":
+        return ["--list-registered-families", *rest]
+    return argv
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,6 +49,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-id", dest="project_id")
     parser.add_argument("--gap-id", dest="gap_id")
     parser.add_argument("--scan-id", dest="scan_id")
+    parser.add_argument("--proposal-id", dest="proposal_id")
+    parser.add_argument("--objective", dest="objective_slug")
     parser.add_argument(
         "--gap-status",
         dest="gap_status",
@@ -110,6 +135,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stale-after-s", type=int, default=900, dest="stale_after_s")
     parser.add_argument("--alert-count", type=int, default=20, dest="alert_count")
     parser.add_argument("--message")
+    parser.add_argument("--reason", dest="message")
     parser.add_argument("--review-note", dest="review_note")
     parser.add_argument("--voice-file", dest="voice_file")
     parser.add_argument("--listen", action="store_true")
@@ -129,6 +155,12 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--scan-frontier", action="store_true", dest="scan_frontier")
     group.add_argument("--list-gaps", action="store_true", dest="list_gaps")
     group.add_argument("--list-gap-scans", action="store_true", dest="list_gap_scans")
+    group.add_argument("--propose-experiment-family", action="store_true", dest="propose_experiment_family")
+    group.add_argument("--list-family-proposals", action="store_true", dest="list_family_proposals")
+    group.add_argument("--approve-family-proposal", action="store_true", dest="approve_family_proposal")
+    group.add_argument("--reject-family-proposal", action="store_true", dest="reject_family_proposal")
+    group.add_argument("--run-family-feasibility", action="store_true", dest="run_family_feasibility")
+    group.add_argument("--list-registered-families", action="store_true", dest="list_registered_families")
     group.add_argument("--propose-gap-projects", action="store_true", dest="propose_gap_projects")
     group.add_argument("--promote-gap", action="store_true", dest="promote_gap")
     group.add_argument("--reject-gap", action="store_true", dest="reject_gap")
@@ -202,7 +234,7 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--pivot", action="store_true")
     group.add_argument("--explain", action="store_true")
     group.add_argument("--panic", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(_rewrite_family_subcommand(sys.argv[1:]))
 
 
 def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) -> Dict[str, Any]:
@@ -235,6 +267,39 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
             topic=args.topic,
             limit=args.max_results,
         )
+    if args.propose_experiment_family:
+        return orchestrator.propose_experiment_family(
+            args.objective_slug or "thermodynamic-anchor",
+            args.message or "manual",
+        ).model_dump(mode="json")
+    if args.list_family_proposals:
+        return {
+            "proposals": [
+                item.model_dump(mode="json")
+                for item in orchestrator.list_family_proposals()
+            ]
+        }
+    if args.approve_family_proposal:
+        return orchestrator.approve_family_proposal(args.proposal_id or "").model_dump(mode="json")
+    if args.reject_family_proposal:
+        orchestrator.reject_family_proposal(
+            args.proposal_id or "",
+            args.message or "operator_rejected",
+        )
+        return {
+            "proposal_id": args.proposal_id or "",
+            "status": "rejected",
+            "reason": args.message or "operator_rejected",
+        }
+    if args.run_family_feasibility:
+        return orchestrator.run_family_feasibility(args.proposal_id or "").model_dump(mode="json")
+    if args.list_registered_families:
+        return {
+            "families": [
+                item.model_dump(mode="json")
+                for item in orchestrator.list_registered_families()
+            ]
+        }
     if args.propose_gap_projects:
         return {
             "projects": [
@@ -1140,6 +1205,53 @@ def _render_frontier_gap_scan_history(payload: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_family_proposal(payload: Dict[str, Any]) -> str:
+    lines = [
+        f"Proposal ID: {payload.get('proposal_id', 'n/a')}",
+        f"Objective: {payload.get('objective_slug', 'n/a')}",
+        f"Trigger Reason: {payload.get('trigger_reason', 'n/a')}",
+    ]
+    family = payload.get("proposed_family") or {}
+    if family:
+        lines.extend(
+            [
+                f"Family ID: {family.get('family_id', 'n/a')}",
+                f"Name: {family.get('name', 'n/a')}",
+                f"Status: {family.get('status', 'n/a')}",
+                f"Proposed By: {family.get('proposed_by', 'n/a')}",
+                f"Feasibility Note: {family.get('feasibility_note', 'n/a')}",
+                f"Description: {family.get('description', 'n/a')}",
+                f"Rationale: {family.get('rationale', 'n/a')}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _render_family_proposal_list(payload: Dict[str, Any]) -> str:
+    proposals = payload.get("proposals") or []
+    if not proposals:
+        return "No family proposals recorded."
+    lines = ["Family Proposals:"]
+    for item in proposals:
+        family = item.get("proposed_family") or {}
+        lines.append(
+            f"- {item.get('proposal_id', 'n/a')} :: {family.get('name', 'n/a')} status={family.get('status', 'n/a')} proposed_by={family.get('proposed_by', 'n/a')}"
+        )
+    return "\n".join(lines)
+
+
+def _render_registered_family_list(payload: Dict[str, Any]) -> str:
+    families = payload.get("families") or []
+    if not families:
+        return "No registered experiment families."
+    lines = ["Registered Experiment Families:"]
+    for item in families:
+        lines.append(
+            f"- {item.get('family_id', 'n/a')} :: {item.get('name', 'n/a')} status={item.get('status', 'n/a')} approved_at={item.get('approved_at', 'n/a')}"
+        )
+    return "\n".join(lines)
+
+
 def _render_gap_project_list(payload: Dict[str, Any]) -> str:
     projects = payload.get("projects") or []
     if not projects:
@@ -1651,6 +1763,44 @@ def main() -> int:
                     host=args.host,
                     port=args.port,
                 )
+            elif args.propose_experiment_family:
+                response = send_command(
+                    "propose_experiment_family",
+                    payload={
+                        "objective_slug": args.objective_slug or "thermodynamic-anchor",
+                        "trigger_reason": args.message or "manual",
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.list_family_proposals:
+                response = send_command("list_family_proposals", host=args.host, port=args.port)
+            elif args.approve_family_proposal:
+                response = send_command(
+                    "approve_family_proposal",
+                    payload={"proposal_id": args.proposal_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.reject_family_proposal:
+                response = send_command(
+                    "reject_family_proposal",
+                    payload={
+                        "proposal_id": args.proposal_id or "",
+                        "reason": args.message or "operator_rejected",
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.run_family_feasibility:
+                response = send_command(
+                    "run_family_feasibility",
+                    payload={"proposal_id": args.proposal_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.list_registered_families:
+                response = send_command("list_registered_families", host=args.host, port=args.port)
             elif args.propose_gap_projects:
                 response = send_command(
                     "propose_projects_from_gaps",
@@ -2256,6 +2406,14 @@ def main() -> int:
             print(_render_frontier_gap_status(payload))
         elif args.list_gap_scans:
             print(_render_frontier_gap_scan_history(payload))
+        elif args.propose_experiment_family or args.approve_family_proposal or args.run_family_feasibility:
+            print(_render_family_proposal(payload))
+        elif args.list_family_proposals:
+            print(_render_family_proposal_list(payload))
+        elif args.reject_family_proposal:
+            print(json.dumps(payload, indent=2))
+        elif args.list_registered_families:
+            print(_render_registered_family_list(payload))
         elif args.propose_gap_projects:
             print(_render_gap_project_list(payload))
         elif args.promote_gap:
