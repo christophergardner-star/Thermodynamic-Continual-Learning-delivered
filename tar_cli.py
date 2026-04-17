@@ -33,6 +33,28 @@ def _rewrite_family_subcommand(argv: list[str]) -> list[str]:
     return argv
 
 
+def _rewrite_agenda_subcommand(argv: list[str]) -> list[str]:
+    if not argv or argv[0] != "agenda":
+        return argv
+    if len(argv) == 1:
+        return argv
+    action = argv[1]
+    rest = argv[2:]
+    if action == "review":
+        return ["--run-agenda-review", *rest]
+    if action == "status":
+        return ["--agenda-status", *rest]
+    if action == "decisions":
+        return ["--list-agenda-decisions", *rest]
+    if action == "veto" and rest:
+        return ["--veto-agenda-decision", "--decision-id", rest[0], *rest[1:]]
+    if action == "commit":
+        return ["--commit-agenda-decisions", *rest]
+    if action == "config":
+        return ["--agenda-config", *rest]
+    return argv
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="TAR command and control CLI")
     parser.add_argument("--workspace", default=str(Path(__file__).resolve().parent))
@@ -51,6 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gap-id", dest="gap_id")
     parser.add_argument("--scan-id", dest="scan_id")
     parser.add_argument("--proposal-id", dest="proposal_id")
+    parser.add_argument("--decision-id", dest="decision_id")
     parser.add_argument("--cycle-id", dest="cycle_id")
     parser.add_argument("--delta-id", dest="delta_id")
     parser.add_argument("--retrain-id", dest="retrain_id")
@@ -60,6 +83,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-manifest-path", dest="run_manifest_path")
     parser.add_argument("--baseline-mean-score", type=float, default=0.4625, dest="baseline_mean_score")
     parser.add_argument("--baseline-overclaim-rate", type=float, default=0.0, dest="baseline_overclaim_rate")
+    parser.add_argument(
+        "--decision-status",
+        dest="decision_status",
+        choices=["pending_veto", "committed", "vetoed"],
+    )
+    parser.add_argument("--max-active-projects", type=int, dest="max_active_projects")
+    parser.add_argument("--veto-window-hours", type=float, dest="veto_window_hours")
+    parser.add_argument("--min-gap-novelty-to-promote", type=float, dest="min_gap_novelty_to_promote")
+    parser.add_argument("--stale-project-hours", type=float, dest="stale_project_hours")
+    parser.add_argument("--max-promotions-per-review", type=int, dest="max_promotions_per_review")
+    parser.add_argument("--disable-recycle-decisions", action="store_true", dest="disable_recycle_decisions")
     parser.add_argument(
         "--gap-status",
         dest="gap_status",
@@ -179,6 +213,12 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--deploy-improved-adapter", action="store_true", dest="deploy_improved_adapter")
     group.add_argument("--self-improvement-status", action="store_true", dest="self_improvement_status")
     group.add_argument("--resume-self-improvement", action="store_true", dest="resume_self_improvement")
+    group.add_argument("--run-agenda-review", action="store_true", dest="run_agenda_review")
+    group.add_argument("--agenda-status", action="store_true", dest="agenda_status")
+    group.add_argument("--list-agenda-decisions", action="store_true", dest="list_agenda_decisions")
+    group.add_argument("--veto-agenda-decision", action="store_true", dest="veto_agenda_decision")
+    group.add_argument("--commit-agenda-decisions", action="store_true", dest="commit_agenda_decisions")
+    group.add_argument("--agenda-config", action="store_true", dest="agenda_config")
     group.add_argument("--propose-gap-projects", action="store_true", dest="propose_gap_projects")
     group.add_argument("--promote-gap", action="store_true", dest="promote_gap")
     group.add_argument("--reject-gap", action="store_true", dest="reject_gap")
@@ -252,7 +292,9 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--pivot", action="store_true")
     group.add_argument("--explain", action="store_true")
     group.add_argument("--panic", action="store_true")
-    return parser.parse_args(_rewrite_family_subcommand(sys.argv[1:]))
+    argv = _rewrite_family_subcommand(sys.argv[1:])
+    argv = _rewrite_agenda_subcommand(argv)
+    return parser.parse_args(argv)
 
 
 def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) -> Dict[str, Any]:
@@ -359,6 +401,49 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
         return orchestrator.self_improvement_status().model_dump(mode="json")
     if args.resume_self_improvement:
         return orchestrator.resume_self_improvement(args.cycle_id or "").model_dump(mode="json")
+    if args.run_agenda_review:
+        return orchestrator.run_agenda_review().model_dump(mode="json")
+    if args.agenda_status:
+        return orchestrator.agenda_status().model_dump(mode="json")
+    if args.list_agenda_decisions:
+        return {
+            "decisions": [
+                item.model_dump(mode="json")
+                for item in orchestrator.list_agenda_decisions(status=args.decision_status)
+            ]
+        }
+    if args.veto_agenda_decision:
+        return orchestrator.veto_agenda_decision(
+            args.decision_id or "",
+            args.message or "operator_veto",
+        ).model_dump(mode="json")
+    if args.commit_agenda_decisions:
+        return {
+            "decisions": [
+                item.model_dump(mode="json")
+                for item in orchestrator.commit_agenda_decisions()
+            ]
+        }
+    if args.agenda_config:
+        current = orchestrator.agenda_status().config.model_dump(mode="json")
+        updates = {
+            "max_active_projects": args.max_active_projects,
+            "veto_window_hours": args.veto_window_hours,
+            "min_gap_novelty_to_promote": args.min_gap_novelty_to_promote,
+            "stale_project_hours": args.stale_project_hours,
+            "max_promotions_per_review": args.max_promotions_per_review,
+        }
+        updates = {key: value for key, value in updates.items() if value is not None}
+        if args.disable_recycle_decisions:
+            updates["recycle_decisions_to_training_signal"] = False
+        if updates:
+            from tar_lab.schemas import AgendaReviewConfig
+
+            orchestrator.update_agenda_config(
+                AgendaReviewConfig.model_validate({**current, **updates})
+            )
+            current = orchestrator.agenda_status().config.model_dump(mode="json")
+        return current
     if args.propose_gap_projects:
         return {
             "projects": [
@@ -1926,6 +2011,49 @@ def main() -> int:
                     host=args.host,
                     port=args.port,
                 )
+            elif args.run_agenda_review:
+                response = send_command("run_agenda_review", host=args.host, port=args.port)
+            elif args.agenda_status:
+                response = send_command("agenda_status", host=args.host, port=args.port)
+            elif args.list_agenda_decisions:
+                response = send_command(
+                    "list_agenda_decisions",
+                    payload={"status": args.decision_status},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.veto_agenda_decision:
+                response = send_command(
+                    "veto_agenda_decision",
+                    payload={
+                        "decision_id": args.decision_id or "",
+                        "reason": args.message or "operator_veto",
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.commit_agenda_decisions:
+                response = send_command("commit_agenda_decisions", host=args.host, port=args.port)
+            elif args.agenda_config:
+                payload = {
+                    key: value
+                    for key, value in {
+                        "max_active_projects": args.max_active_projects,
+                        "veto_window_hours": args.veto_window_hours,
+                        "min_gap_novelty_to_promote": args.min_gap_novelty_to_promote,
+                        "stale_project_hours": args.stale_project_hours,
+                        "max_promotions_per_review": args.max_promotions_per_review,
+                    }.items()
+                    if value is not None
+                }
+                if args.disable_recycle_decisions:
+                    payload["recycle_decisions_to_training_signal"] = False
+                response = send_command(
+                    "agenda_config",
+                    payload=payload,
+                    host=args.host,
+                    port=args.port,
+                )
             elif args.propose_gap_projects:
                 response = send_command(
                     "propose_projects_from_gaps",
@@ -2549,6 +2677,12 @@ def main() -> int:
             or args.deploy_improved_adapter
             or args.self_improvement_status
             or args.resume_self_improvement
+            or args.run_agenda_review
+            or args.agenda_status
+            or args.list_agenda_decisions
+            or args.veto_agenda_decision
+            or args.commit_agenda_decisions
+            or args.agenda_config
         ):
             print(json.dumps(payload, indent=2))
         elif args.propose_gap_projects:

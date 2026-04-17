@@ -5,7 +5,7 @@ import socketserver
 from typing import Any, Dict, Optional
 
 from tar_lab.orchestrator import TAROrchestrator
-from tar_lab.schemas import ControlRequest, ControlResponse, TrainingSignalRecord
+from tar_lab.schemas import AgendaReviewConfig, ControlRequest, ControlResponse, TrainingSignalRecord
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -163,6 +163,50 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
             payload = orchestrator.resume_self_improvement(
                 str(request.payload.get("cycle_id", ""))
             ).model_dump(mode="json")
+        elif request.command == "run_agenda_review":
+            payload = orchestrator.run_agenda_review().model_dump(mode="json")
+        elif request.command == "agenda_status":
+            payload = orchestrator.agenda_status().model_dump(mode="json")
+        elif request.command == "list_agenda_decisions":
+            payload = {
+                "decisions": [
+                    item.model_dump(mode="json")
+                    for item in orchestrator.list_agenda_decisions(
+                        status=request.payload.get("status")
+                    )
+                ]
+            }
+        elif request.command == "veto_agenda_decision":
+            payload = orchestrator.veto_agenda_decision(
+                str(request.payload.get("decision_id", "")),
+                str(request.payload.get("reason", "operator_veto")),
+            ).model_dump(mode="json")
+        elif request.command == "commit_agenda_decisions":
+            payload = {
+                "decisions": [
+                    item.model_dump(mode="json")
+                    for item in orchestrator.commit_agenda_decisions()
+                ]
+            }
+        elif request.command == "agenda_config":
+            current = orchestrator.agenda_status().config.model_dump(mode="json")
+            updates = {
+                key: request.payload[key]
+                for key in (
+                    "max_active_projects",
+                    "veto_window_hours",
+                    "min_gap_novelty_to_promote",
+                    "stale_project_hours",
+                    "max_promotions_per_review",
+                    "recycle_decisions_to_training_signal",
+                )
+                if key in request.payload
+            }
+            if updates:
+                config = AgendaReviewConfig.model_validate({**current, **updates})
+                orchestrator.update_agenda_config(config)
+                current = orchestrator.agenda_status().config.model_dump(mode="json")
+            payload = current
         elif request.command == "verify_last_trial":
             payload = orchestrator.verify_last_trial(
                 trial_id=request.payload.get("trial_id"),

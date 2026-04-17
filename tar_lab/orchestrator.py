@@ -36,6 +36,10 @@ from tar_lab.science_profiles import ProblemResearchEngine, ScienceProfileRegist
 from tar_lab.self_improvement import SelfImprovementEngine
 from tar_lab.schemas import (
     ActionScoreBreakdown,
+    AgendaDecisionRecord,
+    AgendaReviewConfig,
+    AgendaReviewRecord,
+    AgendaSnapshot,
     AlertRecord,
     BenchmarkTier,
     BudgetAllocationDecision,
@@ -746,6 +750,36 @@ class TAROrchestrator:
 
     def resume_self_improvement(self, cycle_id: str) -> SelfImprovementCycleRecord:
         return self._self_improvement_engine().resume_self_improvement(cycle_id)
+
+    def run_agenda_review(self) -> AgendaReviewRecord:
+        from tar_lab.agenda import AgendaEngine
+
+        return AgendaEngine(str(self.workspace), self).run_agenda_review()
+
+    def agenda_status(self) -> AgendaSnapshot:
+        from tar_lab.agenda import AgendaEngine
+
+        return AgendaEngine(str(self.workspace), self).get_snapshot()
+
+    def list_agenda_decisions(self, status: Optional[str] = None) -> list[AgendaDecisionRecord]:
+        from tar_lab.agenda import AgendaEngine
+
+        return AgendaEngine(str(self.workspace), self)._list_decisions(status=status)
+
+    def veto_agenda_decision(self, decision_id: str, reason: str) -> AgendaDecisionRecord:
+        from tar_lab.agenda import AgendaEngine
+
+        return AgendaEngine(str(self.workspace), self).veto_agenda_decision(decision_id, reason)
+
+    def commit_agenda_decisions(self) -> list[AgendaDecisionRecord]:
+        from tar_lab.agenda import AgendaEngine
+
+        return AgendaEngine(str(self.workspace), self).commit_pending_decisions()
+
+    def update_agenda_config(self, config: AgendaReviewConfig) -> None:
+        from tar_lab.agenda import AgendaEngine
+
+        AgendaEngine(str(self.workspace), self).update_config(config)
 
     def ingest_research(self, topic: str = "frontier ai", max_results: int = 6) -> ResearchIngestReport:
         report = self.research_ingestor.ingest(topic=topic, max_results=max_results)

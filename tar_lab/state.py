@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from tar_lab.schemas import (
+    AgendaDecisionRecord,
     AlertRecord,
     BuildAttestation,
     BudgetAllocationDecision,
@@ -102,6 +103,9 @@ class TARStateStore:
         self.execution_policy_path = self.policies_dir / "execution_policy.json"
         self.self_improvement_dir = self.state_dir / "self_improvement"
         self.anchor_manifest_path = self.self_improvement_dir / "anchor_manifest.json"
+        self.agenda_dir = self.state_dir / "agenda"
+        self.agenda_reviews_dir = self.agenda_dir / "reviews"
+        self.agenda_decisions_dir = self.agenda_dir / "decisions"
         self.checkpoint_registry_path = self.state_dir / "checkpoint_registry.json"
         self.endpoint_registry_path = self.state_dir / "inference_endpoints.json"
         self.endpoints_dir = self.state_dir / "endpoints"
@@ -122,6 +126,8 @@ class TARStateStore:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.self_improvement_dir.mkdir(parents=True, exist_ok=True)
+        self.agenda_reviews_dir.mkdir(parents=True, exist_ok=True)
+        self.agenda_decisions_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.policies_dir.mkdir(parents=True, exist_ok=True)
         self.manifests_dir.mkdir(parents=True, exist_ok=True)
@@ -414,6 +420,18 @@ class TARStateStore:
 
     def self_improvement_initialized(self) -> bool:
         return self.anchor_manifest_path.exists()
+
+    def list_agenda_decisions(self, status: Optional[str] = None) -> list[AgendaDecisionRecord]:
+        decisions: list[AgendaDecisionRecord] = []
+        if not self.agenda_decisions_dir.exists():
+            return decisions
+        for path in sorted(self.agenda_decisions_dir.glob("*.json")):
+            decision = AgendaDecisionRecord.model_validate_json(
+                path.read_text(encoding="utf-8")
+            )
+            if status is None or decision.status == status:
+                decisions.append(decision)
+        return decisions
 
     def append_research_decision(self, record: ResearchDecisionRecord) -> None:
         with self.research_decisions_path.open("a", encoding="utf-8") as handle:

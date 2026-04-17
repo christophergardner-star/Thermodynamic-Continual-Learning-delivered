@@ -233,6 +233,18 @@ TrainingSignalKind = Literal[
     "portfolio_governance",
     "problem_study",
 ]
+AgendaDecisionKind = Literal[
+    "promote_gap_project",
+    "park_stale_project",
+    "defer_gap",
+    "cap_enforced",
+    "no_action",
+]
+AgendaDecisionStatus = Literal[
+    "pending_veto",
+    "committed",
+    "vetoed",
+]
 
 
 class DatasetSourceConfig(StrictModel):
@@ -502,6 +514,52 @@ class SelfImprovementCycleRecord(StrictModel):
     human_resume_required: bool = False
     started_at: str = Field(default_factory=utc_now_iso)
     updated_at: str = Field(default_factory=utc_now_iso)
+
+
+class AgendaReviewConfig(StrictModel):
+    max_active_projects: int = Field(default=5, ge=1)
+    veto_window_hours: float = Field(default=24.0, ge=0.0)
+    min_gap_novelty_to_promote: float = Field(default=0.55, ge=0.0, le=1.0)
+    stale_project_hours: float = Field(default=72.0, ge=1.0)
+    max_promotions_per_review: int = Field(default=2, ge=1)
+    recycle_decisions_to_training_signal: bool = True
+
+
+class AgendaDecisionRecord(StrictModel):
+    decision_id: str
+    review_id: str
+    kind: AgendaDecisionKind
+    subject_id: str
+    subject_title: str
+    rationale: str
+    status: AgendaDecisionStatus = "pending_veto"
+    veto_deadline: str
+    vetoed_at: Optional[str] = None
+    veto_reason: Optional[str] = None
+    committed_at: Optional[str] = None
+    recycled_to_signal_id: Optional[str] = None
+    created_at: str = Field(default_factory=utc_now_iso)
+
+
+class AgendaReviewRecord(StrictModel):
+    review_id: str
+    started_at: str = Field(default_factory=utc_now_iso)
+    completed_at: Optional[str] = None
+    active_project_count: int = Field(default=0, ge=0)
+    gap_candidates_reviewed: int = Field(default=0, ge=0)
+    decisions: List[AgendaDecisionRecord] = Field(default_factory=list)
+    cap_enforced: bool = False
+    notes: List[str] = Field(default_factory=list)
+
+
+class AgendaSnapshot(StrictModel):
+    captured_at: str = Field(default_factory=utc_now_iso)
+    active_project_count: int = Field(default=0, ge=0)
+    pending_veto_count: int = Field(default=0, ge=0)
+    committed_this_session: int = Field(default=0, ge=0)
+    vetoed_this_session: int = Field(default=0, ge=0)
+    latest_review_id: Optional[str] = None
+    config: AgendaReviewConfig = Field(default_factory=AgendaReviewConfig)
 
 
 class BackendProvenance(StrictModel):
@@ -2278,6 +2336,12 @@ class ControlRequest(StrictModel):
         "deploy_improved_adapter",
         "self_improvement_status",
         "resume_self_improvement",
+        "run_agenda_review",
+        "agenda_status",
+        "list_agenda_decisions",
+        "veto_agenda_decision",
+        "commit_agenda_decisions",
+        "agenda_config",
         "verify_last_trial",
         "breakthrough_report",
         "resolve_problem",
