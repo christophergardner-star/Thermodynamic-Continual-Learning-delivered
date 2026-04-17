@@ -55,6 +55,9 @@ def compute_participation_ratio(
 
     sample_count = matrix.shape[0]
     covariance = matrix.T @ matrix / max(sample_count - 1, 1)
+    n_features = covariance.shape[0]
+    reg = covariance.diagonal().mean().clamp(min=1e-8) * 1e-4
+    covariance = covariance + reg * torch.eye(n_features, dtype=covariance.dtype, device=covariance.device)
     eigenvalues = torch.linalg.eigvalsh(covariance)
     eigenvalues = torch.clamp(eigenvalues.real, min=0.0)
     trace = float(eigenvalues.sum().item())
