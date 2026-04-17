@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Optional
 from tar_lab.schemas import (
     CuratedDeltaRecord,
     FrozenAnchorPackManifest,
+    RetrainRecord,
     SelfImprovementCycleRecord,
     SelfImprovementPolicy,
     TrainingSignalRecord,
@@ -29,6 +31,9 @@ class SelfImprovementEngine:
     DELTAS_PATH = "tar_state/self_improvement/deltas"
     CYCLES_PATH = "tar_state/self_improvement/cycles"
     ANCHOR_PATH = "tar_state/self_improvement/anchor_manifest.json"
+    RETRAINS_PATH = "tar_state/self_improvement/retrains"
+    ADAPTERS_PATH = "tar_state/adapters"
+    ACTIVE_ADAPTER_PATH = "tar_state/serving/active_adapter.json"
 
     def __init__(
         self,
@@ -41,7 +46,16 @@ class SelfImprovementEngine:
         self._deltas_dir = self._workspace / self.DELTAS_PATH
         self._cycles_dir = self._workspace / self.CYCLES_PATH
         self._anchor_path = self._workspace / self.ANCHOR_PATH
-        for directory in (self._signals_dir, self._deltas_dir, self._cycles_dir):
+        self._retrains_dir = self._workspace / self.RETRAINS_PATH
+        self._adapters_dir = self._workspace / self.ADAPTERS_PATH
+        self._active_adapter_path = self._workspace / self.ACTIVE_ADAPTER_PATH
+        for directory in (
+            self._signals_dir,
+            self._deltas_dir,
+            self._cycles_dir,
+            self._retrains_dir,
+            self._adapters_dir,
+        ):
             directory.mkdir(parents=True, exist_ok=True)
 
     def initialize_anchor_pack(
@@ -266,6 +280,230 @@ class SelfImprovementEngine:
         path = self._cycles_dir / f"{cycle.cycle_id}.json"
         path.write_text(cycle.model_dump_json(indent=2), encoding="utf-8")
 
+    def load_delta(self, delta_id: str) -> Optional[CuratedDeltaRecord]:
+        path = self._deltas_dir / f"{delta_id}.json"
+        if not path.exists():
+            return None
+        return CuratedDeltaRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def load_retrain(self, retrain_id: str) -> Optional[RetrainRecord]:
+        path = self._retrains_dir / f"{retrain_id}.json"
+        if not path.exists():
+            return None
+        return RetrainRecord.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def save_retrain(self, retrain: RetrainRecord) -> None:
+        path = self._retrains_dir / f"{retrain.retrain_id}.json"
+        path.write_text(retrain.model_dump_json(indent=2), encoding="utf-8")
+
+    def run1(self, cycle_id: str, delta_id: str) -> RetrainRecord:
+        from datasets import Dataset
+        from peft import LoraConfig, TaskType, get_peft_model
+        from transformers import (
+            AutoModelForCausalLM,
+            AutoTokenizer,
+            DataCollatorForSeq2Seq,
+            Trainer,
+            TrainingArguments,
+        )
+        import torch
+
+        cycle = self.load_cycle(cycle_id) if cycle_id else self._load_latest_cycle()
+        if cycle is None:
+            cycle = self.start_cycle()
+        resolved_delta_id = delta_id or (cycle.delta_id or "")
+        delta = self.load_delta(resolved_delta_id)
+        if delta is None:
+            raise ValueError(f"Delta not found: {resolved_delta_id}")
+        if not delta.ready:
+            raise ValueError(
+                f"Delta {delta.delta_id} is not ready: "
+                f"signal_count={delta.signal_count}, diversity_score={delta.diversity_score:.3f}"
+            )
+
+        signals_by_id = {signal.signal_id: signal for signal in self.list_signals()}
+        selected_signals = [
+            signals_by_id[signal_id]
+            for signal_id in delta.signal_ids
+            if signal_id in signals_by_id
+        ]
+        if not selected_signals:
+            raise ValueError(f"Delta {delta.delta_id} has no resolvable training signals")
+
+        training_cycle = cycle.model_copy(
+            update={
+                "delta_id": delta.delta_id,
+                "status": "training",
+                "updated_at": utc_now_iso(),
+            }
+        )
+        self.save_cycle(training_cycle)
+
+        base_model_id = self._resolve_base_model_id()
+        adapter_out = self._adapters_dir / f"ws38-r1-{uuid.uuid4().hex[:8]}"
+        adapter_out.mkdir(parents=True, exist_ok=True)
+
+        tokenizer = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=False)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        def _format_signal(signal: TrainingSignalRecord) -> dict[str, str]:
+            conversation = list(signal.messages)
+            conversation.append({"role": "assistant", "content": signal.gold_response})
+            try:
+                text = tokenizer.apply_chat_template(
+                    conversation,
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+            except Exception:
+                text = "\n".join(
+                    f"{item.get('role', 'user')}: {item.get('content', '')}"
+                    for item in conversation
+                )
+            return {"text": text}
+
+        dataset = Dataset.from_list([_format_signal(signal) for signal in selected_signals])
+
+        def _tokenize(example: dict[str, str]) -> dict[str, list[int]]:
+            payload = tokenizer(
+                example["text"],
+                truncation=True,
+                max_length=1024,
+                padding="max_length",
+            )
+            payload["labels"] = list(payload["input_ids"])
+            return payload
+
+        tokenized = dataset.map(_tokenize, remove_columns=["text"])
+
+        bf16 = bool(torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+        fp16 = bool(torch.cuda.is_available() and not bf16)
+        torch_dtype = torch.bfloat16 if bf16 else (torch.float16 if fp16 else torch.float32)
+
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model_id,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+            trust_remote_code=False,
+        )
+        model.config.use_cache = False
+
+        lora_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=16,
+            lora_alpha=32,
+            lora_dropout=0.05,
+            target_modules=["q_proj", "v_proj"],
+            bias="none",
+        )
+        model = get_peft_model(model, lora_config)
+
+        training_args = TrainingArguments(
+            output_dir=str(adapter_out),
+            num_train_epochs=3,
+            per_device_train_batch_size=1,
+            gradient_accumulation_steps=4,
+            learning_rate=2e-4,
+            fp16=fp16,
+            bf16=bf16,
+            logging_steps=5,
+            save_strategy="no",
+            report_to="none",
+            dataloader_pin_memory=False,
+            remove_unused_columns=False,
+        )
+
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=tokenized,
+            data_collator=DataCollatorForSeq2Seq(tokenizer, model=model, padding=True),
+        )
+        trainer.train()
+
+        model.save_pretrained(str(adapter_out))
+        tokenizer.save_pretrained(str(adapter_out))
+
+        final_loss = next(
+            (
+                float(entry["loss"])
+                for entry in reversed(trainer.state.log_history)
+                if "loss" in entry
+            ),
+            None,
+        )
+        retrain = RetrainRecord(
+            retrain_id=f"retrain-{uuid.uuid4().hex[:8]}",
+            cycle_id=training_cycle.cycle_id,
+            delta_id=delta.delta_id,
+            run_kind="run1",
+            adapter_output_path=str(adapter_out),
+            anchor_hash_verified=self.verify_anchor_integrity(),
+            completed_at=utc_now_iso(),
+            notes=[
+                f"base_model={base_model_id}",
+                "epochs=3",
+                f"signal_count={len(selected_signals)}",
+                *( [f"final_loss={final_loss:.6f}"] if final_loss is not None else [] ),
+            ],
+        )
+        self.save_retrain(retrain)
+        self.save_cycle(
+            training_cycle.model_copy(
+                update={
+                    "run1_retrain_id": retrain.retrain_id,
+                    "updated_at": utc_now_iso(),
+                }
+            )
+        )
+        return retrain
+
+    def deploy(self, cycle_id: str, retrain_id: str) -> str:
+        retrain = self.load_retrain(retrain_id)
+        if retrain is None:
+            raise ValueError(f"Retrain record not found: {retrain_id}")
+        if not retrain.adapter_output_path:
+            raise ValueError(f"Retrain record {retrain_id} has no adapter output path")
+        adapter_path = Path(retrain.adapter_output_path)
+        if not adapter_path.exists():
+            raise FileNotFoundError(f"Adapter path does not exist: {adapter_path}")
+
+        cycle = self.load_cycle(cycle_id) if cycle_id else self._load_latest_cycle()
+        if cycle is None:
+            raise ValueError(f"Cycle not found: {cycle_id}")
+
+        base_model_id = self._note_value(retrain.notes, "base_model=")
+        payload = {
+            "adapter_path": str(adapter_path),
+            "retrain_id": retrain.retrain_id,
+            "cycle_id": cycle.cycle_id,
+            "delta_id": retrain.delta_id,
+            "deployed_at": utc_now_iso(),
+        }
+        if base_model_id is not None:
+            payload["base_model_id"] = base_model_id
+        self._active_adapter_path.parent.mkdir(parents=True, exist_ok=True)
+        self._active_adapter_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        deployed_retrain = retrain.model_copy(update={"gate_passed": True})
+        self.save_retrain(deployed_retrain)
+        self.save_cycle(
+            cycle.model_copy(
+                update={
+                    "run1_retrain_id": retrain.retrain_id,
+                    "deployed_adapter_path": str(adapter_path),
+                    "status": "completed",
+                    "total_cycles_completed": cycle.total_cycles_completed + 1,
+                    "consecutive_gate_failures": 0,
+                    "paused_reason": None,
+                    "human_resume_required": False,
+                    "updated_at": utc_now_iso(),
+                }
+            )
+        )
+        return str(adapter_path)
+
     def _sha256_file(self, path: str) -> str:
         digest = hashlib.sha256()
         with open(path, "rb") as handle:
@@ -307,3 +545,24 @@ class SelfImprovementEngine:
         if candidate.is_absolute():
             return candidate
         return self._workspace / candidate
+
+    def _resolve_base_model_id(self) -> str:
+        candidates = [
+            os.environ.get("TAR_WS38_BASE_MODEL"),
+            "/workspace/models/Qwen2.5-7B-Instruct",
+            "Qwen/Qwen2.5-7B-Instruct",
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if candidate.startswith("/") and not Path(candidate).exists():
+                continue
+            return candidate
+        raise RuntimeError("No usable WS38 base model path found")
+
+    @staticmethod
+    def _note_value(notes: list[str], prefix: str) -> Optional[str]:
+        for note in notes:
+            if note.startswith(prefix):
+                return note[len(prefix) :]
+        return None

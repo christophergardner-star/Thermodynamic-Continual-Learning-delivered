@@ -767,10 +767,10 @@ class TAROrchestrator:
         return retrain
 
     def run_self_improvement_run1(self, cycle_id: str, delta_id: str) -> RetrainRecord:
-        raise NotImplementedError("run1 requires pod with CUDA; use pod session")
+        return self._self_improvement_engine().run1(cycle_id, delta_id)
 
     def deploy_improved_adapter(self, cycle_id: str, retrain_id: str) -> str:
-        raise NotImplementedError("deployment requires pod with CUDA; use pod session")
+        return self._self_improvement_engine().deploy(cycle_id, retrain_id)
 
     def self_improvement_status(self) -> SelfImprovementCycleRecord:
         return self._self_improvement_engine().current_status()
