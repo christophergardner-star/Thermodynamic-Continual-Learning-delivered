@@ -224,6 +224,47 @@ class ContributionPositioningReport(StrictModel):
     vault_indexed: bool = False
 
 
+class ContinualLearningMetrics(StrictModel):
+    task_id: int
+    task_accuracy: float
+    accuracy_right_after_training: float
+    backward_transfer: float
+    forgetting_measure: float
+    forward_transfer: float
+    stability_plasticity_gap: float
+
+
+class ContinualLearningBenchmarkResult(StrictModel):
+    benchmark_id: str
+    method: str
+    seed: int
+    n_tasks: int = 5
+    per_task_metrics: List[ContinualLearningMetrics]
+    mean_backward_transfer: float
+    mean_forgetting: float
+    final_mean_accuracy: float
+    last_task_accuracy: float
+    thermodynamic_trace_path: str = ""
+
+
+class ContinualLearningBenchmarkConfig(StrictModel):
+    dataset: str = "split_cifar10"
+    setting: str = "task_incremental"
+    n_tasks: int = 5
+    classes_per_task: int = 2
+    class_order: List[List[int]] = Field(
+        default_factory=lambda: [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]]
+    )
+    train_epochs_per_task: int = 5
+    batch_size: int = 64
+    seed: int = 42
+    ewc_lambda: float = 5000.0
+    si_c: float = 0.1
+    si_xi: float = 0.001
+    tcl_governor_enabled: bool = True
+    augmentation: str = "flip_normalize"
+
+
 DataAccessMode = Literal["OFFLINE_FALLBACK", "CACHED_REAL", "DOWNLOAD_REAL"]
 DataPurity = Literal["fallback", "cached_real", "download_real", "local_real", "mixed"]
 RunIntent = Literal["control", "plumbing", "research"]

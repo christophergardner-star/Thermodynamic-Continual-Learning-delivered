@@ -254,6 +254,7 @@ class ActivationThermoObserver:
         self._groups: list[_ObservedGroup] = []
         self.anchor_dimensionality_by_group: Dict[str, float] = {}
         self.anchor_effective_dimensionality: float = 0.0
+        self._last_snapshot: Optional[RegimeSnapshot] = None
         self._register_groups()
 
     def _register_groups(self) -> None:
@@ -415,7 +416,7 @@ class ActivationThermoObserver:
         stat_sample_count = min(sample_counts) if sample_counts else 0
         statistically_ready = stat_sample_count >= self.stat_window_size
 
-        return RegimeSnapshot(
+        snapshot = RegimeSnapshot(
             layer_metrics=layer_metrics,
             entropy_sigma=float(median(sigma_values)) if sigma_values else 0.0,
             entropy_sigma_std_err=float(median(sigma_errors)) if sigma_errors else 0.0,
@@ -430,6 +431,21 @@ class ActivationThermoObserver:
             equilibrium_fraction=equilibrium_fraction,
             equilibrium_gate=(equilibrium_fraction >= 0.8 and statistically_ready) if eq_values else False,
         )
+        self._last_snapshot = snapshot
+        return snapshot
+
+    @property
+    def current_regime(self) -> str:
+        if self._last_snapshot is None:
+            return "unknown"
+        if not self._last_snapshot.statistically_ready:
+            return "unknown"
+        rho = self._last_snapshot.regime_rho
+        if rho > 1.1:
+            return "disordered"
+        if rho < 0.9:
+            return "ordered"
+        return "critical"
 
     @staticmethod
     def _group_lr(optimizer: torch.optim.Optimizer, params: Iterable[nn.Parameter]) -> float:

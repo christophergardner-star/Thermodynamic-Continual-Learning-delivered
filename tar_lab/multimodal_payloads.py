@@ -6,22 +6,27 @@ import math
 import random
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
+from uuid import uuid4
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset
 
 from tar_lab.errors import ScientificValidityError
 from tar_lab.schemas import (
     BackendProvenance,
+    ContinualLearningBenchmarkConfig,
+    ContinualLearningBenchmarkResult,
+    ContinualLearningMetrics,
     DataBundleProvenance,
     DataProvenance,
     GovernorMetrics,
     TokenizerProvenance,
     TrainingPayloadConfig,
 )
-from tar_lab.thermoobserver import compute_participation_ratio
+from tar_lab.thermoobserver import ActivationThermoObserver, compute_participation_ratio
 
 try:
     from sklearn.datasets import load_breast_cancer, load_digits  # type: ignore
@@ -586,6 +591,295 @@ def run_multimodal_backend(
     _save_json(output_dir / "payload_summary.json", summary)
     _save_json(output_dir / "execution_summary.json", summary)
     return summary
+
+
+def _tcl_lr_adjustment(observer: ActivationThermoObserver, base_lr: float) -> float:
+    regime = observer.current_regime
+    if regime in ("critical", "unknown"):
+        return base_lr
+    if regime == "ordered":
+        return base_lr * 0.5
+    if regime == "disordered":
+        return base_lr * 1.2
+    return base_lr
+
+
+def run_split_cifar10_benchmark(
+    config: ContinualLearningBenchmarkConfig,
+    method: str,
+    observer: Optional[ActivationThermoObserver] = None,
+    workspace: Optional[str] = None,
+) -> ContinualLearningBenchmarkResult:
+    try:
+        import torchvision
+        import torchvision.transforms as T
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise RuntimeError(
+            "torchvision is required for split_cifar10 benchmark. Install with: pip install torchvision"
+        ) from exc
+
+    torch.manual_seed(config.seed)
+    import random as _random
+    import numpy as _np
+
+    _random.seed(config.seed)
+    _np.random.seed(config.seed)
+
+    transform = T.Compose(
+        [
+            T.ToTensor(),
+            T.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)),
+        ]
+    )
+    if config.augmentation == "flip_normalize":
+        train_transform = T.Compose(
+            [
+                T.RandomHorizontalFlip(),
+                T.ToTensor(),
+                T.Normalize((0.4914, 0.4822, 0.4465), (0.247, 0.243, 0.261)),
+            ]
+        )
+    else:
+        train_transform = transform
+
+    cache_dir = str(Path(workspace) / "dataset_artifacts" / "split_cifar10") if workspace else "/tmp/cifar10"
+    full_train = torchvision.datasets.CIFAR10(
+        root=cache_dir,
+        train=True,
+        download=True,
+        transform=train_transform,
+    )
+    full_test = torchvision.datasets.CIFAR10(
+        root=cache_dir,
+        train=False,
+        download=True,
+        transform=transform,
+    )
+
+    class _RemappedSubset(Dataset):
+        def __init__(self, dataset: Any, indices: list[int], label_map: dict[int, int]):
+            self._dataset = dataset
+            self._indices = indices
+            self._label_map = label_map
+
+        def __len__(self) -> int:
+            return len(self._indices)
+
+        def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+            image, label = self._dataset[self._indices[idx]]
+            return image, self._label_map[int(label)]
+
+    class_order = config.class_order[: config.n_tasks]
+    if len(class_order) != config.n_tasks:
+        raise ValueError("class_order must provide one class-pair entry per task")
+
+    train_targets = np.array(full_train.targets)
+    test_targets = np.array(full_test.targets)
+    task_train_subsets: list[Dataset] = []
+    task_test_subsets: list[Dataset] = []
+    for task_classes in class_order:
+        if len(task_classes) != config.classes_per_task:
+            raise ValueError("Each split_cifar10 task must match classes_per_task")
+        label_map = {int(label): idx for idx, label in enumerate(task_classes)}
+        train_indices = [int(idx) for idx, label in enumerate(train_targets) if int(label) in label_map]
+        test_indices = [int(idx) for idx, label in enumerate(test_targets) if int(label) in label_map]
+        task_train_subsets.append(_RemappedSubset(full_train, train_indices, label_map))
+        task_test_subsets.append(_RemappedSubset(full_test, test_indices, label_map))
+
+    class _CLTrunk(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.conv1 = nn.Conv2d(3, 32, 3, padding=1)
+            self.conv2 = nn.Conv2d(32, 64, 3, padding=1)
+            self.conv3 = nn.Conv2d(64, 64, 3, padding=1)
+            self.pool = nn.MaxPool2d(2)
+            self.fc = nn.Linear(64 * 4 * 4, 128)
+            self.relu = nn.ReLU()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            x = self.pool(self.relu(self.conv1(x)))
+            x = self.pool(self.relu(self.conv2(x)))
+            x = self.pool(self.relu(self.conv3(x)))
+            x = x.view(x.size(0), -1)
+            return self.relu(self.fc(x))
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    trunk = _CLTrunk().to(device)
+    heads = nn.ModuleList([nn.Linear(128, 2) for _ in range(config.n_tasks)]).to(device)
+    all_params = list(trunk.parameters()) + list(heads.parameters())
+
+    ewc_fisher: dict[str, torch.Tensor] = {}
+    ewc_params: dict[str, torch.Tensor] = {}
+    si_omega: dict[str, torch.Tensor] = {name: torch.zeros_like(param) for name, param in trunk.named_parameters()}
+    si_prev_params: dict[str, torch.Tensor] = {
+        name: param.detach().clone() for name, param in trunk.named_parameters()
+    }
+    si_path_integral: dict[str, torch.Tensor] = {
+        name: torch.zeros_like(param) for name, param in trunk.named_parameters()
+    }
+
+    if observer is None and method == "tcl" and config.tcl_governor_enabled:
+        observer = ActivationThermoObserver(trunk, stat_window_size=5)
+
+    accuracy_matrix: dict[int, dict[int, float]] = {}
+    base_lr = 0.01
+
+    for train_task_idx in range(config.n_tasks):
+        optimizer = torch.optim.SGD(all_params, lr=base_lr, momentum=0.9, weight_decay=1e-4)
+        train_loader = DataLoader(
+            task_train_subsets[train_task_idx],
+            batch_size=config.batch_size,
+            shuffle=True,
+        )
+
+        for _epoch in range(config.train_epochs_per_task):
+            trunk.train()
+            heads[train_task_idx].train()
+            for batch_x, batch_y in train_loader:
+                batch_x = batch_x.to(device)
+                batch_y = batch_y.to(device)
+                reps = trunk(batch_x)
+                logits = heads[train_task_idx](reps)
+                loss = F.cross_entropy(logits, batch_y)
+
+                if method == "ewc" and ewc_fisher:
+                    ewc_loss = torch.zeros((), device=device)
+                    for name, param in trunk.named_parameters():
+                        fisher = ewc_fisher.get(name)
+                        params_ref = ewc_params.get(name)
+                        if fisher is None or params_ref is None:
+                            continue
+                        ewc_loss = ewc_loss + (fisher.to(device) * (param - params_ref.to(device)).pow(2)).sum()
+                    loss = loss + (config.ewc_lambda / 2.0) * ewc_loss
+
+                if method == "si":
+                    si_reg = torch.zeros((), device=device)
+                    for name, param in trunk.named_parameters():
+                        si_reg = si_reg + (si_omega[name].to(device) * (param - si_prev_params[name].to(device)).pow(2)).sum()
+                    loss = loss + config.si_c * si_reg
+
+                optimizer.zero_grad()
+                loss.backward()
+
+                if method == "si":
+                    for name, param in trunk.named_parameters():
+                        if param.grad is not None:
+                            si_path_integral[name] = si_path_integral[name] + (
+                                -param.grad.detach() * (param.detach() - si_prev_params[name].to(device))
+                            ).abs().cpu()
+
+                optimizer.step()
+
+                if observer is not None and method == "tcl":
+                    observer.step(optimizer)
+                    adj_lr = _tcl_lr_adjustment(observer, base_lr)
+                    for group in optimizer.param_groups:
+                        group["lr"] = adj_lr
+
+        if method == "ewc":
+            trunk.eval()
+            ewc_fisher_new: dict[str, torch.Tensor] = {
+                name: torch.zeros_like(param) for name, param in trunk.named_parameters()
+            }
+            sample_loader = DataLoader(task_train_subsets[train_task_idx], batch_size=32, shuffle=True)
+            count = 0
+            for batch_x, batch_y in sample_loader:
+                if count >= 100:
+                    break
+                batch_x = batch_x.to(device)
+                batch_y = batch_y.to(device)
+                reps = trunk(batch_x)
+                log_probs = F.log_softmax(heads[train_task_idx](reps), dim=1)
+                for item_idx in range(batch_x.size(0)):
+                    log_probs[item_idx, batch_y[item_idx]].backward(retain_graph=item_idx < batch_x.size(0) - 1)
+                    for name, param in trunk.named_parameters():
+                        if param.grad is not None:
+                            ewc_fisher_new[name] = ewc_fisher_new[name] + param.grad.detach().cpu().pow(2)
+                    trunk.zero_grad()
+                    heads[train_task_idx].zero_grad()
+                count += batch_x.size(0)
+            n_samples = max(count, 1)
+            for name, fisher in ewc_fisher_new.items():
+                normalized = fisher / n_samples
+                if name in ewc_fisher:
+                    ewc_fisher[name] = ewc_fisher[name] + normalized
+                else:
+                    ewc_fisher[name] = normalized
+            ewc_params = {name: param.detach().cpu().clone() for name, param in trunk.named_parameters()}
+
+        if method == "si":
+            for name, param in trunk.named_parameters():
+                current = param.detach().cpu()
+                denom = (current - si_prev_params[name].cpu()).pow(2) + config.si_xi
+                si_omega[name] = (si_omega[name].cpu() + si_path_integral[name].cpu() / denom).clamp(min=0)
+                si_path_integral[name].zero_()
+            si_prev_params = {name: param.detach().cpu().clone() for name, param in trunk.named_parameters()}
+
+        trunk.eval()
+        row: dict[int, float] = {}
+        for eval_task_idx in range(config.n_tasks):
+            test_loader = DataLoader(task_test_subsets[eval_task_idx], batch_size=256, shuffle=False)
+            correct = 0
+            total = 0
+            with torch.no_grad():
+                for batch_x, batch_y in test_loader:
+                    batch_x = batch_x.to(device)
+                    batch_y = batch_y.to(device)
+                    reps = trunk(batch_x)
+                    logits = heads[eval_task_idx](reps)
+                    correct += int((logits.argmax(1) == batch_y).sum().item())
+                    total += int(batch_y.size(0))
+            row[eval_task_idx] = correct / max(total, 1)
+        accuracy_matrix[train_task_idx] = row
+
+    per_task_metrics: list[ContinualLearningMetrics] = []
+    final_task_idx = config.n_tasks - 1
+    for task_idx in range(config.n_tasks):
+        acc_right_after = accuracy_matrix[task_idx][task_idx]
+        acc_final = accuracy_matrix[final_task_idx][task_idx]
+        backward_transfer = acc_final - acc_right_after
+        peak = max(accuracy_matrix[t][task_idx] for t in range(task_idx, config.n_tasks))
+        forgetting = peak - acc_final
+        stability_plasticity_gap = abs(1.0 - acc_final / max(acc_right_after, 1e-8))
+        per_task_metrics.append(
+            ContinualLearningMetrics(
+                task_id=task_idx,
+                task_accuracy=acc_final,
+                accuracy_right_after_training=acc_right_after,
+                backward_transfer=backward_transfer,
+                forgetting_measure=forgetting,
+                forward_transfer=0.0,
+                stability_plasticity_gap=stability_plasticity_gap,
+            )
+        )
+
+    mean_backward_transfer = sum(metric.backward_transfer for metric in per_task_metrics) / len(per_task_metrics)
+    mean_forgetting = sum(metric.forgetting_measure for metric in per_task_metrics) / len(per_task_metrics)
+    final_mean_accuracy = sum(metric.task_accuracy for metric in per_task_metrics) / len(per_task_metrics)
+
+    trace_path = ""
+    if observer is not None and workspace:
+        trace_dir = Path(workspace) / "tar_state" / "cl_traces"
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        trace_file = trace_dir / f"tcl_{config.seed}.json"
+        trace_file.write_text(
+            json.dumps({"seed": config.seed, "final_regime": observer.current_regime}, indent=2),
+            encoding="utf-8",
+        )
+        trace_path = str(trace_file)
+
+    return ContinualLearningBenchmarkResult(
+        benchmark_id=uuid4().hex,
+        method=method,
+        seed=config.seed,
+        n_tasks=config.n_tasks,
+        per_task_metrics=per_task_metrics,
+        mean_backward_transfer=mean_backward_transfer,
+        mean_forgetting=mean_forgetting,
+        final_mean_accuracy=final_mean_accuracy,
+        last_task_accuracy=per_task_metrics[-1].task_accuracy,
+        thermodynamic_trace_path=trace_path,
+    )
 
 
 def _load_payload(path: str) -> Dict[str, Any]:
