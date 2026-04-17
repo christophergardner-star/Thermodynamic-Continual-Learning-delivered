@@ -1,10 +1,11 @@
 import tempfile
+import string
 from pathlib import Path
 
 import dashboard
 import tar_cli
 from tar_lab.control import handle_request
-from tar_lab.orchestrator import TAROrchestrator
+from tar_lab.orchestrator import TAROrchestrator, _compute_gap_content_hash
 from tar_lab.schemas import ControlRequest, ResearchDocument
 
 
@@ -39,6 +40,21 @@ def _seed_document(
     )
 
 
+def test_content_hash_is_stable_across_calls():
+    left = _compute_gap_content_hash(
+        ["paper-b", "paper-a"],
+        "Investigate retrieval augmented generation drift in language model memory systems.",
+    )
+    right = _compute_gap_content_hash(
+        ["paper-a", "paper-b"],
+        "  Investigate retrieval augmented generation drift in language model memory systems.  ",
+    )
+
+    assert left == right
+    assert len(left) == 16
+    assert all(character in string.hexdigits for character in left)
+
+
 def test_scan_frontier_gaps_proposes_and_promotes_project():
     with tempfile.TemporaryDirectory() as tmp:
         _copy_science_profiles(tmp)
@@ -68,6 +84,8 @@ def test_scan_frontier_gaps_proposes_and_promotes_project():
             assert len(report.gaps) == 1
             gap = report.gaps[0]
             assert gap.status == "identified"
+            assert gap.scan_id == report.scan_id
+            assert gap.content_hash is not None
             assert gap.domain_profile == "natural_language_processing"
             assert gap.evidence_count == 2
 
@@ -81,12 +99,14 @@ def test_scan_frontier_gaps_proposes_and_promotes_project():
             assert stored_gap.status == "proposed"
             assert stored_gap.proposed_project_id == project.project_id
 
-            promoted = orchestrator.promote_gap_project(gap.gap_id)
+            promoted = orchestrator.promote_gap_project(gap.gap_id, note="promote after operator review")
 
             assert promoted.status == "active"
             promoted_gap = orchestrator.store.get_frontier_gap(gap.gap_id)
             assert promoted_gap is not None
             assert promoted_gap.status == "promoted"
+            assert promoted_gap.review_note == "promote after operator review"
+            assert promoted_gap.reviewed_at is not None
         finally:
             orchestrator.shutdown()
 
@@ -187,13 +207,60 @@ def test_reject_gap_project_parks_proposed_project():
             created = orchestrator.propose_projects_from_gaps(max_proposals=1, confidence_threshold=0.45)
             assert len(created) == 1
 
-            updated_gap = orchestrator.reject_gap_project(gap.gap_id, "duplicate after operator review")
+            updated_gap = orchestrator.reject_gap_project(
+                gap.gap_id,
+                "duplicate after operator review",
+                note="reject after operator review",
+            )
 
             assert updated_gap.status == "rejected"
             assert updated_gap.rejection_reason == "duplicate after operator review"
+            assert updated_gap.review_note == "reject after operator review"
+            assert updated_gap.reviewed_at is not None
             project = orchestrator.store.get_research_project(created[0].project_id)
             assert project is not None
             assert project.status == "parked"
+        finally:
+            orchestrator.shutdown()
+
+
+def test_rescan_does_not_duplicate_gaps():
+    with tempfile.TemporaryDirectory() as tmp:
+        _copy_science_profiles(tmp)
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            _seed_document(
+                orchestrator,
+                "doc-rescan-1",
+                title="Rescan Gap A",
+                problem_statements=[
+                    "Investigate retrieval grounded prompt drift in language model systems.",
+                ],
+            )
+            _seed_document(
+                orchestrator,
+                "doc-rescan-2",
+                title="Rescan Gap B",
+                problem_statements=[
+                    "Analyze retrieval grounded prompt drift in language model systems.",
+                ],
+            )
+
+            first_report = orchestrator.scan_frontier_gaps(topic="rescan frontier", max_gaps=5)
+            first_state = list(orchestrator.store.iter_frontier_gaps())
+
+            second_report = orchestrator.scan_frontier_gaps(topic="rescan frontier", max_gaps=5)
+            second_state = list(orchestrator.store.iter_frontier_gaps())
+            content_hashes = [gap.content_hash for gap in second_state if gap.content_hash]
+
+            assert first_report.gaps_skipped_cross_scan == 0
+            assert len(first_state) == 1
+            assert first_state[0].content_hash is not None
+            assert orchestrator.store.has_content_hash(first_state[0].content_hash or "") is True
+            assert orchestrator.store.find_by_content_hash(first_state[0].content_hash or "") is not None
+            assert second_report.gaps_skipped_cross_scan >= 1
+            assert len(second_state) == len(first_state)
+            assert len(content_hashes) == len(set(content_hashes))
         finally:
             orchestrator.shutdown()
 
@@ -235,6 +302,14 @@ def test_ws36_control_commands_and_cli_renderers():
             assert listed.ok is True
             assert listed.payload["counts"]["identified"] == 1
 
+            scan_history = handle_request(
+                orchestrator,
+                ControlRequest(command="list_frontier_gap_scans", payload={"topic": "retrieval robustness", "limit": 10}),
+            )
+            assert scan_history.ok is True
+            assert scan_history.payload["scan_count"] >= 1
+            assert scan_history.payload["scans"][0]["scan_id"] == scan.payload["scan_id"]
+
             proposed = handle_request(
                 orchestrator,
                 ControlRequest(
@@ -248,16 +323,18 @@ def test_ws36_control_commands_and_cli_renderers():
 
             promoted = handle_request(
                 orchestrator,
-                ControlRequest(command="promote_gap_project", payload={"gap_id": gap_id}),
+                ControlRequest(command="promote_gap_project", payload={"gap_id": gap_id, "note": "approve after review"}),
             )
             assert promoted.ok is True
             assert promoted.payload["status"] == "active"
 
             rendered_scan = tar_cli._render_frontier_gap_scan(scan.payload)
             rendered_list = tar_cli._render_frontier_gap_status(listed.payload)
+            rendered_history = tar_cli._render_frontier_gap_scan_history(scan_history.payload)
             rendered_projects = tar_cli._render_gap_project_list(proposed.payload)
             assert "Scan ID:" in rendered_scan
             assert "Frontier Gaps: total=" in rendered_list
+            assert "Frontier Gap Scans:" in rendered_history
             assert f"- {project_id} ::" in rendered_projects
         finally:
             orchestrator.shutdown()
@@ -298,6 +375,7 @@ def test_ws36_operator_status_dashboard_and_frontier_status_surfaces():
             assert frontier.frontier_gap_counts["identified"] >= 1
             assert frontier.frontier_gap_scans >= 1
             assert context["frontier_gap_status"]["counts"]["identified"] >= 1
+            assert context["frontier_gap_scan_history"]["scan_count"] >= 1
             assert "Frontier Gaps:" in tar_cli._render_operator_view(operator_view)
             assert "Frontier Gaps: total=" in tar_cli._render_status(status_payload)
             assert "Frontier Gap Scans:" in tar_cli._render_frontier_status(frontier.model_dump(mode="json"))
@@ -383,5 +461,6 @@ def test_ws36_filtered_gap_review_surfaces_selected_gap_in_dashboard_context():
             assert len(context["frontier_gap_views"]) == 1
             assert context["selected_frontier_gap"]["gap_id"] == proposed_gap_id
             assert context["selected_frontier_gap"]["status"] == "proposed"
+            assert context["selected_frontier_scan"]["scan_id"] == context["selected_frontier_gap"]["scan_id"]
         finally:
             orchestrator.shutdown()

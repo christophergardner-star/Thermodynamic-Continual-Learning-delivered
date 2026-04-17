@@ -54,6 +54,11 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
                 limit=int(request.payload.get("limit", 20)),
                 min_confidence=float(request.payload.get("min_confidence", request.payload.get("threshold", 0.0))),
             )
+        elif request.command == "list_frontier_gap_scans":
+            payload = orchestrator.frontier_gap_scan_history(
+                topic=request.payload.get("topic"),
+                limit=int(request.payload.get("limit", 20)),
+            )
         elif request.command == "propose_projects_from_gaps":
             payload = {
                 "projects": [
@@ -65,11 +70,15 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
                 ]
             }
         elif request.command == "promote_gap_project":
-            payload = orchestrator.promote_gap_project(str(request.payload.get("gap_id", ""))).model_dump(mode="json")
+            payload = orchestrator.promote_gap_project(
+                str(request.payload.get("gap_id", "")),
+                note=request.payload.get("note"),
+            ).model_dump(mode="json")
         elif request.command == "reject_gap_project":
             payload = orchestrator.reject_gap_project(
                 str(request.payload.get("gap_id", "")),
                 str(request.payload.get("reason", "")),
+                note=request.payload.get("note"),
             ).model_dump(mode="json")
         elif request.command == "verify_last_trial":
             payload = orchestrator.verify_last_trial(

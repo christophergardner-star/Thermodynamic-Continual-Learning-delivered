@@ -25,6 +25,9 @@ operator-facing surfaces:
   `frontier_status()`
 - filtered frontier-gap review by status and minimum confidence
 - direct dashboard actions for scan / propose / promote / reject
+- review-note persistence on promote / reject decisions
+- first-class frontier scan-history inspection in orchestrator, control, CLI,
+  and dashboard
 
 ## Implemented Files
 
@@ -88,6 +91,5 @@ Continuity check:
 
 The next `WS36` slice should add richer interaction and policy surfaces:
 
-- optional operator review notes on gap promotion/rejection
-- frontier-gap history/log views beyond the latest scan snapshot
-- richer CLI/control filtering and scan-history inspection
+- confidence-sorted review queues for promoted/rejected follow-up
+- agenda-facing export of approved frontier gaps for `WS39`

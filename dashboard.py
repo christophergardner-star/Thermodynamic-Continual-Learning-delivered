@@ -31,6 +31,7 @@ def build_dashboard_context(
     *,
     include_blocked: bool = True,
     max_results: int = 8,
+    frontier_topic: str = "",
     selected_project_id: str = "",
     frontier_gap_status_filter: str = "",
     frontier_gap_min_confidence: float = 0.0,
@@ -71,6 +72,10 @@ def build_dashboard_context(
         limit=max_results,
         min_confidence=frontier_gap_min_confidence,
     )
+    frontier_gap_scan_history = orchestrator.frontier_gap_scan_history(
+        topic=frontier_topic or None,
+        limit=max_results,
+    )
     frontier_gap_views = frontier_gap_status.get("gaps", [])
     frontier_gap_ids = [item.get("gap_id") for item in frontier_gap_views if item.get("gap_id")]
     frontier_gap_labels = {
@@ -83,6 +88,16 @@ def build_dashboard_context(
         gap = orchestrator.store.get_frontier_gap(selected_frontier_gap_id)
         if gap is not None:
             selected_frontier_gap = gap.model_dump(mode="json")
+    selected_frontier_scan = None
+    if selected_frontier_gap is not None and selected_frontier_gap.get("scan_id"):
+        selected_frontier_scan = next(
+            (
+                item
+                for item in frontier_gap_scan_history.get("scans", [])
+                if item.get("scan_id") == selected_frontier_gap.get("scan_id")
+            ),
+            None,
+        )
 
     selected_project_status = None
     selected_resume_dashboard = None
@@ -116,11 +131,13 @@ def build_dashboard_context(
         "literature_artifacts": literature_artifacts,
         "literature_conflicts": literature_conflicts,
         "frontier_gap_status": frontier_gap_status,
+        "frontier_gap_scan_history": frontier_gap_scan_history,
         "frontier_gap_views": frontier_gap_views,
         "frontier_gap_ids": frontier_gap_ids,
         "frontier_gap_labels": frontier_gap_labels,
         "selected_frontier_gap_id": selected_frontier_gap_id,
         "selected_frontier_gap": selected_frontier_gap,
+        "selected_frontier_scan": selected_frontier_scan,
         "selected_project_status": selected_project_status,
         "selected_resume_dashboard": selected_resume_dashboard,
         "selected_evidence_map": selected_evidence_map,
@@ -463,10 +480,12 @@ def _render_frontier_gap_tab(
     frontier_gap_min_confidence: float,
 ) -> None:
     payload = context.get("frontier_gap_status", {})
+    scan_history = context.get("frontier_gap_scan_history", {})
     counts = payload.get("counts", {})
     latest_scan = payload.get("latest_scan", {})
     gaps = payload.get("gaps", [])
     selected_gap = context.get("selected_frontier_gap") or {}
+    selected_scan = context.get("selected_frontier_scan") or {}
 
     notice = st.session_state.pop("frontier_gap_notice", None)
     if notice:
@@ -486,6 +505,12 @@ def _render_frontier_gap_tab(
     with right:
         _show_json("Frontier Gap Status", payload, "No frontier gap status recorded.")
 
+    history_left, history_right = st.columns(2)
+    with history_left:
+        _show_json("Frontier Scan History", scan_history, "No frontier scan history recorded.")
+    with history_right:
+        _show_json("Selected Frontier Scan", selected_scan, "No frontier scan linked to the selected gap.")
+
     action_col1, action_col2 = st.columns(2)
     with action_col1:
         if st.button("Scan Frontier Now", key="frontier_scan_now"):
@@ -504,6 +529,11 @@ def _render_frontier_gap_tab(
             )
             st.rerun()
     with action_col2:
+        review_note = st.text_area(
+            "Review Note",
+            value="operator review complete",
+            key="frontier_gap_review_note",
+        )
         rejection_reason = st.text_input(
             "Reject Reason",
             value="operator review rejected this frontier gap",
@@ -511,14 +541,21 @@ def _render_frontier_gap_tab(
         )
         if selected_gap and selected_gap.get("status") == "proposed":
             if st.button("Promote Selected Gap", key="frontier_promote_selected"):
-                project = orchestrator.promote_gap_project(str(selected_gap.get("gap_id", "")))
+                project = orchestrator.promote_gap_project(
+                    str(selected_gap.get("gap_id", "")),
+                    note=review_note,
+                )
                 st.session_state["frontier_gap_notice"] = (
                     f"Promoted frontier gap {selected_gap.get('gap_id', 'n/a')} into active project {project.project_id}."
                 )
                 st.rerun()
         if selected_gap and selected_gap.get("status") in {"identified", "proposed"}:
             if st.button("Reject Selected Gap", key="frontier_reject_selected"):
-                gap = orchestrator.reject_gap_project(str(selected_gap.get("gap_id", "")), rejection_reason)
+                gap = orchestrator.reject_gap_project(
+                    str(selected_gap.get("gap_id", "")),
+                    rejection_reason,
+                    note=review_note,
+                )
                 st.session_state["frontier_gap_notice"] = (
                     f"Rejected frontier gap {gap.gap_id}."
                 )
@@ -632,6 +669,7 @@ def main() -> None:
             orchestrator,
             include_blocked=include_blocked,
             max_results=max_results,
+            frontier_topic=frontier_topic,
             selected_project_id="",
             frontier_gap_status_filter=frontier_gap_status_filter,
             frontier_gap_min_confidence=frontier_gap_min_confidence,
@@ -658,6 +696,7 @@ def main() -> None:
                 orchestrator,
                 include_blocked=include_blocked,
                 max_results=max_results,
+                frontier_topic=frontier_topic,
                 selected_project_id=selected_project_id,
                 frontier_gap_status_filter=frontier_gap_status_filter,
                 frontier_gap_min_confidence=frontier_gap_min_confidence,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -109,6 +110,12 @@ from tar_lab.schemas import (
 )
 from tar_lab.state import TARStateStore
 from tar_lab.verification import VerificationRunner
+
+
+def _compute_gap_content_hash(source_paper_ids: list[str], title: str) -> str:
+    normalized_title = re.sub(r"\s+", " ", title.strip().lower())
+    key = "|".join(sorted(source_paper_ids)) + "|" + normalized_title
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
 class TAROrchestrator:
@@ -647,6 +654,7 @@ class TAROrchestrator:
             gaps.append(
                 FrontierGapRecord(
                     gap_id=self._continuity_id("gap"),
+                    content_hash=_compute_gap_content_hash(document_ids, description),
                     description=description,
                     domain_profile=domain_profile,
                     evidence_count=len(document_ids),
@@ -669,20 +677,30 @@ class TAROrchestrator:
                 self.ingest_research(topic=topic, max_results=max(4, max_gaps))
             except Exception:
                 pass
+        scan_id = self._continuity_id("gap-scan")
         gaps = self._extract_frontier_gaps(topic, limit=max_gaps)
         persisted: list[FrontierGapRecord] = []
+        existing_gap_hashes = {
+            gap.content_hash
+            for gap in self.store.iter_frontier_gaps()
+            if gap.content_hash
+        }
         rejected = 0
+        skipped_cross_scan = 0
         for gap in gaps:
-            updated_gap = gap
+            updated_gap = gap.model_copy(update={"scan_id": scan_id})
+            if updated_gap.content_hash and updated_gap.content_hash in existing_gap_hashes:
+                skipped_cross_scan += 1
+                continue
             if gap.similarity_to_existing > 0.75:
-                updated_gap = gap.model_copy(
+                updated_gap = updated_gap.model_copy(
                     update={
                         "status": "rejected",
                         "rejection_reason": "too_similar_to_existing_project",
                     }
                 )
             elif gap.domain_profile is None:
-                updated_gap = gap.model_copy(
+                updated_gap = updated_gap.model_copy(
                     update={
                         "status": "rejected",
                         "rejection_reason": "domain_profile_unresolved",
@@ -693,11 +711,12 @@ class TAROrchestrator:
             self.store.append_frontier_gap(updated_gap)
             persisted.append(updated_gap)
         report = FrontierGapScanReport(
-            scan_id=self._continuity_id("gap-scan"),
+            scan_id=scan_id,
             topic=topic,
             gaps_identified=len([item for item in persisted if item.status == "identified"]),
             gaps_proposed=0,
             gaps_rejected=rejected,
+            gaps_skipped_cross_scan=skipped_cross_scan,
             gaps=persisted,
             existing_project_count=len(self.store.list_research_projects()),
             retrieval_mode="semantic" if self.vault is not None and getattr(self.vault, "semantic_ready", False) else "lexical_fallback",
@@ -711,6 +730,7 @@ class TAROrchestrator:
                 "topic": topic,
                 "gaps_identified": report.gaps_identified,
                 "gaps_rejected": report.gaps_rejected,
+                "gaps_skipped_cross_scan": report.gaps_skipped_cross_scan,
             },
         )
         return report
@@ -747,6 +767,25 @@ class TAROrchestrator:
             "gaps": [item.model_dump(mode="json") for item in filtered[: max(1, limit)]],
             "status_filter": status,
             "min_confidence": round(max(0.0, min(1.0, min_confidence)), 6),
+        }
+
+    def frontier_gap_scan_history(
+        self,
+        *,
+        topic: Optional[str] = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        scans = list(self.store.iter_gap_scan_reports())
+        if topic:
+            topic_lower = topic.strip().lower()
+            scans = [item for item in scans if topic_lower in item.topic.lower()]
+        scans = sorted(scans, key=lambda item: (item.created_at, item.scan_id), reverse=True)
+        recent = scans[: max(1, limit)]
+        return {
+            "scan_count": len(scans),
+            "topic_filter": topic,
+            "latest_scan": recent[0].model_dump(mode="json") if recent else None,
+            "scans": [item.model_dump(mode="json") for item in recent],
         }
 
     def show_manifest(self, manifest_id: Optional[str] = None, manifest_path: Optional[str] = None) -> dict[str, Any]:
@@ -1340,7 +1379,7 @@ class TAROrchestrator:
         )
         return created
 
-    def promote_gap_project(self, gap_id: str) -> ResearchProject:
+    def promote_gap_project(self, gap_id: str, note: Optional[str] = None) -> ResearchProject:
         gap = self.store.get_frontier_gap(gap_id)
         if gap is None:
             raise RuntimeError(f"Unknown frontier gap: {gap_id}")
@@ -1353,23 +1392,31 @@ class TAROrchestrator:
             project.model_copy(
                 update={
                     "status": "active",
-                    "latest_decision_summary": "Promoted from proposed frontier gap project to active research.",
+                    "latest_decision_summary": note
+                    or "Promoted from proposed frontier gap project to active research.",
                 }
             ),
             latest_evidence_summary=f"Promoted from frontier gap {gap_id}.",
         )
-        self.store.update_frontier_gap(gap_id, status="promoted")
+        review_note = note or "operator review approved this frontier gap for active research"
+        self.store.update_frontier_gap(
+            gap_id,
+            status="promoted",
+            review_note=review_note,
+            reviewed_at=datetime.now(timezone.utc).isoformat(),
+        )
         self.store.append_audit_event(
             "frontier",
             "promote_gap_project",
-            {"gap_id": gap_id, "project_id": updated_project.project_id},
+            {"gap_id": gap_id, "project_id": updated_project.project_id, "note": review_note},
         )
         return updated_project
 
-    def reject_gap_project(self, gap_id: str, reason: str) -> FrontierGapRecord:
+    def reject_gap_project(self, gap_id: str, reason: str, note: Optional[str] = None) -> FrontierGapRecord:
         gap = self.store.get_frontier_gap(gap_id)
         if gap is None:
             raise RuntimeError(f"Unknown frontier gap: {gap_id}")
+        review_note = note or reason
         if gap.proposed_project_id:
             project = self.store.get_research_project(gap.proposed_project_id)
             if project is not None:
@@ -1377,7 +1424,7 @@ class TAROrchestrator:
                     project.model_copy(
                         update={
                             "status": "parked",
-                            "latest_decision_summary": f"Frontier gap proposal rejected: {reason}",
+                            "latest_decision_summary": f"Frontier gap proposal rejected: {review_note}",
                         }
                     ),
                     blockers=[reason],
@@ -1386,13 +1433,15 @@ class TAROrchestrator:
             gap_id,
             status="rejected",
             rejection_reason=reason,
+            review_note=review_note,
+            reviewed_at=datetime.now(timezone.utc).isoformat(),
         )
         if updated_gap is None:
             raise RuntimeError(f"Failed to update frontier gap: {gap_id}")
         self.store.append_audit_event(
             "frontier",
             "reject_gap_project",
-            {"gap_id": gap_id, "reason": reason},
+            {"gap_id": gap_id, "reason": reason, "note": review_note},
         )
         return updated_gap
 

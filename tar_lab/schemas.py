@@ -487,6 +487,8 @@ class ResearchIngestReport(StrictModel):
 class FrontierGapRecord(StrictModel):
     gap_id: str
     created_at: str = Field(default_factory=utc_now_iso)
+    scan_id: Optional[str] = None
+    content_hash: Optional[str] = None
     description: str
     domain_profile: Optional[str] = None
     evidence_count: int = Field(default=0, ge=0)
@@ -497,6 +499,8 @@ class FrontierGapRecord(StrictModel):
     status: Literal["identified", "proposed", "rejected", "promoted"] = "identified"
     rejection_reason: Optional[str] = None
     proposed_project_id: Optional[str] = None
+    review_note: Optional[str] = None
+    reviewed_at: Optional[str] = None
 
 
 class FrontierGapScanReport(StrictModel):
@@ -506,6 +510,7 @@ class FrontierGapScanReport(StrictModel):
     gaps_identified: int = Field(default=0, ge=0)
     gaps_proposed: int = Field(default=0, ge=0)
     gaps_rejected: int = Field(default=0, ge=0)
+    gaps_skipped_cross_scan: int = Field(default=0, ge=0)
     gaps: List[FrontierGapRecord] = Field(default_factory=list)
     existing_project_count: int = Field(default=0, ge=0)
     retrieval_mode: Literal["semantic", "lexical_fallback"] = "lexical_fallback"
@@ -2119,6 +2124,7 @@ class ControlRequest(StrictModel):
         "ingest_research",
         "scan_frontier_gaps",
         "list_frontier_gaps",
+        "list_frontier_gap_scans",
         "propose_projects_from_gaps",
         "promote_gap_project",
         "reject_gap_project",

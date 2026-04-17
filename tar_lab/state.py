@@ -223,6 +223,15 @@ class TARStateStore:
                 return gap
         return None
 
+    def has_content_hash(self, content_hash: str) -> bool:
+        return any(gap.content_hash == content_hash for gap in self.iter_frontier_gaps())
+
+    def find_by_content_hash(self, content_hash: str) -> Optional[FrontierGapRecord]:
+        return next(
+            (gap for gap in self.iter_frontier_gaps() if gap.content_hash == content_hash),
+            None,
+        )
+
     def update_frontier_gap(self, gap_id: str, **updates: Any) -> Optional[FrontierGapRecord]:
         rows = list(self.iter_frontier_gaps())
         updated_gap: Optional[FrontierGapRecord] = None

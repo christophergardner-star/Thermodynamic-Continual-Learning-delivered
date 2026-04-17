@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--problem-id", dest="problem_id")
     parser.add_argument("--project-id", dest="project_id")
     parser.add_argument("--gap-id", dest="gap_id")
+    parser.add_argument("--scan-id", dest="scan_id")
     parser.add_argument(
         "--gap-status",
         dest="gap_status",
@@ -109,6 +110,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stale-after-s", type=int, default=900, dest="stale_after_s")
     parser.add_argument("--alert-count", type=int, default=20, dest="alert_count")
     parser.add_argument("--message")
+    parser.add_argument("--review-note", dest="review_note")
     parser.add_argument("--voice-file", dest="voice_file")
     parser.add_argument("--listen", action="store_true")
     parser.add_argument("--wake-word", default="lab")
@@ -126,6 +128,7 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--ingest-research", action="store_true", dest="ingest_research")
     group.add_argument("--scan-frontier", action="store_true", dest="scan_frontier")
     group.add_argument("--list-gaps", action="store_true", dest="list_gaps")
+    group.add_argument("--list-gap-scans", action="store_true", dest="list_gap_scans")
     group.add_argument("--propose-gap-projects", action="store_true", dest="propose_gap_projects")
     group.add_argument("--promote-gap", action="store_true", dest="promote_gap")
     group.add_argument("--reject-gap", action="store_true", dest="reject_gap")
@@ -227,6 +230,11 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
             limit=args.max_results,
             min_confidence=args.threshold,
         )
+    if args.list_gap_scans:
+        return orchestrator.frontier_gap_scan_history(
+            topic=args.topic,
+            limit=args.max_results,
+        )
     if args.propose_gap_projects:
         return {
             "projects": [
@@ -238,9 +246,13 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
             ]
         }
     if args.promote_gap:
-        return orchestrator.promote_gap_project(args.gap_id or "").model_dump(mode="json")
+        return orchestrator.promote_gap_project(args.gap_id or "", note=args.review_note or args.message).model_dump(mode="json")
     if args.reject_gap:
-        return orchestrator.reject_gap_project(args.gap_id or "", args.message or "").model_dump(mode="json")
+        return orchestrator.reject_gap_project(
+            args.gap_id or "",
+            args.message or "",
+            note=args.review_note,
+        ).model_dump(mode="json")
     if args.verify_last_trial:
         return orchestrator.verify_last_trial(trial_id=args.trial_id).model_dump(mode="json")
     if args.breakthrough_report:
@@ -1107,6 +1119,27 @@ def _render_frontier_gap_scan(payload: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_frontier_gap_scan_history(payload: Dict[str, Any]) -> str:
+    lines = [
+        f"Frontier Gap Scans: {payload.get('scan_count', 0)}",
+        f"Topic Filter: {payload.get('topic_filter', 'all') or 'all'}",
+    ]
+    latest_scan = payload.get("latest_scan") or {}
+    if latest_scan:
+        lines.append(
+            f"Latest Scan: {latest_scan.get('scan_id', 'n/a')} topic={latest_scan.get('topic', 'n/a')} retrieval_mode={latest_scan.get('retrieval_mode', 'n/a')}"
+        )
+    scans = payload.get("scans") or []
+    if scans:
+        lines.append("")
+        lines.append("Scans:")
+        for item in scans:
+            lines.append(
+                f"- {item.get('scan_id', 'n/a')} :: topic={item.get('topic', 'n/a')} identified={item.get('gaps_identified', 0)} rejected={item.get('gaps_rejected', 0)} retrieval={item.get('retrieval_mode', 'n/a')}"
+            )
+    return "\n".join(lines)
+
+
 def _render_gap_project_list(payload: Dict[str, Any]) -> str:
     projects = payload.get("projects") or []
     if not projects:
@@ -1129,6 +1162,9 @@ def _render_frontier_gap_record(payload: Dict[str, Any]) -> str:
         f"Domain Profile: {payload.get('domain_profile', 'n/a')}",
         f"Evidence Count: {payload.get('evidence_count', 0)}",
         f"Proposed Project: {payload.get('proposed_project_id', 'n/a')}",
+        f"Scan ID: {payload.get('scan_id', 'n/a')}",
+        f"Reviewed At: {payload.get('reviewed_at', 'n/a')}",
+        f"Review Note: {payload.get('review_note', 'n/a')}",
         f"Rejection Reason: {payload.get('rejection_reason', 'n/a')}",
         f"Description: {payload.get('description', 'n/a')}",
     ]
@@ -1608,6 +1644,13 @@ def main() -> int:
                     host=args.host,
                     port=args.port,
                 )
+            elif args.list_gap_scans:
+                response = send_command(
+                    "list_frontier_gap_scans",
+                    payload={"topic": args.topic, "limit": args.max_results},
+                    host=args.host,
+                    port=args.port,
+                )
             elif args.propose_gap_projects:
                 response = send_command(
                     "propose_projects_from_gaps",
@@ -1618,14 +1661,18 @@ def main() -> int:
             elif args.promote_gap:
                 response = send_command(
                     "promote_gap_project",
-                    payload={"gap_id": args.gap_id or ""},
+                    payload={"gap_id": args.gap_id or "", "note": args.review_note or args.message},
                     host=args.host,
                     port=args.port,
                 )
             elif args.reject_gap:
                 response = send_command(
                     "reject_gap_project",
-                    payload={"gap_id": args.gap_id or "", "reason": args.message or ""},
+                    payload={
+                        "gap_id": args.gap_id or "",
+                        "reason": args.message or "",
+                        "note": args.review_note,
+                    },
                     host=args.host,
                     port=args.port,
                 )
@@ -2207,6 +2254,8 @@ def main() -> int:
             print(_render_frontier_gap_scan(payload))
         elif args.list_gaps:
             print(_render_frontier_gap_status(payload))
+        elif args.list_gap_scans:
+            print(_render_frontier_gap_scan_history(payload))
         elif args.propose_gap_projects:
             print(_render_gap_project_list(payload))
         elif args.promote_gap:
