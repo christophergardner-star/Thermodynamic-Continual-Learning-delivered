@@ -199,6 +199,31 @@ class TheoryInvalidationRecord(StrictModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+class SoTAComparison(StrictModel):
+    comparison_id: str
+    timestamp: str
+    paper_id: str
+    paper_title: str
+    domain: str
+    similarity_score: float = Field(ge=0.0, le=1.0)
+    outperforms: bool
+    delta_description: str
+
+
+class ContributionPositioningReport(StrictModel):
+    report_id: str
+    timestamp: str
+    project_id: str
+    trial_id: str
+    novelty_vs_literature: float = Field(ge=0.0, le=1.0)
+    surprise_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    sota_comparisons: List[SoTAComparison] = Field(default_factory=list)
+    competing_theories_open: int = Field(default=0, ge=0)
+    competing_theories_invalidated: int = Field(default=0, ge=0)
+    positioning_summary: str
+    vault_indexed: bool = False
+
+
 DataAccessMode = Literal["OFFLINE_FALLBACK", "CACHED_REAL", "DOWNLOAD_REAL"]
 DataPurity = Literal["fallback", "cached_real", "download_real", "local_real", "mixed"]
 RunIntent = Literal["control", "plumbing", "research"]
@@ -1663,6 +1688,7 @@ class PublicationHandoffPackage(StrictModel):
     open_questions: List[str] = Field(default_factory=list)
     evidence_gaps: List[str] = Field(default_factory=list)
     writer_cautions: List[str] = Field(default_factory=list)
+    positioning_report_id: Optional[str] = None
     artifact_path: Optional[str] = None
 
 
@@ -2450,6 +2476,8 @@ class ControlRequest(StrictModel):
         "get_competing_theories",
         "get_head_to_head_plans",
         "get_theory_invalidations",
+        "get_positioning_reports",
+        "get_positioning_report",
         "run_agenda_review",
         "agenda_status",
         "list_agenda_decisions",

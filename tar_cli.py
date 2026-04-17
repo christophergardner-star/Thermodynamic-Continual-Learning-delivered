@@ -105,6 +105,18 @@ def _rewrite_theories_subcommand(argv: list[str]) -> list[str]:
     return argv
 
 
+def _rewrite_positioning_subcommand(argv: list[str]) -> list[str]:
+    if not argv or argv[0] != "positioning":
+        return argv
+    if len(argv) == 1:
+        return argv
+    action = argv[1]
+    rest = argv[2:]
+    if action == "list":
+        return ["--list-positioning-reports", *rest]
+    return argv
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="TAR command and control CLI")
     parser.add_argument("--workspace", default=str(Path(__file__).resolve().parent))
@@ -268,6 +280,7 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--load-frontier-config", action="store_true", dest="load_frontier_config")
     group.add_argument("--list-anomaly-elevations", action="store_true", dest="list_anomaly_elevations")
     group.add_argument("--list-competing-theories", action="store_true", dest="list_competing_theories")
+    group.add_argument("--list-positioning-reports", action="store_true", dest="list_positioning_reports")
     group.add_argument("--run-agenda-review", action="store_true", dest="run_agenda_review")
     group.add_argument("--agenda-status", action="store_true", dest="agenda_status")
     group.add_argument("--list-agenda-decisions", action="store_true", dest="list_agenda_decisions")
@@ -353,6 +366,7 @@ def parse_args() -> argparse.Namespace:
     argv = _rewrite_frontier_config_subcommand(argv)
     argv = _rewrite_anomalies_subcommand(argv)
     argv = _rewrite_theories_subcommand(argv)
+    argv = _rewrite_positioning_subcommand(argv)
     return parser.parse_args(argv)
 
 
@@ -471,6 +485,8 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
         return {"records": orchestrator.get_anomaly_elevations()}
     if args.list_competing_theories:
         return {"records": orchestrator.get_competing_theories()}
+    if args.list_positioning_reports:
+        return {"records": orchestrator.get_positioning_reports()}
     if args.run_agenda_review:
         return orchestrator.run_agenda_review().model_dump(mode="json")
     if args.agenda_status:
@@ -1496,6 +1512,21 @@ def _render_competing_theories(payload: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_positioning_reports(payload: Dict[str, Any]) -> str:
+    records = payload.get("records") or []
+    if not records:
+        return "No contribution positioning reports recorded."
+    lines = ["Contribution Positioning Reports:"]
+    for item in records:
+        lines.append(
+            f"- {item.get('report_id', 'n/a')} :: project={item.get('project_id', 'n/a')} "
+            f"trial={item.get('trial_id', 'n/a')} "
+            f"novelty={float(item.get('novelty_vs_literature', 0.0)):.2f} "
+            f"surprise={float(item.get('surprise_score', 0.0)):.2f}"
+        )
+    return "\n".join(lines)
+
+
 def _render_gap_project_list(payload: Dict[str, Any]) -> str:
     projects = payload.get("projects") or []
     if not projects:
@@ -2121,6 +2152,8 @@ def main() -> int:
                 response = send_command("get_anomaly_elevations", host=args.host, port=args.port)
             elif args.list_competing_theories:
                 response = send_command("get_competing_theories", host=args.host, port=args.port)
+            elif args.list_positioning_reports:
+                response = send_command("get_positioning_reports", host=args.host, port=args.port)
             elif args.run_agenda_review:
                 response = send_command("run_agenda_review", host=args.host, port=args.port)
             elif args.agenda_status:
@@ -2781,6 +2814,8 @@ def main() -> int:
             print(_render_anomaly_elevations(payload))
         elif args.list_competing_theories:
             print(_render_competing_theories(payload))
+        elif args.list_positioning_reports:
+            print(_render_positioning_reports(payload))
         elif (
             args.initialize_anchor_pack
             or args.curate_training_signal

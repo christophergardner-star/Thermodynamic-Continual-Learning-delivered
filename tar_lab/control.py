@@ -178,6 +178,12 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
             payload = {"records": orchestrator.get_head_to_head_plans()}
         elif request.command == "get_theory_invalidations":
             payload = {"records": orchestrator.get_theory_invalidations()}
+        elif request.command == "get_positioning_reports":
+            payload = {"records": orchestrator.get_positioning_reports()}
+        elif request.command == "get_positioning_report":
+            payload = orchestrator.get_positioning_report(
+                str(request.payload.get("report_id", ""))
+            )
         elif request.command == "run_agenda_review":
             payload = orchestrator.run_agenda_review().model_dump(mode="json")
         elif request.command == "agenda_status":

@@ -52,6 +52,7 @@ from tar_lab.schemas import (
     ClaimAcceptancePolicy,
     ClaimVerdict,
     CheckpointRecord,
+    ContributionPositioningReport,
     ContradictionReview,
     CompetingTheory,
     CrossDomainBridgeRecord,
@@ -128,6 +129,7 @@ from tar_lab.schemas import (
     SelfImprovementCycleRecord,
     SelfImprovementPolicy,
     SelfCorrectionNote,
+    SoTAComparison,
     ScienceEnvironmentBundle,
     TARExecutionPolicy,
     TheoryInvalidationRecord,
@@ -1386,6 +1388,11 @@ class TAROrchestrator:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def _positioning_dir(self) -> Path:
+        path = Path(self.store.state_dir) / "positioning"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def _persist_competing_theory(self, theory: CompetingTheory) -> Path:
         path = self._theories_dir() / f"{theory.theory_id}.json"
         path.write_text(theory.model_dump_json(indent=2), encoding="utf-8")
@@ -1399,6 +1406,11 @@ class TAROrchestrator:
     def _persist_theory_invalidation(self, record: TheoryInvalidationRecord) -> Path:
         path = self._theory_invalidations_dir() / f"{record.invalidation_id}.json"
         path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+        return path
+
+    def _persist_positioning_report(self, report: ContributionPositioningReport) -> Path:
+        path = self._positioning_dir() / f"{report.report_id}.json"
+        path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
         return path
 
     def _load_competing_theory(self, theory_id: str) -> CompetingTheory:
@@ -1481,6 +1493,21 @@ class TAROrchestrator:
             rows.append(TheoryInvalidationRecord.model_validate_json(path.read_text(encoding="utf-8")))
         rows.sort(key=lambda item: (-item.confidence, item.timestamp, item.invalidation_id))
         return [item.model_dump(mode="json") for item in rows]
+
+    def get_positioning_reports(self) -> list[dict[str, Any]]:
+        rows: list[ContributionPositioningReport] = []
+        for path in sorted(self._positioning_dir().glob("*.json")):
+            rows.append(ContributionPositioningReport.model_validate_json(path.read_text(encoding="utf-8")))
+        rows.sort(key=lambda item: (item.timestamp, item.report_id), reverse=True)
+        return [item.model_dump(mode="json") for item in rows]
+
+    def get_positioning_report(self, report_id: str) -> dict[str, Any]:
+        path = self._positioning_dir() / f"{report_id}.json"
+        if not path.exists():
+            raise RuntimeError(f"Unknown positioning report: {report_id}")
+        return ContributionPositioningReport.model_validate_json(
+            path.read_text(encoding="utf-8")
+        ).model_dump(mode="json")
 
     def generate_competing_theories(
         self,
@@ -1616,6 +1643,122 @@ class TAROrchestrator:
             )
             path.write_text(anomaly.model_dump_json(indent=2), encoding="utf-8")
         return invalidation
+
+    def position_contribution(
+        self,
+        project_id: str,
+        trial_id: str,
+        result_description: str,
+    ) -> ContributionPositioningReport:
+        hits: list[MemorySearchHit] = []
+        if self.vault is not None:
+            try:
+                hits = self.vault.search(result_description, n_results=5)
+            except Exception:
+                hits = []
+        sota_comparisons: list[SoTAComparison] = []
+        for hit in hits[:5]:
+            metadata = hit.metadata or {}
+            similarity_score = max(0.0, min(1.0, float(hit.score)))
+            sota_comparisons.append(
+                SoTAComparison(
+                    comparison_id=uuid.uuid4().hex,
+                    timestamp=datetime.utcnow().isoformat(),
+                    paper_id=str(
+                        metadata.get("paper_id")
+                        or metadata.get("document_id")
+                        or hit.document_id
+                    ),
+                    paper_title=str(
+                        metadata.get("paper_title")
+                        or metadata.get("title")
+                        or "unknown"
+                    ),
+                    domain=str(metadata.get("domain") or "unknown"),
+                    similarity_score=similarity_score,
+                    outperforms=False,
+                    delta_description=(
+                        f"Vault similarity {similarity_score:.2f} — requires manual benchmark comparison"
+                    ),
+                )
+            )
+        if sota_comparisons:
+            novelty_vs_literature = 1.0 - (
+                sum(item.similarity_score for item in sota_comparisons) / len(sota_comparisons)
+            )
+            novelty_vs_literature = max(0.0, min(1.0, novelty_vs_literature))
+        else:
+            novelty_vs_literature = 1.0
+
+        surprise_score = 0.0
+        for path in sorted(self._anomalies_dir().glob("*.json")):
+            anomaly = AnomalyElevationRecord.model_validate_json(path.read_text(encoding="utf-8"))
+            if anomaly.breakthrough_id == trial_id:
+                surprise_score = max(surprise_score, anomaly.surprise_score)
+
+        competing_theories_open = 0
+        competing_theories_invalidated = 0
+        for path in sorted(self._theories_dir().glob("*.json")):
+            theory = CompetingTheory.model_validate_json(path.read_text(encoding="utf-8"))
+            if theory.trial_id != trial_id:
+                continue
+            if theory.status == "open":
+                competing_theories_open += 1
+            if theory.status == "invalidated":
+                competing_theories_invalidated += 1
+
+        positioning_summary = (
+            f"This contribution shows novelty_vs_literature={novelty_vs_literature:.2f} "
+            f"against {len(sota_comparisons)} nearest literature matches. "
+            f"Surprise elevation score is {surprise_score:.2f}. "
+            f"{competing_theories_open} competing theories remain open; "
+            f"{competing_theories_invalidated} have been invalidated."
+        )
+
+        report = ContributionPositioningReport(
+            report_id=uuid.uuid4().hex,
+            timestamp=datetime.utcnow().isoformat(),
+            project_id=project_id,
+            trial_id=trial_id,
+            novelty_vs_literature=novelty_vs_literature,
+            surprise_score=surprise_score,
+            sota_comparisons=sota_comparisons,
+            competing_theories_open=competing_theories_open,
+            competing_theories_invalidated=competing_theories_invalidated,
+            positioning_summary=positioning_summary,
+            vault_indexed=False,
+        )
+        self._persist_positioning_report(report)
+        indexed = self._index_structured_record(
+            document_id=f"contribution_positioning:{report.report_id}",
+            text=positioning_summary,
+            metadata={
+                "kind": "contribution_positioning",
+                "report_id": report.report_id,
+                "project_id": report.project_id,
+                "trial_id": report.trial_id,
+                "novelty_vs_literature": report.novelty_vs_literature,
+                "surprise_score": report.surprise_score,
+                "source_confidence": max(report.novelty_vs_literature, report.surprise_score),
+            },
+        )
+        if indexed:
+            report = report.model_copy(update={"vault_indexed": True})
+            self._persist_positioning_report(report)
+        return report
+
+    def publish_handoff_package(
+        self,
+        project_id: str,
+        trial_id: str,
+        description: str,
+    ) -> dict[str, Any]:
+        positioning = self.position_contribution(project_id, trial_id, description)
+        return {
+            "project_id": project_id,
+            "trial_id": trial_id,
+            "positioning_report_id": positioning.report_id,
+        }
 
     def elevate_anomalies(self) -> list[AnomalyElevationRecord]:
         reports = list(self.store.iter_breakthrough_reports())
@@ -3110,6 +3253,30 @@ class TAROrchestrator:
         else:
             claim_readiness_summary = "No accepted claim bundle exists yet; the package is suitable only for bounded research handoff."
 
+        latest_trial_id = next(
+            (
+                item.trial_id
+                for item in reversed(verdicts)
+                if item.trial_id
+            ),
+            None,
+        )
+        if latest_trial_id is None and verifications:
+            latest_trial_id = verifications[-1].trial_id
+        positioning_report_id: Optional[str] = None
+        latest_evidence_summary = (
+            project.resume_snapshot.latest_evidence_summary
+            if project.resume_snapshot is not None
+            else (project.latest_decision_summary or project.goal)
+        )
+        if latest_trial_id:
+            positioning = self.publish_handoff_package(
+                project.project_id,
+                latest_trial_id,
+                latest_evidence_summary,
+            )
+            positioning_report_id = positioning["positioning_report_id"]
+
         package = PublicationHandoffPackage(
             package_id=self._continuity_id("publication"),
             project_id=project.project_id,
@@ -3117,11 +3284,7 @@ class TAROrchestrator:
             domain_profile=project.domain_profile,
             package_status=package_status,
             project_status=project.status,
-            latest_evidence_summary=(
-                project.resume_snapshot.latest_evidence_summary
-                if project.resume_snapshot is not None
-                else (project.latest_decision_summary or project.goal)
-            ),
+            latest_evidence_summary=latest_evidence_summary,
             claim_readiness_summary=claim_readiness_summary,
             accepted_claims=accepted_claims,
             provisional_claims=provisional_claims,
@@ -3132,6 +3295,7 @@ class TAROrchestrator:
             open_questions=open_questions,
             evidence_gaps=evidence_gaps,
             writer_cautions=writer_cautions,
+            positioning_report_id=positioning_report_id,
         )
         artifact_path = self.store.save_publication_handoff(package)
         package = package.model_copy(update={"artifact_path": str(artifact_path)})
