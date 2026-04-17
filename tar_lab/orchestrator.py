@@ -49,6 +49,7 @@ from tar_lab.schemas import (
     ClaimVerdict,
     CheckpointRecord,
     ContradictionReview,
+    CrossDomainBridgeRecord,
     CuratedDeltaRecord,
     DirectorPolicy,
     DryRunReport,
@@ -794,6 +795,30 @@ class TAROrchestrator:
         router = ModelRouter(str(self.workspace), frontier_config)
         return [item.model_dump(mode="json") for item in router.load_log()]
 
+    def _persist_cross_domain_bridge(self, bridge: CrossDomainBridgeRecord) -> None:
+        bridges_dir = Path(self.store.literature_dir) / "bridges"
+        bridges_dir.mkdir(parents=True, exist_ok=True)
+        path = bridges_dir / f"{bridge.bridge_id}.json"
+        path.write_text(bridge.model_dump_json(indent=2), encoding="utf-8")
+
+    def _index_cross_domain_bridge(self, bridge: CrossDomainBridgeRecord) -> CrossDomainBridgeRecord:
+        if self.vault is None:
+            return bridge
+        text = bridge.summary
+        metadata = {
+            "kind": "cross_domain_bridge",
+            "bridge_id": bridge.bridge_id,
+            "source_domain": bridge.source_domain,
+            "target_domain": bridge.target_domain,
+            "source_paper_id": bridge.source_paper_id,
+            "target_paper_id": bridge.target_paper_id,
+            "bridge_type": bridge.bridge_type,
+            "confidence": bridge.confidence,
+            "source_confidence": bridge.confidence,
+        }
+        self.vault._upsert(f"cross_domain_bridge:{bridge.bridge_id}", text, metadata)
+        return bridge.model_copy(update={"vault_indexed": True})
+
     def run_agenda_review(self) -> AgendaReviewRecord:
         from tar_lab.agenda import AgendaEngine
 
@@ -830,6 +855,14 @@ class TAROrchestrator:
             self.store.append_research_document(document)
             if self.vault is not None:
                 self.vault.index_research_document(document)
+        cross_domain_bridges = self.research_ingestor.detect_cross_domain_bridges(report.documents)
+        indexed_bridge_count = 0
+        for bridge in cross_domain_bridges:
+            if self.vault is not None:
+                bridge = self._index_cross_domain_bridge(bridge)
+            if bridge.vault_indexed:
+                indexed_bridge_count += 1
+            self._persist_cross_domain_bridge(bridge)
         self.store.append_audit_event(
             "research",
             "ingest",
@@ -838,6 +871,8 @@ class TAROrchestrator:
                 "fetched": report.fetched,
                 "indexed": report.indexed,
                 "sources": report.sources,
+                "cross_domain_bridges": len(cross_domain_bridges),
+                "cross_domain_bridges_indexed": indexed_bridge_count,
             },
         )
         self._sync_memory()

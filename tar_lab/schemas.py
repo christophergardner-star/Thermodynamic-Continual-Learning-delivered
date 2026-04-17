@@ -135,6 +135,19 @@ class RoutingSummary(StrictModel):
     budget_exhausted: bool = False
 
 
+class CrossDomainBridgeRecord(StrictModel):
+    bridge_id: str
+    timestamp: str
+    source_domain: str
+    target_domain: str
+    source_paper_id: str
+    target_paper_id: str
+    bridge_type: Literal["analogy", "method_transfer", "shared_formalism", "empirical_parallel"]
+    confidence: float = Field(ge=0.0, le=1.0)
+    summary: str
+    vault_indexed: bool = False
+
+
 DataAccessMode = Literal["OFFLINE_FALLBACK", "CACHED_REAL", "DOWNLOAD_REAL"]
 DataPurity = Literal["fallback", "cached_real", "download_real", "local_real", "mixed"]
 RunIntent = Literal["control", "plumbing", "research"]
@@ -691,6 +704,7 @@ class ResearchDocument(StrictModel):
     document_id: str
     source_kind: Literal["arxiv", "rss", "manual"]
     source_name: str
+    domain: str = ""
     title: str
     summary: str
     url: str
