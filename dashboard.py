@@ -18,12 +18,23 @@ def _project_label(payload: dict[str, Any]) -> str:
     return f"{title} [{status}]"
 
 
+def _frontier_gap_label(payload: dict[str, Any]) -> str:
+    gap_id = str(payload.get("gap_id") or "unknown-gap")
+    status = str(payload.get("status") or "n/a")
+    description = str(payload.get("description") or gap_id)
+    short = description if len(description) <= 72 else f"{description[:69]}..."
+    return f"{short} [{status}]"
+
+
 def build_dashboard_context(
     orchestrator: TAROrchestrator,
     *,
     include_blocked: bool = True,
     max_results: int = 8,
     selected_project_id: str = "",
+    frontier_gap_status_filter: str = "",
+    frontier_gap_min_confidence: float = 0.0,
+    selected_frontier_gap_id: str = "",
 ) -> dict[str, Any]:
     status = orchestrator.status()
     projects_payload = orchestrator.list_projects()
@@ -55,6 +66,23 @@ def build_dashboard_context(
     literature_status = orchestrator.literature_status()
     literature_artifacts = orchestrator.list_paper_artifacts(limit=max_results)
     literature_conflicts = orchestrator.literature_conflicts(limit=max_results)
+    frontier_gap_status = orchestrator.frontier_gap_status(
+        status=frontier_gap_status_filter or None,
+        limit=max_results,
+        min_confidence=frontier_gap_min_confidence,
+    )
+    frontier_gap_views = frontier_gap_status.get("gaps", [])
+    frontier_gap_ids = [item.get("gap_id") for item in frontier_gap_views if item.get("gap_id")]
+    frontier_gap_labels = {
+        item.get("gap_id"): _frontier_gap_label(item)
+        for item in frontier_gap_views
+        if item.get("gap_id")
+    }
+    selected_frontier_gap = None
+    if selected_frontier_gap_id:
+        gap = orchestrator.store.get_frontier_gap(selected_frontier_gap_id)
+        if gap is not None:
+            selected_frontier_gap = gap.model_dump(mode="json")
 
     selected_project_status = None
     selected_resume_dashboard = None
@@ -87,6 +115,12 @@ def build_dashboard_context(
         "literature_status": literature_status,
         "literature_artifacts": literature_artifacts,
         "literature_conflicts": literature_conflicts,
+        "frontier_gap_status": frontier_gap_status,
+        "frontier_gap_views": frontier_gap_views,
+        "frontier_gap_ids": frontier_gap_ids,
+        "frontier_gap_labels": frontier_gap_labels,
+        "selected_frontier_gap_id": selected_frontier_gap_id,
+        "selected_frontier_gap": selected_frontier_gap,
         "selected_project_status": selected_project_status,
         "selected_resume_dashboard": selected_resume_dashboard,
         "selected_evidence_map": selected_evidence_map,
@@ -176,6 +210,7 @@ def _render_operator_tab(context: dict[str, Any]) -> None:
     health = operator_view.get("portfolio_health", {})
     retrieval = operator_view.get("retrieval_mode_breakdown", {})
     verdicts = operator_view.get("claim_verdict_lifecycle", {})
+    frontier = operator_view.get("frontier_gap_counts", {})
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.metric("Total", counts.get("total", 0))
@@ -190,6 +225,12 @@ def _render_operator_tab(context: dict[str, Any]) -> None:
     ret2.metric("Lexical Fallback", retrieval.get("lexical_fallback", 0))
     ret3.metric("Degraded Studies", operator_view.get("degraded_retrieval_studies", 0))
     ret4.metric("Aging Verdicts", verdicts.get("aging", 0))
+
+    frontier1, frontier2, frontier3, frontier4 = st.columns(4)
+    frontier1.metric("Frontier Identified", frontier.get("identified", 0))
+    frontier2.metric("Frontier Proposed", frontier.get("proposed", 0))
+    frontier3.metric("Frontier Promoted", frontier.get("promoted", 0))
+    frontier4.metric("Frontier Scans", operator_view.get("frontier_gap_scan_count", 0))
 
     left, right = st.columns(2)
     with left:
@@ -233,6 +274,11 @@ def _render_operator_tab(context: dict[str, Any]) -> None:
         "Resume Candidates",
         operator_view.get("resume_candidates", []),
         "No resume candidates.",
+    )
+    _show_dataframe(
+        "Frontier Gaps",
+        operator_view.get("frontier_gaps", []),
+        "No frontier gaps recorded.",
     )
 
 
@@ -408,6 +454,84 @@ def _render_literature_tab(context: dict[str, Any]) -> None:
     )
 
 
+def _render_frontier_gap_tab(
+    orchestrator: TAROrchestrator,
+    context: dict[str, Any],
+    *,
+    frontier_topic: str,
+    max_results: int,
+    frontier_gap_min_confidence: float,
+) -> None:
+    payload = context.get("frontier_gap_status", {})
+    counts = payload.get("counts", {})
+    latest_scan = payload.get("latest_scan", {})
+    gaps = payload.get("gaps", [])
+    selected_gap = context.get("selected_frontier_gap") or {}
+
+    notice = st.session_state.pop("frontier_gap_notice", None)
+    if notice:
+        st.success(str(notice))
+
+    top1, top2, top3, top4, top5, top6 = st.columns(6)
+    top1.metric("Total", counts.get("total", 0))
+    top2.metric("Identified", counts.get("identified", 0))
+    top3.metric("Proposed", counts.get("proposed", 0))
+    top4.metric("Rejected", counts.get("rejected", 0))
+    top5.metric("Promoted", counts.get("promoted", 0))
+    top6.metric("Scans", payload.get("scan_count", 0))
+
+    left, right = st.columns(2)
+    with left:
+        _show_json("Latest Frontier Scan", latest_scan, "No frontier gap scan recorded.")
+    with right:
+        _show_json("Frontier Gap Status", payload, "No frontier gap status recorded.")
+
+    action_col1, action_col2 = st.columns(2)
+    with action_col1:
+        if st.button("Scan Frontier Now", key="frontier_scan_now"):
+            report = orchestrator.scan_frontier_gaps(topic=frontier_topic, max_gaps=max_results)
+            st.session_state["frontier_gap_notice"] = (
+                f"Frontier scan {report.scan_id} completed: identified={report.gaps_identified} rejected={report.gaps_rejected}."
+            )
+            st.rerun()
+        if st.button("Propose From Frontier Gaps", key="frontier_propose_now"):
+            created = orchestrator.propose_projects_from_gaps(
+                max_proposals=max_results,
+                confidence_threshold=frontier_gap_min_confidence,
+            )
+            st.session_state["frontier_gap_notice"] = (
+                f"Created {len(created)} proposed project(s) from frontier gaps."
+            )
+            st.rerun()
+    with action_col2:
+        rejection_reason = st.text_input(
+            "Reject Reason",
+            value="operator review rejected this frontier gap",
+            key="frontier_gap_rejection_reason",
+        )
+        if selected_gap and selected_gap.get("status") == "proposed":
+            if st.button("Promote Selected Gap", key="frontier_promote_selected"):
+                project = orchestrator.promote_gap_project(str(selected_gap.get("gap_id", "")))
+                st.session_state["frontier_gap_notice"] = (
+                    f"Promoted frontier gap {selected_gap.get('gap_id', 'n/a')} into active project {project.project_id}."
+                )
+                st.rerun()
+        if selected_gap and selected_gap.get("status") in {"identified", "proposed"}:
+            if st.button("Reject Selected Gap", key="frontier_reject_selected"):
+                gap = orchestrator.reject_gap_project(str(selected_gap.get("gap_id", "")), rejection_reason)
+                st.session_state["frontier_gap_notice"] = (
+                    f"Rejected frontier gap {gap.gap_id}."
+                )
+                st.rerun()
+
+    _show_json("Selected Frontier Gap", selected_gap, "No frontier gap selected.")
+    _show_dataframe(
+        "Frontier Gaps",
+        gaps,
+        "No frontier gaps recorded.",
+    )
+
+
 def _render_actions_tab(orchestrator: TAROrchestrator) -> None:
     button_col1, button_col2, button_col3 = st.columns(3)
     if button_col1.button("Dry Run"):
@@ -488,6 +612,19 @@ def main() -> None:
     workspace = st.sidebar.text_input("Workspace", ".")
     max_results = st.sidebar.slider("View Limit", min_value=3, max_value=20, value=8)
     include_blocked = st.sidebar.checkbox("Include Blocked", value=True)
+    frontier_topic = st.sidebar.text_input("Frontier Topic", "thermodynamic continual learning")
+    frontier_gap_status_filter = st.sidebar.selectbox(
+        "Gap Status Filter",
+        options=["", "identified", "proposed", "rejected", "promoted"],
+        format_func=lambda item: "All statuses" if not item else item,
+    )
+    frontier_gap_min_confidence = st.sidebar.slider(
+        "Gap Min Confidence",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.0,
+        step=0.05,
+    )
 
     orchestrator = TAROrchestrator(workspace=workspace)
     try:
@@ -496,6 +633,9 @@ def main() -> None:
             include_blocked=include_blocked,
             max_results=max_results,
             selected_project_id="",
+            frontier_gap_status_filter=frontier_gap_status_filter,
+            frontier_gap_min_confidence=frontier_gap_min_confidence,
+            selected_frontier_gap_id="",
         )
         selected_project_id = st.sidebar.selectbox(
             "Project",
@@ -504,18 +644,28 @@ def main() -> None:
             if not item
             else base_context["project_labels"].get(item, item),
         )
+        selected_frontier_gap_id = st.sidebar.selectbox(
+            "Frontier Gap",
+            options=[""] + base_context["frontier_gap_ids"],
+            format_func=lambda item: "No frontier gap selected"
+            if not item
+            else base_context["frontier_gap_labels"].get(item, item),
+        )
         context = (
             base_context
-            if not selected_project_id
+            if not selected_project_id and not selected_frontier_gap_id
             else build_dashboard_context(
                 orchestrator,
                 include_blocked=include_blocked,
                 max_results=max_results,
                 selected_project_id=selected_project_id,
+                frontier_gap_status_filter=frontier_gap_status_filter,
+                frontier_gap_min_confidence=frontier_gap_min_confidence,
+                selected_frontier_gap_id=selected_frontier_gap_id,
             )
         )
 
-        tabs = st.tabs(["Overview", "Operator", "Project", "Publication", "Infrastructure", "Literature", "Actions", "Raw"])
+        tabs = st.tabs(["Overview", "Operator", "Project", "Publication", "Infrastructure", "Literature", "Frontier Gaps", "Actions", "Raw"])
         with tabs[0]:
             _render_overview_tab(context)
         with tabs[1]:
@@ -529,8 +679,16 @@ def main() -> None:
         with tabs[5]:
             _render_literature_tab(context)
         with tabs[6]:
-            _render_actions_tab(orchestrator)
+            _render_frontier_gap_tab(
+                orchestrator,
+                context,
+                frontier_topic=frontier_topic,
+                max_results=max_results,
+                frontier_gap_min_confidence=frontier_gap_min_confidence,
+            )
         with tabs[7]:
+            _render_actions_tab(orchestrator)
+        with tabs[8]:
             _render_raw_tab(context)
     finally:
         orchestrator.shutdown()

@@ -119,7 +119,16 @@ SandboxNetworkPolicy = Literal["off", "restricted", "profile_required"]
 SandboxProfile = Literal["production", "dev_override"]
 MemoryStoreHealth = Literal["healthy", "rebuild_required", "rebuilding", "degraded"]
 DependencyResolutionStatus = Literal["pinned", "missing_version", "optional_missing"]
-ResearchProjectStatus = Literal["active", "paused", "blocked", "awaiting_human_review", "completed", "abandoned"]
+ResearchProjectStatus = Literal[
+    "active",
+    "paused",
+    "blocked",
+    "awaiting_human_review",
+    "proposed",
+    "parked",
+    "completed",
+    "abandoned",
+]
 ResearchThreadStatus = Literal["open", "testing", "falsifying", "supported", "contradicted", "parked", "closed"]
 ResearchActionStatus = Literal["planned", "queued", "running", "completed", "failed", "skipped", "invalidated"]
 ResearchConfidenceState = Literal["unknown", "exploratory", "provisional", "supported", "contradicted"]
@@ -473,6 +482,33 @@ class ResearchIngestReport(StrictModel):
     indexed: int = Field(ge=0)
     sources: List[str] = Field(default_factory=list)
     documents: List[ResearchDocument] = Field(default_factory=list)
+
+
+class FrontierGapRecord(StrictModel):
+    gap_id: str
+    created_at: str = Field(default_factory=utc_now_iso)
+    description: str
+    domain_profile: Optional[str] = None
+    evidence_count: int = Field(default=0, ge=0)
+    source_document_ids: List[str] = Field(default_factory=list)
+    novelty_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    similarity_to_existing: float = Field(default=0.0, ge=0.0, le=1.0)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    status: Literal["identified", "proposed", "rejected", "promoted"] = "identified"
+    rejection_reason: Optional[str] = None
+    proposed_project_id: Optional[str] = None
+
+
+class FrontierGapScanReport(StrictModel):
+    scan_id: str
+    created_at: str = Field(default_factory=utc_now_iso)
+    topic: str
+    gaps_identified: int = Field(default=0, ge=0)
+    gaps_proposed: int = Field(default=0, ge=0)
+    gaps_rejected: int = Field(default=0, ge=0)
+    gaps: List[FrontierGapRecord] = Field(default_factory=list)
+    existing_project_count: int = Field(default=0, ge=0)
+    retrieval_mode: Literal["semantic", "lexical_fallback"] = "lexical_fallback"
 
 
 class SciencePackageSpec(StrictModel):
@@ -2057,6 +2093,10 @@ class FrontierStatus(StrictModel):
     claim_policy: Optional[ClaimAcceptancePolicy] = None
     recent_claim_verdicts: List[ClaimVerdict] = Field(default_factory=list)
     benchmark_profiles: Dict[str, int] = Field(default_factory=dict)
+    frontier_gap_counts: Dict[str, int] = Field(default_factory=dict)
+    frontier_gap_scans: int = Field(default=0, ge=0)
+    latest_frontier_gap_scan: Optional[FrontierGapScanReport] = None
+    recent_frontier_gaps: List[FrontierGapRecord] = Field(default_factory=list)
     safe_execution_mode: str
     active_leases: int = Field(default=0, ge=0)
     alert_count: int = Field(default=0, ge=0)
@@ -2077,6 +2117,11 @@ class ControlRequest(StrictModel):
         "chat",
         "check_regime",
         "ingest_research",
+        "scan_frontier_gaps",
+        "list_frontier_gaps",
+        "propose_projects_from_gaps",
+        "promote_gap_project",
+        "reject_gap_project",
         "verify_last_trial",
         "breakthrough_report",
         "resolve_problem",

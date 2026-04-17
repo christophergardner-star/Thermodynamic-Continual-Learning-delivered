@@ -20,6 +20,8 @@ from tar_lab.schemas import (
     EndpointRecord,
     EndpointRegistryState,
     FalsificationPlan,
+    FrontierGapRecord,
+    FrontierGapScanReport,
     ImageManifest,
     MemoryStoreManifest,
     PortfolioDecision,
@@ -78,6 +80,8 @@ class TARStateStore:
         self.problem_executions_path = self.state_dir / "problem_executions.jsonl"
         self.problem_schedule_path = self.state_dir / "problem_schedule.json"
         self.research_projects_path = self.state_dir / "research_projects.json"
+        self.frontier_gaps_path = self.state_dir / "frontier_gaps.jsonl"
+        self.gap_scan_reports_path = self.state_dir / "gap_scan_reports.jsonl"
         self.research_portfolio_path = self.state_dir / "research_portfolio.json"
         self.priority_snapshots_path = self.state_dir / "priority_snapshots.jsonl"
         self.budget_allocations_path = self.state_dir / "budget_allocations.jsonl"
@@ -198,6 +202,54 @@ class TARStateStore:
         for line in self.research_intel_path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 rows.append(ResearchDocument.model_validate_json(line))
+        return rows
+
+    def append_frontier_gap(self, gap: FrontierGapRecord) -> None:
+        with self.frontier_gaps_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(gap.model_dump(mode="json")) + "\n")
+
+    def iter_frontier_gaps(self) -> Iterable[FrontierGapRecord]:
+        if not self.frontier_gaps_path.exists():
+            return []
+        rows: List[FrontierGapRecord] = []
+        for line in self.frontier_gaps_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(FrontierGapRecord.model_validate_json(line))
+        return rows
+
+    def get_frontier_gap(self, gap_id: str) -> Optional[FrontierGapRecord]:
+        for gap in self.iter_frontier_gaps():
+            if gap.gap_id == gap_id:
+                return gap
+        return None
+
+    def update_frontier_gap(self, gap_id: str, **updates: Any) -> Optional[FrontierGapRecord]:
+        rows = list(self.iter_frontier_gaps())
+        updated_gap: Optional[FrontierGapRecord] = None
+        new_rows: List[FrontierGapRecord] = []
+        for gap in rows:
+            if gap.gap_id == gap_id:
+                updated_gap = gap.model_copy(update=updates)
+                new_rows.append(updated_gap)
+            else:
+                new_rows.append(gap)
+        content = ""
+        if new_rows:
+            content = "\n".join(json.dumps(item.model_dump(mode="json")) for item in new_rows) + "\n"
+        self._atomic_write_text(self.frontier_gaps_path, content)
+        return updated_gap
+
+    def append_gap_scan_report(self, report: FrontierGapScanReport) -> None:
+        with self.gap_scan_reports_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(report.model_dump(mode="json")) + "\n")
+
+    def iter_gap_scan_reports(self) -> Iterable[FrontierGapScanReport]:
+        if not self.gap_scan_reports_path.exists():
+            return []
+        rows: List[FrontierGapScanReport] = []
+        for line in self.gap_scan_reports_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(FrontierGapScanReport.model_validate_json(line))
         return rows
 
     def append_verification_report(self, report: VerificationReport) -> None:

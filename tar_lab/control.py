@@ -43,6 +43,34 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
                 topic=str(request.payload.get("topic", "frontier ai")),
                 max_results=int(request.payload.get("max_results", 6)),
             ).model_dump(mode="json")
+        elif request.command == "scan_frontier_gaps":
+            payload = orchestrator.scan_frontier_gaps(
+                topic=str(request.payload.get("topic", "thermodynamic continual learning")),
+                max_gaps=int(request.payload.get("max_gaps", request.payload.get("limit", 10))),
+            ).model_dump(mode="json")
+        elif request.command == "list_frontier_gaps":
+            payload = orchestrator.frontier_gap_status(
+                status=request.payload.get("status"),
+                limit=int(request.payload.get("limit", 20)),
+                min_confidence=float(request.payload.get("min_confidence", request.payload.get("threshold", 0.0))),
+            )
+        elif request.command == "propose_projects_from_gaps":
+            payload = {
+                "projects": [
+                    item.model_dump(mode="json")
+                    for item in orchestrator.propose_projects_from_gaps(
+                        max_proposals=int(request.payload.get("max_proposals", request.payload.get("limit", 3))),
+                        confidence_threshold=float(request.payload.get("confidence_threshold", request.payload.get("threshold", 0.45))),
+                    )
+                ]
+            }
+        elif request.command == "promote_gap_project":
+            payload = orchestrator.promote_gap_project(str(request.payload.get("gap_id", ""))).model_dump(mode="json")
+        elif request.command == "reject_gap_project":
+            payload = orchestrator.reject_gap_project(
+                str(request.payload.get("gap_id", "")),
+                str(request.payload.get("reason", "")),
+            ).model_dump(mode="json")
         elif request.command == "verify_last_trial":
             payload = orchestrator.verify_last_trial(
                 trial_id=request.payload.get("trial_id"),

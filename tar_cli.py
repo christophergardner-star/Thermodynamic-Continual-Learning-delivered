@@ -24,6 +24,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trial-id", dest="trial_id")
     parser.add_argument("--problem-id", dest="problem_id")
     parser.add_argument("--project-id", dest="project_id")
+    parser.add_argument("--gap-id", dest="gap_id")
+    parser.add_argument(
+        "--gap-status",
+        dest="gap_status",
+        choices=["identified", "proposed", "rejected", "promoted"],
+    )
     parser.add_argument("--schedule-id", dest="schedule_id")
     parser.add_argument("--endpoint-name", dest="endpoint_name")
     parser.add_argument("--profile-id", dest="profile_id")
@@ -68,6 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeat-interval-s", type=int, dest="repeat_interval_s")
     parser.add_argument("--max-runs", type=int, default=1, dest="max_runs")
     parser.add_argument("--priority", type=int, default=0)
+    parser.add_argument("--threshold", type=float, default=0.45)
     parser.add_argument(
         "--pause-reason",
         default="operator_paused",
@@ -117,6 +124,11 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--live-docker-test", action="store_true", dest="live_docker_test")
     group.add_argument("--check-regime", action="store_true", dest="check_regime")
     group.add_argument("--ingest-research", action="store_true", dest="ingest_research")
+    group.add_argument("--scan-frontier", action="store_true", dest="scan_frontier")
+    group.add_argument("--list-gaps", action="store_true", dest="list_gaps")
+    group.add_argument("--propose-gap-projects", action="store_true", dest="propose_gap_projects")
+    group.add_argument("--promote-gap", action="store_true", dest="promote_gap")
+    group.add_argument("--reject-gap", action="store_true", dest="reject_gap")
     group.add_argument("--verify-last-trial", action="store_true", dest="verify_last_trial")
     group.add_argument("--breakthrough-report", action="store_true", dest="breakthrough_report")
     group.add_argument("--resolve-problem", action="store_true", dest="resolve_problem")
@@ -207,6 +219,28 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
         return orchestrator.check_regime()
     if args.ingest_research:
         return orchestrator.ingest_research(topic=args.topic, max_results=args.max_results).model_dump(mode="json")
+    if args.scan_frontier:
+        return orchestrator.scan_frontier_gaps(topic=args.topic, max_gaps=args.max_results).model_dump(mode="json")
+    if args.list_gaps:
+        return orchestrator.frontier_gap_status(
+            status=args.gap_status,
+            limit=args.max_results,
+            min_confidence=args.threshold,
+        )
+    if args.propose_gap_projects:
+        return {
+            "projects": [
+                item.model_dump(mode="json")
+                for item in orchestrator.propose_projects_from_gaps(
+                    max_proposals=args.max_results,
+                    confidence_threshold=args.threshold,
+                )
+            ]
+        }
+    if args.promote_gap:
+        return orchestrator.promote_gap_project(args.gap_id or "").model_dump(mode="json")
+    if args.reject_gap:
+        return orchestrator.reject_gap_project(args.gap_id or "", args.message or "").model_dump(mode="json")
     if args.verify_last_trial:
         return orchestrator.verify_last_trial(trial_id=args.trial_id).model_dump(mode="json")
     if args.breakthrough_report:
@@ -516,6 +550,7 @@ def _render_status(payload: Dict[str, Any]) -> str:
         f"Literature Artifacts: {literature.get('artifacts', 0)}",
         f"Literature Conflicts: {literature.get('conflicts', 0)}",
         f"Literature Manifests: {literature.get('manifests', 0)}",
+        f"Frontier Gaps: total={payload.get('frontier_gap_counts', {}).get('total', 0)} identified={payload.get('frontier_gap_counts', {}).get('identified', 0)} proposed={payload.get('frontier_gap_counts', {}).get('proposed', 0)} rejected={payload.get('frontier_gap_counts', {}).get('rejected', 0)} promoted={payload.get('frontier_gap_counts', {}).get('promoted', 0)} scans={payload.get('frontier_gap_scans', 0)}",
         f"Retrieval Modes: semantic={retrieval.get('semantic', 0)} lexical_fallback={retrieval.get('lexical_fallback', 0)} degraded={payload.get('degraded_retrieval_studies', 0)} window={payload.get('recent_study_window', 0)}",
         f"Queue Health: scheduled={queue.get('scheduled', 0)} leased={queue.get('leased', 0)} running={queue.get('running', 0)} recoverable_crash={queue.get('recoverable_crash', 0)} retry_wait={queue.get('retry_wait', 0)} failed_terminal={queue.get('failed_terminal', 0)}",
         f"Latest Claim Verdict: {(payload.get('latest_claim_verdict') or {}).get('status', 'n/a')}",
@@ -597,6 +632,34 @@ def _render_status(payload: Dict[str, Any]) -> str:
         )
         lines.append(f"Operator Endpoint: {operator_state.get('endpoint_name', 'n/a')}")
         lines.append(f"Operator Checkpoint Kind: {operator_checkpoint.get('checkpoint_kind', 'n/a')}")
+    return "\n".join(lines)
+
+
+def _render_frontier_status(payload: Dict[str, Any]) -> str:
+    counts = payload.get("frontier_gap_counts") or {}
+    latest_scan = payload.get("latest_frontier_gap_scan") or {}
+    lines = [
+        f"Experiment Backends: {len(payload.get('experiment_backends', []))}",
+        f"Literature Artifacts: {payload.get('literature_artifacts', 0)}",
+        f"Literature Conflicts: {payload.get('literature_conflicts', 0)}",
+        f"Literature Manifests: {payload.get('literature_manifests', 0)}",
+        f"Semantic Research Ready: {payload.get('semantic_research_ready', False)}",
+        f"Reranker: {payload.get('reranker', 'n/a')}",
+        f"Frontier Gaps: total={counts.get('total', 0)} identified={counts.get('identified', 0)} proposed={counts.get('proposed', 0)} rejected={counts.get('rejected', 0)} promoted={counts.get('promoted', 0)}",
+        f"Frontier Gap Scans: {payload.get('frontier_gap_scans', 0)}",
+    ]
+    if latest_scan:
+        lines.append(
+            f"Latest Frontier Scan: {latest_scan.get('scan_id', 'n/a')} topic={latest_scan.get('topic', 'n/a')} identified={latest_scan.get('gaps_identified', 0)} rejected={latest_scan.get('gaps_rejected', 0)}"
+        )
+    recent = payload.get("recent_frontier_gaps") or []
+    if recent:
+        lines.append("")
+        lines.append("Recent Frontier Gaps:")
+        for item in recent:
+            lines.append(
+                f"- {item.get('gap_id', 'n/a')} :: {item.get('status', 'n/a')} confidence={item.get('confidence', 'n/a')} domain={item.get('domain_profile', 'n/a')} description={item.get('description', 'n/a')}"
+            )
     return "\n".join(lines)
 
 
@@ -945,10 +1008,12 @@ def _render_operator_view(payload: Dict[str, Any]) -> str:
     health = payload.get("portfolio_health") or {}
     retrieval = payload.get("retrieval_mode_breakdown") or {}
     verdicts = payload.get("claim_verdict_lifecycle") or {}
+    frontier = payload.get("frontier_gap_counts") or {}
     lines = [
         f"Generated At: {payload.get('generated_at', 'n/a')}",
         f"Projects: total={counts.get('total', 0)} active={counts.get('active', 0)} paused={counts.get('paused', 0)} blocked={counts.get('blocked', 0)} stale={counts.get('stale', 0)}",
         f"Portfolio Health: selected={health.get('selected_project_id', 'n/a')} resume_candidates={health.get('resume_candidates', 0)} promotion_blocked={health.get('promotion_blocked_projects', 0)}",
+        f"Frontier Gaps: total={frontier.get('total', 0)} identified={frontier.get('identified', 0)} proposed={frontier.get('proposed', 0)} rejected={frontier.get('rejected', 0)} promoted={frontier.get('promoted', 0)} scans={payload.get('frontier_gap_scan_count', 0)}",
         f"Recent Retrieval Modes: semantic={retrieval.get('semantic', 0)} lexical_fallback={retrieval.get('lexical_fallback', 0)} degraded={payload.get('degraded_retrieval_studies', 0)} window={payload.get('recent_study_window', 0)}",
         f"Verdict Lifecycle: active={verdicts.get('active', 0)} aging={verdicts.get('aging', 0)} escalated={verdicts.get('escalated', 0)} resolved={verdicts.get('resolved', 0)} window={payload.get('recent_verdict_window', 0)}",
         "",
@@ -980,6 +1045,93 @@ def _render_operator_view(payload: Dict[str, Any]) -> str:
     if escalated:
         lines.append("")
         lines.append("Escalated Verdicts: " + ", ".join(escalated))
+    frontier_gaps = payload.get("frontier_gaps") or []
+    if frontier_gaps:
+        lines.append("")
+        lines.append("Frontier Gaps:")
+        for item in frontier_gaps:
+            lines.append(
+                f"- {item.get('gap_id', 'n/a')} :: {item.get('status', 'n/a')} confidence={item.get('confidence', 'n/a')} domain={item.get('domain_profile', 'n/a')}"
+            )
+    return "\n".join(lines)
+
+
+def _render_frontier_gap_status(payload: Dict[str, Any]) -> str:
+    counts = payload.get("counts") or {}
+    lines = [
+        f"Frontier Gaps: total={counts.get('total', 0)} identified={counts.get('identified', 0)} proposed={counts.get('proposed', 0)} rejected={counts.get('rejected', 0)} promoted={counts.get('promoted', 0)}",
+        f"Frontier Gap Scans: {payload.get('scan_count', 0)}",
+        f"Filter: status={payload.get('status_filter', 'all') or 'all'} min_confidence={payload.get('min_confidence', 0.0)}",
+    ]
+    latest_scan = payload.get("latest_scan") or {}
+    if latest_scan:
+        lines.append(
+            f"Latest Scan: {latest_scan.get('scan_id', 'n/a')} topic={latest_scan.get('topic', 'n/a')} retrieval_mode={latest_scan.get('retrieval_mode', 'n/a')}"
+        )
+    recent_scans = payload.get("recent_scans") or []
+    if recent_scans:
+        lines.append("")
+        lines.append("Recent Scans:")
+        for item in recent_scans[:5]:
+            lines.append(
+                f"- {item.get('scan_id', 'n/a')} :: topic={item.get('topic', 'n/a')} identified={item.get('gaps_identified', 0)} rejected={item.get('gaps_rejected', 0)}"
+            )
+    gaps = payload.get("gaps") or []
+    if gaps:
+        lines.append("")
+        lines.append("Gaps:")
+        for item in gaps:
+            lines.append(
+                f"- {item.get('gap_id', 'n/a')} :: {item.get('status', 'n/a')} confidence={item.get('confidence', 'n/a')} novelty={item.get('novelty_score', 'n/a')} similarity={item.get('similarity_to_existing', 'n/a')} domain={item.get('domain_profile', 'n/a')} project={item.get('proposed_project_id', 'n/a')}"
+            )
+    return "\n".join(lines)
+
+
+def _render_frontier_gap_scan(payload: Dict[str, Any]) -> str:
+    gaps = payload.get("gaps") or []
+    lines = [
+        f"Scan ID: {payload.get('scan_id', 'n/a')}",
+        f"Topic: {payload.get('topic', 'n/a')}",
+        f"Retrieval Mode: {payload.get('retrieval_mode', 'n/a')}",
+        f"Gaps Identified: {payload.get('gaps_identified', 0)}",
+        f"Gaps Rejected: {payload.get('gaps_rejected', 0)}",
+        f"Existing Projects: {payload.get('existing_project_count', 0)}",
+    ]
+    if gaps:
+        lines.append("")
+        lines.append("Gaps:")
+        for item in gaps:
+            lines.append(
+                f"- {item.get('gap_id', 'n/a')} :: {item.get('status', 'n/a')} confidence={item.get('confidence', 'n/a')} domain={item.get('domain_profile', 'n/a')} reason={item.get('rejection_reason', 'n/a')}"
+            )
+    return "\n".join(lines)
+
+
+def _render_gap_project_list(payload: Dict[str, Any]) -> str:
+    projects = payload.get("projects") or []
+    if not projects:
+        return "No proposed gap projects created."
+    lines = ["Proposed Gap Projects:"]
+    for item in projects:
+        lines.append(
+            f"- {item.get('project_id', 'n/a')} :: {item.get('status', 'n/a')} domain={item.get('domain_profile', 'n/a')} title={item.get('title', 'n/a')}"
+        )
+    return "\n".join(lines)
+
+
+def _render_frontier_gap_record(payload: Dict[str, Any]) -> str:
+    lines = [
+        f"Gap ID: {payload.get('gap_id', 'n/a')}",
+        f"Status: {payload.get('status', 'n/a')}",
+        f"Confidence: {payload.get('confidence', 'n/a')}",
+        f"Novelty Score: {payload.get('novelty_score', 'n/a')}",
+        f"Similarity To Existing: {payload.get('similarity_to_existing', 'n/a')}",
+        f"Domain Profile: {payload.get('domain_profile', 'n/a')}",
+        f"Evidence Count: {payload.get('evidence_count', 0)}",
+        f"Proposed Project: {payload.get('proposed_project_id', 'n/a')}",
+        f"Rejection Reason: {payload.get('rejection_reason', 'n/a')}",
+        f"Description: {payload.get('description', 'n/a')}",
+    ]
     return "\n".join(lines)
 
 
@@ -1435,6 +1587,45 @@ def main() -> int:
                 response = send_command(
                     "ingest_research",
                     payload={"topic": args.topic, "max_results": args.max_results},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.scan_frontier:
+                response = send_command(
+                    "scan_frontier_gaps",
+                    payload={"topic": args.topic, "max_gaps": args.max_results},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.list_gaps:
+                response = send_command(
+                    "list_frontier_gaps",
+                    payload={
+                        "limit": args.max_results,
+                        "status": args.gap_status,
+                        "min_confidence": args.threshold,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.propose_gap_projects:
+                response = send_command(
+                    "propose_projects_from_gaps",
+                    payload={"max_proposals": args.max_results, "confidence_threshold": args.threshold},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.promote_gap:
+                response = send_command(
+                    "promote_gap_project",
+                    payload={"gap_id": args.gap_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.reject_gap:
+                response = send_command(
+                    "reject_gap_project",
+                    payload={"gap_id": args.gap_id or "", "reason": args.message or ""},
                     host=args.host,
                     port=args.port,
                 )
@@ -1980,6 +2171,8 @@ def main() -> int:
             print(json.dumps(payload, indent=2))
         elif args.status:
             print(_render_status(payload))
+        elif args.frontier_status:
+            print(_render_frontier_status(payload))
         elif args.runtime_status:
             print(_render_runtime_status(payload))
         elif args.queue_health:
@@ -2010,6 +2203,16 @@ def main() -> int:
             print(_render_next_action(payload))
         elif args.operator_view:
             print(_render_operator_view(payload))
+        elif args.scan_frontier:
+            print(_render_frontier_gap_scan(payload))
+        elif args.list_gaps:
+            print(_render_frontier_gap_status(payload))
+        elif args.propose_gap_projects:
+            print(_render_gap_project_list(payload))
+        elif args.promote_gap:
+            print(_render_project_status({"project": payload}))
+        elif args.reject_gap:
+            print(_render_frontier_gap_record(payload))
         elif args.project_timeline:
             print(_render_project_timeline(payload))
         elif args.evidence_map:
@@ -2051,7 +2254,7 @@ def main() -> int:
             print(_render_regime(payload))
         elif args.ingest_research:
             print(f"Ingested {payload.get('indexed', 0)} research documents for topic: {payload.get('topic', '')}")
-        elif args.verify_last_trial or args.breakthrough_report or args.resolve_problem or args.prepare_science_env or args.study_problem or args.run_problem_study or args.schedule_problem_study or args.scheduler_status or args.run_scheduler_once or args.frontier_status or args.runtime_status or args.queue_health or args.list_benchmarks or args.benchmark_status or args.prepare_payload_env or args.rebuild_locked_image or args.show_manifest or args.ingest_papers or args.literature_status or args.list_paper_artifacts or args.paper_artifact or args.literature_conflicts or args.list_experiment_backends or args.experiment_backend_runtime_status or args.run_runtime_cycle or args.list_alerts or args.retry_failed_job or args.confirm_recovery or args.cancel_job or args.sandbox_policy or args.register_checkpoint or args.list_checkpoints or args.build_inference_endpoint or args.list_endpoints or args.start_endpoint or args.stop_endpoint or args.restart_endpoint or args.endpoint_health or args.assign_role or args.select_operator_checkpoint or args.operator_serving_status or args.claim_policy or args.claim_verdict or args.research_decision_log:
+        elif args.verify_last_trial or args.breakthrough_report or args.resolve_problem or args.prepare_science_env or args.study_problem or args.run_problem_study or args.schedule_problem_study or args.scheduler_status or args.run_scheduler_once or args.runtime_status or args.queue_health or args.list_benchmarks or args.benchmark_status or args.prepare_payload_env or args.rebuild_locked_image or args.show_manifest or args.ingest_papers or args.literature_status or args.list_paper_artifacts or args.paper_artifact or args.literature_conflicts or args.list_experiment_backends or args.experiment_backend_runtime_status or args.run_runtime_cycle or args.list_alerts or args.retry_failed_job or args.confirm_recovery or args.cancel_job or args.sandbox_policy or args.register_checkpoint or args.list_checkpoints or args.build_inference_endpoint or args.list_endpoints or args.start_endpoint or args.stop_endpoint or args.restart_endpoint or args.endpoint_health or args.assign_role or args.select_operator_checkpoint or args.operator_serving_status or args.claim_policy or args.claim_verdict or args.research_decision_log:
             print(json.dumps(payload, indent=2))
         else:
             print(json.dumps(payload, indent=2))

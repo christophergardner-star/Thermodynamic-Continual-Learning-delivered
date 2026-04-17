@@ -48,6 +48,8 @@ from tar_lab.schemas import (
     FalsificationPlan,
     FalsificationTest,
     FalsificationTrigger,
+    FrontierGapRecord,
+    FrontierGapScanReport,
     FrontierStatus,
     FailureAutopsy,
     GovernorDecision,
@@ -78,10 +80,12 @@ from tar_lab.schemas import (
     PreparedDataBundle,
     ResearchActionStatus,
     ResearchBudgetLedger,
+    ResearchDocument,
     ResearchPortfolio,
     ResearchOpenQuestion,
     ResearchPlannedAction,
     ResearchProject,
+    ResearchProjectStatus,
     ResearchResumeSnapshot,
     ResearchResumeReason,
     ResearchStopReason,
@@ -532,6 +536,218 @@ class TAROrchestrator:
             },
         )
         return report
+
+    @staticmethod
+    def _frontier_signature(text: str) -> set[str]:
+        tokens: set[str] = set()
+        for token in re.findall(r"[a-z0-9]+", text.lower()):
+            if len(token) <= 3:
+                continue
+            if token.endswith("ing") and len(token) > 5:
+                token = token[:-3]
+            elif token.endswith("ed") and len(token) > 4:
+                token = token[:-2]
+            elif token.endswith("s") and len(token) > 4:
+                token = token[:-1]
+            if token in {"using", "study", "paper", "result", "method", "approach"}:
+                continue
+            tokens.add(token)
+        return tokens
+
+    def _frontier_similarity(self, left: str, right: str) -> float:
+        if not left.strip() or not right.strip():
+            return 0.0
+        if self.vault is not None and getattr(self.vault, "semantic_ready", False):
+            try:
+                left_embedding = self.vault.embedder.embed(left)
+                right_embedding = self.vault.embedder.embed(right)
+                return max(0.0, min(1.0, VectorVault._cosine(left_embedding, right_embedding)))
+            except Exception:
+                pass
+        left_tokens = self._frontier_signature(left)
+        right_tokens = self._frontier_signature(right)
+        if not left_tokens or not right_tokens:
+            return 0.0
+        overlap = len(left_tokens & right_tokens)
+        union = len(left_tokens | right_tokens)
+        return max(0.0, min(1.0, overlap / max(1, union)))
+
+    def _novelty_score(self, description: str, existing_projects: list[ResearchProject]) -> float:
+        if not existing_projects:
+            return 1.0
+        similarity = max(
+            self._frontier_similarity(description, f"{project.title} {project.goal}")
+            for project in existing_projects
+        )
+        return round(max(0.0, min(1.0, 1.0 - similarity)), 6)
+
+    def _resolve_frontier_domain_profile(self, description: str) -> Optional[str]:
+        resolution = self.resolve_problem(description, benchmark_tier="validation")
+        if not resolution.matched_keywords:
+            return None
+        if resolution.confidence < 0.32:
+            return None
+        return resolution.profile_id
+
+    def _extract_frontier_gaps(self, topic: str, limit: int = 20) -> list[FrontierGapRecord]:
+        documents = list(self.store.iter_research_documents())
+        statements: list[tuple[str, str]] = []
+        for document in documents:
+            for statement in document.problem_statements:
+                cleaned = statement.strip()
+                if cleaned:
+                    statements.append((document.document_id, cleaned))
+        if not statements:
+            return []
+
+        parent = list(range(len(statements)))
+
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(left: int, right: int) -> None:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+        signatures = [self._frontier_signature(statement) for _, statement in statements]
+        for left in range(len(statements)):
+            for right in range(left + 1, len(statements)):
+                if statements[left][0] == statements[right][0]:
+                    continue
+                overlap = len(signatures[left] & signatures[right])
+                if overlap >= 3:
+                    union(left, right)
+
+        clusters: dict[int, list[tuple[str, str]]] = {}
+        for index, item in enumerate(statements):
+            clusters.setdefault(find(index), []).append(item)
+
+        projects = self.store.list_research_projects()
+        gaps: list[FrontierGapRecord] = []
+        for items in clusters.values():
+            document_ids = sorted({document_id for document_id, _ in items})
+            if len(document_ids) < 2:
+                continue
+            descriptions = [statement for _, statement in items]
+            description = sorted(descriptions, key=lambda value: (-len(self._frontier_signature(value)), -len(value), value))[0]
+            similarity_to_existing = 0.0
+            if projects:
+                similarity_to_existing = max(
+                    self._frontier_similarity(description, f"{project.title} {project.goal}")
+                    for project in projects
+                )
+            novelty_score = self._novelty_score(description, projects)
+            domain_profile = self._resolve_frontier_domain_profile(description)
+            confidence = min(0.95, 0.2 + (0.14 * len(document_ids)) + (0.25 * novelty_score))
+            gaps.append(
+                FrontierGapRecord(
+                    gap_id=self._continuity_id("gap"),
+                    description=description,
+                    domain_profile=domain_profile,
+                    evidence_count=len(document_ids),
+                    source_document_ids=document_ids,
+                    novelty_score=round(novelty_score, 6),
+                    similarity_to_existing=round(max(0.0, min(1.0, similarity_to_existing)), 6),
+                    confidence=round(confidence, 6),
+                )
+            )
+        gaps.sort(key=lambda item: (item.confidence, item.novelty_score, item.evidence_count, item.created_at), reverse=True)
+        return gaps[: max(1, limit)]
+
+    def scan_frontier_gaps(
+        self,
+        topic: str = "thermodynamic continual learning",
+        max_gaps: int = 10,
+    ) -> FrontierGapScanReport:
+        if not list(self.store.iter_research_documents()):
+            try:
+                self.ingest_research(topic=topic, max_results=max(4, max_gaps))
+            except Exception:
+                pass
+        gaps = self._extract_frontier_gaps(topic, limit=max_gaps)
+        persisted: list[FrontierGapRecord] = []
+        rejected = 0
+        for gap in gaps:
+            updated_gap = gap
+            if gap.similarity_to_existing > 0.75:
+                updated_gap = gap.model_copy(
+                    update={
+                        "status": "rejected",
+                        "rejection_reason": "too_similar_to_existing_project",
+                    }
+                )
+            elif gap.domain_profile is None:
+                updated_gap = gap.model_copy(
+                    update={
+                        "status": "rejected",
+                        "rejection_reason": "domain_profile_unresolved",
+                    }
+                )
+            if updated_gap.status == "rejected":
+                rejected += 1
+            self.store.append_frontier_gap(updated_gap)
+            persisted.append(updated_gap)
+        report = FrontierGapScanReport(
+            scan_id=self._continuity_id("gap-scan"),
+            topic=topic,
+            gaps_identified=len([item for item in persisted if item.status == "identified"]),
+            gaps_proposed=0,
+            gaps_rejected=rejected,
+            gaps=persisted,
+            existing_project_count=len(self.store.list_research_projects()),
+            retrieval_mode="semantic" if self.vault is not None and getattr(self.vault, "semantic_ready", False) else "lexical_fallback",
+        )
+        self.store.append_gap_scan_report(report)
+        self.store.append_audit_event(
+            "frontier",
+            "scan_frontier_gaps",
+            {
+                "scan_id": report.scan_id,
+                "topic": topic,
+                "gaps_identified": report.gaps_identified,
+                "gaps_rejected": report.gaps_rejected,
+            },
+        )
+        return report
+
+    def frontier_gap_status(
+        self,
+        *,
+        status: Optional[str] = None,
+        limit: int = 10,
+        min_confidence: float = 0.0,
+    ) -> dict[str, Any]:
+        gaps = list(self.store.iter_frontier_gaps())
+        scans = list(self.store.iter_gap_scan_reports())
+        counts = {
+            "total": len(gaps),
+            "identified": len([item for item in gaps if item.status == "identified"]),
+            "proposed": len([item for item in gaps if item.status == "proposed"]),
+            "rejected": len([item for item in gaps if item.status == "rejected"]),
+            "promoted": len([item for item in gaps if item.status == "promoted"]),
+        }
+        filtered = [
+            item
+            for item in gaps
+            if (status is None or item.status == status) and item.confidence >= min_confidence
+        ]
+        filtered = sorted(filtered, key=lambda item: (item.created_at, item.gap_id), reverse=True)
+        latest_scan = scans[-1] if scans else None
+        recent_scans = sorted(scans, key=lambda item: (item.created_at, item.scan_id), reverse=True)[: max(1, limit)]
+        return {
+            "counts": counts,
+            "scan_count": len(scans),
+            "latest_scan": latest_scan.model_dump(mode="json") if latest_scan else None,
+            "recent_scans": [item.model_dump(mode="json") for item in recent_scans],
+            "gaps": [item.model_dump(mode="json") for item in filtered[: max(1, limit)]],
+            "status_filter": status,
+            "min_confidence": round(max(0.0, min(1.0, min_confidence)), 6),
+        }
 
     def show_manifest(self, manifest_id: Optional[str] = None, manifest_path: Optional[str] = None) -> dict[str, Any]:
         if manifest_path:
@@ -1026,6 +1242,7 @@ class TAROrchestrator:
         *,
         benchmark_tier: BenchmarkTier = "validation",
         requested_benchmark: Optional[str] = None,
+        status: ResearchProjectStatus = "active",
     ) -> ResearchProject:
         resolution = self.resolve_problem(
             problem,
@@ -1069,7 +1286,7 @@ class TAROrchestrator:
             title=problem,
             goal=problem,
             domain_profile=resolution.profile_id,
-            status="active",
+            status=status,
             active_thread_id=thread_id,
             budget_ledger=self._default_project_budget(),
             latest_decision_summary=resolution.summary,
@@ -1084,6 +1301,100 @@ class TAROrchestrator:
             project.model_dump(mode="json"),
         )
         return project
+
+    def propose_projects_from_gaps(
+        self,
+        max_proposals: int = 3,
+        confidence_threshold: float = 0.45,
+    ) -> list[ResearchProject]:
+        created: list[ResearchProject] = []
+        candidates = [
+            gap
+            for gap in self.store.iter_frontier_gaps()
+            if gap.status == "identified" and gap.confidence >= confidence_threshold
+        ]
+        candidates = sorted(
+            candidates,
+            key=lambda item: (item.confidence * item.novelty_score, item.evidence_count, item.created_at),
+            reverse=True,
+        )
+        for gap in candidates[: max(1, max_proposals)]:
+            project = self.create_project(gap.description, status="proposed")
+            project = self._persist_project(
+                project.model_copy(update={"latest_decision_summary": "Project proposed by WS36 frontier gap scanner."}),
+                latest_evidence_summary=f"Frontier gap identified from {gap.evidence_count} supporting documents.",
+            )
+            self.store.update_frontier_gap(
+                gap.gap_id,
+                status="proposed",
+                proposed_project_id=project.project_id,
+            )
+            created.append(project)
+        self.store.append_audit_event(
+            "frontier",
+            "propose_projects_from_gaps",
+            {
+                "created_project_ids": [item.project_id for item in created],
+                "confidence_threshold": confidence_threshold,
+            },
+        )
+        return created
+
+    def promote_gap_project(self, gap_id: str) -> ResearchProject:
+        gap = self.store.get_frontier_gap(gap_id)
+        if gap is None:
+            raise RuntimeError(f"Unknown frontier gap: {gap_id}")
+        if not gap.proposed_project_id:
+            raise RuntimeError(f"Frontier gap has no proposed project: {gap_id}")
+        project = self.store.get_research_project(gap.proposed_project_id)
+        if project is None:
+            raise RuntimeError(f"Unknown proposed project for frontier gap: {gap.proposed_project_id}")
+        updated_project = self._persist_project(
+            project.model_copy(
+                update={
+                    "status": "active",
+                    "latest_decision_summary": "Promoted from proposed frontier gap project to active research.",
+                }
+            ),
+            latest_evidence_summary=f"Promoted from frontier gap {gap_id}.",
+        )
+        self.store.update_frontier_gap(gap_id, status="promoted")
+        self.store.append_audit_event(
+            "frontier",
+            "promote_gap_project",
+            {"gap_id": gap_id, "project_id": updated_project.project_id},
+        )
+        return updated_project
+
+    def reject_gap_project(self, gap_id: str, reason: str) -> FrontierGapRecord:
+        gap = self.store.get_frontier_gap(gap_id)
+        if gap is None:
+            raise RuntimeError(f"Unknown frontier gap: {gap_id}")
+        if gap.proposed_project_id:
+            project = self.store.get_research_project(gap.proposed_project_id)
+            if project is not None:
+                self._persist_project(
+                    project.model_copy(
+                        update={
+                            "status": "parked",
+                            "latest_decision_summary": f"Frontier gap proposal rejected: {reason}",
+                        }
+                    ),
+                    blockers=[reason],
+                )
+        updated_gap = self.store.update_frontier_gap(
+            gap_id,
+            status="rejected",
+            rejection_reason=reason,
+        )
+        if updated_gap is None:
+            raise RuntimeError(f"Failed to update frontier gap: {gap_id}")
+        self.store.append_audit_event(
+            "frontier",
+            "reject_gap_project",
+            {"gap_id": gap_id, "reason": reason},
+        )
+        return updated_gap
 
     def list_projects(self) -> dict[str, Any]:
         projects = sorted(
@@ -1526,6 +1837,7 @@ class TAROrchestrator:
         promotion_blocked = [item.model_dump(mode="json") for item in evidence_debts if item.promotion_blocked][: max(1, limit)]
         retrieval_summary = self._retrieval_mode_summary(limit=20)
         verdict_summary = self._claim_verdict_lifecycle_summary(limit=20)
+        frontier_summary = self.frontier_gap_status(limit=limit)
         return {
             "generated_at": self._project_now(),
             "project_counts": {
@@ -1535,6 +1847,10 @@ class TAROrchestrator:
                 "blocked": len([item for item in projects if item.status == "blocked"]),
                 "stale": len([item for item in stale_records if item.staleness_level in {"stale", "critical"}]),
             },
+            "frontier_gap_counts": frontier_summary["counts"],
+            "frontier_gap_scan_count": frontier_summary["scan_count"],
+            "frontier_gaps": frontier_summary["gaps"],
+            "latest_frontier_gap_scan": frontier_summary["latest_scan"],
             "portfolio_health": portfolio.health_snapshot.model_dump(mode="json"),
             "active_projects": [self._project_summary(item) for item in projects if item.status == "active"][: max(1, limit)],
             "blocked_projects": [self._project_summary(item) for item in projects if item.status == "blocked"][: max(1, limit)],
@@ -4159,6 +4475,7 @@ class TAROrchestrator:
         payload_env = self.payload_environment.load()
         literature_status = self.literature_engine.status()
         vault_status = self.vault.stats() if self.vault is not None else {}
+        frontier_summary = self.frontier_gap_status(limit=5)
         literature_capability = self.literature_engine.capability_report(
             notes=list(literature_status.get("capability_report", {}).get("notes", []))  # type: ignore[union-attr]
         )
@@ -4194,6 +4511,10 @@ class TAROrchestrator:
             claim_policy=self._claim_policy(),
             recent_claim_verdicts=list(self.store.iter_claim_verdicts())[-5:],
             benchmark_profiles=self.profile_registry.benchmark_profile_counts(),
+            frontier_gap_counts=frontier_summary["counts"],
+            frontier_gap_scans=frontier_summary["scan_count"],
+            latest_frontier_gap_scan=FrontierGapScanReport.model_validate(frontier_summary["latest_scan"]) if frontier_summary["latest_scan"] else None,
+            recent_frontier_gaps=[FrontierGapRecord.model_validate(item) for item in frontier_summary["gaps"]],
             safe_execution_mode=self.safe_execution_mode,
             active_leases=len([item for item in self.store.iter_problem_schedules() if item.status in {"leased", "running"}]),
             alert_count=len(list(self.store.iter_alerts())),
@@ -5345,9 +5666,14 @@ class TAROrchestrator:
             else (latest_problem_study.canonical_comparable if latest_problem_study is not None else False)
         )
         runtime_payload = self.runtime_status()
+        frontier_gap_summary = self.frontier_gap_status(limit=5)
         payload["retrieval_mode_breakdown"] = retrieval_summary["retrieval_mode_breakdown"]
         payload["degraded_retrieval_studies"] = retrieval_summary["degraded_retrieval_studies"]
         payload["recent_study_window"] = retrieval_summary["window"]
+        payload["frontier_gap_counts"] = frontier_gap_summary["counts"]
+        payload["frontier_gap_scans"] = frontier_gap_summary["scan_count"]
+        payload["recent_frontier_gaps"] = frontier_gap_summary["gaps"]
+        payload["latest_frontier_gap_scan"] = frontier_gap_summary["latest_scan"]
         payload["claim_verdict_lifecycle"] = runtime_payload.get("claim_verdict_lifecycle", {})
         payload["recent_verdict_window"] = runtime_payload.get("recent_verdict_window", 0)
         payload["escalated_verdict_ids"] = runtime_payload.get("escalated_verdict_ids", [])
