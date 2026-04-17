@@ -471,6 +471,7 @@ def test_problem_runner_executes_deep_learning_benchmarks(tmp_path: Path):
     assert optimizer_metrics["gradient_norm"] > 0.0
 
 
+@pytest.mark.slow
 def test_problem_runner_executes_nlp_benchmarks(tmp_path: Path):
     payload = {
         "problem_id": "nlp-1",
@@ -1032,13 +1033,15 @@ def test_literature_engine_extracts_claims_and_conflicts():
         paper_a = root / "paper_a.txt"
         paper_b = root / "paper_b.txt"
         paper_a.write_text(
-            "Paper A\n\nAbstract\nThis method improves robustness.\n\nResults\nThe method is stable and better than baseline [1].\n\n"
+            "Paper A\n\nAbstract\nThis retrieval calibration method improves robustness under noisy retrieval.\n\nResults\n"
+            "The retrieval calibration method is stable under noisy retrieval and better than baseline [1].\n\n"
             "Table 1 Performance Summary\nModel  Accuracy  ECE\nASC    0.91      0.03\nAdamW  0.84      0.09\n\n"
             "Figure 1 Calibration improves as entropy decreases.",
             encoding="utf-8",
         )
         paper_b.write_text(
-            "Paper B\n\nAbstract\nThis method does not improve robustness.\n\nResults\nThe method is not stable and worse than baseline [2].",
+            "Paper B\n\nAbstract\nThis retrieval calibration method does not improve robustness under noisy retrieval.\n\nResults\n"
+            "The retrieval calibration method is not stable under noisy retrieval and worse than baseline [2].",
             encoding="utf-8",
         )
         engine = LiteratureEngine(tmp)
