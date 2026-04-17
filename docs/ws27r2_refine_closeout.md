@@ -1,5 +1,25 @@
 # WS27R2 Refinement Closeout
 
+## Correction Note
+
+Corrected by independent eval validation pass `2026-04-17`.
+
+The original closeout below reported internal probe and regression pack results.
+Those internal figures remain historically true for the bounded refinement run,
+but they are **not** the authoritative independent validation result.
+
+The independently validated external-slice metrics are:
+
+- `mean_score = 0.4625`
+- `decision_accuracy = 0.4375`
+- `parse_error_rate = 0.4375`
+- `false_refusal_rate = 0.0`
+- `overclaim_rate = 0.0`
+
+The published `WS27R2` mean-score claim is therefore corrected by the
+independent eval validation pass. The honesty claim on `overclaim_rate = 0.0`
+is confirmed.
+
 ## Scope
 
 This document closes the bounded `WS27-R2` refinement cycle that followed
@@ -116,6 +136,14 @@ Error buckets:
 - `parse_error_rate = 0.07333333333333333`
 - `overclaim_rate = 0.0`
 
+`WS27R2` independent external slice:
+
+- `mean_score = 0.4625`
+- `decision_accuracy = 0.4375`
+- `parse_error_rate = 0.4375`
+- `false_refusal_rate = 0.0`
+- `overclaim_rate = 0.0`
+
 This is the correct closing signal:
 
 - reasoning improved
@@ -125,14 +153,16 @@ This is the correct closing signal:
 
 ## Decision
 
-`WS27` is now **closed successfully**.
+`WS27` training and refinement work remains closed, but the published `WS27R2`
+performance claim is corrected by the independent eval validation pass.
 
 More precisely:
 
 - the initial coder-backbone branch remains rejected
 - the revised continuation branch is validated
-- the bounded refinement cycle removed the remaining parse issue to an
-  acceptable level
+- the bounded refinement cycle improved the internal probe packs, but the
+  independent external slice showed materially weaker generalization than the
+  original published claim
 - there is no further justified `WS27` pod cycle at this time
 
 The branch no longer needs to be described as "successful with a caveat." The
