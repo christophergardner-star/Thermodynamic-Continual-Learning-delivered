@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import gc
 import hashlib
 import os
 from pathlib import Path
@@ -6256,8 +6257,11 @@ class TAROrchestrator:
     def shutdown(self) -> None:
         if self.memory_indexer is not None:
             self.memory_indexer.stop()
+            self.memory_indexer = None
         if self.vault is not None:
             self.vault.close()
+            self.vault = None
+        gc.collect()
 
 
 def _utc_now() -> str:

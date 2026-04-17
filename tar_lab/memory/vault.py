@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import gc
 from dataclasses import dataclass
 from hashlib import blake2b
 from threading import Event, Thread
@@ -1069,18 +1070,30 @@ class VectorVault:
         return f"{prefix}:{blake2b(value.encode('utf-8'), digest_size=8).hexdigest()}"
 
     def close(self) -> None:
-        system = getattr(self.client, "_system", None)
+        client = getattr(self, "client", None)
+        system = getattr(client, "_system", None)
         if system is not None:
             try:
                 system.stop()
             except Exception:
                 pass
-        clear_cache = getattr(self.client, "clear_system_cache", None)
+        clear_cache = getattr(client, "clear_system_cache", None)
         if callable(clear_cache):
             try:
                 clear_cache()
             except Exception:
                 pass
+        try:
+            from chromadb.api.shared_system_client import SharedSystemClient  # type: ignore
+
+            SharedSystemClient.clear_system_cache()
+        except Exception:
+            pass
+        if hasattr(self, "collection"):
+            self.collection = None  # type: ignore[assignment]
+        if hasattr(self, "client"):
+            self.client = None  # type: ignore[assignment]
+        gc.collect()
 
 
 class MemoryIndexer:
