@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 from tar_lab.control import DEFAULT_HOST, DEFAULT_PORT, TARControlServer, send_command
 from tar_lab.orchestrator import TAROrchestrator
+from tar_lab.schemas import TrainingSignalRecord
 
 
 def _rewrite_family_subcommand(argv: list[str]) -> list[str]:
@@ -50,7 +51,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gap-id", dest="gap_id")
     parser.add_argument("--scan-id", dest="scan_id")
     parser.add_argument("--proposal-id", dest="proposal_id")
+    parser.add_argument("--cycle-id", dest="cycle_id")
+    parser.add_argument("--delta-id", dest="delta_id")
+    parser.add_argument("--retrain-id", dest="retrain_id")
     parser.add_argument("--objective", dest="objective_slug")
+    parser.add_argument("--signal-path", dest="signal_path")
+    parser.add_argument("--pack-path", dest="pack_path")
+    parser.add_argument("--run-manifest-path", dest="run_manifest_path")
+    parser.add_argument("--baseline-mean-score", type=float, default=0.4625, dest="baseline_mean_score")
+    parser.add_argument("--baseline-overclaim-rate", type=float, default=0.0, dest="baseline_overclaim_rate")
     parser.add_argument(
         "--gap-status",
         dest="gap_status",
@@ -161,6 +170,15 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--reject-family-proposal", action="store_true", dest="reject_family_proposal")
     group.add_argument("--run-family-feasibility", action="store_true", dest="run_family_feasibility")
     group.add_argument("--list-registered-families", action="store_true", dest="list_registered_families")
+    group.add_argument("--initialize-anchor-pack", action="store_true", dest="initialize_anchor_pack")
+    group.add_argument("--curate-training-signal", action="store_true", dest="curate_training_signal")
+    group.add_argument("--list-training-signals", action="store_true", dest="list_training_signals")
+    group.add_argument("--assemble-curated-delta", action="store_true", dest="assemble_curated_delta")
+    group.add_argument("--run-self-improvement-probe", action="store_true", dest="run_self_improvement_probe")
+    group.add_argument("--run-self-improvement-run1", action="store_true", dest="run_self_improvement_run1")
+    group.add_argument("--deploy-improved-adapter", action="store_true", dest="deploy_improved_adapter")
+    group.add_argument("--self-improvement-status", action="store_true", dest="self_improvement_status")
+    group.add_argument("--resume-self-improvement", action="store_true", dest="resume_self_improvement")
     group.add_argument("--propose-gap-projects", action="store_true", dest="propose_gap_projects")
     group.add_argument("--promote-gap", action="store_true", dest="promote_gap")
     group.add_argument("--reject-gap", action="store_true", dest="reject_gap")
@@ -300,6 +318,47 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
                 for item in orchestrator.list_registered_families()
             ]
         }
+    if args.initialize_anchor_pack:
+        return orchestrator.initialize_anchor_pack(
+            args.pack_path or "",
+            args.run_manifest_path or "",
+            args.baseline_mean_score,
+            args.baseline_overclaim_rate,
+        ).model_dump(mode="json")
+    if args.curate_training_signal:
+        signal_payload = json.loads(Path(args.signal_path or "").read_text(encoding="utf-8"))
+        return {
+            "accepted": orchestrator.curate_training_signal(
+                TrainingSignalRecord.model_validate(signal_payload)
+            )
+        }
+    if args.list_training_signals:
+        return {
+            "signals": [
+                item.model_dump(mode="json")
+                for item in orchestrator.list_training_signals()
+            ]
+        }
+    if args.assemble_curated_delta:
+        return orchestrator.assemble_curated_delta(args.cycle_id or "").model_dump(mode="json")
+    if args.run_self_improvement_probe:
+        return orchestrator.run_self_improvement_probe(args.cycle_id or "").model_dump(mode="json")
+    if args.run_self_improvement_run1:
+        return orchestrator.run_self_improvement_run1(
+            args.cycle_id or "",
+            args.delta_id or "",
+        ).model_dump(mode="json")
+    if args.deploy_improved_adapter:
+        return {
+            "deployed_adapter_path": orchestrator.deploy_improved_adapter(
+                args.cycle_id or "",
+                args.retrain_id or "",
+            )
+        }
+    if args.self_improvement_status:
+        return orchestrator.self_improvement_status().model_dump(mode="json")
+    if args.resume_self_improvement:
+        return orchestrator.resume_self_improvement(args.cycle_id or "").model_dump(mode="json")
     if args.propose_gap_projects:
         return {
             "projects": [
@@ -1801,6 +1860,72 @@ def main() -> int:
                 )
             elif args.list_registered_families:
                 response = send_command("list_registered_families", host=args.host, port=args.port)
+            elif args.initialize_anchor_pack:
+                response = send_command(
+                    "initialize_anchor_pack",
+                    payload={
+                        "pack_path": args.pack_path or "",
+                        "run_manifest_path": args.run_manifest_path or "",
+                        "baseline_mean_score": args.baseline_mean_score,
+                        "baseline_overclaim_rate": args.baseline_overclaim_rate,
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.curate_training_signal:
+                response = send_command(
+                    "curate_training_signal",
+                    payload={
+                        "signal": json.loads(Path(args.signal_path or "").read_text(encoding="utf-8"))
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.list_training_signals:
+                response = send_command("list_training_signals", host=args.host, port=args.port)
+            elif args.assemble_curated_delta:
+                response = send_command(
+                    "assemble_curated_delta",
+                    payload={"cycle_id": args.cycle_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.run_self_improvement_probe:
+                response = send_command(
+                    "run_self_improvement_probe",
+                    payload={"cycle_id": args.cycle_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.run_self_improvement_run1:
+                response = send_command(
+                    "run_self_improvement_run1",
+                    payload={
+                        "cycle_id": args.cycle_id or "",
+                        "delta_id": args.delta_id or "",
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.deploy_improved_adapter:
+                response = send_command(
+                    "deploy_improved_adapter",
+                    payload={
+                        "cycle_id": args.cycle_id or "",
+                        "retrain_id": args.retrain_id or "",
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.self_improvement_status:
+                response = send_command("self_improvement_status", host=args.host, port=args.port)
+            elif args.resume_self_improvement:
+                response = send_command(
+                    "resume_self_improvement",
+                    payload={"cycle_id": args.cycle_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
             elif args.propose_gap_projects:
                 response = send_command(
                     "propose_projects_from_gaps",
@@ -2414,6 +2539,18 @@ def main() -> int:
             print(json.dumps(payload, indent=2))
         elif args.list_registered_families:
             print(_render_registered_family_list(payload))
+        elif (
+            args.initialize_anchor_pack
+            or args.curate_training_signal
+            or args.list_training_signals
+            or args.assemble_curated_delta
+            or args.run_self_improvement_probe
+            or args.run_self_improvement_run1
+            or args.deploy_improved_adapter
+            or args.self_improvement_status
+            or args.resume_self_improvement
+        ):
+            print(json.dumps(payload, indent=2))
         elif args.propose_gap_projects:
             print(_render_gap_project_list(payload))
         elif args.promote_gap:

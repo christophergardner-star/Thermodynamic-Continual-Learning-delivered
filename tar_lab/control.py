@@ -5,7 +5,7 @@ import socketserver
 from typing import Any, Dict, Optional
 
 from tar_lab.orchestrator import TAROrchestrator
-from tar_lab.schemas import ControlRequest, ControlResponse
+from tar_lab.schemas import ControlRequest, ControlResponse, TrainingSignalRecord
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -117,6 +117,52 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
                     for item in orchestrator.list_registered_families()
                 ]
             }
+        elif request.command == "initialize_anchor_pack":
+            payload = orchestrator.initialize_anchor_pack(
+                str(request.payload.get("pack_path", "")),
+                str(request.payload.get("run_manifest_path", "")),
+                float(request.payload.get("baseline_mean_score", 0.4625)),
+                float(request.payload.get("baseline_overclaim_rate", 0.0)),
+            ).model_dump(mode="json")
+        elif request.command == "curate_training_signal":
+            payload = {
+                "accepted": orchestrator.curate_training_signal(
+                    TrainingSignalRecord.model_validate(request.payload.get("signal", {}))
+                )
+            }
+        elif request.command == "list_training_signals":
+            payload = {
+                "signals": [
+                    item.model_dump(mode="json")
+                    for item in orchestrator.list_training_signals()
+                ]
+            }
+        elif request.command == "assemble_curated_delta":
+            payload = orchestrator.assemble_curated_delta(
+                str(request.payload.get("cycle_id", ""))
+            ).model_dump(mode="json")
+        elif request.command == "run_self_improvement_probe":
+            payload = orchestrator.run_self_improvement_probe(
+                str(request.payload.get("cycle_id", ""))
+            ).model_dump(mode="json")
+        elif request.command == "run_self_improvement_run1":
+            payload = orchestrator.run_self_improvement_run1(
+                str(request.payload.get("cycle_id", "")),
+                str(request.payload.get("delta_id", "")),
+            ).model_dump(mode="json")
+        elif request.command == "deploy_improved_adapter":
+            payload = {
+                "deployed_adapter_path": orchestrator.deploy_improved_adapter(
+                    str(request.payload.get("cycle_id", "")),
+                    str(request.payload.get("retrain_id", "")),
+                )
+            }
+        elif request.command == "self_improvement_status":
+            payload = orchestrator.self_improvement_status().model_dump(mode="json")
+        elif request.command == "resume_self_improvement":
+            payload = orchestrator.resume_self_improvement(
+                str(request.payload.get("cycle_id", ""))
+            ).model_dump(mode="json")
         elif request.command == "verify_last_trial":
             payload = orchestrator.verify_last_trial(
                 trial_id=request.payload.get("trial_id"),

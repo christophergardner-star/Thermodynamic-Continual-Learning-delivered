@@ -215,6 +215,24 @@ FamilyProposalStatus = Literal[
     "approved",
     "rejected",
 ]
+SelfImprovementCycleStatus = Literal[
+    "idle",
+    "curating",
+    "probing",
+    "gate_failed",
+    "training",
+    "deploying",
+    "paused_consecutive_failures",
+    "paused_cycle_limit",
+    "completed",
+]
+TrainingSignalKind = Literal[
+    "research_decision",
+    "falsification_plan",
+    "claim_verdict",
+    "portfolio_governance",
+    "problem_study",
+]
 
 
 class DatasetSourceConfig(StrictModel):
@@ -414,6 +432,76 @@ class GenerativeDirectorProposal(StrictModel):
 
 class RegisteredFamilyState(StrictModel):
     entries: List[ProposedExperimentFamily] = Field(default_factory=list)
+
+
+class FrozenAnchorPackManifest(StrictModel):
+    manifest_id: str
+    pack_path: str
+    run_manifest_hash_sha256: str
+    item_ids: List[str] = Field(default_factory=list)
+    item_count: int = Field(ge=0)
+    baseline_mean_score: float = Field(ge=0.0, le=1.0)
+    baseline_overclaim_rate: float = Field(ge=0.0, le=1.0)
+    sealed_at: str = Field(default_factory=utc_now_iso)
+    sealed_by: str = "eval_validation_pass"
+
+
+class TrainingSignalRecord(StrictModel):
+    signal_id: str
+    kind: TrainingSignalKind
+    source_id: str
+    project_id: Optional[str] = None
+    messages: List[Dict[str, Any]] = Field(default_factory=list)
+    gold_response: str
+    quality_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    overclaim_present: bool = False
+    anchor_pack_overlap: bool = False
+    created_at: str = Field(default_factory=utc_now_iso)
+
+
+class CuratedDeltaRecord(StrictModel):
+    delta_id: str
+    cycle_id: str
+    signal_ids: List[str] = Field(default_factory=list)
+    signal_count: int = Field(default=0, ge=0)
+    anchor_overlaps_excluded: int = Field(default=0, ge=0)
+    overclaim_excluded: int = Field(default=0, ge=0)
+    diversity_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    kind_distribution: Dict[str, int] = Field(default_factory=dict)
+    ready: bool = False
+    created_at: str = Field(default_factory=utc_now_iso)
+
+
+class RetrainRecord(StrictModel):
+    retrain_id: str
+    cycle_id: str
+    delta_id: str
+    run_kind: Literal["probe", "run1"]
+    adapter_output_path: Optional[str] = None
+    probe_mean_score: Optional[float] = None
+    probe_overclaim_rate: Optional[float] = None
+    anchor_hash_verified: bool = False
+    gate_passed: bool = False
+    gate_failure_reason: Optional[str] = None
+    started_at: str = Field(default_factory=utc_now_iso)
+    completed_at: Optional[str] = None
+    notes: List[str] = Field(default_factory=list)
+
+
+class SelfImprovementCycleRecord(StrictModel):
+    cycle_id: str
+    status: SelfImprovementCycleStatus = "idle"
+    cycle_number: int = Field(default=1, ge=1)
+    delta_id: Optional[str] = None
+    probe_retrain_id: Optional[str] = None
+    run1_retrain_id: Optional[str] = None
+    deployed_adapter_path: Optional[str] = None
+    consecutive_gate_failures: int = Field(default=0, ge=0)
+    total_cycles_completed: int = Field(default=0, ge=0)
+    paused_reason: Optional[str] = None
+    human_resume_required: bool = False
+    started_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
 
 
 class BackendProvenance(StrictModel):
@@ -1991,6 +2079,15 @@ class TARRuntimePolicy(StrictModel):
     verdict_aging_days: int = Field(default=14, ge=1)
 
 
+class SelfImprovementPolicy(StrictModel):
+    max_consecutive_gate_failures: int = Field(default=3, ge=1)
+    max_auto_cycles: int = Field(default=5, ge=1)
+    min_delta_signals: int = Field(default=20, ge=1)
+    min_diversity_score: float = Field(default=0.4, ge=0.0, le=1.0)
+    overclaim_hard_limit: float = 0.0
+    min_mean_score_floor: float = Field(default=0.40, ge=0.0)
+
+
 class TARExecutionPolicy(StrictModel):
     require_sandbox_for_generated_code: bool = True
     require_sandbox_for_external_code: bool = True
@@ -2172,6 +2269,15 @@ class ControlRequest(StrictModel):
         "reject_family_proposal",
         "run_family_feasibility",
         "list_registered_families",
+        "initialize_anchor_pack",
+        "curate_training_signal",
+        "list_training_signals",
+        "assemble_curated_delta",
+        "run_self_improvement_probe",
+        "run_self_improvement_run1",
+        "deploy_improved_adapter",
+        "self_improvement_status",
+        "resume_self_improvement",
         "verify_last_trial",
         "breakthrough_report",
         "resolve_problem",

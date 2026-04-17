@@ -20,6 +20,7 @@ from tar_lab.schemas import (
     EndpointRecord,
     EndpointRegistryState,
     FalsificationPlan,
+    FrozenAnchorPackManifest,
     FrontierGapRecord,
     FrontierGapScanReport,
     GenerativeDirectorProposal,
@@ -99,6 +100,8 @@ class TARStateStore:
         self.publication_handoffs_dir = self.state_dir / "publication_handoffs"
         self.runtime_policy_path = self.policies_dir / "runtime_policy.json"
         self.execution_policy_path = self.policies_dir / "execution_policy.json"
+        self.self_improvement_dir = self.state_dir / "self_improvement"
+        self.anchor_manifest_path = self.self_improvement_dir / "anchor_manifest.json"
         self.checkpoint_registry_path = self.state_dir / "checkpoint_registry.json"
         self.endpoint_registry_path = self.state_dir / "inference_endpoints.json"
         self.endpoints_dir = self.state_dir / "endpoints"
@@ -118,6 +121,7 @@ class TARStateStore:
         self.audit_log_path = self.logs_dir / "activity_audit.log"
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.self_improvement_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.policies_dir.mkdir(parents=True, exist_ok=True)
         self.manifests_dir.mkdir(parents=True, exist_ok=True)
@@ -400,6 +404,16 @@ class TARStateStore:
 
     def save_execution_policy(self, policy: TARExecutionPolicy) -> None:
         self._atomic_write_json(self.execution_policy_path, policy.model_dump(mode="json"))
+
+    def load_anchor_manifest(self) -> Optional[FrozenAnchorPackManifest]:
+        if not self.anchor_manifest_path.exists():
+            return None
+        return FrozenAnchorPackManifest.model_validate_json(
+            self.anchor_manifest_path.read_text(encoding="utf-8")
+        )
+
+    def self_improvement_initialized(self) -> bool:
+        return self.anchor_manifest_path.exists()
 
     def append_research_decision(self, record: ResearchDecisionRecord) -> None:
         with self.research_decisions_path.open("a", encoding="utf-8") as handle:

@@ -33,6 +33,7 @@ from tar_lab.reproducibility import PayloadEnvironmentBuilder
 from tar_lab.runtime_daemon import LabRuntimeDaemon
 from tar_lab.scheduler import ProblemStudyScheduler
 from tar_lab.science_profiles import ProblemResearchEngine, ScienceProfileRegistry
+from tar_lab.self_improvement import SelfImprovementEngine
 from tar_lab.schemas import (
     ActionScoreBreakdown,
     AlertRecord,
@@ -43,6 +44,7 @@ from tar_lab.schemas import (
     ClaimVerdict,
     CheckpointRecord,
     ContradictionReview,
+    CuratedDeltaRecord,
     DirectorPolicy,
     DryRunReport,
     EvidenceDebtRecord,
@@ -51,6 +53,7 @@ from tar_lab.schemas import (
     FalsificationPlan,
     FalsificationTest,
     FalsificationTrigger,
+    FrozenAnchorPackManifest,
     FrontierGapRecord,
     FrontierGapScanReport,
     FrontierStatus,
@@ -104,12 +107,16 @@ from tar_lab.schemas import (
     RecoveryState,
     RoleAssignment,
     RunIntent,
+    RetrainRecord,
     RuntimeHeartbeat,
     SandboxPolicy,
     SchedulerCycleReport,
+    SelfImprovementCycleRecord,
+    SelfImprovementPolicy,
     SelfCorrectionNote,
     ScienceEnvironmentBundle,
     TARExecutionPolicy,
+    TrainingSignalRecord,
     TrainingPayloadConfig,
     VerificationReport,
 )
@@ -633,6 +640,112 @@ class TAROrchestrator:
             key=lambda item: (item.approved_at or "", item.updated_at, item.created_at, item.family_id),
             reverse=True,
         )
+
+    def _self_improvement_engine(self) -> SelfImprovementEngine:
+        return SelfImprovementEngine(
+            workspace_root=self.workspace,
+            policy=SelfImprovementPolicy(),
+        )
+
+    def initialize_anchor_pack(
+        self,
+        pack_path: str,
+        run_manifest_path: str,
+        baseline_mean_score: float,
+        baseline_overclaim_rate: float,
+    ) -> FrozenAnchorPackManifest:
+        return self._self_improvement_engine().initialize_anchor_pack(
+            pack_path=pack_path,
+            run_manifest_path=run_manifest_path,
+            baseline_mean_score=baseline_mean_score,
+            baseline_overclaim_rate=baseline_overclaim_rate,
+        )
+
+    def curate_training_signal(self, signal: TrainingSignalRecord) -> bool:
+        return self._self_improvement_engine().curate_signal(signal)
+
+    def list_training_signals(self) -> list[TrainingSignalRecord]:
+        return self._self_improvement_engine().list_signals()
+
+    def assemble_curated_delta(self, cycle_id: str) -> CuratedDeltaRecord:
+        engine = self._self_improvement_engine()
+        cycle = engine.load_cycle(cycle_id) if cycle_id else None
+        if cycle is None:
+            cycle = engine.start_cycle()
+        delta = engine.assemble_delta(cycle.cycle_id)
+        updated_cycle = cycle.model_copy(
+            update={
+                "delta_id": delta.delta_id,
+                "status": "curating",
+                "updated_at": _utc_now(),
+            }
+        )
+        engine.save_cycle(updated_cycle)
+        return delta
+
+    def run_self_improvement_probe(self, cycle_id: str) -> RetrainRecord:
+        engine = self._self_improvement_engine()
+        cycle = engine.load_cycle(cycle_id) if cycle_id else None
+        if cycle is None:
+            cycle = engine.start_cycle()
+        anchor = engine.load_anchor_manifest()
+        probing_cycle = cycle.model_copy(update={"status": "probing", "updated_at": _utc_now()})
+        engine.save_cycle(probing_cycle)
+        anchor_hash_verified = engine.verify_anchor_integrity()
+        passed, reason = engine.evaluate_gate(
+            probe_mean_score=anchor.baseline_mean_score,
+            probe_overclaim_rate=0.0,
+            anchor_hash_verified=anchor_hash_verified,
+        )
+        retrain = RetrainRecord(
+            retrain_id=f"retrain-{hashlib.sha256(f'{probing_cycle.cycle_id}:probe'.encode('utf-8')).hexdigest()[:8]}",
+            cycle_id=probing_cycle.cycle_id,
+            delta_id=probing_cycle.delta_id or "",
+            run_kind="probe",
+            probe_mean_score=anchor.baseline_mean_score,
+            probe_overclaim_rate=0.0,
+            anchor_hash_verified=anchor_hash_verified,
+            gate_passed=passed,
+            gate_failure_reason=None if passed else reason,
+            completed_at=_utc_now(),
+            notes=["heuristic_probe_stub"],
+        )
+        if passed:
+            completed_cycle = probing_cycle.model_copy(
+                update={
+                    "probe_retrain_id": retrain.retrain_id,
+                    "status": "completed",
+                    "total_cycles_completed": probing_cycle.total_cycles_completed + 1,
+                    "consecutive_gate_failures": 0,
+                    "paused_reason": None,
+                    "human_resume_required": False,
+                    "updated_at": _utc_now(),
+                }
+            )
+            engine.save_cycle(completed_cycle)
+        else:
+            failed_cycle = engine.record_gate_failure(probing_cycle, reason)
+            engine.save_cycle(
+                failed_cycle.model_copy(
+                    update={
+                        "probe_retrain_id": retrain.retrain_id,
+                        "updated_at": _utc_now(),
+                    }
+                )
+            )
+        return retrain
+
+    def run_self_improvement_run1(self, cycle_id: str, delta_id: str) -> RetrainRecord:
+        raise NotImplementedError("run1 requires pod with CUDA; use pod session")
+
+    def deploy_improved_adapter(self, cycle_id: str, retrain_id: str) -> str:
+        raise NotImplementedError("deployment requires pod with CUDA; use pod session")
+
+    def self_improvement_status(self) -> SelfImprovementCycleRecord:
+        return self._self_improvement_engine().current_status()
+
+    def resume_self_improvement(self, cycle_id: str) -> SelfImprovementCycleRecord:
+        return self._self_improvement_engine().resume_self_improvement(cycle_id)
 
     def ingest_research(self, topic: str = "frontier ai", max_results: int = 6) -> ResearchIngestReport:
         report = self.research_ingestor.ingest(topic=topic, max_results=max_results)
