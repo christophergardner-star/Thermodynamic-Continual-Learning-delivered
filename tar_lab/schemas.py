@@ -162,6 +162,43 @@ class AnomalyElevationRecord(StrictModel):
     replicated: bool = False
 
 
+class CompetingTheory(StrictModel):
+    theory_id: str
+    timestamp: str
+    trial_id: str
+    project_id: str
+    description: str
+    predicted_outcome: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    source: Literal["operator", "heuristic"]
+    status: Literal["open", "invalidated", "confirmed", "inconclusive"] = "open"
+    invalidated_by_trial_id: str = ""
+    vault_indexed: bool = False
+
+
+class HeadToHeadExperimentPlan(StrictModel):
+    plan_id: str
+    timestamp: str
+    trial_id: str
+    project_id: str
+    primary_theory_description: str
+    competing_theory_id: str
+    discriminating_variable: str
+    expected_primary_outcome: str
+    expected_competing_outcome: str
+    status: Literal["proposed", "scheduled", "completed", "abandoned"] = "proposed"
+
+
+class TheoryInvalidationRecord(StrictModel):
+    invalidation_id: str
+    timestamp: str
+    theory_id: str
+    trial_id: str
+    project_id: str
+    evidence_summary: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
 DataAccessMode = Literal["OFFLINE_FALLBACK", "CACHED_REAL", "DOWNLOAD_REAL"]
 DataPurity = Literal["fallback", "cached_real", "download_real", "local_real", "mixed"]
 RunIntent = Literal["control", "plumbing", "research"]
@@ -2410,6 +2447,9 @@ class ControlRequest(StrictModel):
         "routing_log",
         "load_frontier_config",
         "get_anomaly_elevations",
+        "get_competing_theories",
+        "get_head_to_head_plans",
+        "get_theory_invalidations",
         "run_agenda_review",
         "agenda_status",
         "list_agenda_decisions",

@@ -172,6 +172,12 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
             payload = {"config": config.model_dump(mode="json") if config is not None else None}
         elif request.command == "get_anomaly_elevations":
             payload = {"records": orchestrator.get_anomaly_elevations()}
+        elif request.command == "get_competing_theories":
+            payload = {"records": orchestrator.get_competing_theories()}
+        elif request.command == "get_head_to_head_plans":
+            payload = {"records": orchestrator.get_head_to_head_plans()}
+        elif request.command == "get_theory_invalidations":
+            payload = {"records": orchestrator.get_theory_invalidations()}
         elif request.command == "run_agenda_review":
             payload = orchestrator.run_agenda_review().model_dump(mode="json")
         elif request.command == "agenda_status":

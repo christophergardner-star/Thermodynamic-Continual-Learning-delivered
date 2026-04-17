@@ -53,6 +53,7 @@ from tar_lab.schemas import (
     ClaimVerdict,
     CheckpointRecord,
     ContradictionReview,
+    CompetingTheory,
     CrossDomainBridgeRecord,
     CuratedDeltaRecord,
     DirectorPolicy,
@@ -91,6 +92,7 @@ from tar_lab.schemas import (
     ProblemResolutionReport,
     ProblemStudyReport,
     ProposedExperimentFamily,
+    HeadToHeadExperimentPlan,
     PublicationAlternativeBundle,
     PublicationBenchmarkAttachment,
     PublicationClaimBundle,
@@ -128,6 +130,7 @@ from tar_lab.schemas import (
     SelfCorrectionNote,
     ScienceEnvironmentBundle,
     TARExecutionPolicy,
+    TheoryInvalidationRecord,
     TrainingSignalRecord,
     TrainingPayloadConfig,
     VerificationReport,
@@ -1368,6 +1371,48 @@ class TAROrchestrator:
         path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
         return path
 
+    def _theories_dir(self) -> Path:
+        path = Path(self.store.state_dir) / "theories"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _theory_plans_dir(self) -> Path:
+        path = self._theories_dir() / "plans"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _theory_invalidations_dir(self) -> Path:
+        path = self._theories_dir() / "invalidations"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _persist_competing_theory(self, theory: CompetingTheory) -> Path:
+        path = self._theories_dir() / f"{theory.theory_id}.json"
+        path.write_text(theory.model_dump_json(indent=2), encoding="utf-8")
+        return path
+
+    def _persist_head_to_head_plan(self, plan: HeadToHeadExperimentPlan) -> Path:
+        path = self._theory_plans_dir() / f"{plan.plan_id}.json"
+        path.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+        return path
+
+    def _persist_theory_invalidation(self, record: TheoryInvalidationRecord) -> Path:
+        path = self._theory_invalidations_dir() / f"{record.invalidation_id}.json"
+        path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+        return path
+
+    def _load_competing_theory(self, theory_id: str) -> CompetingTheory:
+        path = self._theories_dir() / f"{theory_id}.json"
+        if not path.exists():
+            raise RuntimeError(f"Unknown competing theory: {theory_id}")
+        return CompetingTheory.model_validate_json(path.read_text(encoding="utf-8"))
+
+    def _index_structured_record(self, *, document_id: str, text: str, metadata: dict[str, Any]) -> bool:
+        if self.vault is None:
+            return False
+        self.vault._upsert(document_id, text, metadata)
+        return True
+
     @staticmethod
     def _breakthrough_score_value(report: BreakthroughReport) -> float:
         return float(report.novelty_score)
@@ -1415,6 +1460,162 @@ class TAROrchestrator:
             rows.append(AnomalyElevationRecord.model_validate_json(path.read_text(encoding="utf-8")))
         rows.sort(key=lambda item: (-item.surprise_score, item.timestamp, item.elevation_id))
         return [item.model_dump(mode="json") for item in rows]
+
+    def get_competing_theories(self) -> list[dict[str, Any]]:
+        rows: list[CompetingTheory] = []
+        for path in sorted(self._theories_dir().glob("*.json")):
+            rows.append(CompetingTheory.model_validate_json(path.read_text(encoding="utf-8")))
+        rows.sort(key=lambda item: (item.timestamp, item.theory_id), reverse=True)
+        return [item.model_dump(mode="json") for item in rows]
+
+    def get_head_to_head_plans(self) -> list[dict[str, Any]]:
+        rows: list[HeadToHeadExperimentPlan] = []
+        for path in sorted(self._theory_plans_dir().glob("*.json")):
+            rows.append(HeadToHeadExperimentPlan.model_validate_json(path.read_text(encoding="utf-8")))
+        rows.sort(key=lambda item: (item.timestamp, item.plan_id), reverse=True)
+        return [item.model_dump(mode="json") for item in rows]
+
+    def get_theory_invalidations(self) -> list[dict[str, Any]]:
+        rows: list[TheoryInvalidationRecord] = []
+        for path in sorted(self._theory_invalidations_dir().glob("*.json")):
+            rows.append(TheoryInvalidationRecord.model_validate_json(path.read_text(encoding="utf-8")))
+        rows.sort(key=lambda item: (-item.confidence, item.timestamp, item.invalidation_id))
+        return [item.model_dump(mode="json") for item in rows]
+
+    def generate_competing_theories(
+        self,
+        trial_id: str,
+        project_id: str,
+        description: str,
+    ) -> list[CompetingTheory]:
+        _ = description
+        templates = [
+            {
+                "description": "Result is an artifact of initialization variance rather than a genuine effect",
+                "predicted_outcome": "Repeated trials with different seeds will show regression to baseline",
+                "confidence": 0.4,
+            },
+            {
+                "description": "Result reflects overfitting to the specific problem distribution rather than generalization",
+                "predicted_outcome": "Performance degrades on held-out problem variants",
+                "confidence": 0.35,
+            },
+        ]
+        theories: list[CompetingTheory] = []
+        for template in templates:
+            theory = CompetingTheory(
+                theory_id=uuid.uuid4().hex,
+                timestamp=datetime.utcnow().isoformat(),
+                trial_id=trial_id,
+                project_id=project_id,
+                description=template["description"],
+                predicted_outcome=template["predicted_outcome"],
+                confidence=template["confidence"],
+                source="heuristic",
+            )
+            self._persist_competing_theory(theory)
+            indexed = self._index_structured_record(
+                document_id=f"competing_theory:{theory.theory_id}",
+                text=f"{theory.description}. Prediction: {theory.predicted_outcome}.",
+                metadata={
+                    "kind": "competing_theory",
+                    "theory_id": theory.theory_id,
+                    "trial_id": theory.trial_id,
+                    "project_id": theory.project_id,
+                    "confidence": theory.confidence,
+                    "status": theory.status,
+                    "source_confidence": theory.confidence,
+                },
+            )
+            if indexed:
+                theory = theory.model_copy(update={"vault_indexed": True})
+                self._persist_competing_theory(theory)
+            theories.append(theory)
+        return theories
+
+    def build_head_to_head_plan(
+        self,
+        trial_id: str,
+        project_id: str,
+        primary_description: str,
+        competing_theory: CompetingTheory,
+    ) -> HeadToHeadExperimentPlan:
+        plan = HeadToHeadExperimentPlan(
+            plan_id=uuid.uuid4().hex,
+            timestamp=datetime.utcnow().isoformat(),
+            trial_id=trial_id,
+            project_id=project_id,
+            primary_theory_description=primary_description,
+            competing_theory_id=competing_theory.theory_id,
+            discriminating_variable=(
+                "random_seed"
+                if "initialization" in competing_theory.description.lower()
+                else "problem_distribution"
+            ),
+            expected_primary_outcome=primary_description,
+            expected_competing_outcome=competing_theory.predicted_outcome,
+        )
+        self._persist_head_to_head_plan(plan)
+        self._index_structured_record(
+            document_id=f"head_to_head_plan:{plan.plan_id}",
+            text=(
+                f"Head-to-head plan for {plan.trial_id}. "
+                f"Primary: {plan.expected_primary_outcome}. "
+                f"Competing: {plan.expected_competing_outcome}. "
+                f"Discriminating variable: {plan.discriminating_variable}."
+            ),
+            metadata={
+                "kind": "head_to_head_plan",
+                "plan_id": plan.plan_id,
+                "trial_id": plan.trial_id,
+                "project_id": plan.project_id,
+                "competing_theory_id": plan.competing_theory_id,
+                "status": plan.status,
+                "source_confidence": 0.5,
+            },
+        )
+        return plan
+
+    def invalidate_theory(
+        self,
+        theory_id: str,
+        trial_id: str,
+        project_id: str,
+        evidence_summary: str,
+        confidence: float,
+    ) -> TheoryInvalidationRecord:
+        theory = self._load_competing_theory(theory_id)
+        updated_theory = theory.model_copy(
+            update={
+                "status": "invalidated",
+                "invalidated_by_trial_id": trial_id,
+            }
+        )
+        self._persist_competing_theory(updated_theory)
+        invalidation = TheoryInvalidationRecord(
+            invalidation_id=uuid.uuid4().hex,
+            timestamp=datetime.utcnow().isoformat(),
+            theory_id=theory_id,
+            trial_id=trial_id,
+            project_id=project_id,
+            evidence_summary=evidence_summary,
+            confidence=confidence,
+        )
+        self._persist_theory_invalidation(invalidation)
+        for path in sorted(self._anomalies_dir().glob("*.json")):
+            anomaly = AnomalyElevationRecord.model_validate_json(path.read_text(encoding="utf-8"))
+            if anomaly.breakthrough_id != trial_id:
+                continue
+            anomaly = anomaly.model_copy(
+                update={
+                    "prior_contradiction_score": min(
+                        1.0,
+                        anomaly.prior_contradiction_score + confidence,
+                    )
+                }
+            )
+            path.write_text(anomaly.model_dump_json(indent=2), encoding="utf-8")
+        return invalidation
 
     def elevate_anomalies(self) -> list[AnomalyElevationRecord]:
         reports = list(self.store.iter_breakthrough_reports())
@@ -1470,6 +1671,22 @@ class TAROrchestrator:
                         "prior_contradiction_score": record.prior_contradiction_score,
                         "replication_priority": record.replication_priority,
                         "source_confidence": record.surprise_score,
+                    },
+                )
+            try:
+                self.generate_competing_theories(
+                    breakthrough_id,
+                    project_id="unknown",
+                    description=record.elevation_reason,
+                )
+            except Exception as exc:
+                self.store.append_audit_event(
+                    "anomaly",
+                    "generate_competing_theories_failed",
+                    {
+                        "breakthrough_id": breakthrough_id,
+                        "elevation_id": record.elevation_id,
+                        "error": str(exc),
                     },
                 )
             elevated.append(record)
