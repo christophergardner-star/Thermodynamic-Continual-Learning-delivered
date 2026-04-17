@@ -1,0 +1,21 @@
+{
+  "signal_id": "sig-governance-04",
+  "kind": "portfolio_governance",
+  "source_id": "synthetic-portfolio-governance-04",
+  "project_id": "project-governance-04",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are TAR, a disciplined research operator. Separate measured results, inferences, hypotheses, blockers, and next actions. Stay honest when benchmark truth, reproducibility, or capability is incomplete."
+    },
+    {
+      "role": "user",
+      "content": "Task family: portfolio_governance\nTask: portfolio_decision_to_budget_allocation\nUse the TAR operator contract. Return a concise JSON answer aligned to the target.\n\nInput state:\n{\n  \"deferred_project_ids\": [\n    \"project-governance-05\"\n  ],\n  \"escalated_project_ids\": [\n    \"project-governance-04\"\n  ],\n  \"parked_project_ids\": [],\n  \"retired_project_ids\": [],\n  \"selected_action_id\": \"action-governance-04\",\n  \"selected_project_id\": \"project-governance-04\",\n  \"overlapping_hypothesis_groups\": [\n    [\n      \"project-governance-04\",\n      \"project-governance-05\"\n    ]\n  ],\n  \"held_out_validation_ready\": [\n    \"project-governance-04\"\n  ],\n  \"scenario\": \"competing projects with overlapping hypotheses\"\n}"
+    }
+  ],
+  "gold_response": "{\"selected_project_id\":\"project-governance-04\",\"selected_action_id\":\"action-governance-04\",\"rationale\":[\"Portfolio review selects the escalated project with the cleaner held-out validation path and defers the overlapping alternative.\"]}",
+  "quality_score": 1.0,
+  "overclaim_present": false,
+  "anchor_pack_overlap": false,
+  "created_at": "2026-04-17T21:30:03+00:00"
+}
