@@ -148,6 +148,20 @@ class CrossDomainBridgeRecord(StrictModel):
     vault_indexed: bool = False
 
 
+class AnomalyElevationRecord(StrictModel):
+    elevation_id: str
+    timestamp: str
+    breakthrough_id: str
+    project_id: str
+    surprise_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    prior_contradiction_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    vault_score_mean: float
+    vault_score_std: float = Field(default=0.0, ge=0.0)
+    elevation_reason: str
+    replication_priority: Literal["immediate", "high", "normal"] = "normal"
+    replicated: bool = False
+
+
 DataAccessMode = Literal["OFFLINE_FALLBACK", "CACHED_REAL", "DOWNLOAD_REAL"]
 DataPurity = Literal["fallback", "cached_real", "download_real", "local_real", "mixed"]
 RunIntent = Literal["control", "plumbing", "research"]
@@ -1627,6 +1641,8 @@ class BreakthroughReport(StrictModel):
     rationale: List[str] = Field(default_factory=list)
     verification: VerificationReport
     claim_verdict: Optional[ClaimVerdict] = None
+    surprise_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    prior_contradiction_score: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class DatasetChangeProposal(StrictModel):
@@ -2393,6 +2409,7 @@ class ControlRequest(StrictModel):
         "routing_summary",
         "routing_log",
         "load_frontier_config",
+        "get_anomaly_elevations",
         "run_agenda_review",
         "agenda_status",
         "list_agenda_decisions",

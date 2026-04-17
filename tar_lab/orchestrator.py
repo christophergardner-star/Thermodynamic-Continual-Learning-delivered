@@ -3,9 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import gc
 import hashlib
+import json
+import math
 import os
 from pathlib import Path
 import re
+import uuid
 import subprocess
 import sys
 from typing import Any, Dict, Optional
@@ -41,6 +44,7 @@ from tar_lab.schemas import (
     AgendaReviewConfig,
     AgendaReviewRecord,
     AgendaSnapshot,
+    AnomalyElevationRecord,
     AlertRecord,
     BenchmarkTier,
     BudgetAllocationDecision,
@@ -1322,12 +1326,15 @@ class TAROrchestrator:
         orphaned = self.recover_orphaned_runs()
         heartbeat = self.runtime_daemon.run_cycle(max_jobs=max_jobs, stale_after_s=stale_after_s)
         escalated_verdicts = self._age_claim_verdicts()
-        if orphaned or escalated_verdicts:
+        elevated_anomalies = self.elevate_anomalies()
+        if orphaned or escalated_verdicts or elevated_anomalies:
             notes = list(heartbeat.notes)
             if orphaned:
                 notes.append(f"orphan_recoveries={len(orphaned)}")
             if escalated_verdicts:
                 notes.append(f"escalated_verdicts={len(escalated_verdicts)}")
+            if elevated_anomalies:
+                notes.append(f"anomaly_elevations={len(elevated_anomalies)}")
             heartbeat = heartbeat.model_copy(
                 update={
                     "stale_cleanups": heartbeat.stale_cleanups + len(orphaned),
@@ -1343,6 +1350,133 @@ class TAROrchestrator:
         )
         self._sync_memory()
         return heartbeat
+
+    def _anomalies_dir(self) -> Path:
+        path = Path(self.store.state_dir) / "anomalies"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _persist_breakthrough_reports(self, reports: list[BreakthroughReport]) -> None:
+        path = self.store.breakthrough_reports_path
+        payload = "\n".join(json.dumps(item.model_dump(mode="json")) for item in reports)
+        if payload:
+            payload += "\n"
+        path.write_text(payload, encoding="utf-8")
+
+    def _persist_anomaly_elevation(self, record: AnomalyElevationRecord) -> Path:
+        path = self._anomalies_dir() / f"{record.elevation_id}.json"
+        path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _breakthrough_score_value(report: BreakthroughReport) -> float:
+        return float(report.novelty_score)
+
+    def _vault_breakthrough_scores(self, limit: int = 100) -> list[float]:
+        if self.vault is None:
+            return []
+        collected: list[float] = []
+        for kind in ("breakthrough_report", "breakthrough"):
+            try:
+                hits = self.vault.search("breakthrough distribution", n_results=limit, kind=kind)
+            except Exception:
+                hits = []
+            for hit in hits:
+                metadata = hit.metadata or {}
+                raw = metadata.get("score", metadata.get("novelty_score"))
+                try:
+                    collected.append(float(raw))
+                except (TypeError, ValueError):
+                    continue
+            if collected:
+                break
+        return collected[:limit]
+
+    def _compute_surprise_score(self, score: float) -> tuple[float, float, float]:
+        sample = self._vault_breakthrough_scores(limit=100)
+        if len(sample) < 5:
+            sample = [
+                self._breakthrough_score_value(report)
+                for report in list(self.store.iter_breakthrough_reports())[-100:]
+            ]
+        if len(sample) < 5:
+            return 0.0, 0.0, 0.0
+        mean = sum(sample) / len(sample)
+        variance = sum((item - mean) ** 2 for item in sample) / len(sample)
+        std = math.sqrt(variance)
+        if std == 0.0:
+            return 0.0, mean, 0.0
+        surprise = min(1.0, abs(score - mean) / (3 * std))
+        return surprise, mean, std
+
+    def get_anomaly_elevations(self) -> list[dict[str, Any]]:
+        rows: list[AnomalyElevationRecord] = []
+        for path in sorted(self._anomalies_dir().glob("*.json")):
+            rows.append(AnomalyElevationRecord.model_validate_json(path.read_text(encoding="utf-8")))
+        rows.sort(key=lambda item: (-item.surprise_score, item.timestamp, item.elevation_id))
+        return [item.model_dump(mode="json") for item in rows]
+
+    def elevate_anomalies(self) -> list[AnomalyElevationRecord]:
+        reports = list(self.store.iter_breakthrough_reports())
+        if not reports:
+            return []
+        updated_reports = list(reports)
+        elevated: list[AnomalyElevationRecord] = []
+        existing_breakthrough_ids = {
+            item["breakthrough_id"]
+            for item in self.get_anomaly_elevations()
+            if item.get("breakthrough_id")
+        }
+        changed = False
+        for idx, report in enumerate(updated_reports):
+            if report.surprise_score != 0.0:
+                continue
+            surprise, mean, std = self._compute_surprise_score(self._breakthrough_score_value(report))
+            if surprise == 0.0 and mean == 0.0 and std == 0.0:
+                continue
+            report = report.model_copy(update={"surprise_score": surprise})
+            updated_reports[idx] = report
+            changed = True
+            breakthrough_id = report.trial_id
+            if surprise < 0.3 or breakthrough_id in existing_breakthrough_ids:
+                continue
+            project_id = report.trial_id
+            record = AnomalyElevationRecord(
+                elevation_id=uuid.uuid4().hex,
+                timestamp=datetime.utcnow().isoformat(),
+                breakthrough_id=breakthrough_id,
+                project_id=project_id,
+                surprise_score=surprise,
+                prior_contradiction_score=0.0,
+                vault_score_mean=mean,
+                vault_score_std=std,
+                elevation_reason=(
+                    f"Score {self._breakthrough_score_value(report):.3f} deviates {surprise:.2f} "
+                    f"from vault distribution (mean={mean:.3f}, std={std:.3f})"
+                ),
+                replication_priority="immediate" if surprise >= 0.7 else "high",
+            )
+            self._persist_anomaly_elevation(record)
+            if self.vault is not None:
+                self.vault._upsert(
+                    f"anomaly_elevation:{record.elevation_id}",
+                    record.elevation_reason,
+                    {
+                        "kind": "anomaly_elevation",
+                        "elevation_id": record.elevation_id,
+                        "breakthrough_id": record.breakthrough_id,
+                        "project_id": record.project_id,
+                        "surprise_score": record.surprise_score,
+                        "prior_contradiction_score": record.prior_contradiction_score,
+                        "replication_priority": record.replication_priority,
+                        "source_confidence": record.surprise_score,
+                    },
+                )
+            elevated.append(record)
+            existing_breakthrough_ids.add(breakthrough_id)
+        if changed:
+            self._persist_breakthrough_reports(updated_reports)
+        return elevated
 
     def retry_failed_job(self, schedule_id: str) -> ProblemScheduleEntry:
         entry = self.scheduler.retry_failed_job(schedule_id)
