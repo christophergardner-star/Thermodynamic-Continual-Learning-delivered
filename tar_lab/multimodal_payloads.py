@@ -710,12 +710,14 @@ def run_split_cifar10_benchmark(
 
     ewc_fisher: dict[str, torch.Tensor] = {}
     ewc_params: dict[str, torch.Tensor] = {}
-    si_omega: dict[str, torch.Tensor] = {name: torch.zeros_like(param) for name, param in trunk.named_parameters()}
+    si_omega: dict[str, torch.Tensor] = {
+        name: torch.zeros_like(param, device="cpu") for name, param in trunk.named_parameters()
+    }
     si_prev_params: dict[str, torch.Tensor] = {
-        name: param.detach().clone() for name, param in trunk.named_parameters()
+        name: param.detach().cpu().clone() for name, param in trunk.named_parameters()
     }
     si_path_integral: dict[str, torch.Tensor] = {
-        name: torch.zeros_like(param) for name, param in trunk.named_parameters()
+        name: torch.zeros_like(param, device="cpu") for name, param in trunk.named_parameters()
     }
 
     if observer is None and method == "tcl" and config.tcl_governor_enabled:
