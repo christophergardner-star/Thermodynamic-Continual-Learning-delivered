@@ -750,6 +750,9 @@ def run_split_cifar10_benchmark(
             heads[train_task_idx].train()
             _epoch_regimes: list[str] = []
             _epoch_lrs: list[float] = []
+            _epoch_sigmas: list[float] = []
+            _epoch_sigma_stars: list[float] = []
+            _epoch_rhos: list[float] = []
 
             for batch_x, batch_y in train_loader:
                 batch_x = batch_x.to(device)
@@ -788,12 +791,21 @@ def run_split_cifar10_benchmark(
                 # Must fire BEFORE optimizer.step() so gradients are fresh and
                 # the adjusted LR takes effect on the current weight update.
                 if observer is not None and method == "tcl":
-                    observer.step(optimizer)
+                    snap = observer.step(optimizer)
                     adj_lr = _tcl_lr_adjustment(observer, base_lr)
                     for group in optimizer.param_groups:
                         group["lr"] = adj_lr
                     _epoch_regimes.append(observer.current_regime)
                     _epoch_lrs.append(adj_lr)
+                    # capture raw sigma/sigma_star for calibration diagnostics
+                    if snap.layer_metrics:
+                        _epoch_sigmas.append(
+                            sum(lm.sigma for lm in snap.layer_metrics) / len(snap.layer_metrics)
+                        )
+                        _epoch_sigma_stars.append(
+                            sum(lm.sigma_star for lm in snap.layer_metrics) / len(snap.layer_metrics)
+                        )
+                        _epoch_rhos.append(snap.regime_rho)
 
                 optimizer.step()
 
@@ -802,7 +814,7 @@ def run_split_cifar10_benchmark(
                 from collections import Counter
                 counts = Counter(_epoch_regimes)
                 total = len(_epoch_regimes)
-                tcl_trace.append({
+                entry: dict = {
                     "task": train_task_idx,
                     "epoch": _epoch,
                     "n_batches": total,
@@ -813,7 +825,17 @@ def run_split_cifar10_benchmark(
                     "mean_lr": round(sum(_epoch_lrs) / len(_epoch_lrs), 6),
                     "min_lr": round(min(_epoch_lrs), 6),
                     "max_lr": round(max(_epoch_lrs), 6),
-                })
+                }
+                if _epoch_sigmas:
+                    entry["mean_sigma"] = round(sum(_epoch_sigmas) / len(_epoch_sigmas), 8)
+                    entry["mean_sigma_star"] = round(sum(_epoch_sigma_stars) / len(_epoch_sigma_stars), 8)
+                    entry["mean_rho"] = round(sum(_epoch_rhos) / len(_epoch_rhos), 4)
+                    # rho headroom: how far from the "ordered" threshold (0.9)
+                    # negative = already ordered, positive = distance to go
+                    entry["rho_to_ordered"] = round(
+                        sum(_epoch_rhos) / len(_epoch_rhos) - 0.9, 4
+                    )
+                tcl_trace.append(entry)
 
         if method == "ewc":
             trunk.eval()
