@@ -265,6 +265,52 @@ class ContinualLearningBenchmarkConfig(StrictModel):
     augmentation: str = "flip_normalize"
 
 
+class StatisticalTestRecord(StrictModel):
+    test_id: str
+    timestamp: str
+    test_type: str
+    metric: str
+    group_a: str
+    group_b: str
+    group_a_values: List[float]
+    group_b_values: List[float]
+    statistic: float
+    p_value: float = -1.0
+    effect_size: float = 0.0
+    significant: bool
+
+
+class BaselineComparisonPlan(StrictModel):
+    plan_id: str
+    timestamp: str
+    project_id: str
+    benchmark: str = "split_cifar10"
+    setting: str = "task_incremental"
+    methods: List[str] = Field(default_factory=lambda: ["tcl", "ewc", "si", "sgd_baseline"])
+    seeds: List[int] = Field(default_factory=lambda: [42, 123, 456, 789, 1337])
+    primary_metric: str = "mean_forgetting"
+    secondary_metrics: List[str] = Field(
+        default_factory=lambda: ["final_mean_accuracy", "mean_backward_transfer"]
+    )
+    significance_threshold: float = 0.05
+    status: str = "proposed"
+
+
+class BaselineComparisonResult(StrictModel):
+    result_id: str
+    plan_id: str
+    project_id: str
+    completed_at: str
+    method_means: Dict[str, Dict[str, float]]
+    method_stds: Dict[str, Dict[str, float]]
+    pairwise_pvalues: Dict[str, float]
+    pairwise_effect_sizes: Dict[str, float]
+    tcl_is_significantly_better: bool
+    tcl_is_significantly_worse: bool
+    honest_assessment: str
+    statistical_test_ids: List[str]
+
+
 DataAccessMode = Literal["OFFLINE_FALLBACK", "CACHED_REAL", "DOWNLOAD_REAL"]
 DataPurity = Literal["fallback", "cached_real", "download_real", "local_real", "mixed"]
 RunIntent = Literal["control", "plumbing", "research"]
@@ -2519,6 +2565,9 @@ class ControlRequest(StrictModel):
         "get_theory_invalidations",
         "get_positioning_reports",
         "get_positioning_report",
+        "plan_baseline_comparison",
+        "get_comparison_plans",
+        "get_comparison_result",
         "run_agenda_review",
         "agenda_status",
         "list_agenda_decisions",

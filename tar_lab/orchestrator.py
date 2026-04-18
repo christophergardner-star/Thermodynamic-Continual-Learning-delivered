@@ -46,12 +46,16 @@ from tar_lab.schemas import (
     AgendaSnapshot,
     AnomalyElevationRecord,
     AlertRecord,
+    BaselineComparisonPlan,
+    BaselineComparisonResult,
     BenchmarkTier,
     BudgetAllocationDecision,
     BreakthroughReport,
     ClaimAcceptancePolicy,
     ClaimVerdict,
     CheckpointRecord,
+    ContinualLearningBenchmarkConfig,
+    ContinualLearningBenchmarkResult,
     ContributionPositioningReport,
     ContradictionReview,
     CompetingTheory,
@@ -131,6 +135,7 @@ from tar_lab.schemas import (
     SelfCorrectionNote,
     SoTAComparison,
     ScienceEnvironmentBundle,
+    StatisticalTestRecord,
     TARExecutionPolicy,
     TheoryInvalidationRecord,
     TrainingSignalRecord,
@@ -1393,6 +1398,21 @@ class TAROrchestrator:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def _comparisons_dir(self) -> Path:
+        path = Path(self.store.state_dir) / "comparisons"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _comparison_runs_dir(self) -> Path:
+        path = self._comparisons_dir() / "runs"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _comparison_stats_dir(self) -> Path:
+        path = self._comparisons_dir() / "stats"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def _persist_competing_theory(self, theory: CompetingTheory) -> Path:
         path = self._theories_dir() / f"{theory.theory_id}.json"
         path.write_text(theory.model_dump_json(indent=2), encoding="utf-8")
@@ -1411,6 +1431,26 @@ class TAROrchestrator:
     def _persist_positioning_report(self, report: ContributionPositioningReport) -> Path:
         path = self._positioning_dir() / f"{report.report_id}.json"
         path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+        return path
+
+    def _persist_comparison_plan(self, plan: BaselineComparisonPlan) -> Path:
+        path = self._comparisons_dir() / f"{plan.plan_id}.json"
+        path.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+        return path
+
+    def _persist_comparison_result(self, result: BaselineComparisonResult) -> Path:
+        path = self._comparisons_dir() / f"{result.result_id}.json"
+        path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+        return path
+
+    def _persist_comparison_run(self, result: ContinualLearningBenchmarkResult) -> Path:
+        path = self._comparison_runs_dir() / f"{result.benchmark_id}.json"
+        path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+        return path
+
+    def _persist_statistical_test(self, record: StatisticalTestRecord) -> Path:
+        path = self._comparison_stats_dir() / f"{record.test_id}.json"
+        path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
         return path
 
     def _load_competing_theory(self, theory_id: str) -> CompetingTheory:
@@ -1508,6 +1548,250 @@ class TAROrchestrator:
         return ContributionPositioningReport.model_validate_json(
             path.read_text(encoding="utf-8")
         ).model_dump(mode="json")
+
+    def get_comparison_plans(self) -> list[dict[str, Any]]:
+        rows: list[BaselineComparisonPlan] = []
+        for path in sorted(self._comparisons_dir().glob("*.json")):
+            try:
+                rows.append(BaselineComparisonPlan.model_validate_json(path.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+        rows.sort(key=lambda item: (item.timestamp, item.plan_id), reverse=True)
+        return [item.model_dump(mode="json") for item in rows]
+
+    def plan_baseline_comparison(
+        self,
+        project_id: str,
+        seeds: Optional[list[int]] = None,
+    ) -> BaselineComparisonPlan:
+        plan = BaselineComparisonPlan(
+            plan_id=uuid.uuid4().hex,
+            timestamp=datetime.utcnow().isoformat(),
+            project_id=project_id,
+            seeds=list(seeds) if seeds is not None else [42, 123, 456, 789, 1337],
+            status="proposed",
+        )
+        self._persist_comparison_plan(plan)
+        return plan
+
+    def run_baseline_comparison(
+        self,
+        plan: BaselineComparisonPlan,
+    ) -> BaselineComparisonResult:
+        from tar_lab.multimodal_payloads import run_split_cifar10_benchmark
+
+        method_results: dict[str, list[ContinualLearningBenchmarkResult]] = {}
+        statistical_test_ids: list[str] = []
+        pairwise_pvalues: dict[str, float] = {}
+        pairwise_effect_sizes: dict[str, float] = {}
+
+        running_plan = plan.model_copy(update={"status": "running"})
+        self._persist_comparison_plan(running_plan)
+
+        for method in running_plan.methods:
+            results_for_method: list[ContinualLearningBenchmarkResult] = []
+            for seed in running_plan.seeds:
+                cfg = ContinualLearningBenchmarkConfig(seed=seed)
+                result = run_split_cifar10_benchmark(cfg, method=method, workspace=self.workspace)
+                results_for_method.append(result)
+                self._persist_comparison_run(result)
+            method_results[method] = results_for_method
+
+        metric_names = [running_plan.primary_metric, *running_plan.secondary_metrics]
+        method_means: dict[str, dict[str, float]] = {}
+        method_stds: dict[str, dict[str, float]] = {}
+        for method, results in method_results.items():
+            means: dict[str, float] = {}
+            stds: dict[str, float] = {}
+            for metric_name in metric_names:
+                values = [float(getattr(result, metric_name)) for result in results]
+                mean_value, std_value = self._mean_and_std(values)
+                means[metric_name] = mean_value
+                stds[metric_name] = std_value
+            method_means[method] = means
+            method_stds[method] = stds
+
+        comparisons = [
+            ("tcl", "ewc"),
+            ("tcl", "si"),
+            ("tcl", "sgd_baseline"),
+        ]
+        for group_a, group_b in comparisons:
+            key = f"{group_a}_vs_{group_b}"
+            a_values = [float(result.mean_forgetting) for result in method_results[group_a]]
+            b_values = [float(result.mean_forgetting) for result in method_results[group_b]]
+            mw_record = self._run_mann_whitney(group_a, group_b, running_plan.primary_metric, a_values, b_values)
+            cd_record = self._compute_cohens_d(group_a, group_b, running_plan.primary_metric, a_values, b_values)
+            self._persist_statistical_test(mw_record)
+            self._persist_statistical_test(cd_record)
+            statistical_test_ids.extend([mw_record.test_id, cd_record.test_id])
+            pairwise_pvalues[key] = mw_record.p_value
+            pairwise_effect_sizes[key] = cd_record.effect_size
+
+        primary_metric = running_plan.primary_metric
+        tcl_mean = method_means["tcl"][primary_metric]
+        baseline_means = {
+            baseline: method_means[baseline][primary_metric]
+            for baseline in ("ewc", "si", "sgd_baseline")
+        }
+        tcl_is_significantly_better = (
+            all(p_value < running_plan.significance_threshold for p_value in pairwise_pvalues.values())
+            and all(tcl_mean < baseline_mean for baseline_mean in baseline_means.values())
+        )
+        tcl_is_significantly_worse = any(
+            pairwise_pvalues[f"tcl_vs_{baseline}"] < running_plan.significance_threshold
+            and tcl_mean > baseline_means[baseline]
+            for baseline in ("ewc", "si", "sgd_baseline")
+        )
+
+        lines: list[str] = []
+        for key, baseline in (
+            ("tcl_vs_ewc", "ewc"),
+            ("tcl_vs_si", "si"),
+            ("tcl_vs_sgd_baseline", "sgd_baseline"),
+        ):
+            baseline_mean = method_means[baseline][primary_metric]
+            p_value = pairwise_pvalues[key]
+            effect_size = pairwise_effect_sizes[key]
+            significance = (
+                "significantly better"
+                if (p_value < 0.05 and tcl_mean < baseline_mean)
+                else "significantly worse"
+                if (p_value < 0.05 and tcl_mean > baseline_mean)
+                else "not significantly different"
+            )
+            lines.append(
+                f"TCL vs {baseline}: mean_forgetting {tcl_mean:.3f} vs {baseline_mean:.3f} "
+                f"(p={p_value:.3f}, d={effect_size:.3f}) — {significance}."
+            )
+        if tcl_is_significantly_better:
+            summary = "Overall: TCL significantly reduces forgetting across all baselines."
+        elif tcl_is_significantly_worse:
+            summary = "Overall: TCL shows significantly worse forgetting on at least one baseline."
+        else:
+            summary = "Overall: TCL does not significantly differ from baselines on primary metric."
+        honest_assessment = " ".join(lines) + " " + summary
+
+        result = BaselineComparisonResult(
+            result_id=uuid.uuid4().hex,
+            plan_id=running_plan.plan_id,
+            project_id=running_plan.project_id,
+            completed_at=datetime.utcnow().isoformat(),
+            method_means=method_means,
+            method_stds=method_stds,
+            pairwise_pvalues=pairwise_pvalues,
+            pairwise_effect_sizes=pairwise_effect_sizes,
+            tcl_is_significantly_better=tcl_is_significantly_better,
+            tcl_is_significantly_worse=tcl_is_significantly_worse,
+            honest_assessment=honest_assessment,
+            statistical_test_ids=statistical_test_ids,
+        )
+        self._persist_comparison_result(result)
+        completed_plan = running_plan.model_copy(update={"status": "complete"})
+        self._persist_comparison_plan(completed_plan)
+        self.position_contribution(
+            completed_plan.project_id,
+            trial_id=result.result_id,
+            result_description=honest_assessment,
+        )
+        return result
+
+    def _run_mann_whitney(
+        self,
+        group_a: str,
+        group_b: str,
+        metric: str,
+        a_values: list[float],
+        b_values: list[float],
+    ) -> StatisticalTestRecord:
+        try:
+            from scipy.stats import mannwhitneyu
+
+            stat, p_value = mannwhitneyu(a_values, b_values, alternative="two-sided")
+        except ImportError:
+            n_a = len(a_values)
+            n_b = len(b_values)
+            u_value = sum(1 for a in a_values for b in b_values if a < b)
+            u_value += 0.5 * sum(1 for a in a_values for b in b_values if a == b)
+            stat = float(u_value)
+            mean_u = n_a * n_b / 2
+            std_u = max(((n_a * n_b * (n_a + n_b + 1)) / 12) ** 0.5, 1e-8)
+            z_score = (stat - mean_u) / std_u
+            p_value = float(2 * (1 - 0.5 * (1 + math.erf(abs(z_score) / math.sqrt(2)))))
+
+        return StatisticalTestRecord(
+            test_id=uuid.uuid4().hex,
+            timestamp=datetime.utcnow().isoformat(),
+            test_type="mann_whitney_u",
+            metric=metric,
+            group_a=group_a,
+            group_b=group_b,
+            group_a_values=list(a_values),
+            group_b_values=list(b_values),
+            statistic=float(stat),
+            p_value=float(p_value),
+            effect_size=0.0,
+            significant=float(p_value) < 0.05,
+        )
+
+    def _compute_cohens_d(
+        self,
+        group_a: str,
+        group_b: str,
+        metric: str,
+        a_values: list[float],
+        b_values: list[float],
+    ) -> StatisticalTestRecord:
+        n_a = len(a_values)
+        n_b = len(b_values)
+        mean_a = sum(a_values) / max(n_a, 1)
+        mean_b = sum(b_values) / max(n_b, 1)
+        var_a = sum((value - mean_a) ** 2 for value in a_values) / max(n_a - 1, 1)
+        var_b = sum((value - mean_b) ** 2 for value in b_values) / max(n_b - 1, 1)
+        pooled_std = math.sqrt(((n_a - 1) * var_a + (n_b - 1) * var_b) / max(n_a + n_b - 2, 1))
+        effect_size = (mean_a - mean_b) / max(pooled_std, 1e-8)
+
+        return StatisticalTestRecord(
+            test_id=uuid.uuid4().hex,
+            timestamp=datetime.utcnow().isoformat(),
+            test_type="cohens_d",
+            metric=metric,
+            group_a=group_a,
+            group_b=group_b,
+            group_a_values=list(a_values),
+            group_b_values=list(b_values),
+            statistic=float(effect_size),
+            p_value=-1.0,
+            effect_size=float(effect_size),
+            significant=False,
+        )
+
+    def get_comparison_result(
+        self,
+        project_id: str,
+    ) -> Optional[BaselineComparisonResult]:
+        rows: list[BaselineComparisonResult] = []
+        for path in sorted(self._comparisons_dir().glob("*.json")):
+            try:
+                result = BaselineComparisonResult.model_validate_json(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if result.project_id == project_id:
+                rows.append(result)
+        if not rows:
+            return None
+        rows.sort(key=lambda item: (item.completed_at, item.result_id), reverse=True)
+        return rows[0]
+
+    @staticmethod
+    def _mean_and_std(values: list[float]) -> tuple[float, float]:
+        if not values:
+            return 0.0, 0.0
+        mean_value = sum(values) / len(values)
+        if len(values) < 2:
+            return mean_value, 0.0
+        variance = sum((value - mean_value) ** 2 for value in values) / (len(values) - 1)
+        return mean_value, math.sqrt(max(variance, 0.0))
 
     def generate_competing_theories(
         self,

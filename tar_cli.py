@@ -117,6 +117,20 @@ def _rewrite_positioning_subcommand(argv: list[str]) -> list[str]:
     return argv
 
 
+def _rewrite_comparison_subcommand(argv: list[str]) -> list[str]:
+    if not argv or argv[0] != "comparison":
+        return argv
+    if len(argv) == 1:
+        return argv
+    action = argv[1]
+    rest = argv[2:]
+    if action == "plan" and rest:
+        return ["--comparison-plan", "--project-id", rest[0], *rest[1:]]
+    if action == "show" and rest:
+        return ["--comparison-show", "--project-id", rest[0], *rest[1:]]
+    return argv
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="TAR command and control CLI")
     parser.add_argument("--workspace", default=str(Path(__file__).resolve().parent))
@@ -281,6 +295,8 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--list-anomaly-elevations", action="store_true", dest="list_anomaly_elevations")
     group.add_argument("--list-competing-theories", action="store_true", dest="list_competing_theories")
     group.add_argument("--list-positioning-reports", action="store_true", dest="list_positioning_reports")
+    group.add_argument("--comparison-plan", action="store_true", dest="comparison_plan")
+    group.add_argument("--comparison-show", action="store_true", dest="comparison_show")
     group.add_argument("--run-agenda-review", action="store_true", dest="run_agenda_review")
     group.add_argument("--agenda-status", action="store_true", dest="agenda_status")
     group.add_argument("--list-agenda-decisions", action="store_true", dest="list_agenda_decisions")
@@ -367,6 +383,7 @@ def parse_args() -> argparse.Namespace:
     argv = _rewrite_anomalies_subcommand(argv)
     argv = _rewrite_theories_subcommand(argv)
     argv = _rewrite_positioning_subcommand(argv)
+    argv = _rewrite_comparison_subcommand(argv)
     return parser.parse_args(argv)
 
 
@@ -487,6 +504,11 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
         return {"records": orchestrator.get_competing_theories()}
     if args.list_positioning_reports:
         return {"records": orchestrator.get_positioning_reports()}
+    if args.comparison_plan:
+        return orchestrator.plan_baseline_comparison(args.project_id or "").model_dump(mode="json")
+    if args.comparison_show:
+        result = orchestrator.get_comparison_result(args.project_id or "")
+        return result.model_dump(mode="json") if result is not None else {}
     if args.run_agenda_review:
         return orchestrator.run_agenda_review().model_dump(mode="json")
     if args.agenda_status:
@@ -1527,6 +1549,20 @@ def _render_positioning_reports(payload: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_comparison_plans(payload: Dict[str, Any]) -> str:
+    records = payload.get("records") or []
+    if not records:
+        return "No baseline comparison plans recorded."
+    lines = ["Baseline Comparison Plans:"]
+    for item in records:
+        methods = ", ".join(str(method) for method in item.get("methods", []))
+        lines.append(
+            f"- {item.get('plan_id', 'n/a')} :: project={item.get('project_id', 'n/a')} "
+            f"status={item.get('status', 'n/a')} methods=[{methods}]"
+        )
+    return "\n".join(lines)
+
+
 def _render_gap_project_list(payload: Dict[str, Any]) -> str:
     projects = payload.get("projects") or []
     if not projects:
@@ -2154,6 +2190,20 @@ def main() -> int:
                 response = send_command("get_competing_theories", host=args.host, port=args.port)
             elif args.list_positioning_reports:
                 response = send_command("get_positioning_reports", host=args.host, port=args.port)
+            elif args.comparison_plan:
+                response = send_command(
+                    "plan_baseline_comparison",
+                    payload={"project_id": args.project_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.comparison_show:
+                response = send_command(
+                    "get_comparison_result",
+                    payload={"project_id": args.project_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
             elif args.run_agenda_review:
                 response = send_command("run_agenda_review", host=args.host, port=args.port)
             elif args.agenda_status:
@@ -2816,6 +2866,14 @@ def main() -> int:
             print(_render_competing_theories(payload))
         elif args.list_positioning_reports:
             print(_render_positioning_reports(payload))
+        elif args.comparison_plan:
+            methods = ", ".join(str(method) for method in payload.get("methods", []))
+            print(f"Plan ID: {payload.get('plan_id', 'n/a')}\nMethods: {methods}")
+        elif args.comparison_show:
+            if not payload:
+                print("No baseline comparison result recorded.")
+            else:
+                print(payload.get("honest_assessment", "No assessment available."))
         elif (
             args.initialize_anchor_pack
             or args.curate_training_signal

@@ -184,6 +184,18 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
             payload = orchestrator.get_positioning_report(
                 str(request.payload.get("report_id", ""))
             )
+        elif request.command == "plan_baseline_comparison":
+            payload = orchestrator.plan_baseline_comparison(
+                str(request.payload.get("project_id", "")),
+                seeds=request.payload.get("seeds"),
+            ).model_dump(mode="json")
+        elif request.command == "get_comparison_plans":
+            payload = {"records": orchestrator.get_comparison_plans()}
+        elif request.command == "get_comparison_result":
+            result = orchestrator.get_comparison_result(
+                str(request.payload.get("project_id", ""))
+            )
+            payload = result.model_dump(mode="json") if result is not None else None
         elif request.command == "run_agenda_review":
             payload = orchestrator.run_agenda_review().model_dump(mode="json")
         elif request.command == "agenda_status":
