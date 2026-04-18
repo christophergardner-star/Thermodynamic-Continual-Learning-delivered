@@ -311,6 +311,44 @@ class BaselineComparisonResult(StrictModel):
     statistical_test_ids: List[str]
 
 
+class EnvironmentManifest(StrictModel):
+    manifest_id: str
+    captured_at: str
+    python_version: str
+    torch_version: str
+    cuda_version: str = ""
+    platform: str
+    package_hashes: Dict[str, str]
+    dataset_checksums: Dict[str, str]
+    repo_commit: str
+    repo_dirty: bool
+
+
+class SealedDatasetManifest(StrictModel):
+    dataset_id: str
+    name: str
+    archive_sha256: str
+    split_config: Dict[str, Any]
+    sealed_at: str
+    n_train_total: int = 0
+    n_test_total: int = 0
+
+
+class ReproducibilityPackage(StrictModel):
+    package_id: str
+    project_id: str
+    created_at: str
+    environment_manifest_id: str
+    dataset_manifest_id: str
+    comparison_result_id: str
+    positioning_report_id: str = ""
+    anchor_pack_manifest_id: str = ""
+    rerun_script_path: str
+    reviewer_summary_path: str
+    artifact_paths: List[str]
+    package_sha256: str
+
+
 DataAccessMode = Literal["OFFLINE_FALLBACK", "CACHED_REAL", "DOWNLOAD_REAL"]
 DataPurity = Literal["fallback", "cached_real", "download_real", "local_real", "mixed"]
 RunIntent = Literal["control", "plumbing", "research"]
@@ -2568,6 +2606,8 @@ class ControlRequest(StrictModel):
         "plan_baseline_comparison",
         "get_comparison_plans",
         "get_comparison_result",
+        "get_reproducibility_packages",
+        "create_reproducibility_package",
         "run_agenda_review",
         "agenda_status",
         "list_agenda_decisions",

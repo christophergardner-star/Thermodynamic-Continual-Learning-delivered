@@ -131,6 +131,27 @@ def _rewrite_comparison_subcommand(argv: list[str]) -> list[str]:
     return argv
 
 
+def _rewrite_package_subcommand(argv: list[str]) -> list[str]:
+    if not argv or argv[0] != "package":
+        return argv
+    if len(argv) == 1:
+        return argv
+    action = argv[1]
+    rest = argv[2:]
+    if action == "create" and len(rest) >= 2:
+        return [
+            "--create-reproducibility-package",
+            "--project-id",
+            rest[0],
+            "--comparison-result-id",
+            rest[1],
+            *rest[2:],
+        ]
+    if action == "list" and rest:
+        return ["--list-reproducibility-packages", "--project-id", rest[0], *rest[1:]]
+    return argv
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="TAR command and control CLI")
     parser.add_argument("--workspace", default=str(Path(__file__).resolve().parent))
@@ -180,6 +201,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile-id", dest="profile_id")
     parser.add_argument("--manifest-id", dest="manifest_id")
     parser.add_argument("--manifest-path", dest="manifest_path")
+    parser.add_argument("--comparison-result-id", dest="comparison_result_id")
     parser.add_argument("--problem")
     parser.add_argument("--benchmark", dest="benchmark")
     parser.add_argument("--benchmark-tier", default="validation", dest="benchmark_tier", choices=["smoke", "validation", "canonical"])
@@ -297,6 +319,8 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--list-positioning-reports", action="store_true", dest="list_positioning_reports")
     group.add_argument("--comparison-plan", action="store_true", dest="comparison_plan")
     group.add_argument("--comparison-show", action="store_true", dest="comparison_show")
+    group.add_argument("--create-reproducibility-package", action="store_true", dest="create_reproducibility_package")
+    group.add_argument("--list-reproducibility-packages", action="store_true", dest="list_reproducibility_packages")
     group.add_argument("--run-agenda-review", action="store_true", dest="run_agenda_review")
     group.add_argument("--agenda-status", action="store_true", dest="agenda_status")
     group.add_argument("--list-agenda-decisions", action="store_true", dest="list_agenda_decisions")
@@ -384,6 +408,7 @@ def parse_args() -> argparse.Namespace:
     argv = _rewrite_theories_subcommand(argv)
     argv = _rewrite_positioning_subcommand(argv)
     argv = _rewrite_comparison_subcommand(argv)
+    argv = _rewrite_package_subcommand(argv)
     return parser.parse_args(argv)
 
 
@@ -509,6 +534,13 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
     if args.comparison_show:
         result = orchestrator.get_comparison_result(args.project_id or "")
         return result.model_dump(mode="json") if result is not None else {}
+    if args.create_reproducibility_package:
+        return orchestrator.create_reproducibility_package(
+            args.project_id or "",
+            args.comparison_result_id or "",
+        ).model_dump(mode="json")
+    if args.list_reproducibility_packages:
+        return {"records": orchestrator.get_reproducibility_packages(args.project_id or "")}
     if args.run_agenda_review:
         return orchestrator.run_agenda_review().model_dump(mode="json")
     if args.agenda_status:
@@ -1563,6 +1595,18 @@ def _render_comparison_plans(payload: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_reproducibility_packages(payload: Dict[str, Any]) -> str:
+    records = payload.get("records") or []
+    if not records:
+        return "No reproducibility packages recorded."
+    lines = ["Reproducibility Packages:"]
+    for item in records:
+        lines.append(
+            f"- {item.get('package_id', 'n/a')} :: created_at={item.get('created_at', 'n/a')}"
+        )
+    return "\n".join(lines)
+
+
 def _render_gap_project_list(payload: Dict[str, Any]) -> str:
     projects = payload.get("projects") or []
     if not projects:
@@ -2200,6 +2244,23 @@ def main() -> int:
             elif args.comparison_show:
                 response = send_command(
                     "get_comparison_result",
+                    payload={"project_id": args.project_id or ""},
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.create_reproducibility_package:
+                response = send_command(
+                    "create_reproducibility_package",
+                    payload={
+                        "project_id": args.project_id or "",
+                        "comparison_result_id": args.comparison_result_id or "",
+                    },
+                    host=args.host,
+                    port=args.port,
+                )
+            elif args.list_reproducibility_packages:
+                response = send_command(
+                    "get_reproducibility_packages",
                     payload={"project_id": args.project_id or ""},
                     host=args.host,
                     port=args.port,
@@ -2874,6 +2935,13 @@ def main() -> int:
                 print("No baseline comparison result recorded.")
             else:
                 print(payload.get("honest_assessment", "No assessment available."))
+        elif args.create_reproducibility_package:
+            print(
+                f"Package ID: {payload.get('package_id', 'n/a')}\n"
+                f"SHA256: {payload.get('package_sha256', 'n/a')}"
+            )
+        elif args.list_reproducibility_packages:
+            print(_render_reproducibility_packages(payload))
         elif (
             args.initialize_anchor_pack
             or args.curate_training_signal

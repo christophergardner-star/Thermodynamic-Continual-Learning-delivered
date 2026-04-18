@@ -196,6 +196,17 @@ def handle_request(orchestrator: TAROrchestrator, request: ControlRequest) -> Co
                 str(request.payload.get("project_id", ""))
             )
             payload = result.model_dump(mode="json") if result is not None else None
+        elif request.command == "get_reproducibility_packages":
+            payload = {
+                "records": orchestrator.get_reproducibility_packages(
+                    str(request.payload.get("project_id", ""))
+                )
+            }
+        elif request.command == "create_reproducibility_package":
+            payload = orchestrator.create_reproducibility_package(
+                str(request.payload.get("project_id", "")),
+                str(request.payload.get("comparison_result_id", "")),
+            ).model_dump(mode="json")
         elif request.command == "run_agenda_review":
             payload = orchestrator.run_agenda_review().model_dump(mode="json")
         elif request.command == "agenda_status":

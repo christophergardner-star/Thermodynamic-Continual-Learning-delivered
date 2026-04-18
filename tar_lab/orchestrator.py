@@ -63,6 +63,7 @@ from tar_lab.schemas import (
     CuratedDeltaRecord,
     DirectorPolicy,
     DryRunReport,
+    EnvironmentManifest,
     EvidenceDebtRecord,
     EndpointRecord,
     FalsificationCoverage,
@@ -126,6 +127,7 @@ from tar_lab.schemas import (
     RoleAssignment,
     RunIntent,
     RetrainRecord,
+    ReproducibilityPackage,
     RuntimeHeartbeat,
     RoutingSummary,
     SandboxPolicy,
@@ -133,6 +135,7 @@ from tar_lab.schemas import (
     SelfImprovementCycleRecord,
     SelfImprovementPolicy,
     SelfCorrectionNote,
+    SealedDatasetManifest,
     SoTAComparison,
     ScienceEnvironmentBundle,
     StatisticalTestRecord,
@@ -1413,6 +1416,16 @@ class TAROrchestrator:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def _reproducibility_dir(self) -> Path:
+        path = Path(self.workspace) / "tar_state" / "reproducibility"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _reproducibility_packages_dir(self) -> Path:
+        path = self._reproducibility_dir() / "packages"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def _persist_competing_theory(self, theory: CompetingTheory) -> Path:
         path = self._theories_dir() / f"{theory.theory_id}.json"
         path.write_text(theory.model_dump_json(indent=2), encoding="utf-8")
@@ -1793,6 +1806,306 @@ class TAROrchestrator:
         variance = sum((value - mean_value) ** 2 for value in values) / (len(values) - 1)
         return mean_value, math.sqrt(max(variance, 0.0))
 
+    def capture_environment_manifest(self) -> EnvironmentManifest:
+        import subprocess
+        import sys
+        from importlib.metadata import version as pkg_version
+
+        python_version = sys.version
+        torch_version = torch.__version__
+        cuda_version = getattr(torch.version, "cuda", "") or ""
+        platform = sys.platform
+
+        relevant_packages = [
+            "torch",
+            "torchvision",
+            "transformers",
+            "peft",
+            "numpy",
+            "scipy",
+            "sklearn",
+            "pydantic",
+            "datasets",
+            "accelerate",
+            "chromadb",
+            "sentence_transformers",
+            "requests",
+            "tqdm",
+            "packaging",
+        ]
+        package_hashes: dict[str, str] = {}
+        for package_name in relevant_packages:
+            try:
+                package_hashes[package_name] = pkg_version(package_name)
+            except Exception:
+                continue
+
+        dataset_checksums: dict[str, str] = {}
+        artifacts_dir = Path(self.workspace) / "dataset_artifacts"
+        if artifacts_dir.exists():
+            for archive in artifacts_dir.rglob("*.tar.gz"):
+                digest = hashlib.sha256()
+                try:
+                    digest.update(archive.read_bytes())
+                    dataset_checksums[archive.name] = digest.hexdigest()
+                except Exception:
+                    continue
+
+        repo_commit = ""
+        repo_dirty = False
+        try:
+            commit_result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                cwd=self.workspace,
+                timeout=5,
+            )
+            if commit_result.returncode == 0:
+                repo_commit = commit_result.stdout.strip()
+            dirty_result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                cwd=self.workspace,
+                timeout=5,
+            )
+            repo_dirty = bool(dirty_result.stdout.strip())
+        except Exception:
+            pass
+
+        manifest = EnvironmentManifest(
+            manifest_id=uuid.uuid4().hex,
+            captured_at=datetime.utcnow().isoformat(),
+            python_version=python_version,
+            torch_version=torch_version,
+            cuda_version=cuda_version,
+            platform=platform,
+            package_hashes=package_hashes,
+            dataset_checksums=dataset_checksums,
+            repo_commit=repo_commit,
+            repo_dirty=repo_dirty,
+        )
+        path = self._reproducibility_dir() / f"env_{manifest.manifest_id}.json"
+        path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+        return manifest
+
+    def seal_dataset_manifest(self, dataset_name: str) -> SealedDatasetManifest:
+        archive_sha256 = ""
+        n_train = 0
+        n_test = 0
+
+        if dataset_name == "split_cifar10":
+            dataset_root = Path(self.workspace) / "dataset_artifacts" / "split_cifar10"
+            candidates = list(dataset_root.rglob("*.gz")) if dataset_root.exists() else []
+            if candidates:
+                digest = hashlib.sha256()
+                for candidate in sorted(candidates):
+                    try:
+                        digest.update(candidate.read_bytes())
+                    except Exception:
+                        continue
+                archive_sha256 = digest.hexdigest()
+                n_train = 50000
+                n_test = 10000
+
+        manifest = SealedDatasetManifest(
+            dataset_id=uuid.uuid4().hex,
+            name=dataset_name,
+            archive_sha256=archive_sha256,
+            split_config={
+                "class_order": [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]],
+                "n_tasks": 5,
+                "setting": "task_incremental",
+                "classes_per_task": 2,
+            },
+            sealed_at=datetime.utcnow().isoformat(),
+            n_train_total=n_train,
+            n_test_total=n_test,
+        )
+        path = self._reproducibility_dir() / f"dataset_{manifest.dataset_id}.json"
+        path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+        return manifest
+
+    def create_reproducibility_package(
+        self,
+        project_id: str,
+        comparison_result_id: str,
+    ) -> ReproducibilityPackage:
+        import shutil
+
+        package_id = uuid.uuid4().hex
+        package_dir = self._reproducibility_packages_dir() / package_id
+        package_dir.mkdir(parents=True, exist_ok=True)
+
+        env_manifest = self.capture_environment_manifest()
+        dataset_manifest = self.seal_dataset_manifest("split_cifar10")
+
+        task_order = {
+            "task_order": [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]],
+            "setting": "task_incremental",
+        }
+        (package_dir / "task_order_manifest.json").write_text(
+            json.dumps(task_order, indent=2),
+            encoding="utf-8",
+        )
+
+        seed_manifest = {
+            "seeds": [42, 123, 456, 789, 1337],
+            "primary_metric": "mean_forgetting",
+        }
+        (package_dir / "seed_manifest.json").write_text(
+            json.dumps(seed_manifest, indent=2),
+            encoding="utf-8",
+        )
+
+        comparison_path = self._comparisons_dir() / f"{comparison_result_id}.json"
+        honest_assessment = "Comparison result not found."
+        pairwise_summary = ""
+        if comparison_path.exists():
+            comparison_data = json.loads(comparison_path.read_text(encoding="utf-8"))
+            honest_assessment = comparison_data.get("honest_assessment", honest_assessment)
+            pairwise_pvalues = comparison_data.get("pairwise_pvalues", {})
+            pairwise_effect_sizes = comparison_data.get("pairwise_effect_sizes", {})
+            lines = [
+                f"- {key}: p={float(value):.3f}, d={float(pairwise_effect_sizes.get(key, 0.0)):.3f}"
+                for key, value in pairwise_pvalues.items()
+            ]
+            pairwise_summary = "\n".join(lines)
+
+        positioning_report_id = ""
+        positioning_reports: list[ContributionPositioningReport] = []
+        for path in sorted(self._positioning_dir().glob("*.json")):
+            try:
+                report = ContributionPositioningReport.model_validate_json(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if report.project_id == project_id:
+                positioning_reports.append(report)
+        if positioning_reports:
+            positioning_reports.sort(key=lambda item: (item.timestamp, item.report_id), reverse=True)
+            positioning_report_id = positioning_reports[0].report_id
+
+        anchor_pack_manifest_id = ""
+        anchor_candidates = [
+            Path(self.workspace) / "tar_state" / "self_improvement" / "anchor_manifest.json",
+            Path(self.workspace) / "eval_artifacts" / "anchor_pack_manifest.json",
+        ]
+        for anchor_path in anchor_candidates:
+            if not anchor_path.exists():
+                continue
+            try:
+                anchor_pack_manifest_id = json.loads(anchor_path.read_text(encoding="utf-8")).get("manifest_id", "")
+            except Exception:
+                anchor_pack_manifest_id = ""
+            if anchor_pack_manifest_id:
+                break
+
+        rerun_content = (
+            f"# Generated by TAR — reproducibility package {package_id}\n"
+            "# Run: python rerun.py\n"
+            f"# Requires: see env_{env_manifest.manifest_id}.json for exact package versions\n"
+            "import json\n"
+            "from tar_lab.orchestrator import TAROrchestrator\n\n"
+            "workspace = \".\"\n"
+            "o = TAROrchestrator(workspace)\n"
+            f"plan = o.plan_baseline_comparison(\"{project_id}\", seeds=[42, 123, 456, 789, 1337])\n"
+            "result = o.run_baseline_comparison(plan)\n"
+            "print(result.honest_assessment)\n"
+            "with open(\"rerun_result.json\", \"w\", encoding=\"utf-8\") as handle:\n"
+            "    json.dump(result.model_dump(), handle, indent=2)\n"
+            "print(\"Result written to rerun_result.json\")\n"
+        )
+        rerun_path = package_dir / "rerun.py"
+        rerun_path.write_text(rerun_content, encoding="utf-8")
+
+        reviewer_summary = (
+            "# TAR Phase 7 Reviewer Summary\n\n"
+            "## Benchmark\n"
+            "Split-CIFAR-10, task-incremental, 5 tasks (classes per task: 2)\n\n"
+            "## Methods compared\n"
+            "TCL (thermodynamic governor active), EWC (lambda=5000.0), SI (c=0.1), SGD baseline\n\n"
+            "## Seeds\n"
+            f"{seed_manifest['seeds']}\n\n"
+            "## Primary metric\n"
+            "mean_forgetting (lower is better)\n\n"
+            "## Result\n"
+            f"{honest_assessment}\n\n"
+            "## Statistical tests (pairwise)\n"
+            f"{pairwise_summary if pairwise_summary else 'No comparison result available yet.'}\n\n"
+            "## Environment\n"
+            f"Python: {env_manifest.python_version.split()[0]}\n"
+            f"Torch: {env_manifest.torch_version}\n"
+            f"CUDA: {env_manifest.cuda_version or 'not available'}\n"
+            f"Repo commit: {env_manifest.repo_commit or 'unknown'}\n"
+            f"Repo dirty: {env_manifest.repo_dirty}\n\n"
+            "## To reproduce\n"
+            "python rerun.py\n"
+        )
+        reviewer_summary_path = package_dir / "reviewer_summary.md"
+        reviewer_summary_path.write_text(reviewer_summary, encoding="utf-8")
+
+        artifact_paths: list[str] = []
+        files_to_copy = {
+            f"env_{env_manifest.manifest_id}.json": self._reproducibility_dir() / f"env_{env_manifest.manifest_id}.json",
+            f"dataset_{dataset_manifest.dataset_id}.json": self._reproducibility_dir() / f"dataset_{dataset_manifest.dataset_id}.json",
+            "comparison_result.json": comparison_path,
+        }
+        for dest_name, source_path in files_to_copy.items():
+            if source_path.exists():
+                shutil.copy2(source_path, package_dir / dest_name)
+                artifact_paths.append(f"tar_state/reproducibility/packages/{package_id}/{dest_name}")
+
+        artifact_paths.extend(
+            [
+                f"tar_state/reproducibility/packages/{package_id}/rerun.py",
+                f"tar_state/reproducibility/packages/{package_id}/reviewer_summary.md",
+                f"tar_state/reproducibility/packages/{package_id}/task_order_manifest.json",
+                f"tar_state/reproducibility/packages/{package_id}/seed_manifest.json",
+            ]
+        )
+
+        digest = hashlib.sha256()
+        for file_path in sorted(package_dir.rglob("*")):
+            if file_path.is_file():
+                try:
+                    digest.update(file_path.read_bytes())
+                except Exception:
+                    continue
+        package_sha256 = digest.hexdigest()
+
+        package = ReproducibilityPackage(
+            package_id=package_id,
+            project_id=project_id,
+            created_at=datetime.utcnow().isoformat(),
+            environment_manifest_id=env_manifest.manifest_id,
+            dataset_manifest_id=dataset_manifest.dataset_id,
+            comparison_result_id=comparison_result_id,
+            positioning_report_id=positioning_report_id,
+            anchor_pack_manifest_id=anchor_pack_manifest_id,
+            rerun_script_path=f"tar_state/reproducibility/packages/{package_id}/rerun.py",
+            reviewer_summary_path=f"tar_state/reproducibility/packages/{package_id}/reviewer_summary.md",
+            artifact_paths=artifact_paths,
+            package_sha256=package_sha256,
+        )
+        (package_dir / "manifest.json").write_text(package.model_dump_json(indent=2), encoding="utf-8")
+        return package
+
+    def get_reproducibility_packages(self, project_id: str) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        packages_dir = self._reproducibility_packages_dir()
+        for package_dir in packages_dir.iterdir():
+            manifest_path = package_dir / "manifest.json"
+            if not manifest_path.exists():
+                continue
+            try:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if payload.get("project_id") == project_id:
+                results.append(payload)
+        return sorted(results, key=lambda item: item.get("created_at", ""), reverse=True)
+
     def generate_competing_theories(
         self,
         trial_id: str,
@@ -2038,10 +2351,13 @@ class TAROrchestrator:
         description: str,
     ) -> dict[str, Any]:
         positioning = self.position_contribution(project_id, trial_id, description)
+        package = self.create_reproducibility_package(project_id, trial_id)
         return {
             "project_id": project_id,
             "trial_id": trial_id,
             "positioning_report_id": positioning.report_id,
+            "reproducibility_package_id": package.package_id,
+            "package_sha256": package.package_sha256,
         }
 
     def elevate_anomalies(self) -> list[AnomalyElevationRecord]:
