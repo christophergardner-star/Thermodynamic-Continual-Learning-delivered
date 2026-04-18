@@ -609,6 +609,7 @@ def run_split_cifar10_benchmark(
     method: str,
     observer: Optional[ActivationThermoObserver] = None,
     workspace: Optional[str] = None,
+    backbone: str = "tiny",
 ) -> ContinualLearningBenchmarkResult:
     try:
         import torchvision
@@ -703,9 +704,25 @@ def run_split_cifar10_benchmark(
             x = x.view(x.size(0), -1)
             return self.relu(self.fc(x))
 
+    class _ResNet18Trunk(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            import torchvision.models as _models
+            rn = _models.resnet18(weights=None)
+            self.features = nn.Sequential(*list(rn.children())[:-1])  # drop final FC
+            self.feat_dim = 512
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.features(x).flatten(1)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    trunk = _CLTrunk().to(device)
-    heads = nn.ModuleList([nn.Linear(128, 2) for _ in range(config.n_tasks)]).to(device)
+    if backbone == "resnet18":
+        trunk: nn.Module = _ResNet18Trunk().to(device)
+        feat_dim = 512
+    else:
+        trunk = _CLTrunk().to(device)
+        feat_dim = 128
+    heads = nn.ModuleList([nn.Linear(feat_dim, 2) for _ in range(config.n_tasks)]).to(device)
     all_params = list(trunk.parameters()) + list(heads.parameters())
 
     ewc_fisher: dict[str, torch.Tensor] = {}
