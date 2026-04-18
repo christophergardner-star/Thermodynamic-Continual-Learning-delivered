@@ -258,7 +258,7 @@ class ContinualLearningBenchmarkConfig(StrictModel):
     train_epochs_per_task: int = 5
     batch_size: int = 64
     seed: int = 42
-    ewc_lambda: float = 5000.0
+    ewc_lambda: float = 100.0
     si_c: float = 0.1
     si_xi: float = 0.001
     tcl_governor_enabled: bool = True
