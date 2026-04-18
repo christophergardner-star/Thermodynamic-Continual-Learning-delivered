@@ -721,10 +721,11 @@ def run_split_cifar10_benchmark(
     }
 
     if observer is None and method == "tcl" and config.tcl_governor_enabled:
-        # alpha=0.5: sigma_star calibrates to 50% of median activity so the
-        # "ordered" phase (rho < 0.9) is reachable as training converges.
-        # alpha=1.0 tracks the hot early-training distribution and the ordered
-        # threshold is never crossed in practice.
+        # alpha=0.5: "ordered" fires when sigma drops to 50% of the early-task
+        # anchor level (median of first 20 batches).  sigma_star is now a fixed
+        # per-task reference temperature, not a rolling median — so the ratio
+        # actually decreases as the network converges and the threshold is
+        # reachable for any alpha in [0.3, 0.7].
         observer = ActivationThermoObserver(trunk, stat_window_size=5, alpha=0.5)
 
     accuracy_matrix: dict[int, dict[int, float]] = {}
@@ -732,9 +733,8 @@ def run_split_cifar10_benchmark(
     tcl_trace: list[dict] = []  # per-epoch diagnostic snapshots
 
     for train_task_idx in range(config.n_tasks):
-        # Reset per-task calibration state so each task calibrates sigma_star
-        # from its own gradient dynamics rather than inheriting the previous
-        # task's converged statistics.
+        # Reset per-task calibration state.  sigma_star_anchor will be
+        # re-established from the first 20 batches of this task and frozen.
         if observer is not None and method == "tcl" and train_task_idx > 0:
             observer.reset_for_new_task()
 

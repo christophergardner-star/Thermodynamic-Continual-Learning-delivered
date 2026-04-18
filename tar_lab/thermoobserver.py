@@ -221,8 +221,14 @@ class _ObservedGroup:
     params: List[nn.Parameter]
     feature_axis: int
     sigma_ema: Optional[float] = None
-    sigma_star: Optional[float] = None
+    # Rolling window: smooths current sigma estimate, reset each task.
     sigma_window: List[float] = field(default_factory=list)
+    # Fixed per-task reference: set from first sigma_star_anchor_n batches
+    # of each task, then frozen for the rest of that task.
+    # "Ordered" fires when current sigma drops below alpha × this anchor.
+    sigma_star_anchor: Optional[float] = None
+    anchor_window: List[float] = field(default_factory=list)
+    anchor_set: bool = False
     fim_ema: Optional[float] = None
     stable_steps: int = 0
     last_activation: Optional[torch.Tensor] = None
@@ -236,8 +242,9 @@ class ActivationThermoObserver:
         *,
         alpha: float = 1.0,
         sigma_window_size: int = 8,
+        sigma_star_anchor_n: int = 20,
         stat_window_size: int = 5,
-        calib_start: int = 2,
+        calib_start: int = 2,  # retained for API compat; superseded by sigma_star_anchor_n
         sigma_tolerance: float = 0.15,
         fim_tolerance: float = 0.10,
         equilibrium_patience: int = 2,
@@ -245,6 +252,7 @@ class ActivationThermoObserver:
         self.model = model
         self.alpha = alpha
         self.sigma_window_size = sigma_window_size
+        self.sigma_star_anchor_n = max(1, int(sigma_star_anchor_n))
         self.stat_window_size = max(1, stat_window_size)
         self.calib_start = calib_start
         self.sigma_tolerance = sigma_tolerance
@@ -290,16 +298,20 @@ class ActivationThermoObserver:
     def reset_for_new_task(self) -> None:
         """Reset per-task calibration state at each task boundary.
 
-        Clears sigma_ema, sigma_star, sigma_window, fim_ema, stable_steps,
-        and stat_accumulator so the next task calibrates from its own gradient
-        dynamics rather than inheriting the previous task's converged state.
+        Clears sigma_ema, sigma_window, sigma_star_anchor, anchor_window,
+        fim_ema, stable_steps, and stat_accumulator.  sigma_star_anchor will
+        be re-established from the first sigma_star_anchor_n batches of the
+        new task and then frozen for that task's duration, giving a fixed
+        reference temperature against which convergence is measured.
 
-        Preserves: hooks, group structure, anchor reference, last_activation.
+        Preserves: hooks, group structure, dimensionality anchor, last_activation.
         """
         for group in self._groups:
             group.sigma_ema = None
-            group.sigma_star = None
             group.sigma_window = []
+            group.sigma_star_anchor = None
+            group.anchor_window = []
+            group.anchor_set = False
             group.fim_ema = None
             group.stable_steps = 0
             group.stat_accumulator = StatAccumulator(window_size=self.stat_window_size)
@@ -366,15 +378,27 @@ class ActivationThermoObserver:
             else:
                 group.fim_ema = (1.0 - ema_alpha) * group.fim_ema + ema_alpha * fim_trace
 
-            if len(group.sigma_window) >= self.calib_start:
-                group.sigma_window.append(float(sigma))
-                if len(group.sigma_window) > self.sigma_window_size:
-                    group.sigma_window.pop(0)
-                group.sigma_star = self.alpha * float(median(group.sigma_window))
-            else:
-                group.sigma_window.append(float(sigma))
+            # Rolling window: smooths current sigma (noise reduction only).
+            group.sigma_window.append(float(sigma))
+            if len(group.sigma_window) > self.sigma_window_size:
+                group.sigma_window.pop(0)
 
-            sigma_star = group.sigma_star if group.sigma_star is not None else max(group.sigma_ema, 1e-12)
+            # Fixed per-task anchor: accumulate first sigma_star_anchor_n
+            # batches after reset, then freeze.  sigma_star_anchor is the
+            # reference temperature — the network's initial thermal level on
+            # this task.  "Ordered" fires when sigma drops below alpha × this
+            # fixed reference, not below a rolling median that co-contracts.
+            if not group.anchor_set:
+                group.anchor_window.append(float(sigma))
+                if len(group.anchor_window) >= self.sigma_star_anchor_n:
+                    group.sigma_star_anchor = self.alpha * float(median(group.anchor_window))
+                    group.anchor_set = True
+
+            sigma_star = (
+                group.sigma_star_anchor
+                if group.sigma_star_anchor is not None
+                else max(group.sigma_ema, 1e-12)
+            )
             sigma_ratio = sigma / max(sigma_star, 1e-12)
             fim_rel_change = abs(fim_trace - group.fim_ema) / max(abs(group.fim_ema), 1e-12)
             covariance = None
@@ -395,7 +419,7 @@ class ActivationThermoObserver:
             equilibrium_gate = (
                 smoothed.statistically_ready
                 and group.stable_steps >= self.equilibrium_patience
-                and group.sigma_star is not None
+                and group.sigma_star_anchor is not None
             )
 
             layer_metrics.append(

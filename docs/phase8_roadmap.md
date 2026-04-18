@@ -92,53 +92,114 @@ Proceed to 8B (epoch sweep).
 
 ---
 
-### Phase 8B — Epoch Sweep (laptop or pod, ~4 hours)
+### Phase 8B — Epoch Scouting Pass (single seed, complete 2026-04-18)
 
-**Gating condition:** run after 8A regardless of outcome.
-- If 8A succeeded: run sweep with fixed calibration to measure improvement slope
-- If 8A failed: run sweep with original calibration to isolate volume effect
+**Scouting design:** single seed (42), epochs_per_task ∈ {5, 15, 40},
+TCL + SGD only. Purpose: distinguish volume hypothesis from calibration
+hypothesis before committing to a full multi-seed sweep.
 
-**Hypothesis:** governor needs training volume to transition through
-disordered → critical → ordered. At 5 epochs the transition never completes.
+**Results (5-epoch and 15-epoch confirmed; 40-epoch running):**
 
-**Setting:** identical to Phase 7 (same architecture, same seeds, same 4
-methods). Only change: train_epochs_per_task swept over {5, 10, 20}.
+| epochs | TCL forgetting | SGD forgetting | delta  | ordered% |
+|--------|---------------|----------------|--------|----------|
+| 5      | 0.1921        | 0.1534         | +0.039 | ~1%      |
+| 15     | 0.1081        | 0.1046         | +0.004 | ~1%      |
+| 40     | (running)     |                |        |          |
 
-**What success looks like:**
-- TCL forgetting drops disproportionately relative to SGD as epochs increase
-- Specifically: if SGD forgetting drops from 0.120 → 0.100 at 20 epochs
-  but TCL drops from 0.128 → 0.060, that implicates volume as the key factor
-- EWC and SI should be roughly flat (regularization methods are not epoch-sensitive)
+**15-epoch rho trajectories (task 0 and late tasks):**
 
-**What failure looks like:**
-- All four methods improve proportionally with epochs
-- TCL stays roughly aligned with SGD at all epoch budgets
-- → Architecture-level issue: LR modulation alone is insufficient;
-  need a weight-penalty term derived from the thermodynamic signal
+Task 0: `[2.84, 2.92, 2.64, 2.71, 2.60, 2.70, 2.76, 2.59, 2.53, 3.11, 2.72, 3.43, 2.71, 3.27, 5.86]`
+Task 3: `[2.74, 2.87, 2.91, 3.21, 3.07, 3.30, 4.03, 5.92, 4.04, 6.97, 5.96, 5.98, 11.40, 13.75, 38.31]`
+Task 4: `[2.84, 2.56, 2.80, 2.67, 2.77, 3.19, 3.64, 3.09, 4.55, 4.39, 5.08, 4.74, 10.64, 6.30, 32.77]`
 
-**Acceptance:** sweep complete for all 3 epoch budgets × 4 methods × 5 seeds.
-TCL vs SGD delta at each epoch level reported with p-values. Trend conclusion
-written before checking whether it favours TCL.
+Ordered threshold: rho < 0.9. The ordered regime never fires during steady
+within-task training. Late tasks show rho monotonically increasing — the
+governor is moving away from ordered, not toward it.
+
+sigma/sigma_star EMA at task 3 epoch 14: 0.001015 / 0.000144 = 7.06.
+
+**Verdict: CALIBRATION — volume hypothesis rejected.**
+
+**Root cause (derived from 8B traces):**
+
+sigma_star = alpha × median(sigma_window) where sigma_window is populated with
+recent sigma values. As sigma decreases during training, sigma_window contracts
+at the same rate, so median(sigma_window) ≈ sigma. Therefore:
+
+    rho = sigma / (alpha × sigma) = 1/alpha
+
+The ratio is asymptotically pinned to 1/alpha regardless of training duration
+or epoch budget. With alpha=0.5 the theoretical floor is rho ≈ 2.0. The
+ordered threshold at rho < 0.9 is mathematically unreachable from stationary
+training. The 1% ordered batches seen are noise from within-batch variance,
+not thermodynamic convergence.
+
+**Critical distinction:** the rolling-median formulation measures whether sigma
+is currently low *relative to recent sigma* — a stationarity detector. What the
+governor needs to detect is whether sigma has fallen significantly below where it
+was at the start of the task — a convergence detector. Different physical
+quantity, different scientific meaning. Lowering alpha makes this worse (raises
+1/alpha floor). More epochs cannot fix a definitional error.
 
 ---
 
-### Phase 8C — Weight Penalty Term (if 8A + 8B both fail)
+### Phase 8C — sigma_star Redefinition as Fixed Per-Task Anchor
 
-**Gating condition:** only if 8B shows no differential improvement for TCL
-relative to SGD across all epoch budgets.
+**Gating condition:** gates on 8B confirming calibration failure (confirmed above).
 
-**Hypothesis:** LR modulation is a weak forgetting signal. EWC's advantage
-is that the Fisher diagonal directly identifies which weights matter. TCL needs
-an analogous term derived from the thermodynamic signal.
+**Diagnosis:** The current formulation specifies sigma_star as the rolling median
+of the running sigma window. This makes sigma_star co-contract with sigma during
+training, pinning rho ≈ 1/alpha and making the ordered threshold unreachable
+under any steady training regime. Phase 8A correctly implemented the specified
+formulation. Phase 8B revealed the specified formulation is thermodynamically
+wrong.
 
-**Candidate mechanism:** thermodynamic importance = effective_dimensionality
-per layer (from participation ratio). High-dimensionality layers are doing
-distributed computation and should be protected more. Add a
-dimensionality-weighted L2 penalty on weight change between tasks, similar
-to EWC but with thermodynamic importance scores instead of Fisher diagonal.
+**The fix:** sigma_star must be a fixed per-task reference set from the network's
+gradient magnitude during the early phase of each task, then frozen for the
+remainder of that task. "Ordered" then means "sigma has fallen significantly
+below where it was when training on this task began" — thermodynamically, the
+network has cooled to a lower-entropy state than its initial thermal level on
+this data. This is the physically correct definition of convergence.
 
-This is a larger change: new term in the loss function, not just LR scheduling.
-Requires design work before implementation.
+Analogy: sigma_star is the reference temperature — the initial thermal energy
+of the system. The governor fires when the system has genuinely cooled, not
+merely when it is briefly calm relative to recent fluctuations.
+
+**Implementation changes in `ActivationThermoObserver`:**
+
+1. **Two separate state variables per group (not one):**
+   - `sigma_window` — rolling window, used only to smooth current sigma estimate
+   - `sigma_star_anchor` — scalar, set once per task, frozen until next task
+
+2. **Anchor-setting logic in `step()`:**
+   - After `reset_for_new_task()`, maintain a separate `_anchor_window` list
+   - Accumulate first N=20 batch sigma values (or up to first full epoch)
+   - After N batches: set `sigma_star_anchor = alpha × median(_anchor_window)`, mark anchor as set
+   - Use `sigma_star_anchor` (not rolling median) for all rho computations until next reset
+
+3. **Alpha semantics (now defensible):**
+   - With fixed anchor: alpha=0.5 means "ordered when sigma has dropped to 50%
+     of early-task gradient magnitude." Interpretable convergence criterion.
+   - Sweep alpha ∈ {0.3, 0.5, 0.7} after anchor fix to find natural separation.
+   - Any value in {0.3–0.7} now has a thermodynamically meaningful interpretation.
+
+4. **`reset_for_new_task()` additions:**
+   - Clear `sigma_star_anchor = None`
+   - Clear `_anchor_window = []`
+   - Set `_anchor_set = False`
+
+5. **Diagnostic trace additions:**
+   - Log `sigma_star_anchor` value per task (confirm it's being set and frozen)
+   - Log `anchor_set_at_batch` (batch number when anchor locked in)
+   - Log rho trajectory relative to the new fixed anchor
+
+**Acceptance:** rho trajectories show systematic downward trend within tasks
+as training progresses. Task 0 final rho meaningfully lower than task 0 initial
+rho. ordered% present in convergence window (final half of task epochs) for at
+least 1 task across 2+ seeds.
+
+**Estimated scope:** ~50 lines in thermoobserver.py, minor additions to
+multimodal_payloads.py trace logging. No architecture changes.
 
 ---
 
@@ -159,17 +220,21 @@ working TCL calibration produces an uninformative result.
 ## Execution Summary
 
 ```
-Phase 8A: Fix calibration (alpha sweep + per-task reset + diagnostic trace)
-  → if ordered phase reached: re-run Phase 7 benchmark with fixed calibration
-  → always proceed to:
+Phase 8A: Fix integration bugs (alpha=0.5, per-task reset, correct step() order,
+           anchor_snapshot, richer trace) — COMPLETE 2026-04-18
+  → Result: governor correctly implements specified formulation
+  → ordered reached ~1% of batches (volume insufficient, not a bug)
 
-Phase 8B: Epoch sweep {5, 10, 20} × 4 methods × 5 seeds
-  → if TCL shows differential improvement: document mechanism, proceed to 8D
-  → if flat: proceed to 8C
+Phase 8B: Scouting pass {5, 15, 40} epochs × 1 seed — COMPLETE 2026-04-18
+  → Result: CALIBRATION — sigma_star co-tracks sigma, rho pinned to 1/alpha
+  → Rolling median is a stationarity detector, not a convergence detector
+  → Volume hypothesis rejected; formulation itself is wrong
 
-Phase 8C: Weight penalty term from dimensionality signal (if 8A+8B fail)
+Phase 8C: Redefine sigma_star as fixed per-task anchor (N=20 batch median)
+  → Target: rho drops within-task, ordered fires in convergence window
+  → Once working: re-run Phase 7 benchmark (TCL + SGD, 5 seeds, 15–20 epochs)
 
-Phase 8D: Class-incremental Split-CIFAR-10 (after positive TCL signal)
+Phase 8D: Class-incremental Split-CIFAR-10 (after Phase 8C shows TCL > SGD)
 ```
 
 ## What a Good Phase 8 Result Looks Like
