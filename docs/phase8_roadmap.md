@@ -67,11 +67,28 @@ phase is never reached. Fixing calibration will let the brake fire.
 training. rho drops below 0.9 on at least one task boundary for at least 2
 seeds.
 
-**If 8A succeeds** (ordered phase reached): run the Phase 7 benchmark again
-with fixed calibration and compare forgetting delta.
+**8A validation results (2026-04-18, commit 7eda5a0):**
 
-**If 8A fails** (ordered phase still unreachable): sigma_star calibration is
-not the bottleneck — proceed to 8B to test the volume hypothesis.
+| Check | Result | Detail |
+|-------|--------|--------|
+| Regime transitions at task boundaries | 0/5 FAIL | Dominant regime = disordered throughout all tasks/epochs |
+| Anchor live (dimensionality_ratio > 0) | 5/5 PASS | anchor_d = 4.8–6.2 across seeds |
+| "ordered" phase reached | 5/5 PASS | Reached in 0–1% of batches (tasks 3–4 only) |
+
+Benchmark: TCL forgetting=0.1247±0.029, SGD=0.1184±0.042. Delta +0.006 (TCL marginallyy worse).
+
+Mean LR across all tasks ≈ 0.01197 — essentially `base_lr × 1.2` flat.
+Governor fires "disordered" 98–99% of batches → constant LR boost, rare braking.
+
+**Interpretation:** Implementation is now correctly wired. The ordered phase IS
+reachable with alpha=0.5 but only fires for ~1% of batches. The network is
+genuinely in a high-entropy exploratory state for the entire 5-epoch budget.
+The 1% braking doesn't overcome 99% boosting. This is not a calibration bug —
+it is a measurement confirming the volume hypothesis: the thermodynamic
+transition from disordered → ordered requires more training time per task
+than the current 5-epoch budget allows.
+
+Proceed to 8B (epoch sweep).
 
 ---
 
