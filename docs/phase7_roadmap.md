@@ -201,7 +201,7 @@ class ContinualLearningBenchmarkConfig(BaseModel):
     train_epochs_per_task: int = 5
     batch_size: int = 64
     seed: int = 42
-    ewc_lambda: float = 5000.0
+    ewc_lambda: float = 100.0   # swept: see EWC Lambda Calibration below
     si_c: float = 0.1
     si_xi: float = 0.001
     tcl_governor_enabled: bool = True
@@ -896,13 +896,130 @@ scientific artifact:
 - sealed in a package with frozen task-order, seed, and dataset manifests
   that a domain expert can download, run `python rerun.py`, and reproduce
 
-**What comes after Phase 7 (not in scope here):**
+---
 
-- class-incremental Split-CIFAR-10 (harder setting, Phase 8)
-- larger backbone or Split-CIFAR-100
+## EWC Lambda Calibration
+
+The default `ewc_lambda=5000.0` was set without reference to the network size.
+On the 85K-parameter trunk used here, lambda=5000 dominates the loss after
+task 0 — weights are effectively frozen and all subsequent tasks train at chance
+(final_acc ≈ 0.5 across all seeds).
+
+**Sweep methodology:**
+
+lambda tested: {10, 100, 1000} × 5 seeds (42, 123, 456, 789, 1337)
+
+Selection criterion: lowest mean_forgetting over 5 seeds subject to
+final_mean_accuracy > 0.6. This eliminates under-constrained (high forgetting,
+high acc) and over-constrained (low forgetting, chance acc) configurations.
+
+The sweep was run after WS48 and the best lambda used for the final comparison.
+The correction note in the `BaselineComparisonResult` JSON records the original
+lambda, the sweep rationale, and the selected value.
+
+**Why this is reviewer-defensible:**
+
+A reviewer can counter "lambda=5000 was miscalibrated" but cannot counter
+"we swept three orders of magnitude and picked by the same criterion we'd use
+for any other hyperparameter in a fair comparison." The sweep report is included
+in the reviewer package.
+
+**EWC lambda sweep results** (filled in post-run):
+
+| lambda | mean_forgetting | acc | n | verdict |
+|--------|----------------|-----|---|---------|
+| 10     | 0.0562 ± 0.0106 | 0.8523 | 5 | underconstrained — forgetting 3× lambda=100 |
+| **100** | **0.0187 ± 0.0063** | **0.8725** | **5** | **selected** |
+| 1000   | 0.2144 ± 0.0456 | 0.5000 | 5 | overconstrained — all seeds at chance accuracy |
+
+Selected: lambda = 100. Clear winner on both forgetting and accuracy.
+Lambda=1000 shows identical failure mode to original lambda=5000 — small
+network over-constrained, all tasks locked at chance.
+
+---
+
+## WS48 Interim Results (lambda=100 EWC)
+
+Per-method summary over 5 seeds (task-incremental Split-CIFAR-10):
+
+| Method | mean_forgetting | final_mean_accuracy |
+|--------|----------------|---------------------|
+| TCL    | 0.1276 ± 0.0519 | 0.7915 |
+| EWC (λ=100) | 0.0187 ± 0.0063 | 0.8725 |
+| SI     | 0.1547 ± 0.1400 | 0.6444 |
+| SGD    | 0.1202 ± 0.0313 | 0.8017 |
+
+Honest assessment: TCL vs EWC: mean_forgetting 0.128 vs 0.019 (p=0.009,
+d=2.945) — significantly worse. TCL vs SI: not significantly different
+(p=0.602). TCL vs SGD: not significantly different (p=0.917).
+
+This is an honest Phase 7 result. TCL's thermodynamic LR modulation (ordered→×0.5,
+disordered→×1.2) does not outperform regularization-based methods at 5 epochs
+per task. The governor's regime signal may require more training volume to
+accumulate meaningful policy — this is the primary hypothesis driving Phase 8.
+
+---
+
+## Phase 8 Roadmap (Planned)
+
+Phase 8 addresses two questions raised by Phase 7:
+
+1. Does the TCL governor's advantage require more training volume to manifest?
+2. Is task-incremental too easy a setting to show a meaningful difference?
+
+**Why this order matters:**
+
+These hypotheses are not independent. Testing them simultaneously (e.g.
+class-incremental CIFAR-100 with more epochs) conflates the effects and makes
+the result uninterpretable. The correct scientific approach is sequential
+isolation.
+
+### WS49 — Epoch Sweep (Hypothesis 1: Governor Needs Time)
+
+**Setting:** same as Phase 7 exactly (task-incremental Split-CIFAR-10, same
+architecture, same seeds, same 4 methods)
+
+**Only change:** `train_epochs_per_task` swept over {5, 10, 20}
+
+**What we expect to see if H1 is true:** TCL's forgetting drops relative to
+SGD as epochs increase. The regime signal accumulates over training, the
+governor fires more often, and the thermodynamic braking effect materialises
+progressively. EWC and SI are scale-invariant at this level and should stay flat
+or improve monotonically; if TCL improvement is disproportionately larger, that
+implicates volume as the governing factor.
+
+**What we expect to see if H1 is false:** All four methods improve proportionally
+with more epochs. TCL's relative position vs baselines stays the same at 20
+epochs as at 5. This would motivate a different architecture (H3) or a harder
+setting (H2), not more of the same training.
+
+**Budget:** no pod required. ~85K params on CPU; 20 epochs × 5 seeds × 4 methods
+= 400 training runs, each small. Estimated ~4 hours local or ~45 min on pod.
+
+**Acceptance:** results available for all 3 epoch budgets × 4 methods × 5 seeds;
+TCL vs SGD delta (forgetting) reported at each epoch level with p-values;
+trend conclusion written before looking at whether it favours TCL.
+
+### WS50 — Class-Incremental CIFAR-100 (Hypothesis 2: Setting Too Easy)
+
+**Gating condition:** run only after WS49. If WS49 shows a trend (TCL forgetting
+drops disproportionately as epochs increase), carry that winning epoch budget
+into WS50. If WS49 is flat, reconsider whether WS50 is the right next step.
+
+**Setting:** class-incremental (task identity not provided at test time), 20
+tasks × 5 classes from CIFAR-100
+
+**What this tests:** class-incremental is the current hard benchmark standard.
+TCL's regime-awareness may matter more when the model genuinely cannot offload
+task identity to a separate head.
+
+**Budget:** pod required. CIFAR-100, 20 tasks, class-incremental → non-trivial
+compute.
+
+**What comes after Phase 8 (not in scope):**
+
+- larger backbone or ViT-style architecture (Hypothesis 3)
 - multi-domain comparison (Split-CUB, Split-miniImageNet)
-- publication write-up using Phase 7 artifacts as the evidence base
+- publication write-up using Phase 7+8 artifacts as the evidence base
 
-None of those require new machinery. They require Phase 7 to be done right first.
-
-That is what "externally believable" looks like in practice.
+None of those require new machinery. They require Phase 8 to be done right first.
