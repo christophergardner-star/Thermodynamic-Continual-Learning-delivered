@@ -779,7 +779,7 @@ def run_split_cifar10_benchmark(
         if method == "ewc":
             trunk.eval()
             ewc_fisher_new: dict[str, torch.Tensor] = {
-                name: torch.zeros_like(param) for name, param in trunk.named_parameters()
+                name: torch.zeros_like(param, device="cpu") for name, param in trunk.named_parameters()
             }
             sample_loader = DataLoader(task_train_subsets[train_task_idx], batch_size=32, shuffle=True)
             count = 0
