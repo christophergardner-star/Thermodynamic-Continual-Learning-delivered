@@ -72,9 +72,27 @@ def analyse_trace() -> dict:
                           late_rho_mean < early_rho_mean - 0.1)
 
         # CHECK 3: ordered in convergence window?
-        conv_ordered = mean([e["regime_pct"].get("ordered", 0) for e in conv])
+        # Separated into two sub-questions per analysis:
+        #   3a. Does rho reach a minimum below the ordered threshold (0.9)?
+        #       This is whether the anchor calibration allows ordered at all.
+        #   3b. Does ordered% appear in the convergence window (final half)?
+        #       This is whether ordered fires at the right time in the task.
+        conv_ordered  = mean([e["regime_pct"].get("ordered", 0) for e in conv])
         early_ordered = mean([e["regime_pct"].get("ordered", 0) for e in early])
         ordered_in_conv = conv_ordered > 0.02  # > 2% in convergence half
+
+        valid_rhos = [(i, r) for i, r in enumerate(rhos) if not math.isnan(r)]
+        if valid_rhos:
+            rho_min_val = min(r for _, r in valid_rhos)
+            rho_min_ep  = valid_rhos[min(range(len(valid_rhos)), key=lambda k: valid_rhos[k][1])][0]
+        else:
+            rho_min_val, rho_min_ep = float("nan"), None
+        # sigma drop ratio: final sigma vs anchor (sigma_star_anchor / alpha gives the anchor sigma)
+        # With fixed anchor, sigma_star ≈ constant = sigma_star_anchor_value
+        anchor_sigma_est = valid_ss[0] / max(t.get("alpha", 0.5), 1e-12) if valid_ss else float("nan")
+        final_sigma = sigmas[-1] if sigmas else float("nan")
+        sigma_drop_ratio = (final_sigma / max(anchor_sigma_est, 1e-12)
+                            if not (math.isnan(final_sigma) or math.isnan(anchor_sigma_est)) else float("nan"))
 
         task_data.append({
             "task":            task_idx,
@@ -82,10 +100,16 @@ def analyse_trace() -> dict:
             "rho_per_epoch":   [round(r, 4) for r in rhos],
             "sigma_per_epoch": [round(s, 8) for s in sigmas if not math.isnan(s)],
             "sigma_star_per_epoch": [round(s, 8) for s in sigma_stars if not math.isnan(s)],
-            "sigma_star_cv":   round(ss_cv, 4),   # near 0 = frozen, large = co-tracking
+            "sigma_star_cv":   round(ss_cv, 4),     # near 0 = frozen, large = co-tracking
             "rho_early_mean":  round(early_rho_mean, 4),
             "rho_late_mean":   round(late_rho_mean, 4),
             "rho_descends":    rho_descends,
+            # CHECK 3a: does rho reach ordered threshold?
+            "rho_min":         round(rho_min_val, 4),
+            "rho_min_epoch":   rho_min_ep,
+            "rho_min_below_ordered": rho_min_val < 0.9 if not math.isnan(rho_min_val) else False,
+            "sigma_drop_ratio": round(sigma_drop_ratio, 4),  # < 0.5 means sigma halved vs anchor
+            # CHECK 3b: does ordered fire at the right time?
             "early_ordered":   round(early_ordered, 4),
             "conv_ordered":    round(conv_ordered, 4),
             "ordered_in_conv_window": ordered_in_conv,
@@ -161,25 +185,38 @@ print(f"\n  → {n_desc}/{len(check2_pass)} tasks show rho descending  "
       f"({'PASS' if n_desc >= 2 else 'FAIL — fix not working as expected'})")
 
 
-# ── check 3: ordered in convergence window ────────────────────────────────────
+# ── check 3: ordered in convergence window (two sub-questions) ───────────────
 print(f"\n{'='*60}")
-print("CHECK 3: ordered% in CONVERGENCE WINDOW (final half of task epochs)")
+print("CHECK 3a: rho reaches ordered threshold (rho_min < 0.9)")
+print("CHECK 3b: ordered% in CONVERGENCE WINDOW (final half of task epochs)")
 print(f"{'='*60}")
-print("(Previously ordered was < 3% and random — need > 2% in conv window)\n")
+print("(3a = anchor calibration allows ordered at all)")
+print("(3b = ordered fires at the right time, not just early)\n")
 
-check3_pass = []
+check3a_pass = []
+check3_pass  = []
 for td in analysis.get("task_data", []):
-    ok   = td["ordered_in_conv_window"]
-    check3_pass.append(ok)
-    mark = "✓" if ok else "·"
-    print(f"  {mark} task {td['task']}: "
-          f"early_ordered={td['early_ordered']:.1%}  "
-          f"conv_ordered={td['conv_ordered']:.1%}  "
-          f"{'IN CONV WINDOW' if ok else 'not in conv window'}")
+    ok3a = td.get("rho_min_below_ordered", False)
+    ok3b = td["ordered_in_conv_window"]
+    check3a_pass.append(ok3a)
+    check3_pass.append(ok3b)
+    mark3a = "✓" if ok3a else "·"
+    mark3b = "✓" if ok3b else "·"
+    drop = td.get("sigma_drop_ratio", float("nan"))
+    drop_str = f"σ_drop={drop:.2f}x" if not math.isnan(drop) else ""
+    print(f"  {mark3a} task {td['task']} (3a): "
+          f"rho_min={td.get('rho_min', float('nan')):.3f} at epoch {td.get('rho_min_epoch')}  "
+          f"{drop_str}")
+    print(f"  {mark3b} task {td['task']} (3b): "
+          f"early_ordered={td['early_ordered']:.1%}  conv_ordered={td['conv_ordered']:.1%}  "
+          f"{'IN CONV WINDOW' if ok3b else 'not in conv window'}")
 
+n_3a   = sum(check3a_pass)
 n_conv = sum(check3_pass)
-print(f"\n  → {n_conv}/{len(check3_pass)} tasks show ordered in convergence window  "
-      f"({'PASS' if n_conv >= 1 else 'PARTIAL — may need more epochs or lower alpha'})")
+print(f"\n  → 3a: {n_3a}/{len(check3a_pass)} tasks reach rho < 0.9  "
+      f"({'threshold reachable' if n_3a >= 1 else 'THRESHOLD UNREACHABLE — check alpha or anchor_n'})")
+print(f"  → 3b: {n_conv}/{len(check3_pass)} tasks show ordered in conv window  "
+      f"({'timing correct' if n_conv >= 1 else 'timing wrong — check window definition or increase epochs'})")
 
 
 # ── benchmark comparison ──────────────────────────────────────────────────────
@@ -197,17 +234,25 @@ print(f"\n{'='*60}")
 print("VERDICT")
 print(f"{'='*60}")
 
-if n_frozen >= 3 and n_desc >= 2 and n_conv >= 1:
-    verdict = ("ANCHOR FIX WORKING — sigma_star frozen, rho descends, ordered fires "
-               "in convergence window.  Proceed to full 5-seed benchmark at 15 epochs.")
-elif n_frozen >= 3 and n_desc >= 1 and n_conv == 0:
-    verdict = ("ANCHOR FROZEN, RHO MOVING but ordered not yet in convergence window.  "
-               "Try alpha=0.3 or epochs_per_task=20 to reach threshold.")
+if n_frozen >= 3 and n_desc >= 2 and n_3a >= 1 and n_conv >= 1:
+    verdict = ("ANCHOR FIX WORKING — sigma_star frozen, rho descends, threshold reachable, "
+               "ordered fires in convergence window.  Proceed to full 5-seed benchmark at 15 epochs.")
+elif n_frozen >= 3 and n_desc >= 2 and n_3a >= 1 and n_conv == 0:
+    verdict = ("THRESHOLD REACHABLE but ordered timing wrong — ordered fires in early epochs only.  "
+               "Check whether 'convergence window' definition (final half) is too conservative; "
+               "report rho_min_epoch to see when sigma actually collapses.")
+elif n_frozen >= 3 and n_desc >= 2 and n_3a == 0:
+    verdict = ("RHO DESCENDS but never crosses threshold — alpha=0.5 too conservative.  "
+               "Try alpha=0.3 (ordered when sigma drops to 30% of anchor) or increase epochs.")
+elif n_frozen >= 3 and n_desc < 2:
+    verdict = ("ANCHOR FROZEN but rho not descending in most tasks — sigma not falling below anchor.  "
+               "Check sigma trajectory: if sigma rises after anchor window, possible easy-batch "
+               "anchor (check DataLoader shuffle) or task gradient dynamics mismatch.")
 elif n_frozen < 3:
     verdict = ("ANCHOR NOT FROZEN — sigma_star still co-tracking.  "
                "Check reset_for_new_task() and sigma_star_anchor logic.")
 else:
-    verdict = ("PARTIAL — inspect per-task rho trajectories above.")
+    verdict = ("PARTIAL — inspect per-task rho trajectories and 3a/3b sub-checks above.")
 
 print(f"\n{verdict}")
 
@@ -223,9 +268,10 @@ out.write_text(json.dumps({
     "delta": delta,
     "trace_analysis": analysis,
     "checks": {
-        "anchor_frozen": {"n_pass": n_frozen, "total": len(check1_pass)},
-        "rho_descends":  {"n_pass": n_desc,   "total": len(check2_pass)},
-        "ordered_in_conv_window": {"n_pass": n_conv, "total": len(check3_pass)},
+        "anchor_frozen":           {"n_pass": n_frozen, "total": len(check1_pass)},
+        "rho_descends":            {"n_pass": n_desc,   "total": len(check2_pass)},
+        "rho_min_below_threshold": {"n_pass": n_3a,     "total": len(check3a_pass)},
+        "ordered_in_conv_window":  {"n_pass": n_conv,   "total": len(check3_pass)},
     },
     "verdict": verdict,
     "completed_at": datetime.utcnow().isoformat(),
