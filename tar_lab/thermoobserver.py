@@ -287,6 +287,24 @@ class ActivationThermoObserver:
 
         return _hook
 
+    def reset_for_new_task(self) -> None:
+        """Reset per-task calibration state at each task boundary.
+
+        Clears sigma_ema, sigma_star, sigma_window, fim_ema, stable_steps,
+        and stat_accumulator so the next task calibrates from its own gradient
+        dynamics rather than inheriting the previous task's converged state.
+
+        Preserves: hooks, group structure, anchor reference, last_activation.
+        """
+        for group in self._groups:
+            group.sigma_ema = None
+            group.sigma_star = None
+            group.sigma_window = []
+            group.fim_ema = None
+            group.stable_steps = 0
+            group.stat_accumulator = StatAccumulator(window_size=self.stat_window_size)
+        self._last_snapshot = None
+
     def close(self) -> None:
         for handle in self._hooks:
             handle.remove()

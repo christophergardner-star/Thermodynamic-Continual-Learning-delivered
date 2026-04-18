@@ -721,12 +721,23 @@ def run_split_cifar10_benchmark(
     }
 
     if observer is None and method == "tcl" and config.tcl_governor_enabled:
-        observer = ActivationThermoObserver(trunk, stat_window_size=5)
+        # alpha=0.5: sigma_star calibrates to 50% of median activity so the
+        # "ordered" phase (rho < 0.9) is reachable as training converges.
+        # alpha=1.0 tracks the hot early-training distribution and the ordered
+        # threshold is never crossed in practice.
+        observer = ActivationThermoObserver(trunk, stat_window_size=5, alpha=0.5)
 
     accuracy_matrix: dict[int, dict[int, float]] = {}
     base_lr = 0.01
+    tcl_trace: list[dict] = []  # per-epoch diagnostic snapshots
 
     for train_task_idx in range(config.n_tasks):
+        # Reset per-task calibration state so each task calibrates sigma_star
+        # from its own gradient dynamics rather than inheriting the previous
+        # task's converged statistics.
+        if observer is not None and method == "tcl" and train_task_idx > 0:
+            observer.reset_for_new_task()
+
         optimizer = torch.optim.SGD(all_params, lr=base_lr, momentum=0.9, weight_decay=1e-4)
         train_loader = DataLoader(
             task_train_subsets[train_task_idx],
@@ -737,6 +748,9 @@ def run_split_cifar10_benchmark(
         for _epoch in range(config.train_epochs_per_task):
             trunk.train()
             heads[train_task_idx].train()
+            _epoch_regimes: list[str] = []
+            _epoch_lrs: list[float] = []
+
             for batch_x, batch_y in train_loader:
                 batch_x = batch_x.to(device)
                 batch_y = batch_y.to(device)
@@ -770,13 +784,36 @@ def run_split_cifar10_benchmark(
                                 -param.grad.detach() * (param.detach() - si_prev_params[name].to(device))
                             ).abs().cpu()
 
-                optimizer.step()
-
+                # observer.step() reads gradients computed by backward() above.
+                # Must fire BEFORE optimizer.step() so gradients are fresh and
+                # the adjusted LR takes effect on the current weight update.
                 if observer is not None and method == "tcl":
                     observer.step(optimizer)
                     adj_lr = _tcl_lr_adjustment(observer, base_lr)
                     for group in optimizer.param_groups:
                         group["lr"] = adj_lr
+                    _epoch_regimes.append(observer.current_regime)
+                    _epoch_lrs.append(adj_lr)
+
+                optimizer.step()
+
+            # record per-epoch regime summary for diagnostic trace
+            if observer is not None and method == "tcl" and _epoch_regimes:
+                from collections import Counter
+                counts = Counter(_epoch_regimes)
+                total = len(_epoch_regimes)
+                tcl_trace.append({
+                    "task": train_task_idx,
+                    "epoch": _epoch,
+                    "n_batches": total,
+                    "regime_pct": {r: round(counts[r] / total, 3)
+                                   for r in ["ordered", "critical", "disordered", "unknown"]
+                                   if counts[r] > 0},
+                    "dominant_regime": counts.most_common(1)[0][0],
+                    "mean_lr": round(sum(_epoch_lrs) / len(_epoch_lrs), 6),
+                    "min_lr": round(min(_epoch_lrs), 6),
+                    "max_lr": round(max(_epoch_lrs), 6),
+                })
 
         if method == "ewc":
             trunk.eval()
@@ -816,6 +853,12 @@ def run_split_cifar10_benchmark(
                 si_omega[name] = (si_omega[name].cpu() + si_path_integral[name].cpu() / denom).clamp(min=0)
                 si_path_integral[name].zero_()
             si_prev_params = {name: param.detach().cpu().clone() for name, param in trunk.named_parameters()}
+
+        # After task 0 training: set the dimensionality anchor so that
+        # dimensionality_ratio is meaningful for all subsequent tasks.
+        # last_activation is populated from the final training batch above.
+        if observer is not None and method == "tcl" and train_task_idx == 0:
+            observer.anchor_snapshot()
 
         trunk.eval()
         row: dict[int, float] = {}
@@ -864,10 +907,37 @@ def run_split_cifar10_benchmark(
         trace_dir = Path(workspace) / "tar_state" / "cl_traces"
         trace_dir.mkdir(parents=True, exist_ok=True)
         trace_file = trace_dir / f"tcl_{config.seed}.json"
-        trace_file.write_text(
-            json.dumps({"seed": config.seed, "final_regime": observer.current_regime}, indent=2),
-            encoding="utf-8",
-        )
+        # Summarise regime distribution per task across all epochs in that task
+        task_summaries: list[dict] = []
+        for t in range(config.n_tasks):
+            task_epochs = [e for e in tcl_trace if e["task"] == t]
+            if task_epochs:
+                all_regimes = []
+                for e in task_epochs:
+                    for regime, pct in e["regime_pct"].items():
+                        all_regimes.extend([regime] * round(pct * e["n_batches"]))
+                from collections import Counter
+                counts = Counter(all_regimes)
+                total = max(len(all_regimes), 1)
+                task_summaries.append({
+                    "task": t,
+                    "regime_pct": {r: round(counts[r] / total, 3)
+                                   for r in ["ordered", "critical", "disordered", "unknown"]
+                                   if counts[r] > 0},
+                    "dominant_regime": counts.most_common(1)[0][0],
+                    "mean_lr": round(
+                        sum(e["mean_lr"] for e in task_epochs) / len(task_epochs), 6
+                    ),
+                })
+        trace_data = {
+            "seed": config.seed,
+            "alpha": observer.alpha,
+            "final_regime": observer.current_regime,
+            "anchor_effective_dimensionality": observer.anchor_effective_dimensionality,
+            "task_summaries": task_summaries,
+            "epoch_trace": tcl_trace,
+        }
+        trace_file.write_text(json.dumps(trace_data, indent=2), encoding="utf-8")
         trace_path = str(trace_file)
 
     return ContinualLearningBenchmarkResult(
