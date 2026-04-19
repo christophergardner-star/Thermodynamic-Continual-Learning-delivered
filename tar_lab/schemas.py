@@ -262,6 +262,11 @@ class ContinualLearningBenchmarkConfig(StrictModel):
     si_c: float = 0.1
     si_xi: float = 0.001
     tcl_governor_enabled: bool = True
+    # Dimensionality-weighted L2 penalty: after each task TCL anchors the
+    # trunk weights and penalises drift scaled by the task's anchor D_PR.
+    # Higher D_PR = more structured representation = stronger penalty.
+    # Set to 0.0 to disable (governor-only TCL, no weight consolidation).
+    tcl_penalty_lambda: float = 0.01
     augmentation: str = "flip_normalize"
 
 

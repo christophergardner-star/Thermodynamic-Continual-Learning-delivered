@@ -21,8 +21,11 @@ from tar_lab.schemas import ContinualLearningBenchmarkConfig
 from tar_lab.multimodal_payloads import run_split_cifar10_benchmark
 
 SEEDS    = [42, 0, 1, 2, 3]
-EPOCHS   = 15
 BACKBONE = "resnet18"
+# ResNet-18 needs more epochs to converge than the tiny model.
+# At 15 epochs it is badly underfitted and the governor misreads
+# random-initialisation noise as thermal stability.
+EPOCHS   = 40 if BACKBONE == "resnet18" else 15
 
 
 def mean(v):  return sum(v) / len(v)

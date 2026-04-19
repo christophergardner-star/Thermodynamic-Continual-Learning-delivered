@@ -739,15 +739,22 @@ def run_split_cifar10_benchmark(
 
     if observer is None and method == "tcl" and config.tcl_governor_enabled:
         # alpha=0.5: "ordered" fires when sigma drops to 50% of the early-task
-        # anchor level (median of first 20 batches).  sigma_star is now a fixed
-        # per-task reference temperature, not a rolling median — so the ratio
-        # actually decreases as the network converges and the threshold is
-        # reachable for any alpha in [0.3, 0.7].
-        observer = ActivationThermoObserver(trunk, stat_window_size=5, alpha=0.5)
+        # anchor level.  warmup_batches delays anchor collection until the
+        # network has had meaningful gradient signal — set to ~2 epochs worth
+        # of batches for large backbones (resnet18) to avoid anchoring on
+        # random-initialisation noise.
+        _warmup = 60 if backbone == "resnet18" else 0
+        observer = ActivationThermoObserver(
+            trunk, stat_window_size=5, alpha=0.5, warmup_batches=_warmup
+        )
 
     accuracy_matrix: dict[int, dict[int, float]] = {}
     base_lr = 0.01
     tcl_trace: list[dict] = []  # per-epoch diagnostic snapshots
+    # Dimensionality-weighted weight penalty state.
+    # Populated after each task completes; used in subsequent tasks.
+    tcl_anchor_params: dict[str, torch.Tensor] = {}
+    tcl_anchor_dpr: float = 0.0
 
     for train_task_idx in range(config.n_tasks):
         # Reset per-task calibration state.  sigma_star_anchor will be
@@ -793,6 +800,17 @@ def run_split_cifar10_benchmark(
                     for name, param in trunk.named_parameters():
                         si_reg = si_reg + (si_omega[name].to(device) * (param - si_prev_params[name].to(device)).pow(2)).sum()
                     loss = loss + config.si_c * si_reg
+
+                # Dimensionality-weighted L2 penalty: penalise drift from the
+                # previous task's weights, scaled by that task's anchor D_PR.
+                # tcl_anchor_dpr is 0.0 on task 0 so the penalty is inactive.
+                if method == "tcl" and tcl_anchor_params and tcl_anchor_dpr > 0.0 and config.tcl_penalty_lambda > 0.0:
+                    tcl_reg = torch.zeros((), device=device)
+                    for name, param in trunk.named_parameters():
+                        ref = tcl_anchor_params.get(name)
+                        if ref is not None:
+                            tcl_reg = tcl_reg + (param.float() - ref.to(device).float()).pow(2).sum()
+                    loss = loss + config.tcl_penalty_lambda * tcl_anchor_dpr * tcl_reg
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -898,6 +916,16 @@ def run_split_cifar10_benchmark(
         # last_activation is populated from the final training batch above.
         if observer is not None and method == "tcl" and train_task_idx == 0:
             observer.anchor_snapshot()
+
+        # Snapshot weights + D_PR for the dimensionality-weighted penalty.
+        # Done after every task so the next task penalises drift from the
+        # most-recently-consolidated state.
+        if observer is not None and method == "tcl" and config.tcl_penalty_lambda > 0.0:
+            tcl_anchor_params = {
+                name: param.detach().cpu().clone()
+                for name, param in trunk.named_parameters()
+            }
+            tcl_anchor_dpr = observer.anchor_effective_dimensionality
 
         trunk.eval()
         row: dict[int, float] = {}

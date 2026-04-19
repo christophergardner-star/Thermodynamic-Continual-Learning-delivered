@@ -223,12 +223,15 @@ class _ObservedGroup:
     sigma_ema: Optional[float] = None
     # Rolling window: smooths current sigma estimate, reset each task.
     sigma_window: List[float] = field(default_factory=list)
-    # Fixed per-task reference: set from first sigma_star_anchor_n batches
-    # of each task, then frozen for the rest of that task.
-    # "Ordered" fires when current sigma drops below alpha × this anchor.
+    # Fixed per-task reference: set from sigma_star_anchor_n batches
+    # *after* warmup_batches have elapsed, then frozen for the rest of
+    # that task.  "Ordered" fires when sigma drops below alpha × anchor.
     sigma_star_anchor: Optional[float] = None
     anchor_window: List[float] = field(default_factory=list)
     anchor_set: bool = False
+    # Counts batches since last reset — anchor collection is suppressed
+    # until this reaches the observer's warmup_batches threshold.
+    batch_counter: int = 0
     fim_ema: Optional[float] = None
     stable_steps: int = 0
     last_activation: Optional[torch.Tensor] = None
@@ -243,6 +246,7 @@ class ActivationThermoObserver:
         alpha: float = 1.0,
         sigma_window_size: int = 8,
         sigma_star_anchor_n: int = 20,
+        warmup_batches: int = 0,
         stat_window_size: int = 5,
         calib_start: int = 2,  # retained for API compat; superseded by sigma_star_anchor_n
         sigma_tolerance: float = 0.15,
@@ -253,6 +257,7 @@ class ActivationThermoObserver:
         self.alpha = alpha
         self.sigma_window_size = sigma_window_size
         self.sigma_star_anchor_n = max(1, int(sigma_star_anchor_n))
+        self.warmup_batches = max(0, int(warmup_batches))
         self.stat_window_size = max(1, stat_window_size)
         self.calib_start = calib_start
         self.sigma_tolerance = sigma_tolerance
@@ -312,6 +317,7 @@ class ActivationThermoObserver:
             group.sigma_star_anchor = None
             group.anchor_window = []
             group.anchor_set = False
+            group.batch_counter = 0
             group.fim_ema = None
             group.stable_steps = 0
             group.stat_accumulator = StatAccumulator(window_size=self.stat_window_size)
@@ -383,12 +389,15 @@ class ActivationThermoObserver:
             if len(group.sigma_window) > self.sigma_window_size:
                 group.sigma_window.pop(0)
 
-            # Fixed per-task anchor: accumulate first sigma_star_anchor_n
-            # batches after reset, then freeze.  sigma_star_anchor is the
-            # reference temperature — the network's initial thermal level on
-            # this task.  "Ordered" fires when sigma drops below alpha × this
-            # fixed reference, not below a rolling median that co-contracts.
-            if not group.anchor_set:
+            # Fixed per-task anchor: accumulate sigma_star_anchor_n batches
+            # *after* warmup_batches have elapsed, then freeze.
+            # warmup_batches=0 (default) preserves original behaviour.
+            # Set warmup_batches > 0 for large backbones where the first
+            # batches are random-initialisation noise, not a meaningful
+            # thermal baseline (e.g. warmup_batches=60 ≈ 2 epochs on
+            # Split-CIFAR-10 with batch_size=32).
+            group.batch_counter += 1
+            if not group.anchor_set and group.batch_counter > self.warmup_batches:
                 group.anchor_window.append(float(sigma))
                 if len(group.anchor_window) >= self.sigma_star_anchor_n:
                     group.sigma_star_anchor = self.alpha * float(median(group.anchor_window))

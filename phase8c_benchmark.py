@@ -27,28 +27,17 @@ def std(v):
 
 # ── paired t-test (one-sample t on deltas) ────────────────────────────────────
 def paired_t(deltas):
-    n  = len(deltas)
-    m  = mean(deltas)
-    s  = std(deltas)
+    n = len(deltas)
+    m = mean(deltas)
+    s = std(deltas)
     if s < 1e-12 or n < 2:
         return float("nan"), float("nan")
-    t  = m / (s / math.sqrt(n))
-    # two-tailed p approximation via t-distribution CDF (scipy not guaranteed)
+    t = m / (s / math.sqrt(n))
     try:
-        from scipy import stats
-        p = float(stats.ttest_1samp(deltas, 0).pvalue)
+        from scipy import stats as _stats
+        p = float(_stats.ttest_1samp(deltas, 0).pvalue)
     except ImportError:
-        # rough normal approximation for n=5
-        import math
-        # use t-dist with n-1 df via regularised incomplete beta
-        df = n - 1
-        x  = df / (df + t * t)
-        try:
-            import math
-            # betainc not in stdlib; fall back to noting approximation
-            p = float("nan")
-        except Exception:
-            p = float("nan")
+        p = float("nan")
     return t, p
 
 
