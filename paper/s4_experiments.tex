@@ -81,8 +81,8 @@ Seed & Method & $\mathcal{F}\downarrow$ & $\mathcal{A}\uparrow$ & JAF$\uparrow$ 
 \multirow{4}{*}{2}
  & \textbf{TCL} & \textbf{0.1007} & \textbf{0.796} & \textbf{0.716} \\
  & EWC          & 0.2366          & 0.681          & 0.520          \\
- & SI           & [PENDING]       & [PENDING]      & [PENDING]      \\
- & SGD          & [PENDING]       & [PENDING]      & [PENDING]      \\
+ & SI           & 0.1415          & 0.500$^\dagger$& 0.430          \\
+ & SGD          & 0.2720          & 0.657          & 0.431          \\
 \midrule
 \multirow{4}{*}{3}
  & \textbf{TCL} & [PENDING]       & [PENDING]      & [PENDING]      \\
@@ -104,7 +104,7 @@ Network has not learned class-discriminative features; low forgetting is an arte
 
 SI reports forgetting scores of $0.114$--$0.143$ across completed seeds, which would
 rank it first or second in a forgetting-only comparison.
-However, SI accuracy is exactly $0.500$ on every completed seed ($n=3$) --- the
+However, SI accuracy is exactly $0.500$ on every completed seed ($n=4$) --- the
 chance-level baseline for 2-class tasks.
 A network predicting one class regardless of input cannot forget: the forgetting metric
 measures the \emph{relative} drop in performance, and if task accuracy never exceeds
