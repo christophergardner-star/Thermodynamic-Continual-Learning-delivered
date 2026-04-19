@@ -50,27 +50,35 @@ TCL is the application of the TAR governor to the continual learning problem (se
 
 The original `sigma_star` was a rolling median of the current activation window, which meant it co-tracked `sigma` and the ordered threshold was mathematically unreachable. The fix: anchor `sigma_star` from the first 20 batches of each task and freeze it. Now `rho` actually decreases as the network converges.
 
-### Phase 8 Results (Split-CIFAR-10, 5 seeds, 15 epochs)
-
-**Tiny backbone (~189K params)**
+### Phase 8C Results — Tiny backbone (Split-CIFAR-10, 5 seeds, 15 epochs)
 
 | | Forgetting | Accuracy |
 |---|---|---|
 | TCL | 0.0918 ± 0.013 | 0.843 |
 | SGD | 0.0977 ± 0.022 | 0.837 |
 
-mean delta = −0.006, p = 0.68 — directional but not significant. TCL has **5× lower forgetting variance** than SGD.
+mean delta = −0.006, p = 0.68 — directional but not significant on the 189K-param toy backbone. TCL has **5× lower forgetting variance**.
 
-**ResNet-18 (~11M params)**
+### Phase 9 Results — ResNet-18, weight penalty (Split-CIFAR-10, 5 seeds, 40 epochs)
+
+Added two components: (1) **warmup guard** — delays anchor collection until after initialisation noise settles; (2) **dimensionality-weighted L2 penalty** — after each task, penalises weight drift scaled by the thermal participation ratio D_PR.
 
 | | Forgetting | Accuracy |
 |---|---|---|
-| TCL | 0.265 ± 0.015 | 0.655 |
-| SGD | 0.221 ± 0.070 | 0.702 |
+| TCL | **0.1119 ± 0.027** | **0.776** |
+| SGD | 0.2426 ± 0.065 | 0.686 |
 
-mean delta = +0.044 — SGD better on average. At 15 epochs ResNet-18 is underfitted; the governor reads underfitting as thermal stability and cuts LR too early. **Variance reduction still holds** (TCL std 0.015 vs SGD 0.070).
+**mean delta = −0.131 (13.1pp), p = 0.0113, Cohen's d = 1.99 — 5/5 seeds TCL better**
 
-**Next step:** warmup guard — prevent anchor from being set before the network has meaningfully learned.
+**Outcome A: clean win.** The thermodynamic governor produces a statistically significant, large-effect reduction in catastrophic forgetting at realistic scale.
+
+| seed | TCL forg | SGD forg | delta |
+|------|----------|----------|-------|
+| 42 | 0.130 | 0.192 | −0.063 |
+| 0  | 0.090 | 0.209 | −0.118 |
+| 1  | 0.115 | 0.190 | −0.075 |
+| 2  | 0.145 | 0.332 | −0.187 |
+| 3  | 0.080 | 0.290 | −0.210 |
 
 Full investigation log: [`docs/phase8_roadmap.md`](./docs/phase8_roadmap.md)
 

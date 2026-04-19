@@ -72,7 +72,7 @@ sgd_acc  = [r["sgd_acc"] for r in results]
 
 t_stat, p_val = _scipy_stats.ttest_1samp(deltas, 0)
 mean_delta = mean(deltas)
-d_stat = mean_delta / max(std(deltas), 1e-12)
+d_stat = abs(mean_delta) / max(std(deltas), 1e-12)
 n_tcl_better = sum(1 for d in deltas if d < 0)
 
 print(f"\n{'='*60}")
