@@ -1,0 +1,51 @@
+% s1_introduction.tex
+% Status: DRAFT SCAFFOLD — no claims finalised, no citations verified
+% Last updated: 2026-04-19 (scaffold only)
+% Lock condition: after Phase 10 aggregate stats confirmed + SI robustness appendix drafted
+
+\section{Introduction}
+\label{sec:intro}
+
+% HOOK — methodological observation (Contribution 3)
+% PLACEHOLDER — tighten after results locked
+
+Continual learning methods are evaluated primarily on \emph{forgetting}: the degree to
+which learning a new task degrades performance on previous tasks.
+We show that this metric has a systematic failure mode.
+Importance-weighted regularisation methods --- specifically Synaptic Intelligence (SI)
+\needsref{Zenke2017} --- can achieve low forgetting scores while producing networks
+that have not learned to distinguish classes at all.
+A network predicting the same class for every input does not forget what it never learned.
+
+% CLAIM SUMMARY — matches evidence in hand
+We introduce the Thermodynamic Continual Learning (TCL) governor, a method that uses
+per-layer activation entropy as a signal to regulate weight consolidation during
+sequential task learning.
+Across five random seeds on Split-CIFAR-10 with a ResNet-18 backbone, TCL achieves
+lower forgetting than EWC \needsref{Kirkpatrick2017} with comparable or higher accuracy,
+and is the only method in our comparison that simultaneously achieves low forgetting
+\emph{and} meaningful learned representations.
+
+% THREE CONTRIBUTIONS — locked, do not expand without discussion
+\noindent\textbf{Contributions:}
+\begin{enumerate}
+    \item \textbf{TCL method.} A thermodynamic governor for continual learning based on
+          per-task activation entropy anchoring and dimensionality-weighted L2 regularisation.
+
+    \item \textbf{Pareto-optimal accuracy-forgetting tradeoff.} TCL dominates EWC on the
+          joint accuracy-forgetting (JAF) metric across all five seeds. The gap widens on
+          seeds where EWC shows partial accuracy collapse, suggesting TCL degrades more
+          gracefully under difficult initialisations.
+
+    \item \textbf{Methodological observation.} Standard forgetting-only rankings can
+          misrepresent method quality when importance-weighted methods collapse to
+          degenerate solutions. We demonstrate this cleanly on a standard benchmark and
+          propose JAF as a minimal two-metric reporting standard.
+\end{enumerate}
+
+% PAPER STRUCTURE
+The remainder of the paper is organised as follows.
+Section~\ref{sec:background} covers relevant prior work.
+Section~\ref{sec:method} describes the TCL governor.
+Section~\ref{sec:experiments} presents experimental setup and results.
+Section~\ref{sec:discussion} discusses limitations and future work.

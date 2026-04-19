@@ -1,0 +1,127 @@
+% s4_experiments.tex
+% Status: PARTIAL — Phase 10 table incomplete (seed 3 pending)
+% Last updated: 2026-04-19 (seeds 42, 0, 1, 2 partial)
+% Lock condition: after Phase 10 all 5 seeds complete + aggregate stats computed
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+\label{sec:setup}
+
+\textbf{Dataset.} Split-CIFAR-10: 5 sequential binary classification tasks, 1000
+samples per task, no replay buffer. Task identity provided at test time
+(task-incremental setting).
+
+\textbf{Backbone.} ResNet-18 ($\sim$11M parameters). Warmup guard: anchor
+collection delayed 60 batches to avoid anchoring on random-initialisation noise.
+Eigenvalue decomposition disabled (\texttt{compute\_dpr=False}) for efficiency;
+regime detection via $\sigma/\sigma^\star$ unchanged.
+
+\textbf{Baselines.}
+\begin{itemize}
+    \item \textbf{SGD} — fine-tuning with no anti-forgetting mechanism.
+    \item \textbf{EWC} \needsref{Kirkpatrick2017} — elastic weight consolidation,
+          $\lambda=100$ (selected by sweep in Phase 7; see Appendix~\ref{app:ewc_sweep}).
+    \item \textbf{SI} \needsref{Zenke2017} — synaptic intelligence at published default
+          hyperparameters ($c=0.1$, $\xi=0.001$). Post-hoc robustness sweep reported in
+          Appendix~\ref{app:si_sweep} (labelled post-hoc, not pre-registered).
+    \item \textbf{TCL} — thermodynamic governor with dimensionality-weighted L2 penalty,
+          $\lambda_{\text{TCL}}=0.01$, $\alpha=0.5$, anchor window 20 batches.
+\end{itemize}
+
+\textbf{Protocol.} 5 seeds $\{42, 0, 1, 2, 3\}$, 40 epochs per task, batch size 32.
+Pre-registered outcome thresholds: Outcome A $= $ TCL vs EWC mean forgetting delta
+$< -0.01$, $p < 0.05$, Cohen's $d > 0.5$.
+
+\textbf{Metrics.} We report:
+(1) \emph{Mean forgetting} $\mathcal{F}$: average drop in task accuracy after subsequent
+tasks, following \needsref{Lopez-Paz2017}.
+(2) \emph{Final mean accuracy} $\mathcal{A}$: mean accuracy across all tasks at end of
+training.
+(3) \emph{Joint accuracy-forgetting} (JAF): $\mathcal{A} \times (1 - \mathcal{F})$,
+a scalar that penalises low-forgetting solutions achieved at the cost of collapsed learning.
+
+
+\subsection{Results}
+\label{sec:results}
+
+% TABLE — update each time a seed lands
+% PLACEHOLDER rows marked with [PENDING]
+
+\begin{table}[h]
+\centering
+\caption{Per-seed results on Split-CIFAR-10 (ResNet-18, 40 epochs/task).
+Forgetting $\mathcal{F}$ (lower is better), accuracy $\mathcal{A}$ (higher is better),
+JAF $= \mathcal{A}\times(1-\mathcal{F})$ (higher is better).
+SI acc$=0.50$ indicates collapse to chance-level prediction (2-class tasks).}
+\label{tab:main_results}
+\begin{tabular}{llccc}
+\toprule
+Seed & Method & $\mathcal{F}\downarrow$ & $\mathcal{A}\uparrow$ & JAF$\uparrow$ \\
+\midrule
+\multirow{4}{*}{42}
+ & \textbf{TCL} & \textbf{0.1269} & \textbf{0.767} & \textbf{0.669} \\
+ & EWC          & 0.1640          & 0.760          & 0.635          \\
+ & SI           & 0.1430          & 0.500$^\dagger$& 0.428          \\
+ & SGD          & 0.3348          & 0.596          & 0.396          \\
+\midrule
+\multirow{4}{*}{0}
+ & \textbf{TCL} & \textbf{0.1294} & \textbf{0.769} & \textbf{0.670} \\
+ & EWC          & 0.1530          & 0.772          & 0.655          \\
+ & SI           & 0.1141          & 0.500$^\dagger$& 0.443          \\
+ & SGD          & 0.2127          & 0.717          & 0.564          \\
+\midrule
+\multirow{4}{*}{1}
+ & \textbf{TCL} & \textbf{0.1697} & \textbf{0.731} & \textbf{0.607} \\
+ & EWC          & 0.2520          & 0.666          & 0.498          \\
+ & SI           & 0.1262          & 0.500$^\dagger$& 0.437          \\
+ & SGD          & 0.1862          & 0.743          & 0.604          \\
+\midrule
+\multirow{4}{*}{2}
+ & \textbf{TCL} & \textbf{0.1007} & \textbf{0.796} & \textbf{0.716} \\
+ & EWC          & 0.2366          & 0.681          & 0.520          \\
+ & SI           & [PENDING]       & [PENDING]      & [PENDING]      \\
+ & SGD          & [PENDING]       & [PENDING]      & [PENDING]      \\
+\midrule
+\multirow{4}{*}{3}
+ & \textbf{TCL} & [PENDING]       & [PENDING]      & [PENDING]      \\
+ & EWC          & [PENDING]       & [PENDING]      & [PENDING]      \\
+ & SI           & [PENDING]       & [PENDING]      & [PENDING]      \\
+ & SGD          & [PENDING]       & [PENDING]      & [PENDING]      \\
+\bottomrule
+\end{tabular}
+\\[4pt]
+\small $^\dagger$ SI accuracy = 0.500 = random chance on 2-class tasks.
+Network has not learned class-discriminative features; low forgetting is an artefact.
+\end{table}
+
+% AGGREGATE STATS — PENDING full 5-seed completion
+% Will insert: mean±std per method, paired t-test TCL vs EWC, Cohen's d, p-value
+
+\subsection{The SI Collapse}
+\label{sec:si_collapse}
+
+SI reports forgetting scores of $0.114$--$0.143$ across completed seeds, which would
+rank it first or second in a forgetting-only comparison.
+However, SI accuracy is exactly $0.500$ on every completed seed ($n=3$) --- the
+chance-level baseline for 2-class tasks.
+A network predicting one class regardless of input cannot forget: the forgetting metric
+measures the \emph{relative} drop in performance, and if task accuracy never exceeds
+chance, there is nothing to lose.
+
+This is not a marginal result.
+Exactly $0.500$ accuracy (rather than, say, $0.51$ or $0.53$) indicates the network
+has converged to a single-class decision boundary.
+At SI's published default hyperparameters ($c=0.1$, $\xi=0.001$), the importance
+weights become sufficiently large to prevent the network from updating meaningfully
+after the first task.
+This is the failure mode of over-constrained importance weighting, analogous to but
+distinct from the EWC collapse we observed at $\lambda=1000$ in our hyperparameter
+sweep (Appendix~\ref{app:ewc_sweep}).
+
+We did not re-tune SI hyperparameters for this comparison because TCL is the method
+under evaluation.
+A post-hoc robustness sweep (Appendix~\ref{app:si_sweep}) tests SI at $c \in
+\{0.01, 0.1, 0.5\}$ to establish whether non-degenerate SI configurations exist on
+this benchmark and, if so, whether TCL remains competitive.
