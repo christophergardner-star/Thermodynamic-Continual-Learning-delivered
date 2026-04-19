@@ -274,6 +274,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-jobs", type=int, default=1, dest="max_jobs")
     parser.add_argument("--stale-after-s", type=int, default=900, dest="stale_after_s")
+    parser.add_argument("--poll-interval-s", type=float, default=60.0, dest="poll_interval_s")
+    parser.add_argument("--iterations", type=int, default=None, dest="iterations")
     parser.add_argument("--alert-count", type=int, default=20, dest="alert_count")
     parser.add_argument("--message")
     parser.add_argument("--reason", dest="message")
@@ -352,6 +354,7 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--list-experiment-backends", action="store_true", dest="list_experiment_backends")
     group.add_argument("--experiment-backend-runtime-status", action="store_true", dest="experiment_backend_runtime_status")
     group.add_argument("--run-runtime-cycle", action="store_true", dest="run_runtime_cycle")
+    group.add_argument("--run-autonomous", action="store_true", dest="run_autonomous")
     group.add_argument("--list-alerts", action="store_true", dest="list_alerts")
     group.add_argument("--retry-failed-job", action="store_true", dest="retry_failed_job")
     group.add_argument("--confirm-recovery", action="store_true", dest="confirm_recovery")
@@ -2057,7 +2060,7 @@ def _resolve_chat_prompt(orchestrator: TAROrchestrator, args: argparse.Namespace
 
 def main() -> int:
     args = parse_args()
-    orchestrator = TAROrchestrator(workspace=args.workspace, start_memory_indexer=args.serve)
+    orchestrator = TAROrchestrator(workspace=args.workspace, start_memory_indexer=args.serve or args.run_autonomous)
     try:
         orchestrator.store.append_audit_event("cli", "command", {"argv": vars(args)})
 
@@ -2067,6 +2070,15 @@ def main() -> int:
                 server.serve_forever()
             finally:
                 server.shutdown()
+            return 0
+
+        if args.run_autonomous:
+            summaries = orchestrator.serve_forever_full(
+                poll_interval_s=args.poll_interval_s,
+                iterations=args.iterations,
+                max_jobs=args.max_jobs,
+            )
+            print(json.dumps({"cycles_completed": len(summaries), "summaries": summaries}, indent=2))
             return 0
 
         if args.direct:

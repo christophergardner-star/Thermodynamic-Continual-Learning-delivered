@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 
 from tar_lab.orchestrator import TAROrchestrator
-from tar_lab.schemas import AgendaReviewConfig, ResearchDocument, TrainingSignalRecord
+from tar_lab.schemas import AgendaReviewConfig, ResearchDocument, TrainingSignalRecord, ResearchProject
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -124,5 +124,81 @@ def test_full_autonomous_cycle_orchestration():
                 )
                 for decision in review_again.decisions
             )
+        finally:
+            orchestrator.shutdown()
+
+
+def test_run_full_research_cycle_no_human_input():
+    """run_full_research_cycle() completes without raising and returns a valid summary.
+
+    This test verifies that the autonomous loop can tick through a full cycle
+    (ingest→scan→agenda→schedule→execute→family-check→self-improve) purely from
+    code with no human intervention.  We run two cycles via serve_forever_full
+    to confirm the cycle counter increments and throttle logic fires correctly.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        _copy_science_profiles(tmp)
+        _write_anchor_pack(Path(tmp))
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            # Seed two research documents so the frontier scanner has material
+            _seed_document(
+                orchestrator,
+                "doc-auto-1",
+                "Thermodynamic Continual Learning",
+                "Investigate entropy-based regularisation for preventing catastrophic forgetting.",
+            )
+            _seed_document(
+                orchestrator,
+                "doc-auto-2",
+                "Activation Space Dynamics",
+                "Analyse activation covariance as a proxy for representation stability.",
+            )
+
+            # Run two cycles: cycle 0 triggers ingest (0 % 5 == 0), cycle 1 does not
+            cycle_ref: list = [0]
+            summary0 = orchestrator.run_full_research_cycle(
+                ingest_every_n=5,
+                self_improve_every_n=10,
+                min_signals_for_improvement=99,  # won't fire; not enough signals
+                _cycle_count_ref=cycle_ref,
+            )
+            summary1 = orchestrator.run_full_research_cycle(
+                ingest_every_n=5,
+                self_improve_every_n=10,
+                min_signals_for_improvement=99,
+                _cycle_count_ref=cycle_ref,
+            )
+
+            # Basic shape checks
+            assert summary0["cycle"] == 0
+            assert summary1["cycle"] == 1
+            assert "started_at" in summary0
+            assert "finished_at" in summary0
+
+            # Cycle 0 attempted ingest (key present, even if 0 fetched due to no network)
+            assert "ingest_fetched" in summary0 or "ingest_error" in summary0
+            # Cycle 1 skipped ingest (throttled)
+            assert "ingest_fetched" not in summary1 and "ingest_error" not in summary1
+
+            # Frontier scan ran (gaps_identified key present regardless of count)
+            assert "gaps_identified" in summary0
+
+            # Agenda ran (keys present)
+            assert "agenda_decisions_reviewed" in summary0
+            assert "agenda_decisions_committed" in summary0
+
+            # No unhandled exceptions — runtime/study errors captured, not raised
+            assert "studies_scheduled" in summary0
+
+            # serve_forever_full with 1 iteration returns a 1-element list
+            summaries = orchestrator.serve_forever_full(
+                poll_interval_s=0.0,
+                iterations=1,
+                ingest_every_n=5,
+            )
+            assert len(summaries) == 1
+            assert summaries[0]["cycle"] == 0  # serve_forever_full creates its own counter
+
         finally:
             orchestrator.shutdown()

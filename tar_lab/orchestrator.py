@@ -7446,6 +7446,162 @@ class TAROrchestrator:
         self.store.append_audit_event("cli", "panic", {"commands": commands})
         return {"commands": commands}
 
+    # ── Autonomous research loop ──────────────────────────────────────────────
+
+    def run_full_research_cycle(
+        self,
+        *,
+        ingest_topic: str = "continual learning thermodynamic optimization",
+        max_ingest_results: int = 6,
+        max_frontier_gaps: int = 5,
+        max_project_proposals: int = 3,
+        max_jobs: int = 1,
+        ingest_every_n: int = 5,
+        self_improve_every_n: int = 10,
+        min_signals_for_improvement: int = 20,
+        _cycle_count_ref: Optional[list] = None,
+    ) -> Dict[str, Any]:
+        """One full autonomous research cycle.
+
+        Steps (all non-fatal; errors are captured in the summary dict):
+          1. Throttled literature ingest (every ``ingest_every_n`` cycles)
+          2. Frontier gap scan → project proposals
+          3. Agenda review → commit decisions
+          4. Active projects without queued work → study + schedule
+          5. Runtime daemon cycle (execute scheduled studies)
+          6. Failure-streak check → propose new experiment family
+          7. Throttled self-improvement trigger (every ``self_improve_every_n`` cycles)
+
+        Returns a summary dict that is also appended to the audit log.
+        """
+        if _cycle_count_ref is None:
+            _cycle_count_ref = [0]
+        cycle_n = _cycle_count_ref[0]
+        _cycle_count_ref[0] += 1
+
+        summary: Dict[str, Any] = {"cycle": cycle_n, "started_at": _utc_now()}
+
+        # 1. Throttled literature ingest
+        if cycle_n % ingest_every_n == 0:
+            try:
+                ingest = self.ingest_research(topic=ingest_topic, max_results=max_ingest_results)
+                summary["ingest_fetched"] = ingest.fetched
+            except Exception as exc:
+                summary["ingest_error"] = str(exc)
+
+        # 2. Frontier gap scan → project proposals
+        try:
+            scan = self.scan_frontier_gaps(topic=ingest_topic, max_gaps=max_frontier_gaps)
+            summary["gaps_identified"] = scan.gaps_identified
+            if scan.gaps_identified:
+                proposed = self.propose_projects_from_gaps(max_proposals=max_project_proposals)
+                summary["projects_proposed"] = len(proposed)
+        except Exception as exc:
+            summary["frontier_error"] = str(exc)
+
+        # 3. Agenda review → commit decisions
+        try:
+            review = self.run_agenda_review()
+            committed = self.commit_agenda_decisions()
+            summary["agenda_decisions_reviewed"] = len(review.decisions)
+            summary["agenda_decisions_committed"] = len(committed)
+        except Exception as exc:
+            summary["agenda_error"] = str(exc)
+
+        # 4. Active projects without queued work → study + schedule
+        occupied_project_ids: set = {
+            entry.project_id
+            for entry in self.store.iter_problem_schedules()
+            if entry.status in {"scheduled", "leased", "running", "retry_wait"}
+            and entry.project_id
+        }
+        studies_scheduled = 0
+        study_errors: list = []
+        for project in self.store.list_research_projects():
+            if project.status != "active":
+                continue
+            if project.project_id in occupied_project_ids:
+                continue
+            action = self._project_action(project)
+            if action is None:
+                continue
+            try:
+                report = self.study_problem(action.description, project_id=project.project_id)
+                self.schedule_problem_study(problem_id=report.problem_id)
+                studies_scheduled += 1
+            except Exception as exc:
+                study_errors.append({"project_id": project.project_id, "error": str(exc)})
+        summary["studies_scheduled"] = studies_scheduled
+        if study_errors:
+            summary["study_errors"] = study_errors
+
+        # 5. Runtime daemon cycle — execute scheduled studies
+        try:
+            heartbeat = self.run_runtime_cycle(max_jobs=max_jobs)
+            summary["jobs_executed"] = heartbeat.executed_jobs
+            summary["jobs_failed"] = heartbeat.failed_jobs
+        except Exception as exc:
+            summary["runtime_error"] = str(exc)
+
+        # 6. Failure-streak check → propose new experiment family
+        try:
+            recovery = self.store.load_recovery()
+            if recovery.consecutive_fail_fast >= GenerativeDirector.PROPOSAL_TRIGGER_STREAK:
+                proposal = self.propose_experiment_family(
+                    objective_slug="thermodynamic-anchor",
+                    trigger_reason=(
+                        f"autonomous_cycle: {recovery.consecutive_fail_fast} consecutive failures"
+                    ),
+                )
+                summary["family_proposal_id"] = proposal.proposal_id
+        except Exception as exc:
+            summary["family_proposal_error"] = str(exc)
+
+        # 7. Throttled self-improvement trigger
+        if cycle_n > 0 and cycle_n % self_improve_every_n == 0:
+            try:
+                signals = self.list_training_signals()
+                if len(signals) >= min_signals_for_improvement:
+                    delta = self.assemble_curated_delta("")
+                    summary["delta_signals"] = delta.signal_count
+            except Exception as exc:
+                summary["self_improve_error"] = str(exc)
+
+        summary["finished_at"] = _utc_now()
+        self.store.append_audit_event("autonomous", "run_full_research_cycle", summary)
+        return summary
+
+    def serve_forever_full(
+        self,
+        *,
+        poll_interval_s: float = 60.0,
+        iterations: Optional[int] = None,
+        **cycle_kwargs: Any,
+    ) -> list[Dict[str, Any]]:
+        """Run the full autonomous research loop indefinitely (or for ``iterations`` cycles).
+
+        Each iteration calls ``run_full_research_cycle()``.  A shared
+        ``_cycle_count_ref`` is threaded through so the throttle counters
+        (ingest, self-improvement) are consistent across cycles.
+
+        Returns the list of per-cycle summary dicts (useful when
+        ``iterations`` is set, e.g. in tests).
+        """
+        from time import sleep as _sleep
+
+        cycle_count_ref: list = [0]
+        summaries: list[Dict[str, Any]] = []
+        count = 0
+        while iterations is None or count < iterations:
+            summary = self.run_full_research_cycle(
+                _cycle_count_ref=cycle_count_ref, **cycle_kwargs
+            )
+            summaries.append(summary)
+            count += 1
+            if iterations is None or count < iterations:
+                _sleep(poll_interval_s)
+        return summaries
+
     def shutdown(self) -> None:
         if self.memory_indexer is not None:
             self.memory_indexer.stop()
