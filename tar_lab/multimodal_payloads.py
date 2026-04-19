@@ -744,8 +744,13 @@ def run_split_cifar10_benchmark(
         # of batches for large backbones (resnet18) to avoid anchoring on
         # random-initialisation noise.
         _warmup = 60 if backbone == "resnet18" else 0
+        # compute_dpr=False for large backbones: per-batch eigendecomp over
+        # all ResNet layers is the dominant cost (~1s/batch on L40S).
+        # Regime detection (sigma/rho/LR) still works without it.
+        _dpr = backbone != "resnet18"
         observer = ActivationThermoObserver(
-            trunk, stat_window_size=5, alpha=0.5, warmup_batches=_warmup
+            trunk, stat_window_size=5, alpha=0.5,
+            warmup_batches=_warmup, compute_dpr=_dpr,
         )
 
     accuracy_matrix: dict[int, dict[int, float]] = {}

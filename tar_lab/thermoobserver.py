@@ -252,6 +252,7 @@ class ActivationThermoObserver:
         sigma_tolerance: float = 0.15,
         fim_tolerance: float = 0.10,
         equilibrium_patience: int = 2,
+        compute_dpr: bool = True,
     ):
         self.model = model
         self.alpha = alpha
@@ -263,6 +264,11 @@ class ActivationThermoObserver:
         self.sigma_tolerance = sigma_tolerance
         self.fim_tolerance = fim_tolerance
         self.equilibrium_patience = equilibrium_patience
+        # When False, skip covariance and eigenvalue computation entirely.
+        # Regime detection (sigma/rho/LR modulation) still works — D_PR
+        # tracking and equilibrium gating are disabled.  Use for large
+        # backbones where per-batch eigdecomp is the training bottleneck.
+        self.compute_dpr = compute_dpr
         self._hooks: list[Any] = []
         self._groups: list[_ObservedGroup] = []
         self.anchor_dimensionality_by_group: Dict[str, float] = {}
@@ -410,15 +416,18 @@ class ActivationThermoObserver:
             )
             sigma_ratio = sigma / max(sigma_star, 1e-12)
             fim_rel_change = abs(fim_trace - group.fim_ema) / max(abs(group.fim_ema), 1e-12)
-            covariance = None
-            if group.last_activation is not None:
-                covariance = compute_activation_covariance(group.last_activation, feature_axis=group.feature_axis)
             if group.stat_accumulator is None:
                 group.stat_accumulator = StatAccumulator(window_size=self.stat_window_size)
-            group.stat_accumulator.push(covariance, sigma=float(sigma), rho=float(sigma_ratio))
-            smoothed = group.stat_accumulator.get_smoothed_metrics(
-                anchor_effective_dimensionality=self.anchor_dimensionality_by_group.get(group.name, 0.0)
-            )
+            if self.compute_dpr and group.last_activation is not None:
+                covariance = compute_activation_covariance(group.last_activation, feature_axis=group.feature_axis)
+                group.stat_accumulator.push(covariance, sigma=float(sigma), rho=float(sigma_ratio))
+                smoothed = group.stat_accumulator.get_smoothed_metrics(
+                    anchor_effective_dimensionality=self.anchor_dimensionality_by_group.get(group.name, 0.0)
+                )
+            else:
+                # Lightweight path: use sigma/rho directly, skip eigdecomp.
+                group.stat_accumulator.push(None, sigma=float(sigma), rho=float(sigma_ratio))
+                smoothed = group.stat_accumulator.get_smoothed_metrics()
             stable = (
                 smoothed.statistically_ready
                 and abs(smoothed.rho - 1.0) <= self.sigma_tolerance
