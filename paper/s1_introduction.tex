@@ -31,6 +31,13 @@ and is the only method in our comparison that simultaneously achieves low forget
 \begin{enumerate}
     \item \textbf{TCL method.} A thermodynamic governor for continual learning based on
           per-task activation entropy anchoring and dimensionality-weighted L2 regularisation.
+          A pre-registered ablation shows neither component reliably reduces
+          forgetting in isolation; the combination significantly outperforms SGD
+          and each component individually, with substantially reduced variance
+          across seeds.
+          A complementary $\lambda$ sweep confirms that TCL matches best-case
+          EWC mean forgetting without the collapse risk observed at aggressive
+          $\lambda$ values (Appendix~\ref{app:ewc_sweep}).
 
     \item \textbf{Pareto-optimal accuracy-forgetting tradeoff.} TCL dominates EWC on the
           joint accuracy-forgetting (JAF) metric across all five seeds. The gap widens on

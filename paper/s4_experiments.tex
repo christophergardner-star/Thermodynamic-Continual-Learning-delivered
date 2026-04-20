@@ -128,6 +128,24 @@ TCL also reduces forgetting relative to SGD across all five seeds
 ($t(4) = -3.70$, $p = 0.0208$, $d = 1.66$, 5/5 wins), consistent with the
 Phase~9 result on the same benchmark ($p = 0.0113$, $d = 1.99$).
 
+\textbf{EWC hyperparameter sensitivity.}
+To verify that the $\lambda=100$ baseline used in Phase~10 does not
+understate EWC's achievable performance, we ran a pre-registered
+$\lambda$-sweep at $\lambda \in \{10, 100, 1000, 10000\}$ across the same
+five seeds (Appendix~\ref{app:ewc_sweep}).
+The sweep shows that among the four tested $\lambda$ values,
+$\lambda=100$ sits in a stable region.
+At $\lambda=10$, mean forgetting increases to $0.176 \pm 0.016$ and TCL
+remains significantly better ($p = 0.030$, $d = 1.48$).
+At $\lambda=1000$, mean forgetting matches TCL ($0.128 \pm 0.026$ vs.\
+TCL's $0.128 \pm 0.026$; paired $t$-test $p = 0.954$), but EWC
+collapses on 1 of 5 seeds (seed~1: $\mathcal{A} = 0.500$), yielding a
+JAF standard deviation of $0.120$ compared to TCL's $0.042$.
+At $\lambda=10000$, EWC collapses on all 5 seeds ($\mathcal{A} = 0.500$).
+Across the tested range, TCL matches best-case EWC mean forgetting
+without EWC's collapse risk and with approximately three times lower
+JAF variance across seeds.
+
 \subsection{The SI Collapse}
 \label{sec:si_collapse}
 

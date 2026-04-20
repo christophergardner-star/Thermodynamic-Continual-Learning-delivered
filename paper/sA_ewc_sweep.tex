@@ -1,0 +1,119 @@
+% sA_ewc_sweep.tex
+% Appendix A: EWC hyperparameter sweep (Phase 12)
+% Status: COMPLETE — 5 seeds × 4 λ values, full results locked
+% Last updated: 2026-04-20
+
+\section{EWC Hyperparameter Sweep}
+\label{app:ewc_sweep}
+
+Phase~10 compared TCL against EWC at $\lambda=100$, selected from a
+pre-registered $\lambda$ sweep on a reduced benchmark in Phase~7.
+To verify that the Phase~10 comparison is not against a weakly-tuned
+EWC, we ran a post-hoc $\lambda$ sweep at the full ResNet-18 scale
+across the same five seeds used in Phase~10.
+
+\subsection{Protocol}
+
+Four values of $\lambda$ were tested: $\{10, 100, 1000, 10000\}$.
+All other hyperparameters, seeds, optimiser settings, and benchmark
+configurations match Phase~10 (ResNet-18, Split-CIFAR-10, 5 sequential
+binary tasks, 40 epochs per task, batch size 32, seeds
+$\{42, 0, 1, 2, 3\}$).
+$\lambda=100$ is reported in both this appendix and the main
+Phase~10 table; identical numbers.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{EWC $\lambda$ sweep on Split-CIFAR-10 (ResNet-18, 5 seeds).
+Forgetting $\mathcal{F}$ (lower is better), accuracy $\mathcal{A}$
+(higher is better), JAF $= \mathcal{A}\times(1-\mathcal{F})$ (higher
+is better). Paired $t$-test compares per-seed TCL forgetting against
+EWC forgetting at each $\lambda$. $n_{\text{collapsed}}$ counts seeds
+with $\mathcal{A} = 0.500$ (chance on 2-class tasks).}
+\label{tab:ewc_sweep}
+\begin{tabular}{lcccccc}
+\toprule
+$\lambda$ & $\mathcal{F}$ mean$\pm$std & $\mathcal{A}$ mean & JAF mean$\pm$std & vs.\ TCL $p$ & $d$ & $n_{\text{collapsed}}$ \\
+\midrule
+10      & $0.176\pm0.016$ & 0.749 & $0.618\pm0.023$ & 0.030 & 1.48 & 0/5 \\
+100     & $0.193\pm0.047$ & 0.728 & $0.590\pm0.074$ & 0.031 & 1.46 & 0/5 \\
+1000    & $0.128\pm0.026$ & 0.725 & $0.633\pm0.120$ & 0.954 & 0.03 & 1/5 \\
+10000   & $0.144\pm0.029$ & 0.500 & $0.428\pm0.015$ & 0.542 & 0.30 & 5/5 \\
+\midrule
+TCL (ref) & $0.128\pm0.026$ & 0.770 & $0.672\pm0.042$ & --- & --- & 0/5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Per-seed breakdown at $\lambda=1000$}
+
+The $\lambda=1000$ row of Table~\ref{tab:ewc_sweep} is the most
+interpretively loaded: mean forgetting matches TCL's, but one of
+five seeds collapses.
+Per-seed detail:
+
+\begin{table}[h]
+\centering
+\caption{EWC at $\lambda=1000$, per-seed.
+Collapsed seed indicated by $^\dagger$.}
+\label{tab:ewc_lambda1000}
+\begin{tabular}{lccc}
+\toprule
+Seed & $\mathcal{F}$ & $\mathcal{A}$ & Status \\
+\midrule
+42  & 0.106 & 0.787 & non-collapsed \\
+0   & 0.143 & 0.772 & non-collapsed \\
+1   & 0.157 & $0.500^\dagger$ & collapsed \\
+2   & 0.140 & 0.779 & non-collapsed \\
+3   & 0.095 & 0.785 & non-collapsed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On the four seeds where EWC at $\lambda=1000$ does not collapse,
+forgetting is indeed low ($0.095$--$0.143$); the collapse on seed~1
+drives the JAF variance disparity with TCL.
+Forgetting on a collapsed network is not informative as a performance
+metric (cf.\ Section~\ref{sec:si_collapse}): the network has reached
+chance accuracy, so the relative-drop quantity $\mathcal{F}$ measures
+is measuring movement around a degenerate solution rather than
+meaningful forgetting.
+The numeric value $\mathcal{F} = 0.157$ on seed~1 at $\lambda=1000$
+should be read alongside $\mathcal{A} = 0.500$.
+
+\subsection{Interpretation scoped to tested values}
+
+The four tested $\lambda$ values span three orders of magnitude and
+reveal a narrow stable region: $\lambda=100$ shows no collapse;
+$\lambda=1000$ shows seed-dependent collapse; $\lambda=10000$ shows
+universal collapse.
+We do not claim $\lambda=100$ is uniquely optimal --- a finer-grained
+sweep could identify the precise stability range --- only that among
+the tested values it is the one that achieves non-degenerate
+performance on all five seeds.
+
+The comparison that matters for this paper is not whether a specific
+$\lambda$ beats TCL on any single seed, but whether there exists a
+$\lambda$ setting under which EWC is both
+(i)~competitive with TCL on mean forgetting, and
+(ii)~free of collapse risk across the pre-registered seeds.
+The sweep does not identify such a setting among the tested values.
+TCL achieves the mean forgetting of the best-case $\lambda$
+($\lambda=1000$) without the collapse risk observed at that $\lambda$,
+and with substantially lower JAF variance across seeds.
+
+\subsection{Relation to the SI collapse finding}
+
+The collapse of EWC at $\lambda=1000$ on seed~1 and at $\lambda=10000$
+on all seeds is the same degenerate behaviour documented for SI at
+default hyperparameters in Section~\ref{sec:si_collapse}: an
+importance-weighted regulariser becomes sufficiently restrictive that
+the network cannot update away from a single-class decision boundary.
+The finding here extends the observation beyond SI: over-constrained
+EWC produces the same failure mode.
+This strengthens the methodological observation of
+Contribution~3 --- forgetting-only evaluation is unreliable for
+importance-weighted methods at their more aggressive hyperparameters,
+regardless of which specific method is used.
