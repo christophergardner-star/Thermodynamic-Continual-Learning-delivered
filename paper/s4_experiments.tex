@@ -154,3 +154,66 @@ under evaluation.
 A post-hoc robustness sweep (Appendix~\ref{app:si_sweep}) tests SI at $c \in
 \{0.01, 0.1, 0.5\}$ to establish whether non-degenerate SI configurations exist on
 this benchmark and, if so, whether TCL remains competitive.
+
+
+\subsection{Ablation Study}
+\label{sec:ablation}
+
+To identify which components of TCL drive the forgetting reduction, we ran a
+pre-registered four-condition ablation on the same benchmark (ResNet-18, 5 seeds
+$\{42, 0, 1, 2, 3\}$, 40 epochs/task):
+
+\begin{itemize}
+    \item \textbf{SGD} — fine-tuning baseline (no anti-forgetting mechanism).
+    \item \textbf{Governor-only} — thermodynamic LR adjustment active; L2 penalty
+          disabled ($\lambda_{\text{TCL}}=0$).
+    \item \textbf{Penalty-only} — D$_{\mathrm{PR}}$-weighted L2 anchor active at
+          $D_{\mathrm{PR}}=1.0$ (no governor); observer disabled.
+    \item \textbf{Full TCL} — both components active (Phase~10 configuration).
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\caption{Ablation results on Split-CIFAR-10 (ResNet-18, 40 epochs/task).
+Forgetting $\mathcal{F}$ (lower is better). Per-seed and aggregate (mean$\pm$std).}
+\label{tab:ablation}
+\begin{tabular}{lcccccc}
+\toprule
+Condition & Seed 42 & Seed 0 & Seed 1 & Seed 2 & Seed 3 & Mean$\pm$std \\
+\midrule
+SGD             & 0.2471 & 0.1720 & 0.1495 & 0.2601 & 0.3485 & 0.2354$\pm$0.079 \\
+Governor-only   & 0.2107 & 0.2175 & 0.2771 & 0.2047 & 0.2669 & 0.2354$\pm$0.034 \\
+Penalty-only    & 0.1485 & 0.1909 & 0.1393 & 0.3016 & 0.1720 & 0.1905$\pm$0.065 \\
+\textbf{Full TCL} & \textbf{0.1206} & \textbf{0.1083} & \textbf{0.1180} & \textbf{0.1225} & \textbf{0.1044} & \textbf{0.1148$\pm$0.008} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Component analysis.}
+Governor-only produces identical mean forgetting to SGD
+($\Delta = -0.0001$, $p = 0.999$, $d = 0.001$, $3/5$ seeds).
+The LR adjustment alone provides no reduction in forgetting.
+Penalty-only reduces forgetting by $0.045$ relative to SGD on average
+($\Delta = -0.045$, $p = 0.330$, $d = 0.496$, $3/5$ seeds), a directional
+improvement that does not reach significance across five seeds and is
+accompanied by high variance (std $= 0.065$; seed~2 forgetting $= 0.302$,
+worse than all other conditions on that seed).
+
+Full TCL is better than SGD on all five seeds
+($\Delta = -0.121$, $t(4) = -3.30$, $p = 0.030$, $d = 1.48$, $5/5$)
+and better than governor-only on all five seeds
+($\Delta = -0.121$, $t(4) = -7.10$, $p = 0.002$, $d = 3.18$, $5/5$).
+The comparison with penalty-only is directional ($\Delta = -0.076$, $d = 1.20$,
+$5/5$ seeds) but does not reach significance at $\alpha = 0.05$ ($p = 0.056$).
+Notably, full TCL has substantially lower forgetting variance than penalty-only
+alone (std $= 0.008$ vs.\ $0.065$), an observation consistent with the governor
+stabilising the penalty's effect, though the mechanism is not confirmed from
+these data alone.
+
+\textbf{Pre-registered verdict: \textsc{Penalty-Dominant}.}
+The D$_{\mathrm{PR}}$-weighted L2 anchor is the load-bearing component;
+the thermodynamic governor provides no independent forgetting reduction.
+The full TCL system outperforms penalty-only (directionally, $d = 1.20$),
+suggesting the governor contributes to reliability rather than mean performance.
+Contribution~1 is supported with the qualification that the L2 penalty is the
+primary mechanistic driver.
