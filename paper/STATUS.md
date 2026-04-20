@@ -40,12 +40,22 @@
   - Full TCL vs penalty:  Δ=-0.076,  p=0.056, d=1.20, 5/5 (directional; misses α=0.05).
   - Variance compression: full TCL std=0.008 vs penalty-only std=0.065 (governor role).
   - Ablation subsection added to s4_experiments.tex (locked).
+- **Phase 12:** EWC λ sweep, ResNet-18, λ∈{10, 1000, 10000}, 5 seeds {42,0,1,2,3}. COMPLETE.
+  - λ=10:    F=0.176±0.016, A=0.749±0.013, JAF=0.618±0.023 | vs TCL: Δ=-0.048, p=0.030, d=1.48, 4/5
+  - λ=1000:  F=0.128±0.026, A=0.725±0.126, JAF=0.633±0.120 | vs TCL: Δ=-0.001, p=0.954, d=0.028, 2/5
+  - λ=10000: F=0.144±0.029, A=0.500±0.000, JAF=0.428±0.015 | vs TCL: Δ=-0.016, p=0.542, d=0.297, 4/5
+  - λ=100 (Phase 10 ref): F=0.193±0.047, vs TCL p=0.031, d=1.46, 5/5
+  - λ=1000 collapse: seed 1 only (A=0.500). 4/5 seeds λ=1000 works; 5/5 seeds λ=10000 collapses.
+  - λ=1000 JAF std=0.120 vs TCL JAF std=0.042 — EWC instability visible in JAF variance.
+  - TCL mean forgetting tied with EWC λ=1000 (0.1275 vs 0.1282, p=0.954). TCL JAF higher (0.672 vs 0.633).
+  - Appendix file: sA_ewc_sweep.tex (to be written).
 
 ## Pending experiments — SEQUENCED (reviewer defence before scope extension)
 
 ### Reviewer defence (run these first — gate on ablation result before extending)
-- [x] **[1] Ablation:** DONE. Verdict: PENALTY_DOMINANT. Subsection added to s4. See Phase 11 data above.
-- [ ] **[2] EWC λ sweep ResNet-18:** λ∈{10, 1000, 10000}, 3 seeds = 9 runs. (λ=100 already in Phase 10.) Appendix. Closes "you picked a weak λ" gap.
+- [x] **[1] Ablation:** DONE. Subsection added to s4. See Phase 11 data above.
+- [x] **[2] EWC λ sweep ResNet-18:** DONE. 5 seeds, λ∈{10,1000,10000}. See Phase 12 data above. Appendix sA_ewc_sweep.tex to be written.
+- [ ] **[3] SI robustness sweep (minimal):** c∈{0.01, 0.1, 0.5}, ξ=0.001 fixed, 3 seeds = 9 runs. Appendix. Scopes SI degeneracy claim. Full 2D grid only if surprising interaction effects in this pass.
 - [ ] **[3] SI robustness sweep (minimal):** c∈{0.01, 0.1, 0.5}, ξ=0.001 fixed, 3 seeds = 9 runs. Appendix. Scopes SI degeneracy claim. Full 2D grid only if surprising interaction effects in this pass.
 
 ### Scope extension (only after all three defence experiments land clean)
