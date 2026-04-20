@@ -31,15 +31,14 @@ workspace = "/workspace/Thermodynamic-Continual-Learning-delivered"
 from tar_lab.schemas import ContinualLearningBenchmarkConfig
 from tar_lab.multimodal_payloads import run_split_cifar10_benchmark
 
-SEEDS    = [42, 0, 1]
+SEEDS    = [42, 0, 1, 2, 3]
 BACKBONE = "resnet18"
 EPOCHS   = 40
 LAMBDAS  = [10, 1000, 10000]   # λ=100 already in Phase 10
 
-# Phase 10 reference numbers (λ=100, seeds 42/0/1 only, to match 3-seed subset)
-# Per-seed forgetting for seeds [42, 0, 1] from phase10_baseline.json
-PHASE10_EWC_FORG  = [0.1640, 0.1530, 0.2520]   # EWC λ=100
-PHASE10_TCL_FORG  = [0.1269, 0.1294, 0.1697]   # TCL (for reference)
+# Phase 10 reference numbers (λ=100, all 5 seeds) from phase10_baseline.json
+PHASE10_EWC_FORG  = [0.1640, 0.1530, 0.2520, 0.2366, 0.1598]   # EWC λ=100, seeds 42/0/1/2/3
+PHASE10_TCL_FORG  = [0.1269, 0.1294, 0.1697, 0.1007, 0.1108]   # TCL, seeds 42/0/1/2/3
 
 
 def mean(v):  return sum(v) / len(v)
@@ -85,7 +84,7 @@ for seed in SEEDS:
 
 # ── aggregate ─────────────────────────────────────────────────────────────────
 print(f"\n{'='*70}")
-print(f"AGGREGATE (mean ± std) — 3 seeds {{42, 0, 1}}")
+print(f"AGGREGATE (mean ± std) — 5 seeds {{42, 0, 1, 2, 3}}")
 print(f"{'='*70}")
 
 agg = {}
@@ -117,9 +116,9 @@ print(
 
 # ── TCL vs EWC per lambda ─────────────────────────────────────────────────────
 print(f"\n{'='*70}")
-print(f"TCL vs EWC — per-λ comparison (forgetting, paired, seeds 42/0/1)")
+print(f"TCL vs EWC — per-λ comparison (forgetting, paired, all 5 seeds)")
 print(f"{'='*70}")
-print(f"  Phase 10 TCL reference (seeds 42/0/1):  F={mean(PHASE10_TCL_FORG):.4f}±{std(PHASE10_TCL_FORG):.4f}")
+print(f"  Phase 10 TCL reference (all 5 seeds):  F={mean(PHASE10_TCL_FORG):.4f}±{std(PHASE10_TCL_FORG):.4f}")
 print()
 
 tcl_forg = PHASE10_TCL_FORG
