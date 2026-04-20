@@ -809,7 +809,7 @@ def run_split_cifar10_benchmark(
                 # Dimensionality-weighted L2 penalty: penalise drift from the
                 # previous task's weights, scaled by that task's anchor D_PR.
                 # tcl_anchor_dpr is 0.0 on task 0 so the penalty is inactive.
-                if method == "tcl" and tcl_anchor_params and tcl_anchor_dpr > 0.0 and config.tcl_penalty_lambda > 0.0:
+                if method in ("tcl", "tcl_penalty_only") and tcl_anchor_params and tcl_anchor_dpr > 0.0 and config.tcl_penalty_lambda > 0.0:
                     tcl_reg = torch.zeros((), device=device)
                     for name, param in trunk.named_parameters():
                         ref = tcl_anchor_params.get(name)
@@ -931,6 +931,14 @@ def run_split_cifar10_benchmark(
                 for name, param in trunk.named_parameters()
             }
             tcl_anchor_dpr = observer.anchor_effective_dimensionality
+        elif method == "tcl_penalty_only" and config.tcl_penalty_lambda > 0.0:
+            # Governor disabled: no observer, no LR adjustment.
+            # Anchor weights after each task; D_PR fixed at 1.0 (no dimensionality scaling).
+            tcl_anchor_params = {
+                name: param.detach().cpu().clone()
+                for name, param in trunk.named_parameters()
+            }
+            tcl_anchor_dpr = 1.0
 
         trunk.eval()
         row: dict[int, float] = {}
