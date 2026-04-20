@@ -210,10 +210,28 @@ alone (std $= 0.008$ vs.\ $0.065$), an observation consistent with the governor
 stabilising the penalty's effect, though the mechanism is not confirmed from
 these data alone.
 
-\textbf{Pre-registered verdict: \textsc{Penalty-Dominant}.}
-The D$_{\mathrm{PR}}$-weighted L2 anchor is the load-bearing component;
-the thermodynamic governor provides no independent forgetting reduction.
-The full TCL system outperforms penalty-only (directionally, $d = 1.20$),
-suggesting the governor contributes to reliability rather than mean performance.
-Contribution~1 is supported with the qualification that the L2 penalty is the
-primary mechanistic driver.
+\textbf{Interpretation.}
+The pre-registered directional classifier returned \textsc{Penalty-Dominant}
+because penalty-only's mean delta exceeded the $-0.01$ threshold while
+governor-only's did not.
+The statistics are more constraining: \emph{neither component alone reduces
+forgetting significantly} (both $p > 0.05$ vs.\ SGD at $n = 5$).
+Only the combined method clears significance ($p = 0.030$).
+The full TCL system's advantage over penalty-only approaches but does not
+reach significance ($p = 0.056$, $d = 1.20$), and would require larger $n$
+to resolve.
+
+The most statistically clear signal is in variance.
+Full TCL's seed-to-seed forgetting std is $0.008$, compared to $0.065$
+for penalty-only, $0.034$ for governor-only, and $0.079$ for SGD.
+Penalty-only can actively worsen forgetting relative to SGD
+(seed~2: $\mathcal{F} = 0.302$ vs.\ $0.260$); full TCL never did.
+This pattern is consistent with the governor preventing the penalty's
+worst-case behaviour and stabilising its effect across random initialisations,
+though the precise mechanism is not confirmed from these data alone.
+
+The accurate claim supported by this ablation: the L2 anchor provides the
+directional benefit; the regime governor provides the consistency.
+Together they produce a method that significantly outperforms SGD with
+qualitatively tighter variance than either component in isolation.
+Contribution~1 is supported with this qualification.
