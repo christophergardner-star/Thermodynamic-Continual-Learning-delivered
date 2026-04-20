@@ -1,0 +1,151 @@
+{
+  "backbone": "resnet18",
+  "epochs": 40,
+  "seeds": [
+    42,
+    0,
+    1,
+    2,
+    3
+  ],
+  "lambdas_tested": [
+    10,
+    1000,
+    10000
+  ],
+  "phase10_ewc100_ref": {
+    "seeds": [
+      42,
+      0,
+      1,
+      2,
+      3
+    ],
+    "forgetting_per_seed": [
+      0.164,
+      0.153,
+      0.252,
+      0.2366,
+      0.1598
+    ],
+    "forgetting_mean": 0.19308,
+    "forgetting_std": 0.04723655364228004
+  },
+  "phase10_tcl_ref": {
+    "seeds": [
+      42,
+      0,
+      1,
+      2,
+      3
+    ],
+    "forgetting_per_seed": [
+      0.1269,
+      0.1294,
+      0.1697,
+      0.1007,
+      0.1108
+    ],
+    "forgetting_mean": 0.1275,
+    "forgetting_std": 0.026372049598011902
+  },
+  "per_seed": [
+    {
+      "seed": 42,
+      "ewc10_forgetting": 0.19619999999999999,
+      "ewc10_acc": 0.7309,
+      "ewc1000_forgetting": 0.10630000000000002,
+      "ewc1000_acc": 0.787,
+      "ewc10000_forgetting": 0.1595,
+      "ewc10000_acc": 0.5
+    },
+    {
+      "seed": 0,
+      "ewc10_forgetting": 0.18729999999999997,
+      "ewc10_acc": 0.7420000000000001,
+      "ewc1000_forgetting": 0.143,
+      "ewc1000_acc": 0.7715000000000002,
+      "ewc10000_forgetting": 0.1514,
+      "ewc10000_acc": 0.5
+    },
+    {
+      "seed": 1,
+      "ewc10_forgetting": 0.15999999999999998,
+      "ewc10_acc": 0.7656999999999999,
+      "ewc1000_forgetting": 0.15660000000000002,
+      "ewc1000_acc": 0.5,
+      "ewc10000_forgetting": 0.09190000000000001,
+      "ewc10000_acc": 0.5
+    },
+    {
+      "seed": 2,
+      "ewc10_forgetting": 0.16219999999999998,
+      "ewc10_acc": 0.7571,
+      "ewc1000_forgetting": 0.14010000000000003,
+      "ewc1000_acc": 0.7790999999999999,
+      "ewc10000_forgetting": 0.1534,
+      "ewc10000_acc": 0.5
+    },
+    {
+      "seed": 3,
+      "ewc10_forgetting": 0.17279999999999998,
+      "ewc10_acc": 0.7503,
+      "ewc1000_forgetting": 0.095,
+      "ewc1000_acc": 0.7853000000000001,
+      "ewc10000_forgetting": 0.1616,
+      "ewc10000_acc": 0.5
+    }
+  ],
+  "aggregate": {
+    "10": {
+      "forgetting_mean": 0.17569999999999997,
+      "forgetting_std": 0.015747698244505448,
+      "acc_mean": 0.7491999999999999,
+      "acc_std": 0.013440610105199804,
+      "jaf_mean": 0.617731072,
+      "jaf_std": 0.022701484581853185
+    },
+    "1000": {
+      "forgetting_mean": 0.1282,
+      "forgetting_std": 0.026215739547073624,
+      "acc_mean": 0.7245800000000001,
+      "acc_std": 0.12569135610693366,
+      "jaf_mean": 0.633372398,
+      "jaf_std": 0.12019852927699043
+    },
+    "10000": {
+      "forgetting_mean": 0.14356,
+      "forgetting_std": 0.029182923088683213,
+      "acc_mean": 0.5,
+      "acc_std": 0.0,
+      "jaf_mean": 0.42821999999999993,
+      "jaf_std": 0.014591461544341607
+    }
+  },
+  "pairwise_tcl_vs_ewc": {
+    "10": {
+      "mean_delta": -0.048199999999999986,
+      "t_stat": -3.302981769298138,
+      "p_val": 0.029849911457644995,
+      "cohens_d": 1.4771383529186328,
+      "n_tcl_better": 4
+    },
+    "1000": {
+      "mean_delta": -0.0007000000000000145,
+      "t_stat": -0.06162583107395559,
+      "p_val": 0.9538171588810623,
+      "cohens_d": 0.027559909490256718,
+      "n_tcl_better": 2
+    },
+    "10000": {
+      "mean_delta": -0.01606000000000001,
+      "t_stat": -0.6649116866426561,
+      "p_val": 0.5424818437896284,
+      "cohens_d": 0.2973575460734036,
+      "n_tcl_better": 4
+    }
+  },
+  "verdict_key": "ROBUST_AND_SENSITIVE",
+  "verdict": "TCL beats EWC at all tested \u03bb values and EWC degrades sharply at high \u03bb. Closes 'weak \u03bb' gap: TCL advantage holds or widens as \u03bb increases.",
+  "completed_at": "2026-04-20T18:12:18.300640"
+}

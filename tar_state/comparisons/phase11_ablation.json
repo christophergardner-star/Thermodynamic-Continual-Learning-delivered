@@ -1,0 +1,134 @@
+{
+  "backbone": "resnet18",
+  "epochs": 40,
+  "seeds": [
+    42,
+    0,
+    1,
+    2,
+    3
+  ],
+  "conditions": [
+    "sgd",
+    "governor_only",
+    "penalty_only",
+    "full_tcl"
+  ],
+  "per_seed": [
+    {
+      "seed": 42,
+      "sgd_forgetting": 0.24710000000000001,
+      "sgd_acc": 0.6830999999999999,
+      "governor_only_forgetting": 0.21070000000000003,
+      "governor_only_acc": 0.7195,
+      "penalty_only_forgetting": 0.1485,
+      "penalty_only_acc": 0.7589,
+      "full_tcl_forgetting": 0.1206,
+      "full_tcl_acc": 0.7713
+    },
+    {
+      "seed": 0,
+      "sgd_forgetting": 0.172,
+      "sgd_acc": 0.758,
+      "governor_only_forgetting": 0.21749999999999997,
+      "governor_only_acc": 0.7101,
+      "penalty_only_forgetting": 0.1909,
+      "penalty_only_acc": 0.7209,
+      "full_tcl_forgetting": 0.10829999999999998,
+      "full_tcl_acc": 0.7806
+    },
+    {
+      "seed": 1,
+      "sgd_forgetting": 0.14949999999999997,
+      "sgd_acc": 0.7781,
+      "governor_only_forgetting": 0.2771,
+      "governor_only_acc": 0.65,
+      "penalty_only_forgetting": 0.1393,
+      "penalty_only_acc": 0.7712999999999999,
+      "full_tcl_forgetting": 0.11800000000000002,
+      "full_tcl_acc": 0.7760999999999999
+    },
+    {
+      "seed": 2,
+      "sgd_forgetting": 0.2601,
+      "sgd_acc": 0.6687000000000001,
+      "governor_only_forgetting": 0.20470000000000002,
+      "governor_only_acc": 0.7241000000000001,
+      "penalty_only_forgetting": 0.3016,
+      "penalty_only_acc": 0.6025,
+      "full_tcl_forgetting": 0.12250000000000003,
+      "full_tcl_acc": 0.7724
+    },
+    {
+      "seed": 3,
+      "sgd_forgetting": 0.3485,
+      "sgd_acc": 0.5766,
+      "governor_only_forgetting": 0.2669,
+      "governor_only_acc": 0.6617000000000001,
+      "penalty_only_forgetting": 0.172,
+      "penalty_only_acc": 0.7309,
+      "full_tcl_forgetting": 0.10439999999999998,
+      "full_tcl_acc": 0.7847999999999999
+    }
+  ],
+  "aggregate": {
+    "sgd": {
+      "forgetting_mean": 0.23544,
+      "forgetting_std": 0.07895719093280865,
+      "acc_mean": 0.6929000000000001,
+      "acc_std": 0.08016299021368901,
+      "jaf_mean": 0.534826014,
+      "jaf_std": 0.11411417385575788
+    },
+    "governor_only": {
+      "forgetting_mean": 0.23538,
+      "forgetting_std": 0.03392686251335364,
+      "acc_mean": 0.69308,
+      "acc_std": 0.03460682013707702,
+      "jaf_mean": 0.53088172,
+      "jaf_std": 0.049562854565790494
+    },
+    "penalty_only": {
+      "forgetting_mean": 0.19046,
+      "forgetting_std": 0.06532811798911706,
+      "acc_mean": 0.7169000000000001,
+      "acc_std": 0.06712436219436275,
+      "jaf_mean": 0.58386253,
+      "jaf_std": 0.0966108025433261
+    },
+    "full_tcl": {
+      "forgetting_mean": 0.11476,
+      "forgetting_std": 0.007961972117509599,
+      "acc_mean": 0.7770399999999998,
+      "acc_std": 0.00566241997735949,
+      "jaf_mean": 0.6879020639999999,
+      "jaf_std": 0.011146163698810488
+    }
+  },
+  "pairwise": {
+    "sgd": {
+      "mean_delta": -0.12067999999999998,
+      "t_stat": -3.299655008042505,
+      "p_val": 0.029943099886404086,
+      "cohens_d": 1.4756505800561313,
+      "n_full_tcl_better": 5
+    },
+    "governor_only": {
+      "mean_delta": -0.12062000000000002,
+      "t_stat": -7.099823234994935,
+      "p_val": 0.0020787400567358876,
+      "cohens_d": 3.1751374763362277,
+      "n_full_tcl_better": 5
+    },
+    "penalty_only": {
+      "mean_delta": -0.07569999999999999,
+      "t_stat": -2.672311984840504,
+      "p_val": 0.05567187749232599,
+      "cohens_d": 1.195094251038151,
+      "n_full_tcl_better": 5
+    }
+  },
+  "verdict_key": "PENALTY_DOMINANT",
+  "verdict": "PENALTY IS THE PRIMARY COMPONENT. penalty_only beats sgd (delta=-0.0450) but governor_only does not (delta=-0.0001). The D_PR-weighted L2 anchor is load-bearing; governor LR adjustment is secondary. Paper framing: emphasise penalty as the mechanistic contribution.",
+  "completed_at": "2026-04-20T10:52:58.838856"
+}
