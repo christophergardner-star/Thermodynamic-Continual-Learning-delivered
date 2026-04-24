@@ -68,6 +68,10 @@ def test_cl_benchmark_config_schema_valid():
     config = ContinualLearningBenchmarkConfig()
     assert config.class_order == [[0, 1], [2, 3], [4, 5], [6, 7], [8, 9]]
     assert config.setting == "task_incremental"
+    assert config.tcl_alpha == 0.5
+    assert config.tcl_ordered_lr_scale == 0.5
+    assert config.tcl_disordered_lr_scale == 1.2
+    assert config.tcl_reset_on_task_boundary is True
 
 
 def test_thermoobserver_current_regime_unknown_before_step():
@@ -97,6 +101,26 @@ def test_split_cifar10_sgd_runs():
         pytest.skip("torchvision not installed")
 
     config = ContinualLearningBenchmarkConfig(
+        n_tasks=2,
+        train_epochs_per_task=1,
+        class_order=[[0, 1], [2, 3]],
+    )
+    result = run_split_cifar10_benchmark(config, method="sgd_baseline", workspace=None)
+    assert result.n_tasks == 2
+    assert len(result.per_task_metrics) == 2
+    assert result.mean_forgetting >= 0.0
+    assert 0.0 <= result.final_mean_accuracy <= 1.0
+
+
+@pytest.mark.slow
+def test_split_cifar10_class_incremental_sgd_runs():
+    try:
+        import torchvision  # noqa: F401
+    except ImportError:
+        pytest.skip("torchvision not installed")
+
+    config = ContinualLearningBenchmarkConfig(
+        setting="class_incremental",
         n_tasks=2,
         train_epochs_per_task=1,
         class_order=[[0, 1], [2, 3]],

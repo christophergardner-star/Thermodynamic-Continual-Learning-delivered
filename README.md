@@ -115,6 +115,27 @@ python phase8c_benchmark.py    # 5-seed tiny model
 python phase8c_scale.py        # 5-seed ResNet-18
 ```
 
+```bash
+# Run TAR's internal control server
+python tar_cli.py --serve --host 127.0.0.1 --port 8765
+
+# In a second terminal, run the HTTP wrapper
+uvicorn tar_api:app --host 127.0.0.1 --port 8000
+```
+
+Read-only HTTP endpoints exposed by `tar_api.py`:
+- `GET /health`
+- `GET /status`
+- `GET /runtime`
+- `GET /projects`
+- `GET /queue-health`
+- `GET /frontier/status`
+- `GET /positioning/reports`
+- `GET /comparison/{project_id}`
+- `GET /publication-handoff/{project_id}`
+
+Set `TAR_API_KEY` before starting `uvicorn` if you want header-based auth via `X-API-Key`.
+
 ---
 
 ## Repository Structure

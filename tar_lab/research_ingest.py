@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from hashlib import blake2b
 from itertools import combinations
+from pathlib import Path
 from typing import Iterable, List
 from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
@@ -51,6 +52,7 @@ class ResearchIngestor:
         topic = topic.strip() or "frontier ai"
         docs: list[ResearchDocument] = []
         sources: list[str] = []
+        failures: list[dict[str, str]] = []
         for source in self._default_sources(topic=topic, max_results=max_results):
             sources.append(source.name)
             try:
@@ -59,20 +61,39 @@ class ResearchIngestor:
                     docs.extend(self._parse_arxiv(raw, source))
                 elif source.kind == "rss":
                     docs.extend(self._parse_rss(raw, source))
-            except Exception:
+            except Exception as exc:
+                failures.append(
+                    {
+                        "stage": "fetch_source",
+                        "source": source.name,
+                        "url": source.url,
+                        "error": str(exc),
+                    }
+                )
                 continue
 
         deduped: dict[str, ResearchDocument] = {}
         for doc in docs:
-            deduped.setdefault(doc.document_id, doc)
+            existing = deduped.get(doc.document_id)
+            deduped[doc.document_id] = self._merge_documents(existing, doc)
 
         documents = list(deduped.values())[: max_results * max(len(sources), 1)]
+        enriched_documents: list[ResearchDocument] = []
+        downloaded_paths: list[str] = []
+        for document in documents:
+            enriched = self._maybe_download_pdf(document, failures)
+            if enriched.local_pdf_path:
+                downloaded_paths.append(enriched.local_pdf_path)
+            enriched_documents.append(enriched)
         return ResearchIngestReport(
             topic=topic,
             fetched=len(docs),
-            indexed=len(documents),
+            indexed=len(enriched_documents),
             sources=sources,
-            documents=documents,
+            documents=enriched_documents,
+            failures=failures,
+            downloaded_pdfs=len(downloaded_paths),
+            downloaded_paths=downloaded_paths,
         )
 
     def _default_sources(self, topic: str, max_results: int) -> list[_SourceSpec]:
@@ -117,6 +138,12 @@ class ResearchIngestor:
         with urlopen(req, timeout=20) as response:  # nosec - controlled URLs/config
             return response.read().decode("utf-8", errors="replace")
 
+    @staticmethod
+    def _fetch_bytes(url: str) -> bytes:
+        req = Request(url, headers={"User-Agent": "TARResearchIngestor/1.0"})
+        with urlopen(req, timeout=30) as response:  # nosec - controlled URLs/config
+            return response.read()
+
     def _parse_arxiv(self, raw: str, source: _SourceSpec) -> list[ResearchDocument]:
         root = ET.fromstring(raw)
         docs: list[ResearchDocument] = []
@@ -128,6 +155,7 @@ class ResearchIngestor:
             title = self._compact(self._text(entry.findtext("atom:title", "", ATOM_NS)))
             summary = self._compact(self._text(entry.findtext("atom:summary", "", ATOM_NS)))
             url = self._text(entry.findtext("atom:id", "", ATOM_NS))
+            pdf_url = self._extract_arxiv_pdf_url(entry, url)
             authors = [
                 self._compact(self._text(author.findtext("atom:name", "", ATOM_NS)))
                 for author in entry.findall("atom:author", ATOM_NS)
@@ -147,6 +175,7 @@ class ResearchIngestor:
                     authors=[author for author in authors if author],
                     tags=[tag for tag in tags if tag],
                     problem_statements=self._extract_problem_statements(title=title, summary=summary),
+                    pdf_url=pdf_url,
                 )
             )
         return docs
@@ -173,6 +202,109 @@ class ResearchIngestor:
                 )
             )
         return docs
+
+    def _maybe_download_pdf(
+        self,
+        document: ResearchDocument,
+        failures: list[dict[str, str]],
+    ) -> ResearchDocument:
+        if document.source_kind != "arxiv":
+            return document
+        pdf_url = self._normalize_arxiv_pdf_url(document.pdf_url or "") or self._default_pdf_url(document.url)
+        if not pdf_url:
+            return document
+        cache_path = self._pdf_cache_path(document)
+        if cache_path.exists() and cache_path.stat().st_size > 0:
+            return document.model_copy(update={"pdf_url": pdf_url, "local_pdf_path": str(cache_path)})
+        try:
+            payload = self._fetch_bytes(pdf_url)
+            if not payload:
+                raise ValueError("empty PDF response")
+            self._write_bytes_atomic(cache_path, payload)
+            return document.model_copy(update={"pdf_url": pdf_url, "local_pdf_path": str(cache_path)})
+        except Exception as exc:
+            failures.append(
+                {
+                    "stage": "download_pdf",
+                    "source": document.source_name,
+                    "document_id": document.document_id,
+                    "url": pdf_url,
+                    "error": str(exc),
+                }
+            )
+            return document.model_copy(update={"pdf_url": pdf_url})
+
+    def _pdf_cache_path(self, document: ResearchDocument) -> Path:
+        cache_dir = Path(self.workspace) / "tar_state" / "literature" / "arxiv_pdfs"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        filename = document.document_id.replace(":", "__") + ".pdf"
+        return cache_dir / filename
+
+    @staticmethod
+    def _write_bytes_atomic(path: Path, payload: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(payload)
+        tmp.replace(path)
+
+    def _extract_arxiv_pdf_url(self, entry: ET.Element, abs_url: str) -> str | None:
+        for link in entry.findall("atom:link", ATOM_NS):
+            href = self._text(link.attrib.get("href", "")).strip()
+            link_type = self._text(link.attrib.get("type", "")).strip().lower()
+            title = self._text(link.attrib.get("title", "")).strip().lower()
+            if not href:
+                continue
+            if link_type == "application/pdf" or title == "pdf" or "/pdf/" in href or href.endswith(".pdf"):
+                normalized = self._normalize_arxiv_pdf_url(href)
+                if normalized:
+                    return normalized
+        return self._default_pdf_url(abs_url)
+
+    @staticmethod
+    def _normalize_arxiv_pdf_url(url: str) -> str | None:
+        normalized = url.strip()
+        if not normalized:
+            return None
+        normalized = normalized.replace("http://", "https://")
+        normalized = normalized.replace("https://export.arxiv.org/", "https://arxiv.org/")
+        if "/abs/" in normalized:
+            normalized = normalized.replace("/abs/", "/pdf/", 1)
+        if "/pdf/" in normalized and not normalized.endswith(".pdf"):
+            normalized = normalized.rstrip("/") + ".pdf"
+        return normalized
+
+    def _default_pdf_url(self, abs_url: str) -> str | None:
+        normalized = self._normalize_arxiv_pdf_url(abs_url)
+        if normalized and "/pdf/" in normalized:
+            return normalized
+        return None
+
+    @staticmethod
+    def _merge_documents(existing: ResearchDocument | None, incoming: ResearchDocument) -> ResearchDocument:
+        if existing is None:
+            return incoming
+        summary = incoming.summary if len(incoming.summary) > len(existing.summary) else existing.summary
+        tags = sorted({*existing.tags, *incoming.tags})
+        authors = existing.authors or incoming.authors
+        if incoming.authors and len(incoming.authors) > len(existing.authors):
+            authors = incoming.authors
+        problem_statements = existing.problem_statements or incoming.problem_statements
+        if incoming.problem_statements and len(incoming.problem_statements) > len(existing.problem_statements):
+            problem_statements = incoming.problem_statements
+        return existing.model_copy(
+            update={
+                "domain": existing.domain or incoming.domain,
+                "title": incoming.title if len(incoming.title) > len(existing.title) else existing.title,
+                "summary": summary,
+                "url": existing.url or incoming.url,
+                "published_at": existing.published_at or incoming.published_at,
+                "authors": authors,
+                "tags": tags,
+                "problem_statements": problem_statements,
+                "pdf_url": existing.pdf_url or incoming.pdf_url,
+                "local_pdf_path": existing.local_pdf_path or incoming.local_pdf_path,
+            }
+        )
 
     @staticmethod
     def _stable_id(kind: str, value: str) -> str:

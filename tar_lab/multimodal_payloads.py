@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import math
 import random
@@ -23,6 +24,9 @@ from tar_lab.schemas import (
     DataBundleProvenance,
     DataProvenance,
     GovernorMetrics,
+    ExternalBreakthroughAssessment,
+    TCLMechanismCandidate,
+    TCLMechanismSearchResult,
     TokenizerProvenance,
     TrainingPayloadConfig,
 )
@@ -593,14 +597,127 @@ def run_multimodal_backend(
     return summary
 
 
-def _tcl_lr_adjustment(observer: ActivationThermoObserver, base_lr: float) -> float:
+def _mean(values: Iterable[float]) -> float:
+    values = list(values)
+    return sum(values) / max(len(values), 1)
+
+
+def _std(values: Iterable[float]) -> float:
+    values = list(values)
+    if len(values) <= 1:
+        return 0.0
+    mean_value = _mean(values)
+    return math.sqrt(sum((item - mean_value) ** 2 for item in values) / (len(values) - 1))
+
+
+def _jaf(accuracy: float, forgetting: float) -> float:
+    return accuracy * (1.0 - forgetting)
+
+
+def _paired_t_stats(values: list[float]) -> tuple[float, float, float]:
+    deltas = list(values)
+    if not deltas:
+        return 0.0, 1.0, 0.0
+    try:
+        from scipy import stats as _scipy_stats
+
+        t_stat, p_value = _scipy_stats.ttest_1samp(deltas, 0.0)
+        effect_size = abs(_mean(deltas)) / max(_std(deltas), 1e-12)
+        return float(t_stat), float(p_value), float(effect_size)
+    except Exception:
+        mean_delta = _mean(deltas)
+        sample_std = _std(deltas)
+        if sample_std <= 1e-12:
+            return 0.0, 1.0 if abs(mean_delta) <= 1e-12 else 0.0, 0.0
+        stderr = sample_std / math.sqrt(max(len(deltas), 1))
+        t_stat = mean_delta / max(stderr, 1e-12)
+        # Normal approximation fallback.
+        p_value = 2.0 * (1.0 - 0.5 * (1.0 + math.erf(abs(t_stat) / math.sqrt(2.0))))
+        effect_size = abs(mean_delta) / max(sample_std, 1e-12)
+        return float(t_stat), float(p_value), float(effect_size)
+
+
+def _tcl_class_incremental_mechanism_specs() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "tcl_balanced",
+            "method": "tcl",
+            "overrides": {
+                "tcl_penalty_lambda": 0.01,
+                "tcl_alpha": 0.5,
+                "tcl_ordered_lr_scale": 0.5,
+                "tcl_disordered_lr_scale": 1.2,
+                "tcl_reset_on_task_boundary": True,
+            },
+        },
+        {
+            "name": "tcl_stability_bias",
+            "method": "tcl",
+            "overrides": {
+                "tcl_penalty_lambda": 0.02,
+                "tcl_alpha": 0.45,
+                "tcl_ordered_lr_scale": 0.4,
+                "tcl_disordered_lr_scale": 1.05,
+                "tcl_reset_on_task_boundary": True,
+            },
+        },
+        {
+            "name": "tcl_plasticity_bias",
+            "method": "tcl",
+            "overrides": {
+                "tcl_penalty_lambda": 0.005,
+                "tcl_alpha": 0.55,
+                "tcl_ordered_lr_scale": 0.7,
+                "tcl_disordered_lr_scale": 1.35,
+                "tcl_reset_on_task_boundary": True,
+            },
+        },
+        {
+            "name": "tcl_carryover_anchor",
+            "method": "tcl",
+            "overrides": {
+                "tcl_penalty_lambda": 0.01,
+                "tcl_alpha": 0.5,
+                "tcl_ordered_lr_scale": 0.5,
+                "tcl_disordered_lr_scale": 1.2,
+                "tcl_reset_on_task_boundary": False,
+            },
+        },
+        {
+            "name": "tcl_governor_only",
+            "method": "tcl",
+            "overrides": {
+                "tcl_penalty_lambda": 0.0,
+                "tcl_alpha": 0.5,
+                "tcl_ordered_lr_scale": 0.5,
+                "tcl_disordered_lr_scale": 1.2,
+                "tcl_reset_on_task_boundary": True,
+            },
+        },
+        {
+            "name": "tcl_penalty_only",
+            "method": "tcl_penalty_only",
+            "overrides": {
+                "tcl_penalty_lambda": 0.01,
+            },
+        },
+    ]
+
+
+def _tcl_lr_adjustment(
+    observer: ActivationThermoObserver,
+    base_lr: float,
+    *,
+    ordered_scale: float = 0.5,
+    disordered_scale: float = 1.2,
+) -> float:
     regime = observer.current_regime
     if regime in ("critical", "unknown"):
         return base_lr
     if regime == "ordered":
-        return base_lr * 0.5
+        return base_lr * ordered_scale
     if regime == "disordered":
-        return base_lr * 1.2
+        return base_lr * disordered_scale
     return base_lr
 
 
@@ -657,18 +774,27 @@ def run_split_cifar10_benchmark(
         transform=transform,
     )
 
-    class _RemappedSubset(Dataset):
-        def __init__(self, dataset: Any, indices: list[int], label_map: dict[int, int]):
+    if config.setting not in {"task_incremental", "class_incremental"}:
+        raise ValueError("split_cifar10 benchmark supports only task_incremental or class_incremental")
+
+    class _LabelSubset(Dataset):
+        def __init__(
+            self,
+            dataset: Any,
+            indices: list[int],
+            label_map: Optional[dict[int, int]] = None,
+        ):
             self._dataset = dataset
             self._indices = indices
-            self._label_map = label_map
+            self._label_map = label_map or {}
 
         def __len__(self) -> int:
             return len(self._indices)
 
         def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
             image, label = self._dataset[self._indices[idx]]
-            return image, self._label_map[int(label)]
+            remapped = self._label_map.get(int(label), int(label))
+            return image, remapped
 
     class_order = config.class_order[: config.n_tasks]
     if len(class_order) != config.n_tasks:
@@ -678,14 +804,18 @@ def run_split_cifar10_benchmark(
     test_targets = np.array(full_test.targets)
     task_train_subsets: list[Dataset] = []
     task_test_subsets: list[Dataset] = []
+    total_num_classes = max(label for task_classes in class_order for label in task_classes) + 1
     for task_classes in class_order:
         if len(task_classes) != config.classes_per_task:
             raise ValueError("Each split_cifar10 task must match classes_per_task")
-        label_map = {int(label): idx for idx, label in enumerate(task_classes)}
+        if config.setting == "task_incremental":
+            label_map = {int(label): idx for idx, label in enumerate(task_classes)}
+        else:
+            label_map = {int(label): int(label) for label in task_classes}
         train_indices = [int(idx) for idx, label in enumerate(train_targets) if int(label) in label_map]
         test_indices = [int(idx) for idx, label in enumerate(test_targets) if int(label) in label_map]
-        task_train_subsets.append(_RemappedSubset(full_train, train_indices, label_map))
-        task_test_subsets.append(_RemappedSubset(full_test, test_indices, label_map))
+        task_train_subsets.append(_LabelSubset(full_train, train_indices, label_map))
+        task_test_subsets.append(_LabelSubset(full_test, test_indices, label_map))
 
     class _CLTrunk(nn.Module):
         def __init__(self) -> None:
@@ -722,8 +852,14 @@ def run_split_cifar10_benchmark(
     else:
         trunk = _CLTrunk().to(device)
         feat_dim = 128
-    heads = nn.ModuleList([nn.Linear(feat_dim, 2) for _ in range(config.n_tasks)]).to(device)
-    all_params = list(trunk.parameters()) + list(heads.parameters())
+    if config.setting == "class_incremental":
+        shared_head: Optional[nn.Module] = nn.Linear(feat_dim, total_num_classes).to(device)
+        heads = None
+        all_params = list(trunk.parameters()) + list(shared_head.parameters())
+    else:
+        shared_head = None
+        heads = nn.ModuleList([nn.Linear(feat_dim, 2) for _ in range(config.n_tasks)]).to(device)
+        all_params = list(trunk.parameters()) + list(heads.parameters())
 
     ewc_fisher: dict[str, torch.Tensor] = {}
     ewc_params: dict[str, torch.Tensor] = {}
@@ -749,7 +885,7 @@ def run_split_cifar10_benchmark(
         # Regime detection (sigma/rho/LR) still works without it.
         _dpr = backbone != "resnet18"
         observer = ActivationThermoObserver(
-            trunk, stat_window_size=5, alpha=0.5,
+            trunk, stat_window_size=5, alpha=config.tcl_alpha,
             warmup_batches=_warmup, compute_dpr=_dpr,
         )
 
@@ -764,7 +900,12 @@ def run_split_cifar10_benchmark(
     for train_task_idx in range(config.n_tasks):
         # Reset per-task calibration state.  sigma_star_anchor will be
         # re-established from the first 20 batches of this task and frozen.
-        if observer is not None and method == "tcl" and train_task_idx > 0:
+        if (
+            observer is not None
+            and method == "tcl"
+            and config.tcl_reset_on_task_boundary
+            and train_task_idx > 0
+        ):
             observer.reset_for_new_task()
 
         optimizer = torch.optim.SGD(all_params, lr=base_lr, momentum=0.9, weight_decay=1e-4)
@@ -776,7 +917,10 @@ def run_split_cifar10_benchmark(
 
         for _epoch in range(config.train_epochs_per_task):
             trunk.train()
-            heads[train_task_idx].train()
+            if heads is not None:
+                heads[train_task_idx].train()
+            if shared_head is not None:
+                shared_head.train()
             _epoch_regimes: list[str] = []
             _epoch_lrs: list[float] = []
             _epoch_sigmas: list[float] = []
@@ -787,7 +931,11 @@ def run_split_cifar10_benchmark(
                 batch_x = batch_x.to(device)
                 batch_y = batch_y.to(device)
                 reps = trunk(batch_x)
-                logits = heads[train_task_idx](reps)
+                if shared_head is not None:
+                    logits = shared_head(reps)
+                else:
+                    assert heads is not None
+                    logits = heads[train_task_idx](reps)
                 loss = F.cross_entropy(logits, batch_y)
 
                 if method == "ewc" and ewc_fisher:
@@ -832,7 +980,12 @@ def run_split_cifar10_benchmark(
                 # the adjusted LR takes effect on the current weight update.
                 if observer is not None and method == "tcl":
                     snap = observer.step(optimizer)
-                    adj_lr = _tcl_lr_adjustment(observer, base_lr)
+                    adj_lr = _tcl_lr_adjustment(
+                        observer,
+                        base_lr,
+                        ordered_scale=config.tcl_ordered_lr_scale,
+                        disordered_scale=config.tcl_disordered_lr_scale,
+                    )
                     for group in optimizer.param_groups:
                         group["lr"] = adj_lr
                     _epoch_regimes.append(observer.current_regime)
@@ -890,14 +1043,22 @@ def run_split_cifar10_benchmark(
                 batch_x = batch_x.to(device)
                 batch_y = batch_y.to(device)
                 reps = trunk(batch_x)
-                log_probs = F.log_softmax(heads[train_task_idx](reps), dim=1)
+                if shared_head is not None:
+                    log_probs = F.log_softmax(shared_head(reps), dim=1)
+                else:
+                    assert heads is not None
+                    log_probs = F.log_softmax(heads[train_task_idx](reps), dim=1)
                 for item_idx in range(batch_x.size(0)):
                     log_probs[item_idx, batch_y[item_idx]].backward(retain_graph=item_idx < batch_x.size(0) - 1)
                     for name, param in trunk.named_parameters():
                         if param.grad is not None:
                             ewc_fisher_new[name] = ewc_fisher_new[name] + param.grad.detach().cpu().pow(2)
                     trunk.zero_grad()
-                    heads[train_task_idx].zero_grad()
+                    if shared_head is not None:
+                        shared_head.zero_grad()
+                    else:
+                        assert heads is not None
+                        heads[train_task_idx].zero_grad()
                 count += batch_x.size(0)
             n_samples = max(count, 1)
             for name, fisher in ewc_fisher_new.items():
@@ -951,7 +1112,11 @@ def run_split_cifar10_benchmark(
                     batch_x = batch_x.to(device)
                     batch_y = batch_y.to(device)
                     reps = trunk(batch_x)
-                    logits = heads[eval_task_idx](reps)
+                    if shared_head is not None:
+                        logits = shared_head(reps)
+                    else:
+                        assert heads is not None
+                        logits = heads[eval_task_idx](reps)
                     correct += int((logits.argmax(1) == batch_y).sum().item())
                     total += int(batch_y.size(0))
             row[eval_task_idx] = correct / max(total, 1)
@@ -986,7 +1151,10 @@ def run_split_cifar10_benchmark(
     if observer is not None and workspace:
         trace_dir = Path(workspace) / "tar_state" / "cl_traces"
         trace_dir.mkdir(parents=True, exist_ok=True)
-        trace_file = trace_dir / f"tcl_{config.seed}.json"
+        trace_stem = f"tcl_{config.seed}.json"
+        if config.setting == "class_incremental":
+            trace_stem = f"tcl_class_incremental_{config.seed}.json"
+        trace_file = trace_dir / trace_stem
         # Summarise regime distribution per task across all epochs in that task
         task_summaries: list[dict] = []
         for t in range(config.n_tasks):
@@ -1031,6 +1199,130 @@ def run_split_cifar10_benchmark(
         final_mean_accuracy=final_mean_accuracy,
         last_task_accuracy=per_task_metrics[-1].task_accuracy,
         thermodynamic_trace_path=trace_path,
+    )
+
+
+def search_tcl_class_incremental_mechanisms(
+    base_config: Optional[ContinualLearningBenchmarkConfig] = None,
+    *,
+    workspace: Optional[str] = None,
+    backbone: str = "tiny",
+    seeds: Optional[list[int]] = None,
+    problem_id: str = "",
+) -> TCLMechanismSearchResult:
+    seeds = list(seeds) if seeds is not None else [42, 0, 1]
+    base_config = base_config or ContinualLearningBenchmarkConfig()
+    base_config = base_config.model_copy(update={"setting": "class_incremental"})
+
+    baseline_runs: list[ContinualLearningBenchmarkResult] = []
+    strong_baseline_runs: list[ContinualLearningBenchmarkResult] = []
+    for seed in seeds:
+        baseline_cfg = base_config.model_copy(update={"seed": seed})
+        baseline_runs.append(
+            run_split_cifar10_benchmark(
+                baseline_cfg,
+                method="sgd_baseline",
+                workspace=workspace,
+                backbone=backbone,
+            )
+        )
+        strong_baseline_runs.append(
+            run_split_cifar10_benchmark(
+                baseline_cfg,
+                method="ewc",
+                workspace=workspace,
+                backbone=backbone,
+            )
+        )
+
+    candidate_specs = _tcl_class_incremental_mechanism_specs()
+    candidates: list[TCLMechanismCandidate] = []
+    candidate_runs: dict[str, list[ContinualLearningBenchmarkResult]] = {}
+    for spec in candidate_specs:
+        runs: list[ContinualLearningBenchmarkResult] = []
+        for seed in seeds:
+            candidate_cfg = base_config.model_copy(update={"seed": seed, **spec["overrides"]})
+            runs.append(
+                run_split_cifar10_benchmark(
+                    candidate_cfg,
+                    method=spec["method"],
+                    workspace=workspace,
+                    backbone=backbone,
+                )
+            )
+        candidate_runs[spec["name"]] = runs
+        forgetting = [run.mean_forgetting for run in runs]
+        accuracy = [run.final_mean_accuracy for run in runs]
+        baseline_forgetting = [run.mean_forgetting for run in baseline_runs]
+        deltas_vs_sgd = [cand - base for cand, base in zip(forgetting, baseline_forgetting)]
+        candidates.append(
+            TCLMechanismCandidate(
+                name=spec["name"],
+                method=spec["method"],
+                config_overrides=dict(spec["overrides"]),
+                mean_forgetting=_mean(forgetting),
+                std_forgetting=_std(forgetting),
+                mean_accuracy=_mean(accuracy),
+                std_accuracy=_std(accuracy),
+                mean_jaf=_mean(_jaf(run.final_mean_accuracy, run.mean_forgetting) for run in runs),
+                delta_vs_sgd=_mean(deltas_vs_sgd),
+                wins_vs_sgd=sum(1 for delta in deltas_vs_sgd if delta < 0.0),
+            )
+        )
+
+    best_candidate = max(
+        candidates,
+        key=lambda item: (item.mean_jaf, -item.mean_forgetting, item.mean_accuracy),
+    )
+    best_runs = candidate_runs[best_candidate.name]
+    deltas_vs_strong = [
+        cand.mean_forgetting - strong.mean_forgetting
+        for cand, strong in zip(best_runs, strong_baseline_runs)
+    ]
+    _, p_value, effect_size = _paired_t_stats(deltas_vs_strong)
+    best_delta_vs_strong = _mean(deltas_vs_strong)
+    external_breakthrough_candidate = (
+        best_delta_vs_strong < -0.01 and p_value < 0.05 and effect_size > 0.5
+    )
+    if external_breakthrough_candidate:
+        publishability_status = "reviewer_grade_candidate"
+        summary = (
+            f"Best class-incremental TCL mechanism {best_candidate.name} beats EWC on mean_forgetting "
+            f"(delta={best_delta_vs_strong:+.4f}, p={p_value:.4f}, d={effect_size:.3f})."
+        )
+    elif best_candidate.delta_vs_sgd < -0.01:
+        publishability_status = "mechanism_signal_only"
+        summary = (
+            f"Best class-incremental TCL mechanism {best_candidate.name} improves over SGD "
+            f"(delta={best_candidate.delta_vs_sgd:+.4f}) but does not yet clear EWC "
+            f"(delta={best_delta_vs_strong:+.4f}, p={p_value:.4f}, d={effect_size:.3f})."
+        )
+    else:
+        publishability_status = "no_reviewer_grade_signal"
+        summary = (
+            f"Class-incremental TCL mechanism search did not find a reviewer-grade candidate. "
+            f"Best mechanism {best_candidate.name} remains below the strong-baseline bar "
+            f"(delta={best_delta_vs_strong:+.4f}, p={p_value:.4f}, d={effect_size:.3f})."
+        )
+
+    return TCLMechanismSearchResult(
+        search_id=uuid4().hex,
+        created_at=datetime.utcnow().isoformat(),
+        problem_id=problem_id,
+        benchmark="split_cifar10",
+        setting="class_incremental",
+        backbone=backbone,
+        seeds=seeds,
+        baseline_method="sgd_baseline",
+        strong_baseline_method="ewc",
+        candidates=candidates,
+        best_candidate_name=best_candidate.name,
+        best_delta_vs_strong_baseline=best_delta_vs_strong,
+        p_value_vs_strong_baseline=p_value,
+        effect_size_vs_strong_baseline=effect_size,
+        external_breakthrough_candidate=external_breakthrough_candidate,
+        publishability_status=publishability_status,
+        summary=summary,
     )
 
 

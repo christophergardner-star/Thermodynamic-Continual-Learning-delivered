@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
@@ -5,12 +6,17 @@ import tempfile
 from tar_lab.orchestrator import TAROrchestrator
 from tar_lab.schemas import (
     AblationResult,
+    BenchmarkExecutionStatisticalSummary,
+    BenchmarkMetricStatistic,
+    BenchmarkStatisticalSummary,
+    BreakthroughReport,
     CalibrationBin,
     CalibrationReport,
     ClaimAcceptancePolicy,
     ClaimVerdict,
     MemorySearchHit,
     ProblemExecutionReport,
+    ProblemExperimentResult,
     ProblemStudyReport,
     RuntimeHeartbeat,
     ScienceEnvironmentBundle,
@@ -27,6 +33,12 @@ class _FakeVault:
 
     def search(self, *args, **kwargs):
         return list(self._hits)
+
+    def index_verification_report(self, *args, **kwargs) -> None:
+        return None
+
+    def index_breakthrough_report(self, *args, **kwargs) -> None:
+        return None
 
     def close(self) -> None:
         return None
@@ -119,6 +131,78 @@ def _problem_execution_report(
         experiments=[],
         summary=f"Execution for {problem_id}",
         recommended_next_step="Review claim evidence.",
+        artifact_path=f"artifacts/{problem_id}.json",
+        status="completed",
+    )
+
+
+def _rich_problem_execution_report(problem_id: str = "problem-qml") -> ProblemExecutionReport:
+    experiment = ProblemExperimentResult(
+        template_id="ansatz_depth_sweep",
+        name="Ansatz Depth Sweep",
+        benchmark="depth_trainability_curve",
+        benchmark_id="pennylane_barren_plateau_canonical",
+        benchmark_name="PennyLane Barren Plateau Benchmark",
+        benchmark_tier="canonical",
+        requested_benchmark_tier="canonical",
+        executed_benchmark_tier="canonical",
+        benchmark_truth_status="canonical_ready",
+        benchmark_alignment="aligned",
+        dataset_or_env="pennylane:qml_barren_plateau_suite",
+        canonical_comparable=True,
+        provenance_complete=True,
+        proxy_benchmark_used=False,
+        execution_mode="pennylane_backend",
+        status="completed",
+        metrics={
+            "gradient_norm_variance": 0.0019,
+            "barren_plateau_slope": 0.105,
+            "trainability_gap": 0.98,
+        },
+        statistical_summary=BenchmarkStatisticalSummary(
+            statistically_ready=True,
+            sample_count=5,
+            recommended_seed_runs=5,
+            primary_metric="trainability_gap",
+            metrics=[
+                BenchmarkMetricStatistic(
+                    metric_name="trainability_gap",
+                    mean=0.98,
+                    std_dev=0.02,
+                    ci95_low=0.96,
+                    ci95_high=1.0,
+                    sample_count=5,
+                )
+            ],
+        ),
+    )
+    return ProblemExecutionReport(
+        problem_id=problem_id,
+        problem="Investigate barren plateaus in quantum AI",
+        profile_id="quantum_ml",
+        domain="quantum_ml",
+        benchmark_tier="canonical",
+        requested_benchmark="pennylane_barren_plateau_canonical",
+        canonical_comparable=True,
+        proxy_benchmarks_used=False,
+        benchmark_ids=["pennylane_barren_plateau_canonical"],
+        benchmark_names=["PennyLane Barren Plateau Benchmark"],
+        actual_benchmark_tiers=["canonical"],
+        benchmark_truth_statuses=["canonical_ready"],
+        benchmark_alignment="aligned",
+        execution_mode="local_python",
+        imports_ok=["numpy", "pennylane"],
+        experiments=[experiment],
+        benchmark_statistical_summary=BenchmarkExecutionStatisticalSummary(
+            experiment_count=1,
+            completed_experiment_count=1,
+            statistically_ready_experiment_count=1,
+            canonical_ready_completed_count=1,
+            statistically_ready=True,
+            notes=[],
+        ),
+        summary="Canonical PennyLane benchmark completed cleanly with bounded seed variance.",
+        recommended_next_step="Promote the benchmark-backed signal for claim review.",
         artifact_path=f"artifacts/{problem_id}.json",
         status="completed",
     )
@@ -315,6 +399,164 @@ def test_claim_verdict_provenance_fields_are_populated():
             assert decision.trial_id == "trial-1"
             assert decision.problem_id == "problem-a"
             assert decision.claim_verdict_id == verdict.verdict_id
+        finally:
+            orchestrator.shutdown()
+
+
+def test_problem_execution_claim_verdict_without_payload_trial_uses_benchmark_evidence():
+    with tempfile.TemporaryDirectory() as tmp:
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            hit = MemorySearchHit(
+                document_id="research:paper-1",
+                score=0.91,
+                document="Quantum literature supports the trainability claim.",
+                metadata={"kind": "research"},
+            )
+            _configure_orchestrator(orchestrator, hits=[hit])
+            orchestrator.store.append_problem_execution(_rich_problem_execution_report("problem-qml"))
+
+            verdict = orchestrator.claim_verdict(problem_id="problem-qml")
+
+            assert verdict.trial_id == "problem_execution:problem-qml"
+            assert verdict.verification_report_trial_id == "problem_execution:problem-qml"
+            assert verdict.benchmark_problem_id == "problem-qml"
+            assert verdict.canonical_comparability_source == "problem_execution"
+            assert verdict.linkage_status == "exact"
+            assert verdict.status in {"accepted", "provisional"}
+        finally:
+            orchestrator.shutdown()
+
+
+def test_problem_execution_breakthrough_report_uses_problem_execution_path():
+    with tempfile.TemporaryDirectory() as tmp:
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            hit = MemorySearchHit(
+                document_id="research:paper-1",
+                score=0.91,
+                document="Quantum literature supports the trainability claim.",
+                metadata={"kind": "research"},
+            )
+            _configure_orchestrator(orchestrator, hits=[hit])
+            orchestrator.store.append_problem_execution(_rich_problem_execution_report("problem-qml"))
+
+            report = orchestrator.breakthrough_report(problem_id="problem-qml")
+
+            assert report.trial_id == "problem_execution:problem-qml"
+            assert report.verification.trial_id == "problem_execution:problem-qml"
+            assert report.claim_verdict is not None
+            assert report.claim_verdict.benchmark_problem_id == "problem-qml"
+            assert report.status in {"breakthrough", "candidate"}
+        finally:
+            orchestrator.shutdown()
+
+
+def test_quantum_problem_execution_breakthrough_requires_phase14_gate():
+    with tempfile.TemporaryDirectory() as tmp:
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            hit = MemorySearchHit(
+                document_id="research:paper-1",
+                score=0.91,
+                document="Quantum literature supports the trainability claim.",
+                metadata={"kind": "research"},
+            )
+            _configure_orchestrator(orchestrator, hits=[hit])
+            orchestrator.store.append_problem_execution(_rich_problem_execution_report("problem-qml"))
+            comparisons_dir = Path(tmp) / "tar_state" / "comparisons"
+            comparisons_dir.mkdir(parents=True, exist_ok=True)
+            (comparisons_dir / "phase14_quantum_publishability.json").write_text(
+                json.dumps(
+                    {
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "problem_id": "problem-qml",
+                        "publishability_status": "no_reviewer_grade_signal",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = orchestrator.breakthrough_report(problem_id="problem-qml")
+
+            assert report.status == "candidate"
+            assert "publishability_status=no_reviewer_grade_signal" in report.rationale
+            assert "external_breakthrough_candidate=False" in report.rationale
+            assert "reviewer-grade promotion remains open" in report.summary
+        finally:
+            orchestrator.shutdown()
+
+
+def test_problem_execution_breakthrough_report_requires_external_assessment_artifact():
+    with tempfile.TemporaryDirectory() as tmp:
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            hit = MemorySearchHit(
+                document_id="research:paper-1",
+                score=0.91,
+                document="Thermodynamic literature supports the trainability claim.",
+                metadata={"kind": "research"},
+            )
+            _configure_orchestrator(orchestrator, hits=[hit])
+            execution = _rich_problem_execution_report("problem-deep")
+            execution = execution.model_copy(update={"domain": "deep_learning"})
+            orchestrator.store.append_problem_execution(execution)
+
+            report = orchestrator.breakthrough_report(problem_id="problem-deep")
+
+            assert report.status == "candidate"
+            assert "external_assessment=missing" in report.rationale
+            assert "external_breakthrough_candidate=False" in report.rationale
+        finally:
+            orchestrator.shutdown()
+
+
+def test_problem_execution_breakthrough_report_promotes_when_external_assessment_passes():
+    with tempfile.TemporaryDirectory() as tmp:
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            hit = MemorySearchHit(
+                document_id="research:paper-1",
+                score=0.91,
+                document="Thermodynamic literature supports the trainability claim.",
+                metadata={"kind": "research"},
+            )
+            _configure_orchestrator(orchestrator, hits=[hit])
+            execution = _rich_problem_execution_report("problem-deep")
+            execution = execution.model_copy(update={"domain": "deep_learning"})
+            orchestrator.store.append_problem_execution(execution)
+            verification = _verification_report("problem_execution:problem-deep")
+            orchestrator.verification_runner.build_problem_execution_breakthrough_report = lambda *args, **kwargs: BreakthroughReport(
+                trial_id=verification.trial_id,
+                status="breakthrough",
+                summary="Synthetic breakthrough for external gate test.",
+                novelty_score=0.8,
+                stability_score=0.9,
+                calibration_score=0.9,
+                supporting_research_ids=["research:paper-1"],
+                rationale=["synthetic_base_report"],
+                verification=verification,
+                claim_verdict=kwargs.get("claim_verdict"),
+            )
+            comparisons_dir = Path(tmp) / "tar_state" / "comparisons"
+            comparisons_dir.mkdir(parents=True, exist_ok=True)
+            (comparisons_dir / "external_breakthrough_assessment.json").write_text(
+                json.dumps(
+                    {
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "problem_id": "problem-deep",
+                        "publishability_status": "reviewer_grade_candidate",
+                        "external_breakthrough_candidate": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = orchestrator.breakthrough_report(problem_id="problem-deep")
+
+            assert report.status == "breakthrough"
+            assert "publishability_status=reviewer_grade_candidate" in report.rationale
+            assert "external_breakthrough_candidate=True" in report.rationale
         finally:
             orchestrator.shutdown()
 

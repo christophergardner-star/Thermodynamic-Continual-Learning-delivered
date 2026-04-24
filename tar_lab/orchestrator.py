@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import re
+from types import SimpleNamespace
 import uuid
 import subprocess
 import sys
@@ -64,6 +65,7 @@ from tar_lab.schemas import (
     DirectorPolicy,
     DryRunReport,
     EnvironmentManifest,
+    ExternalBreakthroughAssessment,
     EvidenceDebtRecord,
     EndpointRecord,
     FalsificationCoverage,
@@ -140,6 +142,7 @@ from tar_lab.schemas import (
     ScienceEnvironmentBundle,
     StatisticalTestRecord,
     TARExecutionPolicy,
+    TCLMechanismSearchResult,
     TheoryInvalidationRecord,
     TrainingSignalRecord,
     TrainingPayloadConfig,
@@ -872,6 +875,52 @@ class TAROrchestrator:
             self.store.append_research_document(document)
             if self.vault is not None:
                 self.vault.index_research_document(document)
+        paper_failures = list(report.paper_failures)
+        paper_artifact_count = report.paper_artifact_count
+        paper_conflict_count = report.paper_conflict_count
+        paper_manifest_id = report.paper_manifest_id
+        paper_manifest_path = report.paper_manifest_path
+        pdf_paths: list[str] = []
+        seen_paths: set[str] = set()
+        for document in report.documents:
+            if document.local_pdf_path and document.local_pdf_path not in seen_paths:
+                seen_paths.add(document.local_pdf_path)
+                pdf_paths.append(document.local_pdf_path)
+        if not pdf_paths:
+            for raw_path in report.downloaded_paths:
+                if raw_path and raw_path not in seen_paths:
+                    seen_paths.add(raw_path)
+                    pdf_paths.append(raw_path)
+        if pdf_paths:
+            try:
+                paper_report = self.literature_engine.ingest_paths(pdf_paths)
+                paper_artifact_count = len(paper_report.artifacts)
+                paper_conflict_count = len(paper_report.conflicts)
+                paper_failures = list(paper_report.failed)
+                paper_manifest_id = paper_report.manifest_id
+                paper_manifest_path = paper_report.manifest_path
+                if self.vault is not None:
+                    self.vault.ensure_research_ready()
+                    for artifact in paper_report.artifacts:
+                        self.vault.index_paper_artifact(artifact)
+            except Exception as exc:
+                paper_failures.append(
+                    {
+                        "stage": "literature_ingest",
+                        "error": str(exc),
+                    }
+                )
+        report = report.model_copy(
+            update={
+                "downloaded_pdfs": len(pdf_paths),
+                "downloaded_paths": pdf_paths,
+                "paper_artifact_count": paper_artifact_count,
+                "paper_conflict_count": paper_conflict_count,
+                "paper_failures": paper_failures,
+                "paper_manifest_id": paper_manifest_id,
+                "paper_manifest_path": paper_manifest_path,
+            }
+        )
         cross_domain_bridges = self.research_ingestor.detect_cross_domain_bridges(report.documents)
         indexed_bridge_count = 0
         for bridge in cross_domain_bridges:
@@ -888,6 +937,12 @@ class TAROrchestrator:
                 "fetched": report.fetched,
                 "indexed": report.indexed,
                 "sources": report.sources,
+                "failures": report.failures,
+                "downloaded_pdfs": report.downloaded_pdfs,
+                "paper_artifacts": report.paper_artifact_count,
+                "paper_conflicts": report.paper_conflict_count,
+                "paper_failures": report.paper_failures,
+                "paper_manifest_id": report.paper_manifest_id,
                 "cross_domain_bridges": len(cross_domain_bridges),
                 "cross_domain_bridges_indexed": indexed_bridge_count,
             },
@@ -1456,6 +1511,16 @@ class TAROrchestrator:
         path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
         return path
 
+    def _persist_external_breakthrough_assessment(self, assessment: ExternalBreakthroughAssessment) -> Path:
+        path = self._comparisons_dir() / f"{assessment.assessment_id}.json"
+        path.write_text(assessment.model_dump_json(indent=2), encoding="utf-8")
+        return path
+
+    def _persist_tcl_mechanism_search_result(self, result: TCLMechanismSearchResult) -> Path:
+        path = self._comparisons_dir() / f"{result.search_id}.json"
+        path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+        return path
+
     def _persist_comparison_run(self, result: ContinualLearningBenchmarkResult) -> Path:
         path = self._comparison_runs_dir() / f"{result.benchmark_id}.json"
         path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
@@ -1707,6 +1772,46 @@ class TAROrchestrator:
             trial_id=result.result_id,
             result_description=honest_assessment,
         )
+        return result
+
+    def run_tcl_class_incremental_mechanism_search(
+        self,
+        *,
+        problem_id: str = "",
+        seeds: Optional[list[int]] = None,
+        backbone: str = "tiny",
+        train_epochs_per_task: int = 5,
+    ) -> TCLMechanismSearchResult:
+        from tar_lab.multimodal_payloads import search_tcl_class_incremental_mechanisms
+
+        base_config = ContinualLearningBenchmarkConfig(
+            setting="class_incremental",
+            train_epochs_per_task=train_epochs_per_task,
+        )
+        result = search_tcl_class_incremental_mechanisms(
+            base_config,
+            workspace=self.workspace,
+            backbone=backbone,
+            seeds=seeds,
+            problem_id=problem_id,
+        )
+        self._persist_tcl_mechanism_search_result(result)
+        assessment = ExternalBreakthroughAssessment(
+            assessment_id=f"external-breakthrough-{result.search_id}",
+            created_at=datetime.utcnow().isoformat(),
+            problem_id=problem_id,
+            domain="deep_learning",
+            benchmark=result.benchmark,
+            setting=result.setting,
+            strong_baseline=result.strong_baseline_method,
+            primary_metric="mean_forgetting",
+            external_breakthrough_candidate=result.external_breakthrough_candidate,
+            publishability_status=result.publishability_status,
+            p_value=result.p_value_vs_strong_baseline,
+            effect_size=result.effect_size_vs_strong_baseline,
+            summary=result.summary,
+        )
+        self._persist_external_breakthrough_assessment(assessment)
         return result
 
     def _run_mann_whitney(
@@ -5807,6 +5912,147 @@ class TAROrchestrator:
     def _claim_policy(self) -> ClaimAcceptancePolicy:
         return self.inference_bridge.default_claim_policy()
 
+    @staticmethod
+    def _problem_execution_trial_id(problem_id: str) -> str:
+        return f"problem_execution:{problem_id}"
+
+    def _latest_external_breakthrough_assessment(self, problem_id: str) -> Optional[dict[str, Any]]:
+        comparisons_dir = Path(self.workspace) / "tar_state" / "comparisons"
+        if not comparisons_dir.exists():
+            return None
+        matches: list[dict[str, Any]] = []
+        for path in sorted(comparisons_dir.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if data.get("problem_id") != problem_id:
+                continue
+            if (
+                "publishability_status" not in data
+                and "external_breakthrough_candidate" not in data
+                and "tcl_is_significantly_better" not in data
+            ):
+                continue
+            data["_assessment_path"] = str(path)
+            matches.append(data)
+        if not matches:
+            return None
+        matches.sort(
+            key=lambda item: (
+                str(item.get("created_at", item.get("completed_at", ""))),
+                str(item.get("_assessment_path", "")),
+            ),
+            reverse=True,
+        )
+        return matches[0]
+
+    def _apply_external_breakthrough_gate(
+        self,
+        problem_execution: ProblemExecutionReport,
+        report: BreakthroughReport,
+    ) -> BreakthroughReport:
+        assessment = self._latest_external_breakthrough_assessment(problem_execution.problem_id)
+        if assessment is None:
+            updated_rationale = [
+                *report.rationale,
+                "external_breakthrough_candidate=False",
+                "external_assessment=missing",
+            ]
+            gated_summary = (
+                f"{report.summary} External breakthrough gate=missing; "
+                "reviewer-grade promotion remains open."
+            )
+            if report.status == "breakthrough":
+                return report.model_copy(
+                    update={
+                        "status": "candidate",
+                        "summary": gated_summary,
+                        "rationale": updated_rationale,
+                    }
+                )
+            return report.model_copy(update={"summary": gated_summary, "rationale": updated_rationale})
+
+        publishability_status = str(assessment.get("publishability_status", "missing"))
+        if "external_breakthrough_candidate" in assessment:
+            external_candidate = bool(assessment.get("external_breakthrough_candidate"))
+        elif "tcl_is_significantly_better" in assessment:
+            external_candidate = bool(assessment.get("tcl_is_significantly_better")) and not bool(
+                assessment.get("tcl_is_significantly_worse", False)
+            )
+        else:
+            external_candidate = publishability_status == "reviewer_grade_candidate"
+
+        updated_rationale = [
+            *report.rationale,
+            f"publishability_status={publishability_status}",
+            f"external_breakthrough_candidate={external_candidate}",
+        ]
+        gated_summary = report.summary
+        if not external_candidate:
+            gated_summary = (
+                f"{report.summary} External breakthrough gate={publishability_status}; "
+                "reviewer-grade promotion remains open."
+            )
+        if report.status == "breakthrough" and not external_candidate:
+            return report.model_copy(
+                update={
+                    "status": "candidate",
+                    "summary": gated_summary,
+                    "rationale": updated_rationale,
+                }
+            )
+        return report.model_copy(update={"summary": gated_summary, "rationale": updated_rationale})
+
+    def _problem_execution_query(
+        self,
+        execution: ProblemExecutionReport,
+        verification: VerificationReport,
+    ) -> str:
+        benchmark_names = " ".join(execution.benchmark_names)
+        return (
+            f"problem execution claim review {execution.problem_id} {execution.domain} "
+            f"{benchmark_names} canonical={execution.canonical_comparable} "
+            f"control_score={verification.control_score:.4f} "
+            f"{execution.summary}"
+        )
+
+    def _resolve_claim_inputs(
+        self,
+        *,
+        trial_id: Optional[str],
+        problem_id: Optional[str],
+    ) -> tuple[str, VerificationReport, Optional[ProblemExecutionReport]]:
+        if trial_id:
+            verification = self.store.latest_verification_report(trial_id)
+            if verification is None:
+                verification = self.verify_last_trial(trial_id)
+            return trial_id, verification, None
+
+        if problem_id:
+            execution = self.store.latest_problem_execution(problem_id)
+            if execution is not None:
+                synthetic_trial_id = self._problem_execution_trial_id(problem_id)
+                verification = self.store.latest_verification_report(synthetic_trial_id)
+                if verification is None:
+                    verification = self.verification_runner.build_problem_execution_verification(
+                        execution,
+                        trial_id=synthetic_trial_id,
+                    )
+                    self.store.append_verification_report(verification)
+                    if self.vault is not None:
+                        self.vault.index_verification_report(verification)
+                return synthetic_trial_id, verification, execution
+
+        resolved_trial_id = trial_id or self.store.load_recovery().trial_id
+        if resolved_trial_id:
+            verification = self.store.latest_verification_report(resolved_trial_id)
+            if verification is None:
+                verification = self.verify_last_trial(resolved_trial_id)
+            return resolved_trial_id, verification, None
+
+        raise RuntimeError("No trial or problem execution is available for claim review.")
+
     def _claim_review_query(self, trial_id: str, verification: VerificationReport) -> str:
         return (
             f"claim review {trial_id} thermodynamic calibration dimensionality "
@@ -6558,6 +6804,12 @@ class TAROrchestrator:
                 cwd=self.workspace,
             )
             if proc.returncode != 0 and not execution_report_path.exists():
+                recovered = self._recover_problem_execution_report(proc.stdout or "", execution_report_path)
+                if recovered is None:
+                    recovered = self._recover_problem_execution_report(proc.stderr or "", execution_report_path)
+                if recovered is not None:
+                    proc = SimpleNamespace(returncode=0, stdout=proc.stdout, stderr=proc.stderr)
+            if proc.returncode != 0 and not execution_report_path.exists():
                 report = ProblemExecutionReport(
                     problem_id=study.problem_id,
                     project_id=study.project_id,
@@ -6641,6 +6893,29 @@ class TAROrchestrator:
         )
         self._sync_memory()
         return report
+
+    def _recover_problem_execution_report(
+        self,
+        raw_output: str,
+        execution_report_path: Path,
+    ) -> Optional[ProblemExecutionReport]:
+        text = (raw_output or "").strip()
+        if not text:
+            return None
+        candidates = [text]
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidates.append(text[start : end + 1])
+        for candidate in candidates:
+            try:
+                report = ProblemExecutionReport.model_validate_json(candidate)
+            except Exception:
+                continue
+            execution_report_path.parent.mkdir(parents=True, exist_ok=True)
+            execution_report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+            return report
+        return None
 
     def _build_payload_config(
         self,
@@ -6933,24 +7208,36 @@ class TAROrchestrator:
         trial_id: Optional[str] = None,
         problem_id: Optional[str] = None,
     ) -> ClaimVerdict:
-        resolved_trial_id = trial_id or self.store.load_recovery().trial_id
-        if not resolved_trial_id:
-            raise RuntimeError("No trial is available for claim review.")
-        verification = self.store.latest_verification_report(resolved_trial_id)
-        if verification is None:
-            verification = self.verify_last_trial(resolved_trial_id)
-        benchmark_context = self._resolve_claim_benchmark_context(problem_id)
-        query = self._claim_review_query(
-            trial_id=resolved_trial_id,
-            verification=verification,
+        resolved_trial_id, verification, problem_execution = self._resolve_claim_inputs(
+            trial_id=trial_id,
             problem_id=problem_id,
         )
-        try:
-            research_hits = (
-                self.vault.search(query, n_results=5, require_research_grade=True)
-                if self.vault is not None
-                else []
+        benchmark_context = self._resolve_claim_benchmark_context(problem_id)
+        if problem_execution is not None:
+            query = self._problem_execution_query(problem_execution, verification)
+        else:
+            query = self._claim_review_query(
+                trial_id=resolved_trial_id,
+                verification=verification,
+                problem_id=problem_id,
             )
+        try:
+            if self.vault is None:
+                research_hits = []
+            elif problem_execution is not None:
+                primary_hits = self.vault.search(query, n_results=5, kind="research")
+                if len(primary_hits) < 5:
+                    seen_ids = {hit.document_id for hit in primary_hits}
+                    broader_hits = self.vault.search(query, n_results=5, require_research_grade=True)
+                    for hit in broader_hits:
+                        if hit.document_id not in seen_ids:
+                            primary_hits.append(hit)
+                            seen_ids.add(hit.document_id)
+                        if len(primary_hits) >= 5:
+                            break
+                research_hits = primary_hits
+            else:
+                research_hits = self.vault.search(query, n_results=5, require_research_grade=True)
         except Exception:
             research_hits = []
         evidence_bundle = build_evidence_bundle(query, research_hits)
@@ -6958,25 +7245,45 @@ class TAROrchestrator:
             hit.document_id for hit in research_hits if hit.document_id.startswith("research:")
         ]
         supporting_evidence_ids = [hit.document_id for hit in research_hits]
-        verdict = self.verification_runner.assess_claim(
-            verification,
-            supporting_research_ids=supporting_research_ids,
-            supporting_evidence_ids=supporting_evidence_ids,
-            contradiction_review=evidence_bundle.contradiction_review,
-            canonical_comparable=benchmark_context["canonical_comparable"],
-            verification_report_trial_id=verification.trial_id,
-            benchmark_problem_id=benchmark_context["benchmark_problem_id"],
-            benchmark_execution_created_at=benchmark_context["benchmark_execution_created_at"],
-            benchmark_execution_mode=benchmark_context["benchmark_execution_mode"],
-            supporting_benchmark_ids=benchmark_context["supporting_benchmark_ids"],
-            supporting_benchmark_names=benchmark_context["supporting_benchmark_names"],
-            evidence_bundle_id=evidence_bundle.bundle_id,
-            canonical_comparability_source=benchmark_context["canonical_comparability_source"],
-            verdict_inputs_complete=benchmark_context["verdict_inputs_complete"],
-            linkage_status=benchmark_context["linkage_status"],
-            linkage_note=benchmark_context["linkage_note"],
-            policy=self._claim_policy(),
-        )
+        if problem_execution is not None:
+            verdict = self.verification_runner.assess_problem_execution_claim(
+                problem_execution,
+                verification,
+                supporting_research_ids=supporting_research_ids,
+                supporting_evidence_ids=supporting_evidence_ids,
+                contradiction_review=evidence_bundle.contradiction_review,
+                benchmark_problem_id=benchmark_context["benchmark_problem_id"],
+                benchmark_execution_created_at=benchmark_context["benchmark_execution_created_at"],
+                benchmark_execution_mode=benchmark_context["benchmark_execution_mode"],
+                supporting_benchmark_ids=benchmark_context["supporting_benchmark_ids"],
+                supporting_benchmark_names=benchmark_context["supporting_benchmark_names"],
+                evidence_bundle_id=evidence_bundle.bundle_id,
+                canonical_comparability_source=benchmark_context["canonical_comparability_source"],
+                verdict_inputs_complete=benchmark_context["verdict_inputs_complete"],
+                linkage_status=benchmark_context["linkage_status"],
+                linkage_note=benchmark_context["linkage_note"],
+                policy=self._claim_policy(),
+            )
+        else:
+            verdict = self.verification_runner.assess_claim(
+                verification,
+                supporting_research_ids=supporting_research_ids,
+                supporting_evidence_ids=supporting_evidence_ids,
+                contradiction_review=evidence_bundle.contradiction_review,
+                canonical_comparable=benchmark_context["canonical_comparable"],
+                verification_report_trial_id=verification.trial_id,
+                benchmark_problem_id=benchmark_context["benchmark_problem_id"],
+                benchmark_execution_created_at=benchmark_context["benchmark_execution_created_at"],
+                benchmark_execution_mode=benchmark_context["benchmark_execution_mode"],
+                supporting_benchmark_ids=benchmark_context["supporting_benchmark_ids"],
+                supporting_benchmark_names=benchmark_context["supporting_benchmark_names"],
+                evidence_bundle_id=evidence_bundle.bundle_id,
+                canonical_comparability_source=benchmark_context["canonical_comparability_source"],
+                verdict_inputs_complete=benchmark_context["verdict_inputs_complete"],
+                linkage_status=benchmark_context["linkage_status"],
+                linkage_note=benchmark_context["linkage_note"],
+                policy=self._claim_policy(),
+            )
         self.store.append_claim_verdict(verdict)
         self.store.append_research_decision(
             self._build_research_decision(
@@ -6998,35 +7305,48 @@ class TAROrchestrator:
         trial_id: Optional[str] = None,
         problem_id: Optional[str] = None,
     ) -> BreakthroughReport:
-        resolved_trial_id = trial_id or self.store.load_recovery().trial_id
-        if not resolved_trial_id:
-            raise RuntimeError("No trial is available for breakthrough analysis.")
-        verification = self.store.latest_verification_report(resolved_trial_id)
-        if verification is None:
-            verification = self.verify_last_trial(resolved_trial_id)
-        latest_metric = self._latest_metric(resolved_trial_id)
-        query = (
-            "current ai problems thermodynamic learning calibration robustness "
-            f"trial {resolved_trial_id}"
+        resolved_trial_id, verification, problem_execution = self._resolve_claim_inputs(
+            trial_id=trial_id,
+            problem_id=problem_id,
         )
-        if latest_metric is not None:
-            query += (
-                f" D_PR={latest_metric.effective_dimensionality:.4f}"
-                f" sigma={latest_metric.entropy_sigma:.4f}"
+        if problem_execution is not None:
+            query = self._problem_execution_query(problem_execution, verification)
+        else:
+            latest_metric = self._latest_metric(resolved_trial_id)
+            query = (
+                "current ai problems thermodynamic learning calibration robustness "
+                f"trial {resolved_trial_id}"
             )
+            if latest_metric is not None:
+                query += (
+                    f" D_PR={latest_metric.effective_dimensionality:.4f}"
+                    f" sigma={latest_metric.entropy_sigma:.4f}"
+                )
         research_hits = self.vault.search(query, n_results=5, kind="research") if self.vault is not None else []
-        claim_verdict = self.claim_verdict(resolved_trial_id, problem_id=problem_id)
-        report = self.verification_runner.build_breakthrough_report(
-            verification,
-            supporting_research_ids=[hit.document_id for hit in research_hits],
-            claim_verdict=claim_verdict,
+        claim_verdict = self.claim_verdict(
+            trial_id=None if problem_execution is not None else resolved_trial_id,
+            problem_id=problem_id,
         )
-        if claim_verdict.status == "accepted":
-            report = report.model_copy(update={"status": "breakthrough"})
-        elif claim_verdict.status in {"provisional", "insufficient_evidence"} and report.status == "breakthrough":
-            report = report.model_copy(update={"status": "candidate"})
-        elif claim_verdict.status in {"rejected", "contradicted"}:
-            report = report.model_copy(update={"status": "rejected"})
+        if problem_execution is not None:
+            report = self.verification_runner.build_problem_execution_breakthrough_report(
+                problem_execution,
+                verification,
+                supporting_research_ids=[hit.document_id for hit in research_hits],
+                claim_verdict=claim_verdict,
+            )
+            report = self._apply_external_breakthrough_gate(problem_execution, report)
+        else:
+            report = self.verification_runner.build_breakthrough_report(
+                verification,
+                supporting_research_ids=[hit.document_id for hit in research_hits],
+                claim_verdict=claim_verdict,
+            )
+            if claim_verdict.status == "accepted":
+                report = report.model_copy(update={"status": "breakthrough"})
+            elif claim_verdict.status in {"provisional", "insufficient_evidence"} and report.status == "breakthrough":
+                report = report.model_copy(update={"status": "candidate"})
+            elif claim_verdict.status in {"rejected", "contradicted"}:
+                report = report.model_copy(update={"status": "rejected"})
         self.store.append_breakthrough_report(report)
         if self.vault is not None:
             self.vault.index_breakthrough_report(report)

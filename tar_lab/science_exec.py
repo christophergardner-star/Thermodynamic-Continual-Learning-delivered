@@ -2975,12 +2975,86 @@ def _quantum_seed_schedule(experiment: dict[str, Any]) -> list[int]:
     return deduped
 
 
+def _quantum_grid_value(experiment: dict[str, Any], key: str, default: Any) -> Any:
+    grid = experiment.get("parameter_grid", {})
+    raw = grid.get(key, default)
+    if isinstance(raw, list):
+        if not raw:
+            return default
+        return raw[0]
+    return raw
+
+
+def _quantum_executor_settings(experiment: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "cost_mode": str(_quantum_grid_value(experiment, "cost_mode", "local_z0")),
+        "init_strategy": str(_quantum_grid_value(experiment, "init_strategy", "standard")),
+        "qng_precondition": bool(_quantum_grid_value(experiment, "qng_precondition", False)),
+    }
+
+
+def _quantum_observable(qml: Any, qubits: int, cost_mode: str) -> Any:
+    if cost_mode == "local_z0":
+        return qml.PauliZ(0)
+    if cost_mode == "local_mean_z":
+        observable = qml.PauliZ(0)
+        for wire in range(1, qubits):
+            observable = observable + qml.PauliZ(wire)
+        return observable / qubits
+    if cost_mode == "global_parity":
+        observable = qml.PauliZ(0)
+        for wire in range(1, qubits):
+            observable = observable @ qml.PauliZ(wire)
+        return observable
+    raise ValueError(f"Unsupported quantum cost mode: {cost_mode}")
+
+
+def _quantum_initial_weights(
+    *,
+    rng: np.random.Generator,
+    depth: int,
+    qubits: int,
+    init_scale: float,
+    init_strategy: str,
+) -> np.ndarray:
+    if init_strategy == "standard":
+        return rng.normal(loc=0.0, scale=init_scale, size=(depth, qubits))
+    if init_strategy == "layerwise_decay":
+        weights = np.zeros((depth, qubits), dtype=float)
+        for layer in range(depth):
+            layer_scale = init_scale / max(float(layer + 1), 1.0)
+            weights[layer] = rng.normal(loc=0.0, scale=layer_scale, size=(qubits,))
+        return weights
+    if init_strategy == "identity_blocks":
+        weights = np.zeros((depth, qubits), dtype=float)
+        active_layers = max(1, depth // 2)
+        for layer in range(active_layers):
+            weights[layer] = rng.normal(loc=0.0, scale=init_scale, size=(qubits,))
+        return weights
+    raise ValueError(f"Unsupported quantum init strategy: {init_strategy}")
+
+
+def _flatten_quantum_metric_diagonal(metric: Any, expected_size: int) -> np.ndarray:
+    metric_arr = np.asarray(metric)
+    if metric_arr.ndim == 1 and metric_arr.size == expected_size:
+        return metric_arr.astype(float, copy=False)
+    if metric_arr.ndim == 2 and metric_arr.shape == (expected_size, expected_size):
+        return np.diagonal(metric_arr).astype(float, copy=False)
+    if metric_arr.size == expected_size * expected_size:
+        reshaped = metric_arr.reshape(expected_size, expected_size)
+        return np.diagonal(reshaped).astype(float, copy=False)
+    raise ValueError(
+        f"Metric tensor is incompatible with flattened parameter dimension {expected_size}: shape={metric_arr.shape}"
+    )
+
+
 def _run_quantum_with_pennylane(
     qml: Any,
     pnp: Any,
     experiment: dict[str, Any],
 ) -> tuple[dict[str, float], str] | tuple[dict[str, float], str, dict[str, Any]]:
     grid = experiment.get("parameter_grid", {})
+    settings = _quantum_executor_settings(experiment)
     if experiment["template_id"] == "ansatz_depth_sweep":
         depths = [int(x) for x in grid.get("ansatz_depth", [2, 4, 8])]
         qubits = [int(x) for x in grid.get("qubits", [4])]
@@ -2999,6 +3073,9 @@ def _run_quantum_with_pennylane(
                     depth,
                     init_scale=init_scale,
                     seeds=seeds,
+                    cost_mode=settings["cost_mode"],
+                    init_strategy=settings["init_strategy"],
+                    qng_precondition=settings["qng_precondition"],
                 )
                 variances.append(statistics.mean(seed_variances))
                 for seed, value in zip(seeds, seed_variances):
@@ -3018,7 +3095,12 @@ def _run_quantum_with_pennylane(
                 "barren_plateau_slope": round(slope, 6),
                 "trainability_gap": round(trainability_gap, 6),
             },
-            f"backend=pennylane:default.qubit qubits={qubits} ansatz_depth={depths} init_scale={init_scale} seeds={seeds}.",
+            (
+                "backend=pennylane:default.qubit "
+                f"qubits={qubits} ansatz_depth={depths} init_scale={init_scale} "
+                f"cost_mode={settings['cost_mode']} init_strategy={settings['init_strategy']} "
+                f"qng_precondition={settings['qng_precondition']} seeds={seeds}."
+            ),
             {
                 "sample_count": len(seed_gaps),
                 "primary_metric": "trainability_gap",
@@ -3041,6 +3123,9 @@ def _run_quantum_with_pennylane(
                 depth,
                 init_scale=scale,
                 seeds=seeds,
+                cost_mode=settings["cost_mode"],
+                init_strategy=settings["init_strategy"],
+                qng_precondition=settings["qng_precondition"],
             )
             values.append(statistics.mean(seed_values))
             for seed, value in zip(seeds, seed_values):
@@ -3051,7 +3136,12 @@ def _run_quantum_with_pennylane(
                 "gradient_norm_variance": round(statistics.mean(values), 6),
                 "seed_variance": round(statistics.pstdev(values), 6),
             },
-            f"backend=pennylane:default.qubit qubits={qubits} ansatz_depth={depth} init_scale={init_scales} seeds={seeds}.",
+            (
+                "backend=pennylane:default.qubit "
+                f"qubits={qubits} ansatz_depth={depth} init_scale={init_scales} "
+                f"cost_mode={settings['cost_mode']} init_strategy={settings['init_strategy']} "
+                f"qng_precondition={settings['qng_precondition']} seeds={seeds}."
+            ),
             {
                 "sample_count": len(seed_means),
                 "primary_metric": "gradient_norm_variance",
@@ -3141,11 +3231,22 @@ def _estimate_gradient_variance_samples(
     depth: int,
     init_scale: float,
     seeds: List[int],
+    *,
+    cost_mode: str = "local_z0",
+    init_strategy: str = "standard",
+    qng_precondition: bool = False,
 ) -> list[float]:
     gradient_values: list[float] = []
+    observable = _quantum_observable(qml, qubits, cost_mode)
     for seed in seeds:
         rng = np.random.default_rng(seed)
-        weights_np = rng.normal(loc=0.0, scale=init_scale, size=(depth, qubits))
+        weights_np = _quantum_initial_weights(
+            rng=rng,
+            depth=depth,
+            qubits=qubits,
+            init_scale=init_scale,
+            init_strategy=init_strategy,
+        )
         weights = pnp.array(weights_np, requires_grad=True)
         dev = qml.device("default.qubit", wires=qubits)
 
@@ -3158,13 +3259,14 @@ def _estimate_gradient_variance_samples(
                     qml.CNOT(wires=[wire, wire + 1])
                 if qubits > 1:
                     qml.CNOT(wires=[qubits - 1, 0])
-            return qml.expval(qml.PauliZ(0))
+            return qml.expval(observable)
 
-        def cost(params):
-            return circuit(params)
-
-        grads = qml.grad(cost)(weights)
+        grads = qml.grad(circuit)(weights)
         flat = np.asarray(grads).reshape(-1)
+        if qng_precondition:
+            metric = qml.metric_tensor(circuit, approx="diag")(weights)
+            diag = _flatten_quantum_metric_diagonal(metric, flat.size)
+            flat = flat / np.maximum(diag, 1e-8)
         gradient_values.append(float(np.var(flat)))
     return [max(1e-12, value) for value in gradient_values]
 

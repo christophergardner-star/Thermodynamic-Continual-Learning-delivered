@@ -200,6 +200,41 @@ def test_qml_canonical_depth_and_init_use_real_backend_when_available(monkeypatc
     assert all(item.execution_mode != "analytic_proxy" for item in report.experiments)
 
 
+def test_quantum_executor_settings_support_local_qng_candidate():
+    settings = science_exec._quantum_executor_settings(
+        {
+            "parameter_grid": {
+                "cost_mode": ["local_z0"],
+                "init_strategy": ["standard"],
+                "qng_precondition": [True],
+            }
+        }
+    )
+    assert settings["cost_mode"] == "local_z0"
+    assert settings["init_strategy"] == "standard"
+    assert settings["qng_precondition"] is True
+
+
+def test_quantum_helpers_support_structural_candidate_options():
+    weights = science_exec._quantum_initial_weights(
+        rng=np.random.default_rng(0),
+        depth=4,
+        qubits=3,
+        init_scale=0.2,
+        init_strategy="identity_blocks",
+    )
+    assert weights.shape == (4, 3)
+    assert np.allclose(weights[2:], 0.0)
+
+    class _FakeQML:
+        @staticmethod
+        def PauliZ(wire):
+            return float(wire + 1)
+
+    observable = science_exec._quantum_observable(_FakeQML(), 4, "local_mean_z")
+    assert observable == 2.5
+
+
 def test_qml_canonical_statistical_summary_can_be_ready_with_five_seed_evidence(monkeypatch, tmp_path: Path):
     registry = ScienceProfileRegistry(str(REPO_ROOT))
     profile = registry.get("quantum_ml")

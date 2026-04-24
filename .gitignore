@@ -13,3 +13,4 @@ tar_runs/
 anchors/
 training_artifacts/
 eval_artifacts/
+phase14_run.log

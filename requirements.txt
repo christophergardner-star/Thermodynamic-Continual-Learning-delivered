@@ -9,6 +9,7 @@ datasets
 docker
 einops
 evaluate
+fastapi
 faster-whisper
 gymnasium
 matplotlib
@@ -42,3 +43,4 @@ torch
 torchmetrics
 tqdm
 transformers
+uvicorn

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from tar_lab.research_ingest import ResearchIngestor
+from tar_lab.research_ingest import ResearchIngestor, _SourceSpec
 from tar_lab.schemas import CrossDomainBridgeRecord, ResearchDocument
 
 
@@ -19,6 +20,23 @@ def _doc(*, document_id: str, domain: str, title: str, summary: str) -> Research
         summary=summary,
         url=f"https://example.test/{document_id}",
     )
+
+
+def _sample_arxiv_feed() -> str:
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/1234.5678v1</id>
+    <published>2026-04-23T00:00:00Z</published>
+    <title> Thermodynamic regularization for continual learning </title>
+    <summary> We study calibration robustness under distribution shift. </summary>
+    <author><name>Alice Example</name></author>
+    <category term="cs.LG" />
+    <link href="http://arxiv.org/abs/1234.5678v1" rel="alternate" type="text/html" />
+    <link title="pdf" href="http://arxiv.org/pdf/1234.5678v1" rel="related" type="application/pdf" />
+  </entry>
+</feed>
+"""
 
 
 def test_default_sources_contains_seven_domains(tmp_path):
@@ -39,6 +57,46 @@ def test_default_sources_contains_seven_domains(tmp_path):
         "q-bio.NC",
     }
     assert expected.issubset(arxiv_domains)
+
+
+def test_parse_arxiv_extracts_pdf_url(tmp_path):
+    ingestor = ResearchIngestor(str(tmp_path))
+    source = _SourceSpec(kind="arxiv", name="arXiv cs.LG", url="https://export.arxiv.org/api/query")
+
+    docs = ingestor._parse_arxiv(_sample_arxiv_feed(), source)
+
+    assert len(docs) == 1
+    assert docs[0].pdf_url == "https://arxiv.org/pdf/1234.5678v1.pdf"
+
+
+def test_ingest_downloads_pdfs_and_reports_failures(tmp_path, monkeypatch):
+    ingestor = ResearchIngestor(str(tmp_path))
+    arxiv_source = _SourceSpec(kind="arxiv", name="arXiv cs.LG", url="https://export.arxiv.org/api/query")
+    rss_source = _SourceSpec(kind="rss", name="RSS 1", url="https://example.test/rss")
+
+    monkeypatch.setattr(
+        ingestor,
+        "_default_sources",
+        lambda topic, max_results: [arxiv_source, rss_source],
+    )
+
+    def fake_fetch_text(url: str) -> str:
+        if url == arxiv_source.url:
+            return _sample_arxiv_feed()
+        raise RuntimeError("rss unavailable")
+
+    monkeypatch.setattr(ingestor, "_fetch_text", staticmethod(fake_fetch_text))
+    monkeypatch.setattr(ingestor, "_fetch_bytes", staticmethod(lambda url: b"%PDF-1.4 fake pdf"))
+
+    report = ingestor.ingest("thermodynamics", max_results=1)
+
+    assert report.indexed == 1
+    assert report.downloaded_pdfs == 1
+    assert len(report.downloaded_paths) == 1
+    assert Path(report.downloaded_paths[0]).exists()
+    assert report.documents[0].local_pdf_path == report.downloaded_paths[0]
+    assert report.documents[0].pdf_url == "https://arxiv.org/pdf/1234.5678v1.pdf"
+    assert any(item["stage"] == "fetch_source" for item in report.failures)
 
 
 def test_cross_domain_bridge_detected_shared_formalism(tmp_path):

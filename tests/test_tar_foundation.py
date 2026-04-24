@@ -31,6 +31,8 @@ from tar_lab.schemas import (
     GovernorThresholds,
     KnowledgeGraphEntry,
     LocalLLMConfig,
+    PaperArtifact,
+    PaperIngestReport,
     ProblemExecutionReport,
     RecoveryState,
     ResearchDocument,
@@ -340,6 +342,66 @@ def test_research_ingest_indexes_documents():
             hits = orchestrator.vault.search("current ai problems calibration", n_results=3, kind="research")
             assert hits
             assert hits[0].document_id == "research:arxiv:test-paper"
+        finally:
+            orchestrator.shutdown()
+
+
+def test_research_ingest_routes_downloaded_pdfs_into_literature_engine():
+    with tempfile.TemporaryDirectory() as tmp:
+        orchestrator = TAROrchestrator(workspace=tmp)
+        pdf_path = Path(tmp) / "tar_state" / "literature" / "arxiv_pdfs" / "paper.pdf"
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        pdf_path.write_bytes(b"%PDF-1.4 fake")
+        try:
+            orchestrator.research_ingestor.ingest = lambda topic, max_results=6: ResearchIngestReport(  # type: ignore[assignment]
+                topic=topic,
+                fetched=1,
+                indexed=1,
+                sources=["arxiv"],
+                documents=[
+                    ResearchDocument(
+                        document_id="arxiv:test-paper",
+                        source_kind="arxiv",
+                        source_name="arXiv cs.AI",
+                        title="Test Research Paper",
+                        summary="Calibration drift is a core current AI problem.",
+                        url="https://example.com/paper",
+                        pdf_url="https://example.com/paper.pdf",
+                        local_pdf_path=str(pdf_path),
+                        tags=["calibration", "robustness"],
+                        problem_statements=["Calibration drift is a core current AI problem."],
+                    )
+                ],
+                downloaded_pdfs=1,
+                downloaded_paths=[str(pdf_path)],
+            )
+            captured: dict[str, object] = {}
+
+            def fake_ingest_paths(paths: list[str]) -> PaperIngestReport:
+                captured["paths"] = list(paths)
+                return PaperIngestReport(
+                    requested_paths=list(paths),
+                    ingested=1,
+                    stored_total=1,
+                    artifacts=[
+                        PaperArtifact(
+                            paper_id="paper:test-paper",
+                            source_path=str(pdf_path),
+                            title="Parsed Test Paper",
+                        )
+                    ],
+                    manifest_id="manifest:test",
+                    manifest_path=str(Path(tmp) / "tar_state" / "literature" / "manifests" / "manifest__test.json"),
+                )
+
+            orchestrator.literature_engine.ingest_paths = fake_ingest_paths  # type: ignore[assignment]
+
+            report = orchestrator.ingest_research(topic="current ai problems", max_results=1)
+
+            assert captured["paths"] == [str(pdf_path)]
+            assert report.paper_artifact_count == 1
+            assert report.paper_manifest_id == "manifest:test"
+            assert report.paper_failures == []
         finally:
             orchestrator.shutdown()
 
@@ -675,6 +737,51 @@ def test_orchestrator_run_problem_study_reads_execution_report():
             assert orchestrator.vault is not None
             hits = orchestrator.vault.search("problem execution barren plateaus", n_results=5, kind="problem_execution")
             assert hits
+        finally:
+            orchestrator.shutdown()
+
+
+def test_orchestrator_run_problem_study_recovers_report_from_stdout():
+    with tempfile.TemporaryDirectory() as tmp:
+        profile_dir = Path(tmp) / "science_profiles"
+        source_dir = REPO_ROOT / "science_profiles"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        for source in source_dir.glob("*.json"):
+            (profile_dir / source.name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+        orchestrator = TAROrchestrator(workspace=tmp)
+        try:
+            study = orchestrator.study_problem("Investigate barren plateaus in quantum AI", build_env=False, max_results=0)
+            report_path = Path(study.environment.execution_report_path)
+            fake = ProblemExecutionReport(
+                problem_id=study.problem_id,
+                problem=study.problem,
+                profile_id=study.profile_id,
+                domain=study.domain,
+                execution_mode="local_python",
+                imports_ok=["numpy", "pennylane"],
+                experiments=[],
+                summary="Recovered from stdout.",
+                recommended_next_step="Persist the recovered report.",
+                artifact_path=str(report_path),
+                status="completed",
+            )
+            original_run = subprocess.run
+            try:
+                subprocess.run = lambda *args, **kwargs: SimpleNamespace(  # type: ignore[assignment]
+                    returncode=1,
+                    stdout=fake.model_dump_json(indent=2),
+                    stderr="transient wrapper failure",
+                )
+                report = orchestrator.run_problem_study(problem_id=study.problem_id, use_docker=False)
+            finally:
+                subprocess.run = original_run  # type: ignore[assignment]
+            assert report.status == "completed"
+            assert report.summary == "Recovered from stdout."
+            assert report_path.exists()
+            stored = orchestrator.store.latest_problem_execution(study.problem_id)
+            assert stored is not None
+            assert stored.status == "completed"
         finally:
             orchestrator.shutdown()
 

@@ -267,6 +267,10 @@ class ContinualLearningBenchmarkConfig(StrictModel):
     # Higher D_PR = more structured representation = stronger penalty.
     # Set to 0.0 to disable (governor-only TCL, no weight consolidation).
     tcl_penalty_lambda: float = 0.01
+    tcl_alpha: float = 0.5
+    tcl_ordered_lr_scale: float = 0.5
+    tcl_disordered_lr_scale: float = 1.2
+    tcl_reset_on_task_boundary: bool = True
     augmentation: str = "flip_normalize"
 
 
@@ -314,6 +318,56 @@ class BaselineComparisonResult(StrictModel):
     tcl_is_significantly_worse: bool
     honest_assessment: str
     statistical_test_ids: List[str]
+
+
+class ExternalBreakthroughAssessment(StrictModel):
+    assessment_id: str
+    created_at: str
+    problem_id: str = ""
+    domain: str = ""
+    benchmark: str = ""
+    setting: str = ""
+    assessment_kind: str = "external_breakthrough_candidate"
+    strong_baseline: str = ""
+    primary_metric: str = ""
+    external_breakthrough_candidate: bool = False
+    publishability_status: str = "no_reviewer_grade_signal"
+    p_value: float = -1.0
+    effect_size: float = 0.0
+    summary: str
+
+
+class TCLMechanismCandidate(StrictModel):
+    name: str
+    method: str
+    config_overrides: Dict[str, Any] = Field(default_factory=dict)
+    mean_forgetting: float
+    std_forgetting: float
+    mean_accuracy: float
+    std_accuracy: float
+    mean_jaf: float
+    delta_vs_sgd: float
+    wins_vs_sgd: int = Field(default=0, ge=0)
+
+
+class TCLMechanismSearchResult(StrictModel):
+    search_id: str
+    created_at: str
+    problem_id: str = ""
+    benchmark: str = "split_cifar10"
+    setting: str = "class_incremental"
+    backbone: str = "tiny"
+    seeds: List[int] = Field(default_factory=list)
+    baseline_method: str = "sgd_baseline"
+    strong_baseline_method: str = "ewc"
+    candidates: List[TCLMechanismCandidate] = Field(default_factory=list)
+    best_candidate_name: str
+    best_delta_vs_strong_baseline: float
+    p_value_vs_strong_baseline: float = -1.0
+    effect_size_vs_strong_baseline: float = 0.0
+    external_breakthrough_candidate: bool = False
+    publishability_status: str = "no_reviewer_grade_signal"
+    summary: str
 
 
 class EnvironmentManifest(StrictModel):
@@ -918,6 +972,8 @@ class ResearchDocument(StrictModel):
     authors: List[str] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)
     problem_statements: List[str] = Field(default_factory=list)
+    pdf_url: Optional[str] = None
+    local_pdf_path: Optional[str] = None
 
 
 class ResearchIngestReport(StrictModel):
@@ -926,6 +982,14 @@ class ResearchIngestReport(StrictModel):
     indexed: int = Field(ge=0)
     sources: List[str] = Field(default_factory=list)
     documents: List[ResearchDocument] = Field(default_factory=list)
+    failures: List[Dict[str, str]] = Field(default_factory=list)
+    downloaded_pdfs: int = Field(default=0, ge=0)
+    downloaded_paths: List[str] = Field(default_factory=list)
+    paper_artifact_count: int = Field(default=0, ge=0)
+    paper_conflict_count: int = Field(default=0, ge=0)
+    paper_failures: List[Dict[str, str]] = Field(default_factory=list)
+    paper_manifest_id: Optional[str] = None
+    paper_manifest_path: Optional[str] = None
 
 
 class FrontierGapRecord(StrictModel):

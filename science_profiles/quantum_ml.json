@@ -125,7 +125,7 @@
       "benchmark": "depth_trainability_curve",
       "benchmark_family": "depth_trainability_curve",
       "metrics": ["gradient_norm_variance", "barren_plateau_slope", "trainability_gap"],
-      "parameter_grid": {"ansatz_depth": [2, 4, 8, 12], "qubits": [4, 8]},
+      "parameter_grid": {"ansatz_depth": [2, 4, 8, 12], "qubits": [4, 8], "init_scale": [0.15], "cost_mode": ["local_z0"], "init_strategy": ["standard"], "qng_precondition": [true]},
       "success_criteria": ["gradient collapse is delayed or flattened over depth"]
     },
     {
@@ -135,7 +135,7 @@
       "benchmark": "initialization_trainability",
       "benchmark_family": "initialization_trainability",
       "metrics": ["gradient_norm_variance", "seed_variance"],
-      "parameter_grid": {"init_scale": [0.01, 0.05, 0.1], "seed": [7, 18, 29]},
+      "parameter_grid": {"init_scale": [0.01, 0.05, 0.1], "seed": [7, 18, 29], "cost_mode": ["local_z0"], "init_strategy": ["standard"], "qng_precondition": [true]},
       "success_criteria": ["one initialization family avoids immediate gradient collapse"]
     },
     {
@@ -145,7 +145,7 @@
       "benchmark": "noise_trainability_ablation",
       "benchmark_family": "noise_trainability_ablation",
       "metrics": ["shot_noise_robustness", "gradient_norm_variance", "trainability_gap"],
-      "parameter_grid": {"shots": [128, 512], "noise_level": [0.0, 0.01, 0.05], "qubits": [3], "ansatz_depth": [3], "init_scale": [0.05], "seed": [7, 18]},
+      "parameter_grid": {"shots": [128, 512], "noise_level": [0.0, 0.01, 0.05], "qubits": [3], "ansatz_depth": [3], "init_scale": [0.15], "seed": [7, 18]},
       "success_criteria": ["trainability remains bounded under moderate shot noise"]
     }
   ],

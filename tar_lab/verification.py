@@ -7,12 +7,15 @@ from typing import Any, Iterable, List, Optional
 
 from tar_lab.schemas import (
     AblationResult,
+    CalibrationBin,
     BreakthroughReport,
     CalibrationReport,
     ClaimAcceptancePolicy,
     ClaimVerdict,
     ContradictionReview,
     FalsificationTrigger,
+    ProblemExecutionReport,
+    ProblemExperimentResult,
     SeedRunResult,
     SeedVarianceReport,
     TrainingPayloadConfig,
@@ -117,6 +120,277 @@ class VerificationRunner:
             summary = (
                 f"Trial {verification.trial_id} does not yet qualify as a breakthrough: "
                 f"control_score={control_score:.3f}, verdict={verification.verdict}."
+            )
+
+        return BreakthroughReport(
+            trial_id=verification.trial_id,
+            status=status,
+            summary=summary,
+            novelty_score=novelty_score,
+            stability_score=round(stability_score, 6),
+            calibration_score=round(calibration_score, 6),
+            supporting_research_ids=supporting_research_ids or [],
+            rationale=rationale,
+            verification=verification,
+            claim_verdict=claim_verdict,
+        )
+
+    def build_problem_execution_verification(
+        self,
+        execution: ProblemExecutionReport,
+        *,
+        trial_id: Optional[str] = None,
+    ) -> VerificationReport:
+        completed = [item for item in execution.experiments if item.status == "completed"]
+        ready = [
+            item
+            for item in completed
+            if item.statistical_summary is not None and item.statistical_summary.statistically_ready
+        ]
+        signal_scores = [self._problem_execution_signal(item) for item in completed]
+        control_score = round(sum(signal_scores), 6)
+        sample_counts = [
+            item.statistical_summary.sample_count
+            for item in ready
+            if item.statistical_summary is not None
+        ]
+        primary_stds = [self._problem_execution_primary_std(item) for item in ready]
+        primary_means = [self._problem_execution_primary_mean(item) for item in ready]
+        calibration_ece_values = [
+            float(item.metrics.get("calibration_ece") or item.metrics.get("ece") or 0.0)
+            for item in completed
+            if "calibration_ece" in item.metrics or "ece" in item.metrics
+        ]
+        accuracy_values = [
+            float(
+                item.metrics.get("accuracy")
+                or item.metrics.get("top1_accuracy")
+                or item.metrics.get("node_accuracy")
+                or 0.0
+            )
+            for item in completed
+            if any(key in item.metrics for key in ("accuracy", "top1_accuracy", "node_accuracy"))
+        ]
+        calibration_ece = mean(calibration_ece_values) if calibration_ece_values else 0.0
+        accuracy = mean(accuracy_values) if accuracy_values else min(1.0, control_score / max(len(completed), 1))
+        mean_confidence = max(0.0, min(1.0, 1.0 - calibration_ece))
+
+        ablations = [
+            AblationResult(
+                name=f"benchmark_family::{item.template_id}",
+                training_loss=max(0.0, 1.0 - signal),
+                effective_dimensionality=max(0.0, self._problem_execution_primary_mean(item)),
+                equilibrium_fraction=1.0 if item.canonical_comparable else 0.5,
+                calibration_ece=max(0.0, 1.0 - signal),
+                score=round(signal, 6),
+                delta_vs_control=round(signal - 0.5, 6),
+            )
+            for item, signal in zip(completed, signal_scores)
+        ]
+
+        stable = (
+            execution.status == "completed"
+            and execution.benchmark_statistical_summary is not None
+            and execution.benchmark_statistical_summary.statistically_ready
+        )
+        verdict: str
+        if stable and execution.canonical_comparable:
+            verdict = "verified"
+        elif execution.status == "completed":
+            verdict = "inconclusive"
+        else:
+            verdict = "unstable"
+
+        return VerificationReport(
+            trial_id=trial_id or f"problem_execution:{execution.problem_id}",
+            control_score=control_score,
+            seed_variance=SeedVarianceReport(
+                num_runs=min(sample_counts) if sample_counts else 0,
+                loss_mean=mean([max(0.0, 1.0 - score) for score in signal_scores]) if signal_scores else 1.0,
+                loss_std=_float_std(max(0.0, 1.0 - score) for score in signal_scores),
+                dimensionality_mean=mean(primary_means) if primary_means else 0.0,
+                dimensionality_std=mean(primary_stds) if primary_stds else 0.0,
+                calibration_ece_mean=calibration_ece,
+                stable=stable,
+                runs=[
+                    SeedRunResult(
+                        seed=idx,
+                        training_loss=max(0.0, 1.0 - score),
+                        effective_dimensionality=max(0.0, self._problem_execution_primary_mean(item)),
+                        equilibrium_fraction=1.0 if item.canonical_comparable else 0.5,
+                        calibration_ece=calibration_ece,
+                    )
+                    for idx, (item, score) in enumerate(zip(completed, signal_scores), start=1)
+                ],
+            ),
+            calibration=CalibrationReport(
+                ece=calibration_ece,
+                accuracy=accuracy,
+                mean_confidence=mean_confidence,
+                bins=[
+                    CalibrationBin(
+                        lower=0.0,
+                        upper=1.0,
+                        count=max(len(completed), 1),
+                        mean_confidence=mean_confidence,
+                        accuracy=accuracy,
+                    )
+                ],
+            ),
+            ablations=ablations,
+            verdict=verdict,  # type: ignore[arg-type]
+            recommendations=[execution.recommended_next_step],
+        )
+
+    def assess_problem_execution_claim(
+        self,
+        execution: ProblemExecutionReport,
+        verification: VerificationReport,
+        *,
+        supporting_research_ids: Optional[List[str]] = None,
+        supporting_evidence_ids: Optional[List[str]] = None,
+        contradiction_review: Optional[ContradictionReview] = None,
+        benchmark_problem_id: Optional[str] = None,
+        benchmark_execution_created_at: Optional[str] = None,
+        benchmark_execution_mode: Optional[str] = None,
+        supporting_benchmark_ids: Optional[List[str]] = None,
+        supporting_benchmark_names: Optional[List[str]] = None,
+        evidence_bundle_id: Optional[str] = None,
+        canonical_comparability_source: str = "problem_execution",
+        verdict_inputs_complete: bool = True,
+        linkage_status: str = "exact",
+        linkage_note: Optional[str] = None,
+        policy: Optional[ClaimAcceptancePolicy] = None,
+    ) -> ClaimVerdict:
+        policy = policy or ClaimAcceptancePolicy()
+        support_ids = list(dict.fromkeys(supporting_research_ids or []))
+        evidence_ids = list(dict.fromkeys(supporting_evidence_ids or []))
+        contradictions = contradiction_review.contradiction_count if contradiction_review is not None else 0
+        contradiction_clear = contradictions <= policy.max_allowed_contradictions
+        enough_support = len(support_ids) >= policy.min_supporting_sources
+        canonical_ok = (not policy.require_canonical_benchmark) or execution.canonical_comparable
+        stat_ready = (
+            execution.benchmark_statistical_summary is not None
+            and execution.benchmark_statistical_summary.statistically_ready
+        )
+        enough_runs = verification.seed_variance.num_runs >= policy.min_seed_runs
+        strong_signal = verification.control_score >= 1.8
+        directional_signal = verification.control_score >= 0.8
+
+        rationale: list[str] = [
+            f"problem execution status is {execution.status}",
+            (
+                f"{execution.benchmark_statistical_summary.statistically_ready_experiment_count}/"
+                f"{execution.benchmark_statistical_summary.completed_experiment_count} completed experiments are statistically ready"
+                if execution.benchmark_statistical_summary is not None
+                else "benchmark statistical summary is unavailable"
+            ),
+            f"canonical comparability is {'satisfied' if execution.canonical_comparable else 'not satisfied'}",
+            f"control_score={verification.control_score:.3f}",
+            f"literature support count={len(support_ids)}",
+        ]
+        if linkage_note:
+            rationale.append(linkage_note)
+        if contradiction_clear:
+            rationale.append("no unresolved contradictions remain above policy")
+        else:
+            rationale.append("contradictory evidence remains unresolved")
+
+        if not contradiction_clear:
+            status = "contradicted"
+        elif execution.status != "completed":
+            status = "rejected"
+        elif not verdict_inputs_complete or linkage_status != "exact":
+            status = "insufficient_evidence"
+        elif not stat_ready or not enough_runs:
+            status = "insufficient_evidence"
+        elif canonical_ok and enough_support and strong_signal and verification.verdict == "verified":
+            status = "accepted"
+        elif canonical_ok and stat_ready and directional_signal:
+            status = "provisional"
+        else:
+            status = "rejected"
+
+        satisfied = sum(
+            int(flag)
+            for flag in (
+                execution.status == "completed",
+                stat_ready,
+                enough_runs,
+                canonical_ok,
+                enough_support,
+                contradiction_clear,
+                directional_signal,
+            )
+        )
+        confidence = round(min(1.0, satisfied / 7.0), 6)
+        return ClaimVerdict(
+            verdict_id=f"claim-{verification.trial_id}",
+            trial_id=verification.trial_id,
+            decision_scope="trial_local",
+            status=status,  # type: ignore[arg-type]
+            rationale=rationale,
+            policy=policy,
+            supporting_research_ids=support_ids,
+            supporting_evidence_ids=evidence_ids,
+            verification_report_trial_id=verification.trial_id,
+            benchmark_problem_id=benchmark_problem_id or execution.problem_id,
+            benchmark_execution_created_at=benchmark_execution_created_at or execution.executed_at,
+            benchmark_execution_mode=benchmark_execution_mode or execution.execution_mode,
+            supporting_benchmark_ids=list(dict.fromkeys(supporting_benchmark_ids or execution.benchmark_ids)),
+            supporting_benchmark_names=list(dict.fromkeys(supporting_benchmark_names or execution.benchmark_names)),
+            evidence_bundle_id=evidence_bundle_id,
+            canonical_comparability_source=canonical_comparability_source,  # type: ignore[arg-type]
+            verdict_inputs_complete=verdict_inputs_complete,
+            linkage_status=linkage_status,  # type: ignore[arg-type]
+            linkage_note=linkage_note,
+            contradiction_review=contradiction_review,
+            canonical_benchmark_required=policy.require_canonical_benchmark,
+            canonical_benchmark_satisfied=execution.canonical_comparable,
+            confidence=confidence,
+        )
+
+    def build_problem_execution_breakthrough_report(
+        self,
+        execution: ProblemExecutionReport,
+        verification: VerificationReport,
+        *,
+        supporting_research_ids: Optional[List[str]] = None,
+        claim_verdict: Optional[ClaimVerdict] = None,
+    ) -> BreakthroughReport:
+        stability_score = 1.0 if verification.seed_variance.stable else 0.45
+        calibration_score = max(0.0, 1.0 - min(1.0, verification.calibration.ece))
+        novelty_score = round(min(1.0, (0.2 * verification.control_score) + (0.2 * len(execution.benchmark_ids))), 6)
+
+        rationale = [
+            f"completed_experiments={len([item for item in execution.experiments if item.status == 'completed'])}",
+            f"canonical_comparable={execution.canonical_comparable}",
+            (
+                f"statistically_ready_experiments={execution.benchmark_statistical_summary.statistically_ready_experiment_count}"
+                if execution.benchmark_statistical_summary is not None
+                else "statistical_summary_missing"
+            ),
+        ]
+        if claim_verdict is not None:
+            rationale.append(f"claim_verdict={claim_verdict.status}")
+
+        if claim_verdict is not None and claim_verdict.status == "accepted":
+            status = "breakthrough"
+            summary = (
+                f"Problem execution {execution.problem_id} qualifies as a benchmark-backed breakthrough: "
+                f"control_score={verification.control_score:.3f}, canonical={execution.canonical_comparable}."
+            )
+        elif claim_verdict is not None and claim_verdict.status in {"provisional", "insufficient_evidence"}:
+            status = "candidate"
+            summary = (
+                f"Problem execution {execution.problem_id} is a candidate signal: "
+                f"benchmark evidence is promising, but promotion remains gated on claim evidence."
+            )
+        else:
+            status = "rejected"
+            summary = (
+                f"Problem execution {execution.problem_id} does not yet qualify as a breakthrough: "
+                f"claim_verdict={claim_verdict.status if claim_verdict is not None else 'missing'}."
             )
 
         return BreakthroughReport(
@@ -252,6 +526,66 @@ class VerificationRunner:
             canonical_benchmark_satisfied=canonical_comparable,
             confidence=confidence,
         )
+
+    @staticmethod
+    def _problem_execution_primary_metric(experiment: ProblemExperimentResult) -> tuple[str | None, float | None]:
+        summary = experiment.statistical_summary
+        if summary is not None and summary.metrics:
+            metric = summary.metrics[0]
+            return metric.metric_name, metric.mean
+        if experiment.metrics:
+            first_key = next(iter(experiment.metrics))
+            return first_key, float(experiment.metrics[first_key])
+        return None, None
+
+    @staticmethod
+    def _problem_execution_primary_mean(experiment: ProblemExperimentResult) -> float:
+        _, value = VerificationRunner._problem_execution_primary_metric(experiment)
+        return max(0.0, float(value or 0.0))
+
+    @staticmethod
+    def _problem_execution_primary_std(experiment: ProblemExperimentResult) -> float:
+        summary = experiment.statistical_summary
+        if summary is None or not summary.metrics:
+            return 0.0
+        return float(summary.metrics[0].std_dev or 0.0)
+
+    @staticmethod
+    def _problem_execution_signal(experiment: ProblemExperimentResult) -> float:
+        score = 0.0
+        if experiment.status == "completed":
+            score += 0.3
+        if experiment.canonical_comparable:
+            score += 0.2
+        if experiment.provenance_complete:
+            score += 0.1
+        if experiment.statistical_summary is not None and experiment.statistical_summary.statistically_ready:
+            score += 0.25
+        if experiment.benchmark_alignment == "aligned":
+            score += 0.1
+        if not experiment.proxy_benchmark_used:
+            score += 0.05
+        metric_name, metric_value = VerificationRunner._problem_execution_primary_metric(experiment)
+        if metric_name is not None and metric_value is not None:
+            normalized = 0.0
+            if metric_name in {
+                "accuracy",
+                "top1_accuracy",
+                "node_accuracy",
+                "auroc",
+                "f1",
+                "shot_noise_robustness",
+                "corruption_robustness",
+                "sample_efficiency",
+            }:
+                normalized = max(0.0, min(1.0, float(metric_value)))
+            elif metric_name == "trainability_gap":
+                normalized = max(0.0, 1.0 - min(1.0, abs(float(metric_value) - 1.0)))
+            elif metric_name == "gradient_norm_variance":
+                normalized = 1.0 if float(metric_value) > 1e-4 else 0.0
+            if normalized > 0.0:
+                score += 0.1 * normalized
+        return round(min(1.0, score), 6)
 
     def suggest_falsification_triggers(
         self,
