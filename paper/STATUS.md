@@ -2,7 +2,7 @@
 
 **Target venue:** ICLR 2027
 **Lead researcher:** Christopher Gardner
-**Current phase:** Phase 11 complete — ablation done. EWC λ sweep and SI sweep next.
+**Current phase:** Phase 13 SI sweep pending re-run (pod lost). Phase 11 ablation and Phase 12 EWC sweep complete.
 
 ## Contributions (locked — do not expand without discussion)
 1. TCL method — thermodynamic governor with per-task entropy anchoring + D_PR-weighted L2 penalty
@@ -16,8 +16,10 @@
 | s1_introduction.tex | SCAFFOLD | After ablation + SI sweep complete |
 | s2_background.tex | NOT STARTED | — |
 | s3_method.tex | NOT STARTED | — |
-| s4_experiments.tex | PHASE 11 LOCKED | After EWC λ sweep + SI sweep → extend with appendix subsections |
+| s4_experiments.tex | PHASE 12 LOCKED | After SI sweep (Phase 13) → add sB appendix reference |
 | s5_discussion.tex | NOT STARTED | — |
+| sA_ewc_sweep.tex | COMPLETE | Phase 12 data locked. Written and committed. |
+| sB_si_robustness.tex | NOT STARTED | Blocked on Phase 13 re-run |
 | references.bib | NOT STARTED | — |
 
 ## Data in hand
@@ -48,15 +50,14 @@
   - λ=1000 collapse: seed 1 only (A=0.500). 4/5 seeds λ=1000 works; 5/5 seeds λ=10000 collapses.
   - λ=1000 JAF std=0.120 vs TCL JAF std=0.042 — EWC instability visible in JAF variance.
   - TCL mean forgetting tied with EWC λ=1000 (0.1275 vs 0.1282, p=0.954). TCL JAF higher (0.672 vs 0.633).
-  - Appendix file: sA_ewc_sweep.tex (to be written).
+  - Appendix file: sA_ewc_sweep.tex (WRITTEN — locked).
 
 ## Pending experiments — SEQUENCED (reviewer defence before scope extension)
 
 ### Reviewer defence (run these first — gate on ablation result before extending)
 - [x] **[1] Ablation:** DONE. Subsection added to s4. See Phase 11 data above.
 - [x] **[2] EWC λ sweep ResNet-18:** DONE. 5 seeds, λ∈{10,1000,10000}. See Phase 12 data above. Appendix sA_ewc_sweep.tex to be written.
-- [ ] **[3] SI robustness sweep (minimal):** c∈{0.01, 0.1, 0.5}, ξ=0.001 fixed, 3 seeds = 9 runs. Appendix. Scopes SI degeneracy claim. Full 2D grid only if surprising interaction effects in this pass.
-- [ ] **[3] SI robustness sweep (minimal):** c∈{0.01, 0.1, 0.5}, ξ=0.001 fixed, 3 seeds = 9 runs. Appendix. Scopes SI degeneracy claim. Full 2D grid only if surprising interaction effects in this pass.
+- [ ] **[3] SI robustness sweep (minimal):** c∈{0.01, 0.1, 0.5}, ξ=0.001 fixed, 3 seeds = 9 runs. Appendix sB_si_robustness.tex. Scopes SI degeneracy claim. **Pod lost — needs re-run.**
 
 ### Scope extension (only after all three defence experiments land clean)
 - [ ] **[4] Class-incremental CIFAR-10:** TCL + baselines, 5 seeds = 20 runs. Tests whether regime signal transfers to class-IL setting.

@@ -2,6 +2,7 @@
 # These are not TAR's locked runtime manifests; reproducible runs still use the
 # manifest builders under tar_lab/reproducibility.py.
 accelerate
+faiss-cpu
 albumentations
 autoray
 chromadb
