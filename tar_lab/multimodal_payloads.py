@@ -6,7 +6,7 @@ import json
 import math
 import random
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 from uuid import uuid4
 
 import numpy as np
@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
+from tar_optimizer_backend import build_optimizer, maybe_apply_optimizer_safety
 from tar_lab.errors import ScientificValidityError
 from tar_lab.schemas import (
     BackendProvenance,
@@ -725,6 +726,7 @@ def run_split_cifar10_benchmark(
     config: ContinualLearningBenchmarkConfig,
     method: str,
     observer: Optional[ActivationThermoObserver] = None,
+    observer_factory: Optional[Callable[[nn.Module], ActivationThermoObserver]] = None,
     workspace: Optional[str] = None,
     backbone: str = "tiny",
 ) -> ContinualLearningBenchmarkResult:
@@ -884,10 +886,13 @@ def run_split_cifar10_benchmark(
         # all ResNet layers is the dominant cost (~1s/batch on L40S).
         # Regime detection (sigma/rho/LR) still works without it.
         _dpr = backbone != "resnet18"
-        observer = ActivationThermoObserver(
-            trunk, stat_window_size=5, alpha=config.tcl_alpha,
-            warmup_batches=_warmup, compute_dpr=_dpr,
-        )
+        if observer_factory is not None:
+            observer = observer_factory(trunk)
+        else:
+            observer = ActivationThermoObserver(
+                trunk, stat_window_size=5, alpha=config.tcl_alpha,
+                warmup_batches=_warmup, compute_dpr=_dpr,
+            )
 
     accuracy_matrix: dict[int, dict[int, float]] = {}
     base_lr = 0.01
@@ -908,7 +913,16 @@ def run_split_cifar10_benchmark(
         ):
             observer.reset_for_new_task()
 
-        optimizer = torch.optim.SGD(all_params, lr=base_lr, momentum=0.9, weight_decay=1e-4)
+        optimizer = build_optimizer(
+            all_params,
+            backend=config.optimizer_backend,
+            lr=base_lr,
+            weight_decay=1e-4,
+            momentum=0.9,
+            workspace=workspace,
+            run_label=f"{config.dataset}-{method}-seed{config.seed}-task{train_task_idx}",
+            config=config.optimizer_backend_config,
+        )
         train_loader = DataLoader(
             task_train_subsets[train_task_idx],
             batch_size=config.batch_size,
@@ -1000,6 +1014,7 @@ def run_split_cifar10_benchmark(
                         )
                         _epoch_rhos.append(snap.regime_rho)
 
+                maybe_apply_optimizer_safety(optimizer, all_params)
                 optimizer.step()
 
             # record per-epoch regime summary for diagnostic trace

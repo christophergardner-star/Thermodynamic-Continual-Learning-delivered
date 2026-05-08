@@ -32,6 +32,18 @@ def main() -> int:
             train_epochs_per_task=EPOCHS,
         )
         artifact_path = WORKSPACE / "tar_state" / "comparisons" / f"{result.search_id}.json"
+
+        # Write standardised phase summary so tar_author.py / tar_post_queue_eval.py
+        # can discover this result via glob("phase*.json").
+        phase_summary_path = (
+            WORKSPACE / "tar_state" / "comparisons" / "phase15_class_incremental_search.json"
+        )
+        phase_summary_path.parent.mkdir(parents=True, exist_ok=True)
+        phase_summary = {**result.model_dump(), "phase": 15}
+        phase_summary_path.write_text(
+            json.dumps(phase_summary, indent=2, default=str), encoding="utf-8"
+        )
+
         print(result.summary)
         print(f"best_candidate={result.best_candidate_name}")
         print(

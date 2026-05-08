@@ -24,6 +24,7 @@ Pre-registered outcome criteria:
 Collapse threshold: acc ≤ 0.55 (safely above 0.500 chance, allowing small
 numerical variation while still indicating degenerate behaviour).
 """
+import os
 import sys
 import json
 import math
@@ -31,8 +32,10 @@ from pathlib import Path
 from datetime import datetime
 from scipy import stats as _scipy_stats
 
-sys.path.insert(0, "/workspace/Thermodynamic-Continual-Learning-delivered")
-workspace = "/workspace/Thermodynamic-Continual-Learning-delivered"
+_repo = str(Path(__file__).resolve().parent)
+sys.path.insert(0, _repo)
+from tar_storage import ensure_workspace_layout, resolve_workspace
+workspace = str(ensure_workspace_layout(resolve_workspace(Path(_repo)), repo_root=Path(_repo)))
 
 from tar_lab.schemas import ContinualLearningBenchmarkConfig
 from tar_lab.multimodal_payloads import run_split_cifar10_benchmark

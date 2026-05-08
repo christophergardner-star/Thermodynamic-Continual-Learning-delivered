@@ -272,6 +272,8 @@ class ContinualLearningBenchmarkConfig(StrictModel):
     tcl_disordered_lr_scale: float = 1.2
     tcl_reset_on_task_boundary: bool = True
     augmentation: str = "flip_normalize"
+    optimizer_backend: str = "sgd"
+    optimizer_backend_config: Dict[str, Any] = Field(default_factory=dict)
 
 
 class StatisticalTestRecord(StrictModel):

@@ -52,6 +52,7 @@ class ExternalIDs(StrictModel):
     arxiv: Optional[str] = None
     doi: Optional[str] = None
     semantic_scholar: Optional[str] = None
+    openalex: Optional[str] = None
     pwc: Optional[str] = None
     dblp: Optional[str] = None
     acl: Optional[str] = None
@@ -75,7 +76,7 @@ class Paper(StrictModel):
     tldr: Optional[str] = None
     # SPECTER2 embedding stored as list[float]; None until fetched
     embedding: Optional[List[float]] = None
-    source: Literal["semantic_scholar", "arxiv", "pwc", "manual"] = "semantic_scholar"
+    source: Literal["semantic_scholar", "arxiv", "openalex", "crossref", "pwc", "manual"] = "semantic_scholar"
     fetched_at: str = Field(default_factory=_utc_now)
     updated_at: str = Field(default_factory=_utc_now)
 

@@ -1,0 +1,1772 @@
+"""
+TAR Experiment Orchestrator
+=============================
+Manages the lifecycle of all experiments TAR designs.
+
+Every experiment TAR proposes is submitted as an ExperimentSpec. The orchestrator
+tracks it from submission through execution to result storage, keeping a persistent
+queue so that nothing is lost across restarts.
+
+Provides:
+  - ExperimentSpec dataclass (what to run)
+  - ExperimentOrchestrator class (queue management + execution)
+  - CLI: python tar_experiment_orchestrator.py status
+         python tar_experiment_orchestrator.py run-next
+         python tar_experiment_orchestrator.py run-all
+
+Queue:   {workspace}/tar_state/experiment_queue.json
+Results: {workspace}/tar_state/experiments/{experiment_id}/result.json
+Log:     {workspace}/tar_state/experiment_orchestrator.log
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import subprocess
+import sys
+import time
+import traceback
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+from tar_storage import ensure_workspace_layout, resolve_workspace
+from tar_optimizer_backend import split_optimizer_config
+
+try:
+    import psutil as _psutil
+except Exception:
+    _psutil = None
+
+_REPO = Path(__file__).resolve().parent
+sys.path.insert(0, str(_REPO))
+
+# ── status codes ──────────────────────────────────────────────────────────────
+EXP_PENDING   = "pending"
+EXP_RUNNING   = "running"
+EXP_COMPLETE  = "complete"
+EXP_FAILED    = "failed"
+EXP_SKIPPED   = "skipped"
+
+# ── stage codes (finer-grained than status) ───────────────────────────────────
+STAGE_PLANNED      = "planned"
+STAGE_QUEUED       = "queued"
+STAGE_RUNNING      = "running"
+STAGE_STALLED      = "stalled"
+STAGE_ANALYZING    = "analyzing"
+STAGE_WRITING      = "writing_paper"
+STAGE_COMPLETE     = "complete"
+STAGE_FAILED       = "failed"
+
+# ── dataset constants ─────────────────────────────────────────────────────────
+DATASET_CIFAR10      = "split_cifar10"
+DATASET_CIFAR100     = "split_cifar100"
+DATASET_TINYIMAGENET = "split_tinyimagenet"
+
+# ── human-language context templates per hypothesis ───────────────────────────
+_CONTEXT_TEMPLATES: dict[str, dict[str, str]] = {
+    "deep_anchor": {
+        "why": (
+            "Standard TCL calibrates sigma-star using 1 epoch of warm-up. We hypothesise "
+            "that a longer calibration window gives the thermal regime detector time to "
+            "stabilise before the L2 anchor is applied, preventing false 'disordered' "
+            "triggers that inflate plasticity and weaken retention of prior tasks."
+        ),
+        "hypothesis": (
+            "Extended sigma-star calibration reduces mean catastrophic forgetting by "
+            "15–25% relative to the standard TCL baseline (delta < −0.02, p < 0.05, "
+            "Cohen's d > 0.5) across all {n_seeds} seeds on {dataset_label}."
+        ),
+    },
+    "graduated_penalty": {
+        "why": (
+            "The current TCL applies a fixed penalty lambda regardless of how far a "
+            "layer is from its sigma-star. A graduated penalty — proportional to the "
+            "distance from the critical point — should apply stronger anchoring to "
+            "layers deeper in the ordered regime, where forgetting risk is highest."
+        ),
+        "hypothesis": (
+            "A regime-distance-proportional penalty reduces forgetting relative to "
+            "fixed-lambda TCL (delta < −0.015) while maintaining accuracy within 2% "
+            "of the full-plasticity baseline."
+        ),
+    },
+    "strict_consolidation": {
+        "why": (
+            "Current regime thresholds classify a layer as 'critical' over a broad "
+            "sigma/sigma-star band (0.8–1.2). Tightening this band forces cleaner "
+            "ordered/disordered classification, potentially producing a sharper "
+            "anchor that more precisely targets vulnerable layers."
+        ),
+        "hypothesis": (
+            "Strict regime boundaries (0.9–1.1 band) reduce false-critical "
+            "classifications and improve the L2 anchor precision, yielding a "
+            "measurable reduction in average forgetting (delta < −0.01, d > 0.3)."
+        ),
+    },
+    "thermal_carryover": {
+        "why": (
+            "When TCL resets sigma-star at each task boundary, the first few "
+            "batches of the new task produce noisy regime estimates. Carrying "
+            "sigma-star forward from the previous task provides a warm prior that "
+            "stabilises the detector during the vulnerable early-task window."
+        ),
+        "hypothesis": (
+            "Inter-task sigma-star carry-over reduces early-task regime mis-classification "
+            "and produces 10–20% lower forgetting on tasks 2+ compared to the "
+            "reset-on-boundary baseline."
+        ),
+    },
+    "high_penalty_conservative": {
+        "why": (
+            "We explore whether a much higher lambda (0.05 vs default 0.01) combined "
+            "with reduced learning rate scaling in the ordered regime produces a "
+            "'conservative mode' that maximally protects prior knowledge at the "
+            "cost of some plasticity."
+        ),
+        "hypothesis": (
+            "Aggressive anchoring (lambda=0.05, lr_scale=0.3) should reduce forgetting "
+            "further than standard TCL but may also impair performance on new tasks. "
+            "We predict a DIRECTIONAL result on forgetting with possible accuracy trade-off."
+        ),
+    },
+    "_default": {
+        "why": (
+            "This experiment tests a variant of the Thermodynamic Continual Learning "
+            "mechanism on {dataset_label}. The goal is to measure whether the proposed "
+            "change to the thermal regime controller improves the plasticity-stability "
+            "trade-off compared to the pre-registered TCL baseline."
+        ),
+        "hypothesis": (
+            "We predict a measurable reduction in mean catastrophic forgetting "
+            "(delta < 0, p < 0.10) with no significant accuracy degradation."
+        ),
+    },
+}
+
+# ── experiment spec ───────────────────────────────────────────────────────────
+@dataclass
+class ExperimentSpec:
+    """
+    Complete specification for a single experiment run.
+    Immutable after submission (changes create a new spec).
+    """
+    # Identity
+    name: str                        # short human-readable label, e.g. "deep_anchor_seed42"
+    project_id: str                  # links to ProjectRegistry slug
+    hypothesis_name: str             # which research hypothesis this tests
+
+    # What to run
+    dataset: str                     # DATASET_* constant
+    method: str                      # "tcl" | "ewc" | "sgd_baseline"
+    seeds: list[int]                 # seeds to run (run all in one call)
+    config_overrides: dict           # forwarded to ContinualLearningBenchmarkConfig / runner
+
+    # Scheduling
+    priority: int = 50               # 0=highest, 100=lowest; queue sorted ascending
+    estimated_runtime_h: float = 8.0
+    backbone: str = "resnet18"
+    epochs: int = 40
+
+    # Notes
+    description: str = ""
+    tags: list[str] = field(default_factory=list)
+
+    # Auto-assigned on submission
+    id: str = ""                     # deterministic hash of (name, project_id, seeds, config)
+    status: str = EXP_PENDING
+    submitted_at: str = ""
+    started_at: str = ""
+    completed_at: str = ""
+    result_path: str = ""
+    error: str = ""
+    archived_at: str = ""
+    archive_reason: str = ""
+
+    # ── Extended fields (ecosystem v2) ────────────────────────────────────────
+    stage: str = STAGE_PLANNED          # planned|queued|running|analyzing|writing_paper|complete|failed
+    hardware_budget: dict = field(default_factory=lambda: {"vram_gb": 3.5, "cpu_cores": 4})
+    frontier_problem_id: str = ""       # links to FrontierRegistry
+    context: dict = field(default_factory=dict)   # human-language narrative
+    pid: int = 0                        # OS PID when running (0 = not running)
+    progress: dict = field(default_factory=dict)  # seeds_done, seeds_total, tasks_done, latest_accs
+    author_paper_id: str = ""           # paper this experiment feeds into
+    observer_class_name: str = ""       # optional TCL observer variant for CIFAR-10 benchmark
+    depends_on: list[str] = field(default_factory=list)
+    runner_key: str = ""                # optional suite runner selector
+    runtime_context: dict = field(default_factory=dict)
+    optimizer_backend: str = "sgd"
+    optimizer_backend_config: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.id:
+            self.id = self._make_id()
+        if not self.submitted_at:
+            self.submitted_at = datetime.now(timezone.utc).isoformat()
+
+    def _make_id(self) -> str:
+        key = json.dumps(
+            [self.name, self.project_id, sorted(self.seeds),
+             sorted(self.config_overrides.items()),
+             self.optimizer_backend,
+             sorted((self.optimizer_backend_config or {}).items())],
+            sort_keys=True,
+        )
+        return hashlib.sha1(key.encode()).hexdigest()[:12]
+
+
+# ── result record ─────────────────────────────────────────────────────────────
+@dataclass
+class ExperimentResult:
+    experiment_id: str
+    experiment_name: str
+    project_id: str
+    hypothesis_name: str
+    dataset: str
+    method: str
+    seeds: list[int]
+    config_overrides: dict
+    # Per-seed outputs
+    seed_results: list[dict]          # [{seed, forgetting, accuracy, ...}]
+    # Aggregate
+    mean_forgetting: float
+    std_forgetting: float
+    mean_accuracy: float
+    std_accuracy: float
+    # Comparison vs baseline
+    baseline_forgetting: list[float]  # per-seed TCL baseline
+    mean_delta: float
+    t_stat: float
+    p_val: float
+    cohens_d: float
+    n_better: int
+    # Verdict
+    verdict: str                      # BREAKTHROUGH | DIRECTIONAL | NULL | ADVERSE | ERROR
+    notes: str
+    optimizer_backend: str = "sgd"
+    optimizer_backend_config: dict[str, Any] = field(default_factory=dict)
+    completed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+# ── orchestrator ──────────────────────────────────────────────────────────────
+class ExperimentOrchestrator:
+    """
+    Persistent queue of experiments with execution and result tracking.
+
+    Usage:
+        orch = ExperimentOrchestrator(workspace)
+        orch.submit(spec)
+        orch.run_next()          # run one pending experiment
+        orch.run_all()           # drain the queue
+
+    Results land in {workspace}/tar_state/experiments/{experiment_id}/result.json.
+    """
+
+    def __init__(self, workspace: Path):
+        self.workspace  = workspace
+        self._queue_path = workspace / "tar_state" / "experiment_queue.json"
+        self._archive_path = workspace / "tar_state" / "experiment_archive.json"
+        self._log_path   = workspace / "tar_state" / "experiment_orchestrator.log"
+        self._exp_dir    = workspace / "tar_state" / "experiments"
+        self._specs: dict[str, ExperimentSpec] = {}
+        self._load()
+
+    # ── persistence ───────────────────────────────────────────────────────────
+    def _load(self) -> None:
+        if self._queue_path.exists():
+            try:
+                raw = json.loads(self._queue_path.read_text(encoding="utf-8"))
+                for rec in raw.get("experiments", []):
+                    spec = ExperimentSpec(**rec)
+                    self._specs[spec.id] = spec
+            except Exception:
+                pass
+
+    def _save(self) -> None:
+        self._queue_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "experiments": [asdict(s) for s in self._order()],
+        }
+        self._queue_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self._refresh_experiment_library()
+
+    def _reload_from_disk(self) -> None:
+        if not self._queue_path.exists():
+            return
+        try:
+            raw = json.loads(self._queue_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        experiments = raw.get("experiments", []) if isinstance(raw, dict) else []
+        refreshed: dict[str, ExperimentSpec] = {}
+        disk_ids: set[str] = set()
+        for rec in experiments:
+            try:
+                ext = ExperimentSpec(**rec)
+            except Exception:
+                continue
+            disk_ids.add(ext.id)
+            local = self._specs.get(ext.id)
+            if local is not None and local.status == EXP_RUNNING:
+                refreshed[ext.id] = local
+                continue
+            refreshed[ext.id] = ext
+        for exp_id, spec in self._specs.items():
+            if exp_id in refreshed or exp_id in disk_ids:
+                continue
+            if spec.status == EXP_RUNNING:
+                refreshed[exp_id] = spec
+        self._specs = refreshed
+
+    def _load_archive_records(self) -> list[dict[str, Any]]:
+        if not self._archive_path.exists():
+            return []
+        try:
+            raw = json.loads(self._archive_path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        records = raw.get("experiments", []) if isinstance(raw, dict) else []
+        return records if isinstance(records, list) else []
+
+    def _save_archive_records(self, records: list[dict[str, Any]]) -> None:
+        self._archive_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "experiments": records,
+        }
+        self._archive_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _get_archived_spec(self, experiment_id: str) -> ExperimentSpec | None:
+        if not experiment_id:
+            return None
+        for rec in self._load_archive_records():
+            if str(rec.get("id", "") or "") != experiment_id:
+                continue
+            try:
+                filtered = {
+                    key: value for key, value in rec.items()
+                    if key in ExperimentSpec.__dataclass_fields__
+                }
+                return ExperimentSpec(**filtered)
+            except Exception:
+                return None
+        return None
+
+    def _archive_terminal_experiment(self, spec: ExperimentSpec, reason: str = "terminal") -> bool:
+        if spec.status not in {EXP_COMPLETE, EXP_FAILED, EXP_SKIPPED}:
+            return False
+
+        if spec.id == "phase17_tinyimagenet" and reason == "completed":
+            try:
+                from tar_validation_mode import load_state
+
+                validation_state = load_state(self.workspace)
+            except Exception:
+                validation_state = {}
+            if validation_state.get("active"):
+                reason = str(
+                    validation_state.get(
+                        "phase17_archive_policy",
+                        "scale_up_exploratory_incomplete_until_reviewed",
+                    ) or "scale_up_exploratory_incomplete_until_reviewed"
+                )
+                spec.context = {
+                    **(spec.context or {}),
+                    "review_status": "exploratory_incomplete_until_reviewed",
+                    "claim_scope": "excluded_from_hpc_validation_claim",
+                }
+
+        spec.archived_at = spec.archived_at or datetime.now(timezone.utc).isoformat()
+        spec.archive_reason = reason
+        archive_records = [
+            rec for rec in self._load_archive_records()
+            if str(rec.get("id", "") or "") != spec.id
+        ]
+        archive_records.append(asdict(spec))
+        archive_records.sort(
+            key=lambda rec: (
+                str(rec.get("archived_at", "") or ""),
+                str(rec.get("completed_at", "") or ""),
+                str(rec.get("submitted_at", "") or ""),
+            ),
+        )
+        self._save_archive_records(archive_records)
+        self._specs.pop(spec.id, None)
+        self._save()
+        self._refresh_author_state()
+        self._write_process_registry()
+        self._log(f"[archive] {spec.id} status={spec.status} reason={reason}")
+        return True
+
+    def archive_terminal_experiments(self, reason: str = "terminal") -> int:
+        archived = 0
+        for spec in list(self._specs.values()):
+            if self._archive_terminal_experiment(spec, reason=reason):
+                archived += 1
+        return archived
+
+    def _log(self, msg: str) -> None:
+        line = f"[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}] {msg}"
+        print(line, flush=True)
+        try:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._log_path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
+
+    def _order(self) -> list[ExperimentSpec]:
+        return sorted(self._specs.values(), key=lambda s: (s.priority, s.submitted_at))
+
+    def _pid_exists(self, pid: int) -> bool:
+        if pid <= 0:
+            return False
+        if _psutil is not None:
+            try:
+                return _psutil.pid_exists(pid)
+            except Exception:
+                pass
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", f"Get-Process -Id {pid} -ErrorAction SilentlyContinue"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return bool((result.stdout or "").strip())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _parse_iso_dt(raw: str) -> datetime | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    def _pid_started_for_spec(self, spec: ExperimentSpec, tolerance_s: float = 300.0) -> bool | None:
+        if spec.pid <= 0:
+            return None
+        started_at = self._parse_iso_dt(spec.started_at)
+        if started_at is None or _psutil is None:
+            return None
+        try:
+            proc = _psutil.Process(spec.pid)
+            created_at = datetime.fromtimestamp(proc.create_time(), tz=timezone.utc)
+        except Exception:
+            return False
+        return created_at.timestamp() + tolerance_s >= started_at.timestamp()
+
+    def _active_runtime_experiment_id(self) -> str:
+        path = self.workspace / "tar_state" / "living_research_daemon.json"
+        if not path.exists():
+            return ""
+        try:
+            age_s = time.time() - path.stat().st_mtime
+        except OSError:
+            return ""
+        if age_s > 180.0:
+            return ""
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return ""
+        if not isinstance(raw, dict):
+            return ""
+        return str(raw.get("active_experiment_id", "") or "")
+
+    @staticmethod
+    def _progress_is_empty(progress: dict[str, Any]) -> bool:
+        return (
+            not progress
+            or (
+                int(progress.get("seeds_done", 0) or 0) <= 0
+                and int(progress.get("tasks_done", 0) or 0) <= 0
+                and not list(progress.get("forgetting_so_far", []) or [])
+            )
+        )
+
+    def _mark_stalled(self, spec: ExperimentSpec, reason: str) -> bool:
+        changed = False
+        if spec.status != EXP_PENDING:
+            spec.status = EXP_PENDING
+            changed = True
+        if spec.stage != STAGE_STALLED:
+            spec.stage = STAGE_STALLED
+            changed = True
+        if spec.pid != 0:
+            spec.pid = 0
+            changed = True
+        context = dict(spec.context or {})
+        if self._progress_is_empty(spec.progress or {}):
+            projected = (
+                "This run appears to have stalled before producing a completed first seed. "
+                "TAR should resume or restart it before treating it as active."
+            )
+        else:
+            projected = (
+                "This run appears to have stalled after partial progress. "
+                "TAR should resume or restart it from the last safe boundary."
+            )
+        if context.get("projected_outcome") != projected:
+            context["projected_outcome"] = projected
+            spec.context = context
+            changed = True
+        if reason and spec.error != reason:
+            spec.error = reason
+            changed = True
+        return changed
+
+    # ── queue management ──────────────────────────────────────────────────────
+    def _resolved_result_path(self, spec: ExperimentSpec) -> Path | None:
+        candidates: list[Path] = []
+        if spec.result_path:
+            candidates.append(Path(spec.result_path))
+        candidates.append(self._exp_dir / spec.id / "result.json")
+        seen: set[str] = set()
+        for path in candidates:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            if path.exists():
+                return path
+        return None
+
+    def _load_saved_result_payload(self, spec: ExperimentSpec) -> tuple[Path, dict[str, Any]] | None:
+        path = self._resolved_result_path(spec)
+        if path is None:
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(raw, dict):
+            return None
+        return path, raw
+
+    @staticmethod
+    def _result_payload_is_complete(raw: dict[str, Any]) -> bool:
+        verdict = str(raw.get("verdict", "") or "").upper()
+        status_hint = str(raw.get("status", "") or "").upper()
+        return bool(raw) and verdict != "ERROR" and status_hint != "ERROR"
+
+    def _experiment_is_complete(self, experiment_id: str) -> bool:
+        if not experiment_id:
+            return False
+        live = self._specs.get(experiment_id)
+        if live is not None:
+            if live.status == EXP_COMPLETE or live.stage == STAGE_COMPLETE:
+                return True
+            loaded = self._load_saved_result_payload(live)
+            if loaded is not None and self._result_payload_is_complete(loaded[1]):
+                return True
+
+        archived = self._get_archived_spec(experiment_id)
+        if archived is not None:
+            if archived.status == EXP_COMPLETE or archived.stage == STAGE_COMPLETE:
+                return True
+            loaded = self._load_saved_result_payload(archived)
+            if loaded is not None and self._result_payload_is_complete(loaded[1]):
+                return True
+
+        direct_path = self._exp_dir / experiment_id / "result.json"
+        if direct_path.exists():
+            try:
+                raw = json.loads(direct_path.read_text(encoding="utf-8"))
+            except Exception:
+                return False
+            return isinstance(raw, dict) and self._result_payload_is_complete(raw)
+        return False
+
+    def _apply_saved_terminal_state(self, spec: ExperimentSpec) -> bool:
+        loaded = self._load_saved_result_payload(spec)
+        if loaded is None:
+            return False
+
+        path, raw = loaded
+        verdict = str(raw.get("verdict", "") or "").upper()
+        status_hint = str(raw.get("status", "") or "").upper()
+        is_failure = verdict == "ERROR" or status_hint == "ERROR"
+        changed = False
+
+        if spec.result_path != str(path):
+            spec.result_path = str(path)
+            changed = True
+        if raw.get("completed_at") and spec.completed_at != raw.get("completed_at"):
+            spec.completed_at = str(raw.get("completed_at"))
+            changed = True
+
+        seed_results = raw.get("seed_results", [])
+        if isinstance(seed_results, list) and seed_results:
+            progress = dict(spec.progress or {})
+            seeds_total = len(spec.seeds) or len(seed_results)
+            progress.update({
+                "seeds_done": len(seed_results),
+                "seeds_total": seeds_total,
+                "tasks_done": 10,
+                "forgetting_so_far": [
+                    row.get("forgetting")
+                    for row in seed_results
+                    if isinstance(row, dict) and row.get("forgetting") is not None
+                ],
+            })
+            if progress != spec.progress:
+                spec.progress = progress
+                changed = True
+
+        terminal_status = EXP_FAILED if is_failure else EXP_COMPLETE
+        terminal_stage = STAGE_FAILED if is_failure else STAGE_COMPLETE
+        if spec.status != terminal_status:
+            spec.status = terminal_status
+            changed = True
+        if spec.stage != terminal_stage:
+            spec.stage = terminal_stage
+            changed = True
+        if spec.pid != 0:
+            spec.pid = 0
+            changed = True
+
+        terminal_error = ""
+        if is_failure:
+            terminal_error = str(raw.get("error") or raw.get("notes") or raw.get("verdict") or "")
+        if spec.error != terminal_error:
+            spec.error = terminal_error
+            changed = True
+
+        return changed
+
+    def submit(self, spec: ExperimentSpec) -> ExperimentSpec:
+        """Add an experiment to the queue. Idempotent — duplicate IDs are ignored."""
+        if spec.id in self._specs:
+            existing = self._specs[spec.id]
+            if existing.status in (EXP_COMPLETE, EXP_RUNNING):
+                self._log(f"[submit] {spec.id} already {existing.status} — skipping")
+                return existing
+        archived = self._get_archived_spec(spec.id)
+        if archived is not None and archived.status in {EXP_COMPLETE, EXP_FAILED, EXP_SKIPPED}:
+            self._log(f"[submit] {spec.id} already archived as {archived.status} — skipping")
+            return archived
+        # Auto-generate context and hardware budget if not set
+        if not spec.context:
+            self.generate_context(spec)
+        if not spec.hardware_budget.get("vram_gb"):
+            vram_map = {"split_cifar10": 2.5, "split_cifar100": 5.5,
+                        "split_tinyimagenet": 7.5}
+            spec.hardware_budget = {
+                "vram_gb":   vram_map.get(spec.dataset, 4.0),
+                "cpu_cores": 4,
+            }
+        spec.stage = STAGE_QUEUED
+        self._specs[spec.id] = spec
+        self._save()
+        self._refresh_author_state()
+        self._log(f"[submit] {spec.id}  {spec.name}  priority={spec.priority}"
+                  f"  est={spec.estimated_runtime_h:.1f}h")
+        # Link to frontier problem
+        self._link_frontier(spec)
+        return spec
+
+    def _link_frontier(self, spec: ExperimentSpec) -> None:
+        try:
+            from tar_frontier import FrontierRegistry
+            fid = spec.frontier_problem_id or "fp-catastrophic-forgetting"
+            FrontierRegistry(self.workspace).link_experiment(fid, spec.id)
+        except Exception:
+            pass
+
+    def _write_process_registry(self) -> None:
+        """Write {pid: {experiment_id, stage}} for running experiments and preserve legacy entries."""
+        path = self.workspace / "tar_state" / "process_registry.json"
+        reg: dict[str, Any] = {}
+        active_by_experiment = {
+            s.id: int(s.pid)
+            for s in self._specs.values()
+            if s.status == EXP_RUNNING and s.pid
+        }
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    for pid, value in existing.items():
+                        if not isinstance(value, dict) or value.get("owner") == "orchestrator":
+                            continue
+                        try:
+                            pid_int = int(pid)
+                        except Exception:
+                            continue
+                        if not self._pid_exists(pid_int):
+                            continue
+                        exp_id = str(value.get("experiment_id", "") or "")
+                        active_pid = active_by_experiment.get(exp_id)
+                        if active_pid and active_pid != pid_int:
+                            continue
+                        if exp_id and exp_id in active_by_experiment and active_by_experiment[exp_id] == pid_int:
+                            value = dict(value)
+                            value["stage"] = self._specs[exp_id].stage
+                        reg[pid] = value
+            except Exception:
+                pass
+        for s in self._specs.values():
+            if s.status == EXP_RUNNING and s.pid:
+                reg[str(s.pid)] = {
+                    "experiment_id": s.id,
+                    "stage": s.stage,
+                    "owner": "orchestrator",
+                    "name": s.name,
+                    "project_id": s.project_id,
+                    "dataset": s.dataset,
+                }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(reg, indent=2), encoding="utf-8")
+
+    def submit_many(self, specs: list[ExperimentSpec]) -> list[ExperimentSpec]:
+        return [self.submit(s) for s in specs]
+
+    def get_pending(self) -> list[ExperimentSpec]:
+        return [s for s in self._order() if s.status == EXP_PENDING]
+
+    def get_ready_pending(self) -> list[ExperimentSpec]:
+        return [s for s in self.get_pending() if self._dependencies_met(s)]
+
+    def get_by_project(self, project_id: str) -> list[ExperimentSpec]:
+        return [s for s in self._specs.values() if s.project_id == project_id]
+
+    def cancel(self, experiment_id: str) -> None:
+        s = self._specs.get(experiment_id)
+        if s and s.status == EXP_PENDING:
+            s.status = EXP_SKIPPED
+            self._save()
+            self._log(f"[cancel] {experiment_id}")
+
+    def get_running(self) -> list[ExperimentSpec]:
+        return [s for s in self._specs.values() if s.status == EXP_RUNNING]
+
+    def execute_by_id(
+        self,
+        experiment_id: str,
+        *,
+        skip_preflight: bool = False,
+        force_in_process: bool = False,
+    ) -> ExperimentResult | None:
+        self.reconcile_runtime_state()
+        spec = self._specs.get(experiment_id)
+        if spec is None:
+            self._log(f"[execute_by_id] Unknown experiment id: {experiment_id}")
+            return None
+        return self._execute(spec, skip_preflight=skip_preflight, force_in_process=force_in_process)
+
+    def _dependencies_met(self, spec: ExperimentSpec) -> bool:
+        if not spec.depends_on:
+            return True
+        for dep_id in spec.depends_on:
+            if not self._experiment_is_complete(str(dep_id or "")):
+                return False
+        return True
+
+    def _refresh_author_state(self) -> None:
+        try:
+            from tar_author import write_planned_author_state
+            write_planned_author_state(self.workspace)
+        except Exception:
+            pass
+
+    def _refresh_experiment_library(self) -> None:
+        try:
+            from tar_experiment_library import save_experiment_library
+            save_experiment_library(self.workspace)
+        except Exception:
+            pass
+
+    def _suite_log_path(self, spec: ExperimentSpec) -> Path | None:
+        log_name = {
+            "phase16_scale_up_suite": "phase16.log",
+            "phase17_tinyimagenet_suite": "phase17.log",
+            "hpc_claim_validation_suite": "hpc_validation.log",
+        }.get(spec.runner_key, "")
+        if not log_name:
+            return None
+        return self.workspace / "tar_state" / "logs" / log_name
+
+    def _sync_suite_progress(self, spec: ExperimentSpec) -> bool:
+        if spec.runner_key not in {"phase16_scale_up_suite", "phase17_tinyimagenet_suite"}:
+            return False
+        try:
+            from tar_suite_checkpoint import checkpoint_path, load_suite_state, recover_suite_state_from_log
+        except Exception:
+            return False
+
+        ckpt_path = checkpoint_path(self.workspace, spec.id)
+        state = load_suite_state(ckpt_path)
+        if not state:
+            log_path = self._suite_log_path(spec)
+            if log_path is not None:
+                state = recover_suite_state_from_log(
+                    experiment_id=spec.id,
+                    seeds=list(spec.seeds),
+                    methods=["tcl", "ewc", "sgd_baseline"],
+                    log_path=log_path,
+                )
+        if not state:
+            return False
+
+        completed_seeds = list(state.get("completed_seeds", []))
+        tcl_forgetting = list((state.get("forgetting", {}) or {}).get("tcl", []))
+        tasks_total = 10
+        progress = {
+            "seeds_done": len(completed_seeds),
+            "seeds_total": len(spec.seeds),
+            "tasks_done": tasks_total if completed_seeds else 0,
+            "latest_accs": [],
+            "forgetting_so_far": tcl_forgetting[:],
+        }
+        changed = False
+        if spec.progress != progress:
+            spec.progress = progress
+            changed = True
+        if completed_seeds and spec.status == EXP_PENDING and spec.stage in {STAGE_PLANNED, STAGE_QUEUED}:
+            spec.stage = STAGE_STALLED
+            changed = True
+            next_seed_idx = len(completed_seeds) + 1
+            spec.context["projected_outcome"] = (
+                f"Resume available from the last safe seed boundary. "
+                f"{len(completed_seeds)}/{len(spec.seeds)} seeds are complete; "
+                f"the next run will restart seed {next_seed_idx} from scratch."
+            )
+        return changed
+
+    def reconcile_runtime_state(self) -> None:
+        self._reload_from_disk()
+        changed = False
+        active_runtime_experiment_id = self._active_runtime_experiment_id()
+
+        for spec in self._specs.values():
+            if self._apply_saved_terminal_state(spec):
+                changed = True
+                continue
+
+            pid_matches = self._pid_started_for_spec(spec)
+            if spec.status == EXP_RUNNING:
+                if active_runtime_experiment_id and active_runtime_experiment_id != spec.id:
+                    if self._mark_stalled(spec, "stale_running_owner_mismatch"):
+                        changed = True
+                elif pid_matches is False:
+                    if self._mark_stalled(spec, "stale_running_pid_mismatch"):
+                        changed = True
+                elif spec.pid and not self._pid_exists(spec.pid):
+                    if self._mark_stalled(spec, "stale_running_pid_missing"):
+                        changed = True
+
+            if self._sync_suite_progress(spec):
+                changed = True
+
+            if (
+                spec.runner_key in {"phase16_scale_up_suite", "phase17_tinyimagenet_suite"}
+                and spec.status == EXP_FAILED
+                and (spec.progress or {}).get("seeds_done", 0) > 0
+                and (spec.progress or {}).get("seeds_done", 0) < len(spec.seeds)
+            ):
+                spec.status = EXP_PENDING
+                spec.stage = STAGE_STALLED
+                spec.pid = 0
+                spec.error = ""
+                changed = True
+
+        if changed:
+            self._save()
+            self._refresh_author_state()
+            self._write_process_registry()
+        self.archive_terminal_experiments(reason="reconciled_terminal")
+
+    # ── stage management ──────────────────────────────────────────────────────
+    def set_stage(self, experiment_id: str, stage: str) -> None:
+        s = self._specs.get(experiment_id)
+        if s:
+            s.stage = stage
+            self._save()
+
+    # ── progress updates ──────────────────────────────────────────────────────
+    def update_progress(self, experiment_id: str, progress: dict) -> None:
+        """
+        Called by runners after each seed completes.
+        progress = {"seeds_done": N, "seeds_total": M, "tasks_done": K,
+                    "latest_accs": [...], "forgetting_so_far": [...]}
+        Also refreshes context.projected_outcome.
+        """
+        s = self._specs.get(experiment_id)
+        if not s:
+            return
+        s.progress = progress
+        # Update projected outcome from live data
+        seeds_done  = progress.get("seeds_done", 0)
+        seeds_total = progress.get("seeds_total", len(s.seeds))
+        forg_list   = progress.get("forgetting_so_far", [])
+        if forg_list and s.runner_key in {"phase16_scale_up_suite", "phase17_tinyimagenet_suite"}:
+            mean_f = sum(forg_list) / len(forg_list)
+            s.context["projected_outcome"] = (
+                f"{seeds_done}/{seeds_total} seeds complete. "
+                f"TCL mean forgetting so far is {mean_f:.4f}. "
+                f"Final verdict will compare TCL against both EWC and SGD after the suite finishes."
+            )
+        elif s.runner_key == "hpc_claim_validation_suite" and forg_list:
+            mean_f = sum(forg_list) / len(forg_list)
+            current_method = str(progress.get("current_method", "") or "")
+            methods_done = int(progress.get("methods_done", 0) or 0)
+            methods_total = int(progress.get("methods_total", 0) or 0)
+            s.context["projected_outcome"] = (
+                f"{seeds_done}/{seeds_total} full seeds complete. "
+                f"HPC forgetting so far is {mean_f:.4f}. "
+                f"Current method={current_method or 'n/a'}; "
+                f"completed method-runs {methods_done}/{methods_total}. "
+                f"Final verdict will use strict replication criteria only."
+            )
+        elif forg_list:
+            mean_f   = sum(forg_list) / len(forg_list)
+            baseline = 0.1475   # pre-registered TCL mean (phase10)
+            delta    = mean_f - baseline
+            pct      = abs(delta / baseline * 100)
+            direction = "better" if delta < 0 else "worse"
+            trend_word = ("on track for BREAKTHROUGH" if delta < -0.02 else
+                          "on track for DIRECTIONAL"  if delta < 0    else
+                          "on track for NULL"          if delta < 0.01 else
+                          "on track for ADVERSE")
+            s.context["projected_outcome"] = (
+                f"{seeds_done}/{seeds_total} seeds complete. "
+                f"Forgetting trending {mean_f:.4f} (baseline 0.1475) — "
+                f"{pct:.1f}% {direction} than baseline. {trend_word}."
+            )
+        self._save()
+
+    # ── context generation ────────────────────────────────────────────────────
+    def generate_context(self, spec: ExperimentSpec) -> dict:
+        """
+        Build initial human-language context from spec. Called at submit time.
+        Returns context dict; also sets spec.context in-place.
+        """
+        tmpl = _CONTEXT_TEMPLATES.get(spec.hypothesis_name,
+                                      _CONTEXT_TEMPLATES["_default"])
+        ds_labels = {
+            "split_cifar10":      "Split-CIFAR-10",
+            "split_cifar100":     "Split-CIFAR-100",
+            "split_tinyimagenet": "Split-TinyImageNet",
+        }
+        ds_label = ds_labels.get(spec.dataset, spec.dataset)
+        fmt = {
+            "n_seeds":      len(spec.seeds),
+            "dataset_label": ds_label,
+            "epochs":       spec.epochs,
+            "backbone":     spec.backbone,
+            "lambda":       spec.config_overrides.get("tcl_penalty_lambda", "?"),
+            "alpha":        spec.config_overrides.get("tcl_alpha", "?"),
+        }
+        context = {
+            "why":              tmpl["why"].format(**fmt),
+            "hypothesis":       tmpl["hypothesis"].format(**fmt),
+            "projected_outcome": f"0/{len(spec.seeds)} seeds complete — awaiting first results.",
+            "frontier_problem": spec.frontier_problem_id or "fp-catastrophic-forgetting",
+            "feeds_paper":      spec.author_paper_id or "",
+            "methodology_note": (
+                f"{spec.backbone} on {ds_label}, {len(spec.seeds)} seeds "
+                f"({', '.join(str(s) for s in spec.seeds)}), "
+                f"compared against pre-registered TCL baseline (phase10, "
+                f"mean_forgetting=0.1475)."
+            ),
+        }
+        spec.context = context
+        return context
+
+    # ── execution ─────────────────────────────────────────────────────────────
+    def run_next(self) -> ExperimentResult | None:
+        """Run the highest-priority pending experiment. Returns its result."""
+        self.reconcile_runtime_state()
+        pending = self.get_pending()
+        if not pending:
+            self._log("[run_next] No pending experiments.")
+            return None
+        spec = pending[0]
+        return self._execute(spec)
+
+    def run_all(self) -> list[ExperimentResult]:
+        """Drain the entire pending queue in priority order."""
+        results = []
+        while True:
+            self.reconcile_runtime_state()
+            pending = self.get_pending()
+            if not pending:
+                break
+            r = self._execute(pending[0])
+            if r:
+                results.append(r)
+        self._log(f"[run_all] Queue drained. {len(results)} experiments completed.")
+        return results
+
+    def run_scheduled_once(self, scheduler: Any | None = None) -> ExperimentResult | None:
+        self.reconcile_runtime_state()
+        pending = self.get_pending()
+        running = self.get_running()
+        if running or not pending:
+            return None
+
+        if scheduler is None:
+            from tar_scheduler import TARScheduler
+            scheduler = TARScheduler(self.workspace)
+
+        decision = scheduler.decide(pending, running)
+        if not decision.can_start:
+            self._log("[run_scheduled_once] Scheduler holding all pending experiments.")
+            self._log(f"  Rationale: {decision.rationale}")
+            return None
+
+        next_id = decision.can_start[0]
+        spec = self._specs.get(next_id)
+        if spec is None:
+            return None
+        return self._execute(spec)
+
+    def run_parallel(self, continuous: bool = False, poll_interval_s: float = 30.0) -> None:
+        """
+        Hardware-aware parallel runner. Uses TARScheduler to decide which
+        experiments to start. Runs GPU experiments sequentially in the main
+        thread; CPU-only experiments could be threaded (not yet implemented
+        as all current experiments use the GPU).
+        Called from autonomous research loops that want scheduler-aware execution.
+        """
+        try:
+            from tar_scheduler import TARScheduler
+            sch = TARScheduler(self.workspace)
+        except Exception:
+            self._log("[run_parallel] TARScheduler unavailable — falling back to run_all")
+            self.run_all()
+            return
+
+        while True:
+            self.reconcile_runtime_state()
+            pending = self.get_pending()
+            running = self.get_running()
+            if not pending and not running:
+                if continuous:
+                    time.sleep(poll_interval_s)
+                    continue
+                break
+            if not pending:
+                time.sleep(min(10.0, poll_interval_s))
+                continue
+            result = self.run_scheduled_once(scheduler=sch)
+            if result is None:
+                time.sleep(poll_interval_s)
+
+    def run_forever(self, poll_interval_s: float = 30.0) -> None:
+        self.run_parallel(continuous=True, poll_interval_s=poll_interval_s)
+
+    def get_experiment_detail(self, experiment_id: str) -> dict | None:
+        """Return full spec + context + progress for the dashboard modal."""
+        s = self._specs.get(experiment_id)
+        if not s:
+            return None
+        d = {k: v for k, v in vars(s).items() if not k.startswith("_")}
+        # Also load result if complete
+        if s.result_path and Path(s.result_path).exists():
+            try:
+                d["result"] = json.loads(Path(s.result_path).read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return d
+
+    def _execute(
+        self,
+        spec: ExperimentSpec,
+        *,
+        skip_preflight: bool = False,
+        force_in_process: bool = False,
+    ) -> ExperimentResult | None:
+        report: dict[str, Any] | None = None
+        if not skip_preflight:
+            report = self._prepare_execution(spec)
+            if report.get("execution_mode") == "workspace_venv" and not force_in_process:
+                return self._execute_in_prepared_subprocess(spec, report)
+
+        self._log(f"\n{'='*60}")
+        self._log(f"[execute] {spec.id}  {spec.name}")
+        self._log(f"  dataset={spec.dataset}  method={spec.method}  seeds={spec.seeds}")
+        self._log(f"  config_overrides={spec.config_overrides}")
+        if report:
+            self._log(
+                f"  preflight={report.get('execution_mode','in_process')}  "
+                f"python={report.get('python_executable', sys.executable)}"
+            )
+
+        spec.status     = EXP_RUNNING
+        spec.stage      = STAGE_RUNNING
+        spec.started_at = datetime.now(timezone.utc).isoformat()
+        spec.pid        = os.getpid()
+        spec.error      = ""
+        spec.progress   = {"seeds_done": 0, "seeds_total": len(spec.seeds),
+                           "tasks_done": 0, "latest_accs": [], "forgetting_so_far": []}
+        self._save()
+        self._refresh_author_state()
+        self._write_process_registry()
+
+        t0 = time.time()
+        try:
+            result = self._dispatch(spec)
+            elapsed = time.time() - t0
+
+            spec.stage        = STAGE_ANALYZING
+            self._save()
+
+            spec.status       = EXP_COMPLETE
+            spec.stage        = STAGE_COMPLETE
+            spec.completed_at = datetime.now(timezone.utc).isoformat()
+            spec.result_path  = str(self._save_result(spec, result))
+            spec.pid          = 0
+            self._save()
+            self._refresh_author_state()
+            self._write_process_registry()
+            self._log(f"[execute] DONE  {spec.id}  {result.verdict}"
+                      f"  forgetting={result.mean_forgetting:.4f}  ({elapsed/3600:.1f}h)")
+
+            # Update frontier breakthrough count
+            if result.verdict == "BREAKTHROUGH":
+                try:
+                    from tar_frontier import FrontierRegistry
+                    fid = spec.frontier_problem_id or "fp-catastrophic-forgetting"
+                    FrontierRegistry(self.workspace).record_breakthrough(fid)
+                except Exception:
+                    pass
+            self._archive_terminal_experiment(spec, reason="completed")
+            return result
+
+        except Exception as exc:
+            elapsed = time.time() - t0
+            spec.status       = EXP_FAILED
+            spec.stage        = STAGE_FAILED
+            spec.completed_at = datetime.now(timezone.utc).isoformat()
+            spec.error        = str(exc)
+            spec.pid          = 0
+            self._save()
+            self._refresh_author_state()
+            self._write_process_registry()
+            self._log(f"[execute] FAILED  {spec.id}: {exc}")
+            self._log(traceback.format_exc())
+            self._archive_terminal_experiment(spec, reason="failed")
+            return None
+
+    def _prepare_execution(self, spec: ExperimentSpec) -> dict[str, Any]:
+        from tar_experiment_preflight import ExperimentPreflightManager
+
+        manager = ExperimentPreflightManager(self.workspace, _REPO)
+        report = manager.prepare(spec)
+        spec.runtime_context = asdict(report)
+        self._save()
+        self._refresh_author_state()
+        self._log(
+            f"[preflight] {spec.id} clean_state_ready={report.clean_state_ready} "
+            f"mode={report.execution_mode} python={report.python_executable}"
+        )
+        return asdict(report)
+
+    def _execute_in_prepared_subprocess(self, spec: ExperimentSpec, report: dict[str, Any]) -> ExperimentResult | None:
+        from tar_experiment_preflight import ExperimentPreflightManager
+
+        manager = ExperimentPreflightManager(self.workspace, _REPO)
+        env = manager.environment_for_subprocess(report)
+        worker = _REPO / "tar_experiment_worker.py"
+        python_executable = str(report.get("python_executable", sys.executable) or sys.executable)
+        self._log(f"[execute] Launching prepared worker for {spec.id} via {python_executable}")
+        try:
+            proc = subprocess.run(
+                [
+                    python_executable,
+                    str(worker),
+                    "--workspace",
+                    str(self.workspace),
+                    "--experiment-id",
+                    spec.id,
+                    "--skip-preflight",
+                ],
+                cwd=str(_REPO),
+                env=env,
+                timeout=max(3600, int(spec.estimated_runtime_h * 3600) + 7200),
+            )
+        except Exception as exc:
+            self._log(f"[execute] Prepared worker launch failed for {spec.id}: {exc}")
+            raise
+
+        self._reload_from_disk()
+        refreshed = self._specs.get(spec.id) or self._get_archived_spec(spec.id) or spec
+        self._write_process_registry()
+        if proc.returncode != 0 and refreshed.status != EXP_COMPLETE:
+            self._log(f"[execute] Prepared worker exited with code {proc.returncode} for {spec.id}")
+        return self._load_saved_result(refreshed)
+
+    def _load_saved_result(self, spec: ExperimentSpec) -> ExperimentResult | None:
+        path = self._resolved_result_path(spec)
+        if path is None:
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return ExperimentResult(**raw)
+        except Exception:
+            return None
+
+    def _dispatch(self, spec: ExperimentSpec) -> ExperimentResult:
+        """Route the experiment to the right runner based on dataset."""
+        if spec.runner_key == "phase16_scale_up_suite":
+            return self._run_phase16_suite(spec)
+        if spec.runner_key == "phase17_tinyimagenet_suite":
+            return self._run_phase17_suite(spec)
+        if spec.runner_key == "hpc_claim_validation_suite":
+            return self._run_hpc_validation_suite(spec)
+        if spec.dataset == DATASET_CIFAR10:
+            return self._run_cifar10(spec)
+        elif spec.dataset == DATASET_CIFAR100:
+            return self._run_cifar100(spec)
+        elif spec.dataset == DATASET_TINYIMAGENET:
+            return self._run_tinyimagenet(spec)
+        else:
+            raise ValueError(f"Unknown dataset: {spec.dataset}")
+
+    # ── CIFAR-10 runner (uses tar_lab harness) ────────────────────────────────
+    def _run_cifar10(self, spec: ExperimentSpec) -> ExperimentResult:
+        from tar_lab.schemas import ContinualLearningBenchmarkConfig
+        from tar_lab.multimodal_payloads import run_split_cifar10_benchmark
+
+        seed_results, forgetting_list, accuracy_list = [], [], []
+        observer_factory: Callable[[Any], Any] | None = None
+        if spec.observer_class_name and spec.method == "tcl":
+            from tar_research_observers import resolve_observer_class
+            observer_cls = resolve_observer_class(spec.observer_class_name)
+            if observer_cls is not None:
+                observer_factory = observer_cls
+
+        for i, seed in enumerate(spec.seeds):
+            optimizer_backend, optimizer_backend_config, clean_overrides = split_optimizer_config(
+                spec.config_overrides,
+                explicit_backend=spec.optimizer_backend,
+                explicit_config=spec.optimizer_backend_config,
+            )
+            cfg = ContinualLearningBenchmarkConfig(
+                seed=seed,
+                train_epochs_per_task=spec.epochs,
+                optimizer_backend=optimizer_backend,
+                optimizer_backend_config=optimizer_backend_config,
+                **clean_overrides,
+            )
+            r = run_split_cifar10_benchmark(
+                cfg, method=spec.method, workspace=str(self.workspace),
+                backbone=spec.backbone, observer_factory=observer_factory,
+            )
+            forgetting_list.append(r.mean_forgetting)
+            accuracy_list.append(r.final_mean_accuracy)
+            seed_results.append({
+                "seed": seed,
+                "forgetting": r.mean_forgetting,
+                "accuracy": r.final_mean_accuracy,
+            })
+            self._log(f"  seed={seed}  forgetting={r.mean_forgetting:.4f}"
+                      f"  accuracy={r.final_mean_accuracy:.4f}")
+            # Live progress update
+            self.update_progress(spec.id, {
+                "seeds_done":       i + 1,
+                "seeds_total":      len(spec.seeds),
+                "tasks_done":       0,
+                "latest_accs":      [],
+                "forgetting_so_far": forgetting_list[:],
+            })
+
+        return self._build_result(spec, seed_results, forgetting_list, accuracy_list)
+
+    # ── CIFAR-100 runner (native standalone) ──────────────────────────────────
+    def _run_cifar100(self, spec: ExperimentSpec) -> ExperimentResult:
+        import phase16_scale_up as p16
+        train_items, test_items = p16._load_hf_cifar100(str(self.workspace))
+        seed_results, forgetting_list, accuracy_list = [], [], []
+        optimizer_backend, optimizer_backend_config, _clean_overrides = split_optimizer_config(
+            spec.config_overrides,
+            explicit_backend=spec.optimizer_backend,
+            explicit_config=spec.optimizer_backend_config,
+        )
+        for i, seed in enumerate(spec.seeds):
+            res = p16.run_one_seed(
+                seed,
+                spec.method,
+                str(self.workspace),
+                train_items,
+                test_items,
+                progress_callback=lambda payload, seed_idx=i: self.update_progress(spec.id, {
+                    "seeds_done": seed_idx,
+                    "seeds_total": len(spec.seeds),
+                    "tasks_done": payload.get("tasks_done", 0),
+                    "latest_accs": payload.get("latest_accs", []),
+                    "forgetting_so_far": forgetting_list[:],
+                }),
+                optimizer_backend=optimizer_backend,
+                optimizer_backend_config=optimizer_backend_config,
+            )
+            forgetting_list.append(res["mean_forgetting"])
+            accuracy_list.append(res["mean_accuracy"])
+            seed_results.append({
+                "seed": seed,
+                "forgetting": res["mean_forgetting"],
+                "accuracy": res["mean_accuracy"],
+            })
+            self.update_progress(spec.id, {
+                "seeds_done": i + 1,
+                "seeds_total": len(spec.seeds),
+                "tasks_done": p16.N_TASKS,
+                "latest_accs": [f"{v:.3f}" for v in res.get("final_accs_per_task", [])],
+                "forgetting_so_far": forgetting_list[:],
+            })
+        return self._build_result(spec, seed_results, forgetting_list, accuracy_list)
+
+    # ── TinyImageNet runner (native standalone) ───────────────────────────────
+    def _run_tinyimagenet(self, spec: ExperimentSpec) -> ExperimentResult:
+        import phase17_tinyimagenet as p17
+        train_items, val_items = p17._load_hf_tinyimagenet(str(self.workspace))
+        seed_results, forgetting_list, accuracy_list = [], [], []
+        optimizer_backend, optimizer_backend_config, _clean_overrides = split_optimizer_config(
+            spec.config_overrides,
+            explicit_backend=spec.optimizer_backend,
+            explicit_config=spec.optimizer_backend_config,
+        )
+        for i, seed in enumerate(spec.seeds):
+            train_subsets, test_subsets = p17._build_tinyimagenet_tasks(seed, train_items, val_items)
+            res = p17.run_one_seed(
+                seed,
+                spec.method,
+                train_subsets,
+                test_subsets,
+                progress_callback=lambda payload, seed_idx=i: self.update_progress(spec.id, {
+                    "seeds_done": seed_idx,
+                    "seeds_total": len(spec.seeds),
+                    "tasks_done": payload.get("tasks_done", 0),
+                    "latest_accs": payload.get("latest_accs", []),
+                    "forgetting_so_far": forgetting_list[:],
+                }),
+                optimizer_backend=optimizer_backend,
+                optimizer_backend_config=optimizer_backend_config,
+            )
+            forgetting_list.append(res["mean_forgetting"])
+            accuracy_list.append(res["mean_accuracy"])
+            seed_results.append({
+                "seed": seed,
+                "forgetting": res["mean_forgetting"],
+                "accuracy": res["mean_accuracy"],
+            })
+            self.update_progress(spec.id, {
+                "seeds_done": i + 1,
+                "seeds_total": len(spec.seeds),
+                "tasks_done": p17.N_TASKS,
+                "latest_accs": [f"{v:.3f}" for v in res.get("final_accs_per_task", [])],
+                "forgetting_so_far": forgetting_list[:],
+            })
+        return self._build_result(spec, seed_results, forgetting_list, accuracy_list)
+
+    def _run_phase16_suite(self, spec: ExperimentSpec) -> ExperimentResult:
+        import phase16_scale_up as p16
+
+        optimizer_backend, optimizer_backend_config, clean_overrides = split_optimizer_config(
+            spec.config_overrides,
+            explicit_backend=spec.optimizer_backend,
+            explicit_config=spec.optimizer_backend_config,
+        )
+        restart = bool(clean_overrides.get("restart", False))
+        raw = p16.run_phase16_suite(
+            str(self.workspace),
+            progress_callback=lambda payload: self.update_progress(spec.id, {
+                "seeds_done": payload.get("seeds_done", 0),
+                "seeds_total": payload.get("seeds_total", len(spec.seeds)),
+                "tasks_done": payload.get("tasks_done", 0),
+                "latest_accs": payload.get("latest_accs", []),
+                "forgetting_so_far": payload.get("tcl_forgetting_so_far", []),
+            }),
+            restart=restart,
+            optimizer_backend=optimizer_backend,
+            optimizer_backend_config=optimizer_backend_config,
+        )
+        return self._build_suite_result(spec, raw)
+
+    def _run_phase17_suite(self, spec: ExperimentSpec) -> ExperimentResult:
+        import phase17_tinyimagenet as p17
+
+        optimizer_backend, optimizer_backend_config, clean_overrides = split_optimizer_config(
+            spec.config_overrides,
+            explicit_backend=spec.optimizer_backend,
+            explicit_config=spec.optimizer_backend_config,
+        )
+        restart = bool(clean_overrides.get("restart", False))
+        raw = p17.run_phase17_suite(
+            str(self.workspace),
+            progress_callback=lambda payload: self.update_progress(spec.id, {
+                "seeds_done": payload.get("seeds_done", 0),
+                "seeds_total": payload.get("seeds_total", len(spec.seeds)),
+                "tasks_done": payload.get("tasks_done", 0),
+                "latest_accs": payload.get("latest_accs", []),
+                "forgetting_so_far": payload.get("tcl_forgetting_so_far", []),
+            }),
+            restart=restart,
+            optimizer_backend=optimizer_backend,
+            optimizer_backend_config=optimizer_backend_config,
+        )
+        return self._build_suite_result(spec, raw)
+
+    def _run_hpc_validation_suite(self, spec: ExperimentSpec) -> ExperimentResult:
+        from tar_hpc_validation import run_hpc_validation_suite
+        from tar_validation_mode import assert_validation_suite_spec_locked
+
+        assert_validation_suite_spec_locked(spec, self.workspace)
+        clean_overrides = dict(spec.config_overrides or {})
+        seed_list = [int(seed) for seed in clean_overrides.get("min_seed_list", spec.seeds) or spec.seeds]
+        raw = run_hpc_validation_suite(
+            str(self.workspace),
+            seeds=seed_list,
+            backbone=spec.backbone,
+            epochs=spec.epochs,
+            progress_callback=lambda payload: self.update_progress(spec.id, payload),
+        )
+        return self._build_validation_suite_result(spec, raw)
+
+    # ── result builder ────────────────────────────────────────────────────────
+    def _build_result(
+        self,
+        spec: ExperimentSpec,
+        seed_results: list[dict],
+        forgetting_list: list[float],
+        accuracy_list: list[float],
+    ) -> ExperimentResult:
+        def _mean(v): return sum(v) / len(v)
+        def _std(v):
+            m = _mean(v)
+            return math.sqrt(sum((x - m) ** 2 for x in v) / max(len(v) - 1, 1))
+
+        # Load TCL baseline for comparison
+        baseline = self._load_baseline()[:len(forgetting_list)]
+        deltas = [m - b for m, b in zip(forgetting_list, baseline)]
+        mean_delta = _mean(deltas) if deltas else 0.0
+
+        t_stat, p_val = 0.0, 1.0
+        cohens_d = 0.0
+        if len(deltas) >= 2:
+            try:
+                from scipy import stats as sc
+                t_stat, p_val = float(sc.ttest_1samp(deltas, 0).statistic), float(sc.ttest_1samp(deltas, 0).pvalue)
+            except Exception:
+                pass
+            cohens_d = abs(mean_delta) / max(_std(deltas), 1e-12)
+
+        n_better = sum(1 for d in deltas if d < 0)
+        n = len(forgetting_list)
+
+        is_breakthrough = mean_delta < -0.01 and p_val < 0.05 and cohens_d > 0.5
+        is_directional  = mean_delta < 0 and n_better >= n // 2 + 1
+        is_adverse      = mean_delta > 0.02
+        verdict = ("BREAKTHROUGH" if is_breakthrough else
+                   "DIRECTIONAL"  if is_directional  else
+                   "ADVERSE"      if is_adverse       else "NULL")
+        notes = (f"mean_delta={mean_delta:+.4f}  p={p_val:.4f}  d={cohens_d:.3f}"
+                 f"  {n_better}/{n} seeds better")
+
+        return ExperimentResult(
+            experiment_id=spec.id,
+            experiment_name=spec.name,
+            project_id=spec.project_id,
+            hypothesis_name=spec.hypothesis_name,
+            dataset=spec.dataset,
+            method=spec.method,
+            seeds=spec.seeds,
+            config_overrides=spec.config_overrides,
+            seed_results=seed_results,
+            mean_forgetting=_mean(forgetting_list),
+            std_forgetting=_std(forgetting_list),
+            mean_accuracy=_mean(accuracy_list),
+            std_accuracy=_std(accuracy_list),
+            baseline_forgetting=baseline,
+            mean_delta=mean_delta,
+            t_stat=t_stat,
+            p_val=p_val,
+            cohens_d=cohens_d,
+            n_better=n_better,
+            verdict=verdict,
+            notes=notes,
+            optimizer_backend=spec.optimizer_backend,
+            optimizer_backend_config=spec.optimizer_backend_config,
+        )
+
+    def _build_suite_result(self, spec: ExperimentSpec, raw: dict[str, Any]) -> ExperimentResult:
+        aggregate = raw.get("aggregate", {})
+        pairwise = raw.get("pairwise", {})
+        tcl = aggregate.get("tcl", {})
+        ewc = pairwise.get("ewc", {})
+        sgd = pairwise.get("sgd_baseline", {})
+        primary = ewc or sgd
+
+        seed_results = []
+        for row in raw.get("per_seed", []):
+            seed_results.append({
+                "seed": row.get("seed"),
+                "forgetting": row.get("tcl_forgetting"),
+                "accuracy": row.get("tcl_acc"),
+                "ewc_forgetting": row.get("ewc_forgetting"),
+                "sgd_forgetting": row.get("sgd_baseline_forgetting"),
+            })
+
+        baseline = [row.get("ewc_forgetting") for row in raw.get("per_seed", []) if row.get("ewc_forgetting") is not None]
+        notes = raw.get("verdict", "")
+        if ewc:
+            notes += (
+                f" | vs EWC delta={ewc.get('mean_delta', 0.0):+.4f}"
+                f" p={ewc.get('p_val', 1.0):.4f} d={ewc.get('cohens_d', 0.0):.3f}"
+            )
+        if sgd:
+            notes += (
+                f" | vs SGD delta={sgd.get('mean_delta', 0.0):+.4f}"
+                f" p={sgd.get('p_val', 1.0):.4f} d={sgd.get('cohens_d', 0.0):.3f}"
+            )
+
+        verdict_key = raw.get("verdict_key", "")
+        if verdict_key in {"OUTCOME_A", "OUTCOME_B", "BREAKTHROUGH"}:
+            verdict = "BREAKTHROUGH"
+        elif "ERROR" in str(raw.get("status", "")) or "ERROR" in str(raw.get("verdict", "")):
+            verdict = "ERROR"
+        elif primary.get("mean_delta", 0.0) < 0:
+            verdict = "DIRECTIONAL"
+        else:
+            verdict = "NULL"
+
+        return ExperimentResult(
+            experiment_id=spec.id,
+            experiment_name=spec.name,
+            project_id=spec.project_id,
+            hypothesis_name=spec.hypothesis_name,
+            dataset=spec.dataset,
+            method="suite",
+            seeds=spec.seeds,
+            config_overrides=spec.config_overrides,
+            seed_results=seed_results,
+            mean_forgetting=tcl.get("forgetting_mean", 0.0),
+            std_forgetting=tcl.get("forgetting_std", 0.0),
+            mean_accuracy=tcl.get("acc_mean", 0.0),
+            std_accuracy=tcl.get("acc_std", 0.0),
+            baseline_forgetting=baseline,
+            mean_delta=primary.get("mean_delta", 0.0),
+            t_stat=primary.get("t_stat", 0.0),
+            p_val=primary.get("p_val", 1.0),
+            cohens_d=primary.get("cohens_d", 0.0),
+            n_better=primary.get("n_tcl_better", 0),
+            verdict=verdict,
+            notes=notes,
+            optimizer_backend=spec.optimizer_backend,
+            optimizer_backend_config=spec.optimizer_backend_config,
+        )
+
+    def _build_validation_suite_result(self, spec: ExperimentSpec, raw: dict[str, Any]) -> ExperimentResult:
+        aggregate = raw.get("aggregate", {})
+        pairwise = (raw.get("pairwise", {}) or {}).get("high_penalty_conservative", {})
+        hpc = aggregate.get("high_penalty_conservative", {})
+        tcl = pairwise.get("tcl_baseline", {})
+
+        seed_results = []
+        hpc_rows = (raw.get("per_method", {}) or {}).get("high_penalty_conservative", [])
+        by_seed = {
+            int(row.get("seed", -1)): row
+            for row in hpc_rows
+            if row.get("seed") is not None
+        }
+        tcl_rows = {
+            int(row.get("seed", -1)): row
+            for row in ((raw.get("per_method", {}) or {}).get("tcl_baseline", []))
+            if row.get("seed") is not None
+        }
+        for seed in spec.seeds:
+            hpc_row = by_seed.get(int(seed), {})
+            tcl_row = tcl_rows.get(int(seed), {})
+            seed_results.append({
+                "seed": seed,
+                "forgetting": hpc_row.get("mean_forgetting"),
+                "accuracy": hpc_row.get("final_mean_accuracy"),
+                "jaf": hpc_row.get("jaf"),
+                "tcl_forgetting": tcl_row.get("mean_forgetting"),
+                "tcl_accuracy": tcl_row.get("final_mean_accuracy"),
+            })
+
+        baseline = [
+            float(row.get("mean_forgetting"))
+            for row in tcl_rows.values()
+            if row.get("mean_forgetting") is not None
+        ]
+        notes = (
+            f"{raw.get('verdict', '')} | claim_status={raw.get('claim_assessment', {}).get('status', '')} "
+            f"| vs_tcl delta={tcl.get('mean_delta_forgetting', 0.0):+.4f} "
+            f"p={tcl.get('p_value_forgetting', 1.0):.4f} d={tcl.get('cohens_d_forgetting', 0.0):.3f}"
+        )
+        verdict_key = str(raw.get("claim_assessment", {}).get("status", "") or "")
+        if verdict_key == "VERIFIED":
+            verdict = "BREAKTHROUGH"
+        elif verdict_key == "REJECTED":
+            verdict = "ADVERSE"
+        elif tcl.get("classification") == "DIRECTIONAL":
+            verdict = "DIRECTIONAL"
+        else:
+            verdict = "NULL"
+
+        return ExperimentResult(
+            experiment_id=spec.id,
+            experiment_name=spec.name,
+            project_id=spec.project_id,
+            hypothesis_name=spec.hypothesis_name,
+            dataset=spec.dataset,
+            method="validation_suite",
+            seeds=spec.seeds,
+            config_overrides=spec.config_overrides,
+            seed_results=seed_results,
+            mean_forgetting=float(hpc.get("forgetting_mean", 0.0) or 0.0),
+            std_forgetting=float(hpc.get("forgetting_std", 0.0) or 0.0),
+            mean_accuracy=float(hpc.get("acc_mean", 0.0) or 0.0),
+            std_accuracy=float(hpc.get("acc_std", 0.0) or 0.0),
+            baseline_forgetting=baseline,
+            mean_delta=float(tcl.get("mean_delta_forgetting", 0.0) or 0.0),
+            t_stat=float(tcl.get("t_stat_forgetting", 0.0) or 0.0),
+            p_val=float(tcl.get("p_value_forgetting", 1.0) or 1.0),
+            cohens_d=float(tcl.get("cohens_d_forgetting", 0.0) or 0.0),
+            n_better=int(sum(1 for row in seed_results if row.get("forgetting") is not None and row.get("tcl_forgetting") is not None and float(row.get("forgetting")) < float(row.get("tcl_forgetting")))),
+            verdict=verdict,
+            notes=notes,
+            optimizer_backend=spec.optimizer_backend,
+            optimizer_backend_config=spec.optimizer_backend_config,
+        )
+
+    def _load_baseline(self) -> list[float]:
+        for p in [
+            self.workspace / "tar_state" / "comparisons" / "phase10_baseline.json",
+            _REPO / "tar_state" / "comparisons" / "phase10_baseline.json",
+        ]:
+            if p.exists():
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    vals = [r["tcl_forgetting"] for r in data.get("per_seed", [])
+                            if "tcl_forgetting" in r]
+                    if vals: return vals
+                except Exception:
+                    pass
+        return [0.1269, 0.1294, 0.1697, 0.1007, 0.1108]
+
+    def _save_result(self, spec: ExperimentSpec, result: ExperimentResult) -> Path:
+        exp_dir = self._exp_dir / spec.id
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        path = exp_dir / "result.json"
+        path.write_text(json.dumps(asdict(result), indent=2), encoding="utf-8")
+        # Also save spec alongside result for provenance
+        (exp_dir / "spec.json").write_text(json.dumps(asdict(spec), indent=2), encoding="utf-8")
+        return path
+
+    # ── status report ─────────────────────────────────────────────────────────
+    def print_status(self) -> None:
+        all_specs = self._order()
+        by_status: dict[str, list[ExperimentSpec]] = {}
+        for s in all_specs:
+            by_status.setdefault(s.status, []).append(s)
+
+        print(f"\n{'='*72}")
+        print(f"  TAR EXPERIMENT QUEUE  ({len(all_specs)} experiments)")
+        print(f"{'='*72}")
+        for status in (EXP_PENDING, EXP_RUNNING, EXP_COMPLETE, EXP_FAILED, EXP_SKIPPED):
+            items = by_status.get(status, [])
+            if not items: continue
+            print(f"\n  {status.upper()} ({len(items)})")
+            for s in items:
+                v = f"  verdict={s.error[:30]}" if status == EXP_FAILED else ""
+                print(f"    [{s.priority:3d}] {s.id}  {s.name}  "
+                      f"dataset={s.dataset}  seeds={s.seeds}{v}")
+        print(f"{'='*72}\n")
+
+
+# ── autonomous research integration ───────────────────────────────────────────
+def build_autonomous_research_queue(
+    workspace: Path,
+    project_id: str = "tcl-autonomous-cifar10-v1",
+    seeds: list[int] | None = None,
+) -> list[ExperimentSpec]:
+    """
+    Build the standard 5-hypothesis autonomous research queue for Split-CIFAR-10.
+    Each hypothesis gets one ExperimentSpec covering all seeds.
+    """
+    if seeds is None:
+        seeds = [42, 0, 1, 2, 3]
+
+    base_cfg = {
+        "tcl_governor_enabled": True,
+        "tcl_penalty_lambda": 0.01,
+        "tcl_alpha": 0.5,
+        "tcl_reset_on_task_boundary": True,
+    }
+
+    hypotheses = [
+        ("deep_anchor",             {**base_cfg}, 10, 2.0),
+        ("graduated_penalty",       {**base_cfg}, 20, 2.0),
+        ("strict_consolidation",    {**base_cfg}, 30, 2.0),
+        ("thermal_carryover",       {**base_cfg, "tcl_reset_on_task_boundary": False}, 40, 2.0),
+        ("high_penalty_conservative",{
+            "tcl_governor_enabled": True,
+            "tcl_penalty_lambda": 0.05,
+            "tcl_ordered_lr_scale": 0.3,
+            "tcl_alpha": 0.45,
+            "tcl_reset_on_task_boundary": True,
+        }, 50, 2.5),
+    ]
+
+    specs = []
+    for hyp_name, cfg, priority, est_h in hypotheses:
+        spec = ExperimentSpec(
+            name=hyp_name,
+            project_id=project_id,
+            hypothesis_name=hyp_name,
+            dataset=DATASET_CIFAR10,
+            method="tcl",
+            seeds=seeds,
+            config_overrides=cfg,
+            priority=priority,
+            estimated_runtime_h=est_h * len(seeds),
+            description=f"Autonomous research hypothesis: {hyp_name}",
+            tags=["autonomous", "hypothesis", hyp_name],
+        )
+        specs.append(spec)
+    return specs
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    import os
+    ws = ensure_workspace_layout(resolve_workspace(_REPO), repo_root=_REPO)
+    orch = ExperimentOrchestrator(ws)
+
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+
+    if cmd == "status":
+        orch.reconcile_runtime_state()
+        orch.print_status()
+    elif cmd == "run-next":
+        orch.run_next()
+    elif cmd == "run-all":
+        orch.run_all()
+    elif cmd == "run-daemon":
+        poll_interval = float(sys.argv[2]) if len(sys.argv) > 2 else 30.0
+        orch.run_forever(poll_interval_s=poll_interval)
+    elif cmd == "submit-autonomous":
+        specs = build_autonomous_research_queue(ws)
+        orch.submit_many(specs)
+        print(f"Submitted {len(specs)} autonomous research experiments.")
+        orch.print_status()
+    else:
+        print(f"Unknown command: {cmd}")
+        print("Commands: status | run-next | run-all | run-daemon [poll_s] | submit-autonomous")
+        sys.exit(1)
