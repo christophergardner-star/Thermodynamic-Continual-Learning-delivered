@@ -3,7 +3,9 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
 import random
+import traceback
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,11 +30,17 @@ from tar_validation_mode import (
     VALIDATION_EPOCHS,
     VALIDATION_FRONTIER_ID,
     VALIDATION_METHOD_ORDER,
+    VALIDATION_OBSERVABILITY_REQUIREMENTS,
     VALIDATION_PAPER_ID,
     ensure_validation_method_order_exact,
     load_state,
     method_matrix,
 )
+
+try:
+    import psutil as _psutil
+except Exception:
+    _psutil = None
 
 
 def _now_iso() -> str:
@@ -62,6 +70,169 @@ def _seed_everything(seed: int) -> None:
 
 def _chance_level(num_classes: int) -> float:
     return 1.0 / float(max(num_classes, 1))
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _resource_snapshot() -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "captured_at": _now_iso(),
+        "pid": int(os.getpid()),
+    }
+    if _psutil is not None:
+        try:
+            process = _psutil.Process(os.getpid())
+            with process.oneshot():
+                memory = process.memory_info()
+                cpu_times = process.cpu_times()
+                snapshot["process"] = {
+                    "rss_gb": round(float(memory.rss) / (1024 ** 3), 3),
+                    "vms_gb": round(float(memory.vms) / (1024 ** 3), 3),
+                    "cpu_time_s": round(float(cpu_times.user + cpu_times.system), 3),
+                    "status": str(process.status()),
+                }
+        except Exception:
+            snapshot["process"] = {}
+        try:
+            vm = _psutil.virtual_memory()
+            snapshot["system"] = {
+                "cpu_percent": round(float(_psutil.cpu_percent(interval=None)), 2),
+                "ram_used_gb": round(float(vm.used) / (1024 ** 3), 3),
+                "ram_available_gb": round(float(vm.available) / (1024 ** 3), 3),
+                "ram_total_gb": round(float(vm.total) / (1024 ** 3), 3),
+            }
+        except Exception:
+            snapshot["system"] = {}
+    else:
+        snapshot["process"] = {}
+        snapshot["system"] = {}
+    try:
+        snapshot["gpu"] = {
+            "cuda_available": bool(torch.cuda.is_available()),
+        }
+        if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
+            snapshot["gpu"].update(
+                {
+                    "name": str(torch.cuda.get_device_name(0)),
+                    "allocated_gb": round(float(torch.cuda.memory_allocated(0)) / (1024 ** 3), 3),
+                    "reserved_gb": round(float(torch.cuda.memory_reserved(0)) / (1024 ** 3), 3),
+                    "total_vram_gb": round(float(props.total_memory) / (1024 ** 3), 3),
+                }
+            )
+    except Exception:
+        snapshot["gpu"] = {}
+    return snapshot
+
+
+def _checkpoint_payload(
+    *,
+    completed_at: str,
+    completed_method_steps: int,
+    total_method_steps: int,
+    completed_seed_count: int,
+    total_seed_count: int,
+    latest_row: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "saved_at": completed_at,
+        "completed_method_steps": int(completed_method_steps),
+        "total_method_steps": int(total_method_steps),
+        "completed_seed_count": int(completed_seed_count),
+        "total_seed_count": int(total_seed_count),
+        "latest_seed": int(latest_row.get("seed", -1) or -1),
+        "latest_method_key": str(latest_row.get("method_key", "") or ""),
+        "latest_method_name": str(latest_row.get("method_name", "") or ""),
+        "latest_forgetting": float(latest_row.get("mean_forgetting", 0.0) or 0.0),
+        "latest_accuracy": float(latest_row.get("final_mean_accuracy", 0.0) or 0.0),
+        "latest_jaf": float(latest_row.get("jaf", 0.0) or 0.0),
+    }
+
+
+def _write_observability_event(
+    run_dir: Path,
+    *,
+    event_name: str,
+    payload: dict[str, Any],
+    checkpoint_timestamp: str = "",
+) -> None:
+    obs_dir = run_dir / "observability"
+    obs_dir.mkdir(parents=True, exist_ok=True)
+    envelope = dict(payload)
+    envelope["captured_at"] = str(envelope.get("captured_at", "") or _now_iso())
+    envelope["event_name"] = event_name
+    envelope["active_resource_snapshot"] = _resource_snapshot()
+    envelope["last_successful_checkpoint_timestamp"] = str(checkpoint_timestamp or "")
+    latest_path = obs_dir / f"{event_name}_latest.json"
+    history_path = obs_dir / f"{event_name}.jsonl"
+    _write_json(latest_path, envelope)
+    with history_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(envelope, sort_keys=True) + "\n")
+    metric_snapshot = {
+        "captured_at": envelope["captured_at"],
+        "event_name": event_name,
+        "seed": envelope.get("seed"),
+        "method_key": envelope.get("method_key"),
+        "task_index": envelope.get("task_index"),
+        "epoch_index": envelope.get("epoch_index"),
+        "metrics": envelope.get("metrics", {}),
+        "active_resource_snapshot": envelope["active_resource_snapshot"],
+        "last_successful_checkpoint_timestamp": envelope["last_successful_checkpoint_timestamp"],
+    }
+    _write_json(obs_dir / "latest_metric_snapshot.json", metric_snapshot)
+    _write_json(obs_dir / "active_resource_snapshot.json", envelope["active_resource_snapshot"])
+
+
+def _write_partial_views(
+    run_dir: Path,
+    *,
+    per_method: dict[str, list[dict[str, Any]]],
+    method_order: list[str],
+    checkpoint_timestamp: str = "",
+) -> None:
+    obs_dir = run_dir / "observability"
+    per_seed_dir = obs_dir / "per_seed"
+    per_method_dir = obs_dir / "per_method"
+    per_seed_dir.mkdir(parents=True, exist_ok=True)
+    per_method_dir.mkdir(parents=True, exist_ok=True)
+
+    rows_by_seed: dict[int, list[dict[str, Any]]] = {}
+    for method_key, rows in per_method.items():
+        aggregate = _aggregate_method_rows(rows) if rows else {}
+        _write_json(
+            per_method_dir / f"{method_key}.json",
+            {
+                "captured_at": _now_iso(),
+                "method_key": method_key,
+                "completed_seed_count": len(rows),
+                "completed_seeds": [int(row.get("seed", -1) or -1) for row in rows],
+                "aggregate_so_far": aggregate,
+                "rows": rows,
+                "last_successful_checkpoint_timestamp": checkpoint_timestamp,
+            },
+        )
+        for row in rows:
+            seed = int(row.get("seed", -1) or -1)
+            rows_by_seed.setdefault(seed, []).append(row)
+
+    for seed, rows in rows_by_seed.items():
+        completed_methods = [str(row.get("method_key", "") or "") for row in rows]
+        remaining_methods = [key for key in method_order if key not in completed_methods]
+        _write_json(
+            per_seed_dir / f"seed_{seed}.json",
+            {
+                "captured_at": _now_iso(),
+                "seed": seed,
+                "completed_method_count": len(rows),
+                "completed_methods": completed_methods,
+                "remaining_methods": remaining_methods,
+                "rows": rows,
+                "last_successful_checkpoint_timestamp": checkpoint_timestamp,
+            },
+        )
 
 
 class _LabelSubset(Dataset):
@@ -244,6 +415,7 @@ def run_single_validation_method(
     backbone: str = VALIDATION_BACKBONE,
     epochs: int = VALIDATION_EPOCHS,
     batch_size: int = VALIDATION_BATCH_SIZE,
+    heartbeat_callback: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> dict[str, Any]:
     cfg = ContinualLearningBenchmarkConfig(
         dataset=VALIDATION_DATASET,
@@ -402,6 +574,40 @@ def run_single_validation_method(
                     entry["mean_sigma_star"] = round(sum(epoch_sigma_stars) / len(epoch_sigma_stars), 8)
                     entry["mean_rho"] = round(sum(epoch_rhos) / len(epoch_rhos), 4)
                 tcl_trace.append(entry)
+                if heartbeat_callback is not None:
+                    heartbeat_callback(
+                        {
+                            "event_name": "epoch_heartbeat",
+                            "captured_at": _now_iso(),
+                            "seed": seed,
+                            "method_key": method_key,
+                            "method_name": method_name,
+                            "task_index": train_task_idx,
+                            "tasks_total": cfg.n_tasks,
+                            "epoch_index": epoch_idx,
+                            "epochs_total": cfg.train_epochs_per_task,
+                            "metrics": dict(entry),
+                        }
+                    )
+            elif heartbeat_callback is not None:
+                heartbeat_callback(
+                    {
+                        "event_name": "epoch_heartbeat",
+                        "captured_at": _now_iso(),
+                        "seed": seed,
+                        "method_key": method_key,
+                        "method_name": method_name,
+                        "task_index": train_task_idx,
+                        "tasks_total": cfg.n_tasks,
+                        "epoch_index": epoch_idx,
+                        "epochs_total": cfg.train_epochs_per_task,
+                        "metrics": {
+                            "task": train_task_idx,
+                            "epoch": epoch_idx,
+                            "n_batches": len(train_loader),
+                        },
+                    }
+                )
 
         if method == "ewc":
             trunk.eval()
@@ -500,6 +706,29 @@ def run_single_validation_method(
         accuracy_matrix[train_task_idx] = row
         confusion_by_train_task[train_task_idx] = row_confusion
         collapse_diagnostics[train_task_idx] = row_collapse
+        if heartbeat_callback is not None:
+            seen_task_values = [float(row[idx]) for idx in range(train_task_idx + 1)]
+            seen_forgetting_values = []
+            for task_idx in range(train_task_idx + 1):
+                peak = max(accuracy_matrix[t][task_idx] for t in range(task_idx, train_task_idx + 1))
+                seen_forgetting_values.append(peak - accuracy_matrix[train_task_idx][task_idx])
+            heartbeat_callback(
+                {
+                    "event_name": "task_heartbeat",
+                    "captured_at": _now_iso(),
+                    "seed": seed,
+                    "method_key": method_key,
+                    "method_name": method_name,
+                    "task_index": train_task_idx,
+                    "tasks_total": cfg.n_tasks,
+                    "metrics": {
+                        "mean_accuracy_seen_tasks": round(_mean(seen_task_values), 6),
+                        "mean_forgetting_seen_tasks": round(_mean(seen_forgetting_values), 6),
+                        "latest_task_accuracy_vector": [round(float(row[idx]), 6) for idx in range(train_task_idx + 1)],
+                        "collapse_flags": row_collapse,
+                    },
+                }
+            )
 
     per_task_accuracy: list[float] = []
     per_task_forgetting: list[float] = []
@@ -672,6 +901,81 @@ def _write_markdown_report(path: Path, raw: dict[str, Any]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_partial_outputs(
+    run_dir: Path,
+    *,
+    seeds: list[int],
+    method_order: list[str],
+    per_method: dict[str, list[dict[str, Any]]],
+    flat_rows: list[dict[str, Any]],
+    backbone: str,
+    epochs: int,
+    batch_size: int,
+    checkpoint_payload: dict[str, Any] | None = None,
+    latest_metric_snapshot: dict[str, Any] | None = None,
+    error_trace: str = "",
+) -> None:
+    aggregate = {
+        method_key: _aggregate_method_rows(rows)
+        for method_key, rows in per_method.items()
+        if rows
+    }
+    confusion_payload = {
+        method_key: {
+            str(row["seed"]): row["final_confusion_matrices"]
+            for row in rows
+        }
+        for method_key, rows in per_method.items()
+        if rows
+    }
+    payload = {
+        "captured_at": _now_iso(),
+        "claim": PRIMARY_CLAIM,
+        "dataset": VALIDATION_DATASET,
+        "setting": "task_incremental",
+        "backbone": backbone,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "seeds": list(seeds),
+        "method_order": list(method_order),
+        "status": "partial",
+        "completed_rows": len(flat_rows),
+        "total_rows_expected": len(seeds) * len(method_order),
+        "per_method": per_method,
+        "aggregate": aggregate,
+        "error_trace_present": bool(error_trace.strip()),
+        "last_successful_checkpoint_timestamp": str(
+            (checkpoint_payload or {}).get("saved_at", "") or ""
+        ),
+    }
+    _write_csv(run_dir / "partial_results.csv", flat_rows)
+    (run_dir / "partial_confusion_matrices.json").write_text(
+        json.dumps(confusion_payload, indent=2),
+        encoding="utf-8",
+    )
+    (run_dir / "partial_results.json").write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+    if checkpoint_payload:
+        _write_json(run_dir / "observability" / "last_successful_checkpoint.json", checkpoint_payload)
+    if latest_metric_snapshot:
+        _write_observability_event(
+            run_dir,
+            event_name="method_completion_snapshot",
+            payload=latest_metric_snapshot,
+            checkpoint_timestamp=str((checkpoint_payload or {}).get("saved_at", "") or ""),
+        )
+    _write_partial_views(
+        run_dir,
+        per_method=per_method,
+        method_order=method_order,
+        checkpoint_timestamp=str((checkpoint_payload or {}).get("saved_at", "") or ""),
+    )
+    if error_trace.strip():
+        (run_dir / "error_trace.txt").write_text(error_trace, encoding="utf-8")
+
+
 def run_hpc_validation_suite(
     workspace: str,
     *,
@@ -686,68 +990,174 @@ def run_hpc_validation_suite(
     output_root.mkdir(parents=True, exist_ok=True)
     run_dir = output_root / "replication_suite"
     run_dir.mkdir(parents=True, exist_ok=True)
+    observability_dir = run_dir / "observability"
+    observability_dir.mkdir(parents=True, exist_ok=True)
 
     seed_list = list(seeds or DEFAULT_MIN_SEEDS)
     methods = [rec for rec in method_matrix() if rec["key"] in VALIDATION_METHOD_ORDER]
     methods.sort(key=lambda rec: VALIDATION_METHOD_ORDER.index(rec["key"]))
     ensure_validation_method_order_exact([str(rec["key"]) for rec in methods])
+    _write_json(
+        observability_dir / "observability_contract.json",
+        {
+            "captured_at": _now_iso(),
+            "scope": "future_validation_runs_only",
+            "requirements": list(VALIDATION_OBSERVABILITY_REQUIREMENTS),
+            "dataset": VALIDATION_DATASET,
+            "setting": "task_incremental",
+            "backbone": backbone,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "method_order": [str(rec["key"]) for rec in methods],
+        },
+    )
 
     per_method: dict[str, list[dict[str, Any]]] = {rec["key"]: [] for rec in methods}
     flat_rows: list[dict[str, Any]] = []
     total_method_steps = len(seed_list) * len(methods)
     completed_method_steps = 0
     completed_seed_count = 0
+    latest_checkpoint: dict[str, Any] = {}
 
-    for seed_index, seed in enumerate(seed_list):
-        for method_index, rec in enumerate(methods):
-            row = run_single_validation_method(
-                workspace=workspace,
-                seed=seed,
-                method_key=str(rec["key"]),
-                method_name=str(rec["label"]),
-                method=str(rec["method"]),
-                config_overrides=dict(rec["config_overrides"]),
-                backbone=backbone,
-                epochs=epochs,
-                batch_size=batch_size,
-            )
-            per_method[str(rec["key"])].append(row)
-            flat_rows.append(
-                {
-                    "seed": row["seed"],
-                    "method_key": row["method_key"],
-                    "method_name": row["method_name"],
-                    "method": row["method"],
-                    "forgetting": row["mean_forgetting"],
-                    "accuracy": row["final_mean_accuracy"],
-                    "jaf": row["jaf"],
-                    "legacy_jaf": row["legacy_jaf"],
-                    "suspicious": row["collapse_summary"]["suspicious"],
-                    "constant_prediction": row["collapse_summary"]["constant_prediction"],
-                    "near_uniform_outputs": row["collapse_summary"]["near_uniform_outputs"],
-                    "near_random_accuracy": row["collapse_summary"]["near_random_accuracy"],
-                }
-            )
-            completed_method_steps += 1
-            if method_index == len(methods) - 1:
-                completed_seed_count = seed_index + 1
-            if progress_callback is not None:
-                progress_callback(
+    def _checkpoint_timestamp() -> str:
+        return str(latest_checkpoint.get("saved_at", "") or "")
+
+    def _emit_live_event(payload: dict[str, Any]) -> None:
+        event_name = str(payload.get("event_name", "") or "heartbeat")
+        _write_observability_event(
+            run_dir,
+            event_name=event_name,
+            payload=payload,
+            checkpoint_timestamp=_checkpoint_timestamp(),
+        )
+
+    _emit_live_event(
+        {
+            "event_name": "suite_status",
+            "captured_at": _now_iso(),
+            "seed": None,
+            "method_key": "",
+            "metrics": {
+                "status": "starting",
+                "completed_method_steps": 0,
+                "total_method_steps": total_method_steps,
+                "completed_seed_count": 0,
+                "total_seed_count": len(seed_list),
+            },
+        }
+    )
+
+    try:
+        for seed_index, seed in enumerate(seed_list):
+            for method_index, rec in enumerate(methods):
+                row = run_single_validation_method(
+                    workspace=workspace,
+                    seed=seed,
+                    method_key=str(rec["key"]),
+                    method_name=str(rec["label"]),
+                    method=str(rec["method"]),
+                    config_overrides=dict(rec["config_overrides"]),
+                    backbone=backbone,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    heartbeat_callback=_emit_live_event,
+                )
+                per_method[str(rec["key"])].append(row)
+                flat_rows.append(
                     {
-                        "seeds_done": completed_seed_count,
-                        "seeds_total": len(seed_list),
-                        "tasks_done": completed_method_steps,
-                        "latest_accs": [f"{value:.3f}" for value in row["per_task_accuracy"]],
-                        "forgetting_so_far": [
-                            float(item["mean_forgetting"])
-                            for item in per_method["high_penalty_conservative"]
-                        ],
-                        "current_seed": seed,
-                        "current_method": rec["key"],
-                        "methods_done": completed_method_steps,
-                        "methods_total": total_method_steps,
+                        "seed": row["seed"],
+                        "method_key": row["method_key"],
+                        "method_name": row["method_name"],
+                        "method": row["method"],
+                        "forgetting": row["mean_forgetting"],
+                        "accuracy": row["final_mean_accuracy"],
+                        "jaf": row["jaf"],
+                        "legacy_jaf": row["legacy_jaf"],
+                        "suspicious": row["collapse_summary"]["suspicious"],
+                        "constant_prediction": row["collapse_summary"]["constant_prediction"],
+                        "near_uniform_outputs": row["collapse_summary"]["near_uniform_outputs"],
+                        "near_random_accuracy": row["collapse_summary"]["near_random_accuracy"],
                     }
                 )
+                completed_method_steps += 1
+                if method_index == len(methods) - 1:
+                    completed_seed_count = seed_index + 1
+                latest_checkpoint = _checkpoint_payload(
+                    completed_at=_now_iso(),
+                    completed_method_steps=completed_method_steps,
+                    total_method_steps=total_method_steps,
+                    completed_seed_count=completed_seed_count,
+                    total_seed_count=len(seed_list),
+                    latest_row=row,
+                )
+                _write_partial_outputs(
+                    run_dir,
+                    seeds=seed_list,
+                    method_order=[rec["key"] for rec in methods],
+                    per_method=per_method,
+                    flat_rows=flat_rows,
+                    backbone=backbone,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    checkpoint_payload=latest_checkpoint,
+                    latest_metric_snapshot={
+                        "captured_at": _now_iso(),
+                        "seed": row["seed"],
+                        "method_key": row["method_key"],
+                        "method_name": row["method_name"],
+                        "metrics": {
+                            "mean_forgetting": row["mean_forgetting"],
+                            "final_mean_accuracy": row["final_mean_accuracy"],
+                            "jaf": row["jaf"],
+                            "per_task_accuracy": row["per_task_accuracy"],
+                            "collapse_summary": row["collapse_summary"],
+                        },
+                    },
+                )
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "seeds_done": completed_seed_count,
+                            "seeds_total": len(seed_list),
+                            "tasks_done": completed_method_steps,
+                            "latest_accs": [f"{value:.3f}" for value in row["per_task_accuracy"]],
+                            "forgetting_so_far": [
+                                float(item["mean_forgetting"])
+                                for item in per_method["high_penalty_conservative"]
+                            ],
+                            "current_seed": seed,
+                            "current_method": rec["key"],
+                            "methods_done": completed_method_steps,
+                            "methods_total": total_method_steps,
+                        }
+                    )
+    except Exception:
+        _emit_live_event(
+            {
+                "event_name": "suite_status",
+                "captured_at": _now_iso(),
+                "metrics": {
+                    "status": "error",
+                    "completed_method_steps": completed_method_steps,
+                    "total_method_steps": total_method_steps,
+                    "completed_seed_count": completed_seed_count,
+                    "total_seed_count": len(seed_list),
+                },
+            }
+        )
+        _write_partial_outputs(
+            run_dir,
+            seeds=seed_list,
+            method_order=[rec["key"] for rec in methods],
+            per_method=per_method,
+            flat_rows=flat_rows,
+            backbone=backbone,
+            epochs=epochs,
+            batch_size=batch_size,
+            checkpoint_payload=latest_checkpoint or None,
+            error_trace=traceback.format_exc(),
+        )
+        raise
 
     aggregate = {
         method_key: _aggregate_method_rows(rows)
@@ -838,12 +1248,29 @@ def run_hpc_validation_suite(
     confusion_path.write_text(json.dumps(confusion_payload, indent=2), encoding="utf-8")
     claim_path.write_text(json.dumps(raw["claim_assessment"], indent=2), encoding="utf-8")
     _write_markdown_report(report_path, raw)
+    if latest_checkpoint:
+        _write_json(observability_dir / "last_successful_checkpoint.json", latest_checkpoint)
+    _emit_live_event(
+        {
+            "event_name": "suite_status",
+            "captured_at": _now_iso(),
+            "metrics": {
+                "status": "complete",
+                "completed_method_steps": completed_method_steps,
+                "total_method_steps": total_method_steps,
+                "completed_seed_count": completed_seed_count,
+                "total_seed_count": len(seed_list),
+                "final_claim_line": raw["final_claim_line"],
+            },
+        }
+    )
     raw["artifacts"] = {
         "json_path": str(json_path),
         "csv_path": str(csv_path),
         "confusion_path": str(confusion_path),
         "claim_path": str(claim_path),
         "report_path": str(report_path),
+        "observability_dir": str(observability_dir),
     }
     json_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
     print(raw["final_claim_line"], flush=True)

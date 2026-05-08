@@ -455,6 +455,9 @@ def write_research_coordination_state(
         payload["blocked_paper_ids"] = [primary_paper] if primary_paper and primary_waiting else []
         payload["blocked_experiment_ids"] = [primary_experiment] if primary_experiment and primary_waiting else []
         payload["next_experiment_ids"] = [primary_experiment] if primary_experiment and primary_waiting else []
+        payload["post_phase17_observability_task"] = dict(
+            validation_mode.get("post_phase17_observability_task", {}) or {}
+        )
         payload["summary"].update(
             {
                 "active_path_count": 1,
@@ -467,6 +470,7 @@ def write_research_coordination_state(
         payload["notes"] = [
             "Stabilisation mode is active. Exploration is paused and only the single HPC claim validation lane should execute.",
             "All unrelated papers, frontiers, and Director-generated probes are secondary until the claim is verified or rejected.",
+            "After Phase 17, future validation runs must emit epoch/task heartbeats, partial JSON snapshots, metric snapshots, PID/resource snapshots, and checkpoint timestamps.",
         ]
     path = _coordination_state_path(workspace)
     try:

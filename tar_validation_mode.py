@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import hashlib
+import ctypes
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ except Exception:
 
 PRIMARY_CLAIM = (
     "high_penalty_conservative reduces catastrophic forgetting vs TCL baseline "
-    "and EWC on Split-CIFAR-10 without accuracy collapse."
+    "and strong regularisation baselines on Split-CIFAR-10 without accuracy collapse."
 )
 VALIDATION_MODE_ID = "stabilisation_hpc_cifar10_validation"
 VALIDATION_FRONTIER_ID = "fp-hyperparameter-robustness"
@@ -43,6 +44,15 @@ VALIDATION_METHOD_ORDER = [
     "si_c_0_01",
     "tcl_baseline",
     "high_penalty_conservative",
+]
+VALIDATION_OBSERVABILITY_REQUIREMENTS = [
+    "epoch_level_heartbeat",
+    "task_level_heartbeat",
+    "per_seed_partial_json",
+    "per_method_partial_json",
+    "latest_metric_snapshot",
+    "active_pid_and_resource_snapshot",
+    "last_successful_checkpoint_timestamp",
 ]
 DEFAULT_MIN_SEEDS = [42, 0, 1, 2, 3, 4, 5, 6, 7, 8]
 DEFAULT_TARGET_SEEDS = [42, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
@@ -166,6 +176,7 @@ def build_config_snapshots(
         "dataset": VALIDATION_DATASET,
         "setting": VALIDATION_SETTING,
         "backbone": VALIDATION_BACKBONE,
+        "observability_requirements": list(VALIDATION_OBSERVABILITY_REQUIREMENTS),
         "min_seed_list": min_seed_list,
         "target_seed_list": target_seed_list,
         "methods": {},
@@ -249,6 +260,7 @@ def validation_suite_lock_payload(
         "epochs": VALIDATION_EPOCHS,
         "batch_size": VALIDATION_BATCH_SIZE,
         "method_order": list(VALIDATION_METHOD_ORDER),
+        "observability_requirements": list(VALIDATION_OBSERVABILITY_REQUIREMENTS),
         "method_matrix": [
             {
                 "key": str(rec["key"]),
@@ -385,6 +397,28 @@ def capture_environment_snapshot(repo_root: Path, workspace: Path) -> dict[str, 
             vm = _psutil.virtual_memory()
             ram_total_gb = round(vm.total / (1024 ** 3), 3)
             ram_available_gb = round(vm.available / (1024 ** 3), 3)
+        except Exception:
+            pass
+    if platform.system().lower().startswith("win") and (ram_total_gb <= 0.0 or ram_available_gb <= 0.0):
+        try:
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                ram_total_gb = round(status.ullTotalPhys / (1024 ** 3), 3)
+                ram_available_gb = round(status.ullAvailPhys / (1024 ** 3), 3)
         except Exception:
             pass
     return {
@@ -544,6 +578,16 @@ def scaffold_validation_outputs(workspace: Path, bundle_root: Path, mode_state: 
                 "- confusion matrices",
                 "- collapse diagnostics",
                 "- strict classification",
+                "",
+                "## Future-run observability contract",
+                "",
+                "- epoch-level heartbeat",
+                "- task-level heartbeat",
+                "- per-seed partial JSON",
+                "- per-method partial JSON",
+                "- latest metric snapshot",
+                "- active PID and resource snapshot",
+                "- last successful checkpoint timestamp",
             ]
         )
         + "\n",
@@ -697,6 +741,8 @@ def build_validation_suite_spec(
             "min_seed_list": seed_list,
             "target_seed_list": target_seed_list,
             "method_order": list(VALIDATION_METHOD_ORDER),
+            "observability_requirements": list(VALIDATION_OBSERVABILITY_REQUIREMENTS),
+            "observability_mode": "future_validation_runs_only",
             "target_claim": PRIMARY_CLAIM,
         },
     )
@@ -789,6 +835,14 @@ def activate_validation_mode(
         "target_seed_list": list(target_seeds or DEFAULT_TARGET_SEEDS),
         "validation_suite_lock": bundle.get("validation_suite_lock", {}),
         "phase17_archive_policy": "scale_up_exploratory_incomplete_until_reviewed",
+        "post_phase17_observability_task": {
+            "status": "armed",
+            "scope": "future_validation_runs_only",
+            "do_not_modify_current_phase17": True,
+            "applies_after_experiment_id": "phase17_tinyimagenet",
+            "before_experiment_id": VALIDATION_EXPERIMENT_ID,
+            "requirements": list(VALIDATION_OBSERVABILITY_REQUIREMENTS),
+        },
         **bundle,
     }
     outputs = scaffold_validation_outputs(workspace, Path(bundle["bundle_root"]), state)
