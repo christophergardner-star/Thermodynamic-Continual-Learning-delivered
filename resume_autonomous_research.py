@@ -31,6 +31,14 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tar_lab.result_artifacts import (
+    _append_jsonl,          # internal helper — append-only JSONL index
+    collect_environment_snapshot,
+    utc_now_iso,
+    utc_stamp,
+    write_append_only_result_pair,
+)
+
 _REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(_REPO))
 from tar_storage import ensure_workspace_layout, resolve_workspace
@@ -235,8 +243,51 @@ def _eval_result(name: str, seeds: list, forgetting: list, accuracy: list,
     )
 
 
-def _save_result(result: ExperimentResult, hyp: Hypothesis) -> None:
+_AR_INDEX = "ar_results_index.jsonl"
+
+
+def _find_existing_result(hyp_name: str) -> dict | None:
+    """Return the most recent saved result for hyp_name from the index, or None."""
+    index_path = _AR_DIR / _AR_INDEX
+    if not index_path.exists():
+        return None
+    best: dict | None = None
+    for line in index_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("hypothesis_name") != hyp_name:
+            continue
+        if best is None or rec.get("created_at", "") > best.get("created_at", ""):
+            best = rec
+    if best is None:
+        return None
+    rp = Path(best.get("result_path", ""))
+    if not rp.exists():
+        return None
+    try:
+        data = json.loads(rp.read_text(encoding="utf-8"))
+        data["_index_record"] = best
+        return data
+    except Exception:
+        return None
+
+
+def _save_result(
+    result: ExperimentResult,
+    hyp: Hypothesis,
+    run_started_at: str | None = None,
+) -> Path:
+    # RAIL 1+2: timestamped unique path, append-only, env-coupled.
     _AR_DIR.mkdir(parents=True, exist_ok=True)
+
+    stamp = utc_stamp()
+    result_path = _AR_DIR / f"{hyp.name}__{stamp}.json"
+    run_ended_at = utc_now_iso()
+
     record = {
         "hypothesis": {
             "name": hyp.name,
@@ -247,8 +298,35 @@ def _save_result(result: ExperimentResult, hyp: Hypothesis) -> None:
             "registered_at": hyp.registered_at,
         },
         "result": asdict(result),
+        "artifact_schema": "tar_ar_result_v2",
     }
-    (_AR_DIR / f"{hyp.name}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+
+    env_payload = collect_environment_snapshot(
+        repo_root=_REPO,
+        workspace=Path(workspace),
+        config={"hypothesis_name": hyp.name, "seeds": result.seeds},
+        trigger="resume_autonomous_research_script",
+        source_script=Path(__file__).name,
+        run_started_at=run_started_at,
+        run_ended_at=run_ended_at,
+        extra={"verdict": result.verdict},
+    )
+
+    write_append_only_result_pair(
+        result_path=result_path,
+        payload=record,
+        env_payload=env_payload,
+    )
+
+    index_record = {
+        "hypothesis_name": hyp.name,
+        "verdict": result.verdict,
+        "created_at": run_ended_at,
+        "result_path": str(result_path),
+    }
+    _append_jsonl(_AR_DIR / _AR_INDEX, index_record)
+
+    return result_path
 
 
 def _write_hypothesis_paper(hyp: Hypothesis, result: ExperimentResult) -> Path | None:
@@ -457,10 +535,15 @@ def _log_paper_to_registry(hyp: Hypothesis, result: ExperimentResult, paper_path
         pass
 
 
-def _write_summary(results: list[tuple[Hypothesis, ExperimentResult]]) -> None:
+def _write_summary(results: list[tuple[Hypothesis, ExperimentResult]]) -> Path:
     _AR_DIR.mkdir(parents=True, exist_ok=True)
+
+    stamp = utc_stamp()
+    summary_path = _AR_DIR / f"summary__{stamp}.json"
+    created_at = utc_now_iso()
+
     summary = {
-        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": created_at,
         "total_hypotheses_tested": len(results),
         "results": [
             {
@@ -474,8 +557,25 @@ def _write_summary(results: list[tuple[Hypothesis, ExperimentResult]]) -> None:
             }
             for h, r in results
         ],
+        "artifact_schema": "tar_ar_summary_v2",
     }
-    (_AR_DIR / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    env_payload = collect_environment_snapshot(
+        repo_root=_REPO,
+        workspace=Path(workspace),
+        config={"hypothesis_count": len(results)},
+        trigger="resume_autonomous_research_script",
+        source_script=Path(__file__).name,
+        run_ended_at=created_at,
+        extra={"summary": True},
+    )
+
+    write_append_only_result_pair(
+        result_path=summary_path,
+        payload=summary,
+        env_payload=env_payload,
+    )
+    return summary_path
 
 
 # ── load TCL baseline ─────────────────────────────────────────────────────────
@@ -700,13 +800,14 @@ def main() -> None:
             _log(f"  seed={seed}  ERROR: {exc}")
 
     if da_forgetting:
+        da_run_started_at = utc_now_iso()
         da_result = _eval_result(
             "deep_anchor", da_seeds_done, da_forgetting, da_accuracy,
             tcl_baseline, da_hyp.breakthrough_criteria,
         )
         _log(f"\ndeep_anchor RESULT: {da_result.verdict}")
         _log(f"  {da_result.notes}")
-        _save_result(da_result, da_hyp)
+        _save_result(da_result, da_hyp, run_started_at=da_run_started_at)
         all_results.append((da_hyp, da_result))
         _register_hypothesis(registry, da_hyp,
                              STATUS_COMPLETE if da_result.verdict != "ERROR" else STATUS_FAILED,
@@ -729,24 +830,21 @@ def main() -> None:
             _log(f"{'='*70}")
             _log(hyp.mechanism_description)
 
-            # Skip if result file already exists and is complete
-            existing = _AR_DIR / f"{hyp.name}.json"
-            if existing.exists():
-                try:
-                    rec = json.loads(existing.read_text(encoding="utf-8"))
-                    existing_seeds = rec.get("result", {}).get("seeds", [])
-                    if len(existing_seeds) >= len(ALL_SEEDS):
-                        _log(f"  Already complete ({len(existing_seeds)} seeds) — skipping")
-                        verdict = rec.get("result", {}).get("verdict", "UNKNOWN")
-                        if verdict == "BREAKTHROUGH":
-                            _log(f"  Previous BREAKTHROUGH for {hyp.name} — stopping")
-                            breakthrough_found = True
-                            break
-                        continue
-                except Exception:
-                    pass
+            # Skip if result already written (check timestamped index, not fixed filename).
+            existing = _find_existing_result(hyp.name)
+            if existing is not None:
+                existing_seeds = existing.get("result", {}).get("seeds", [])
+                if len(existing_seeds) >= len(ALL_SEEDS):
+                    _log(f"  Already complete ({len(existing_seeds)} seeds) — skipping")
+                    verdict = existing.get("result", {}).get("verdict", "UNKNOWN")
+                    if verdict == "BREAKTHROUGH":
+                        _log(f"  Previous BREAKTHROUGH for {hyp.name} — stopping")
+                        breakthrough_found = True
+                        break
+                    continue
 
             h_forgetting, h_accuracy, h_seeds = [], [], []
+            h_run_started_at = utc_now_iso()
             for seed in ALL_SEEDS:
                 _log(f"  seed={seed}...")
                 t0 = time.time()
@@ -770,7 +868,7 @@ def main() -> None:
             )
             _log(f"\n{hyp.name} RESULT: {result.verdict}")
             _log(f"  {result.notes}")
-            _save_result(result, hyp)
+            _save_result(result, hyp, run_started_at=h_run_started_at)
             all_results.append((hyp, result))
             _register_hypothesis(registry, hyp,
                                  STATUS_COMPLETE if result.verdict != "ERROR" else STATUS_FAILED,
