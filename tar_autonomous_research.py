@@ -34,6 +34,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tar_lab.result_artifacts import (
+    _append_jsonl,          # internal helper — append-only JSONL index
+    collect_environment_snapshot,
+    utc_now_iso,
+    utc_stamp,
+    write_append_only_result_pair,
+)
+
 _REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(_REPO))
 from tar_storage import ensure_workspace_layout, resolve_workspace
@@ -666,10 +674,25 @@ def _build_hypotheses(phase10: dict | None) -> list[tuple[Hypothesis, type | Non
 
 
 # ── result persistence ────────────────────────────────────────────────────────
+# RAIL 1: no overwrites — all writes use timestamped unique paths via
+#          write_append_only_result_pair which hard-refuses FileExistsError.
+# RAIL 2: every write produces a sibling _env.json via collect_environment_snapshot.
 
-def _save_result(result: ExperimentResult, hypothesis: Hypothesis) -> Path:
-    out_dir = Path(workspace) / "tar_state" / "autonomous_research"
-    out_dir.mkdir(parents=True, exist_ok=True)
+_AR_INDEX = "ar_results_index.jsonl"
+
+
+def _save_result(
+    result: ExperimentResult,
+    hypothesis: Hypothesis,
+    run_started_at: str | None = None,
+) -> Path:
+    ar_dir = Path(workspace) / "tar_state" / "autonomous_research"
+    ar_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = utc_stamp()
+    result_path = ar_dir / f"{hypothesis.name}__{stamp}.json"
+    run_ended_at = utc_now_iso()
+
     record = {
         "hypothesis": {
             "name": hypothesis.name,
@@ -680,17 +703,48 @@ def _save_result(result: ExperimentResult, hypothesis: Hypothesis) -> Path:
             "registered_at": hypothesis.registered_at,
         },
         "result": asdict(result),
+        "artifact_schema": "tar_ar_result_v2",
     }
-    path = out_dir / f"{hypothesis.name}.json"
-    path.write_text(json.dumps(record, indent=2), encoding="utf-8")
-    return path
+
+    env_payload = collect_environment_snapshot(
+        repo_root=_REPO,
+        workspace=Path(workspace),
+        config={"hypothesis_name": hypothesis.name, "seeds": result.seeds},
+        trigger="autonomous_research_script",
+        source_script=Path(__file__).name,
+        run_started_at=run_started_at,
+        run_ended_at=run_ended_at,
+        extra={"verdict": result.verdict},
+    )
+
+    write_append_only_result_pair(
+        result_path=result_path,
+        payload=record,
+        env_payload=env_payload,
+    )
+
+    # Append index record so resume logic can find existing results.
+    index_record = {
+        "hypothesis_name": hypothesis.name,
+        "verdict": result.verdict,
+        "created_at": run_ended_at,
+        "result_path": str(result_path),
+    }
+    _append_jsonl(ar_dir / _AR_INDEX, index_record)
+
+    return result_path
 
 
 def _write_summary(results: list[tuple[Hypothesis, ExperimentResult]]) -> Path:
-    out_dir = Path(workspace) / "tar_state" / "autonomous_research"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    ar_dir = Path(workspace) / "tar_state" / "autonomous_research"
+    ar_dir.mkdir(parents=True, exist_ok=True)
+
+    stamp = utc_stamp()
+    summary_path = ar_dir / f"summary__{stamp}.json"
+    created_at = utc_now_iso()
+
     summary = {
-        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": created_at,
         "total_hypotheses_tested": len(results),
         "results": [
             {
@@ -704,10 +758,25 @@ def _write_summary(results: list[tuple[Hypothesis, ExperimentResult]]) -> Path:
             }
             for h, r in results
         ],
+        "artifact_schema": "tar_ar_summary_v2",
     }
-    path = out_dir / "summary.json"
-    path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    return path
+
+    env_payload = collect_environment_snapshot(
+        repo_root=_REPO,
+        workspace=Path(workspace),
+        config={"hypothesis_count": len(results)},
+        trigger="autonomous_research_script",
+        source_script=Path(__file__).name,
+        run_ended_at=created_at,
+        extra={"summary": True},
+    )
+
+    write_append_only_result_pair(
+        result_path=summary_path,
+        payload=summary,
+        env_payload=env_payload,
+    )
+    return summary_path
 
 
 # ── TAR-Author integration ────────────────────────────────────────────────────
@@ -815,6 +884,7 @@ def main() -> None:
         _log(hypothesis.mechanism_description)
         _log(f"Prediction: {hypothesis.prediction}")
 
+        run_started_at = utc_now_iso()
         t0 = time.time()
         result = _run_mechanism(hypothesis, observer_class, config_overrides, tcl_baseline)
         elapsed = time.time() - t0
@@ -826,7 +896,7 @@ def main() -> None:
         _log(f"  Baseline:   {_mean(result.baseline_forgetting):.4f}±{_std(result.baseline_forgetting):.4f}")
         _log(f"  Elapsed:    {hrs}h {mins}m")
 
-        result_path = _save_result(result, hypothesis)
+        result_path = _save_result(result, hypothesis, run_started_at=run_started_at)
         _log(f"  Saved: {result_path}")
         all_results.append((hypothesis, result))
 
