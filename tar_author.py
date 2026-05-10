@@ -39,6 +39,11 @@ except Exception:  # pragma: no cover - non-Windows fallback
     winreg = None  # type: ignore
 
 from tar_storage import ensure_workspace_layout, resolve_workspace
+from tar_lab.result_artifacts import (
+    resolve_canonical_comparison_path,
+    read_advisory_verdict,
+    read_statistics,
+)
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
@@ -975,8 +980,8 @@ def _generate_generic_paper_abstract(evidence: dict) -> str:
     pending = [rec for rec in experiments if rec not in completed and rec not in running]
     phase_keys = sorted(k for k in evidence if re.match(r"phase\d+$", k))
     top_result = next((rec.get("result_summary", {}) for rec in completed if rec.get("result_summary")), {})
-    verdict = str(top_result.get("verdict", "") or "provisional")
-    mean_delta = top_result.get("mean_delta")
+    verdict = str(read_advisory_verdict(top_result)["label"] or "provisional")
+    mean_delta = read_statistics(top_result).get("mean_delta")
     delta_txt = f"{float(mean_delta):+.4f}" if isinstance(mean_delta, (int, float)) else "pending"
     phase_note = (
         f" TAR also loaded {len(phase_keys)} saved phase result file"
@@ -1039,9 +1044,11 @@ Current recommendation: {recommendation}
     rows = []
     for rec in experiments:
         result = rec.get("result_summary", {}) if isinstance(rec.get("result_summary"), dict) else {}
-        verdict = str(result.get("verdict", "") or rec.get("stage", rec.get("status", "")) or "planned")
-        forgetting = result.get("mean_forgetting")
-        delta = result.get("mean_delta")
+        _av = read_advisory_verdict(result)
+        verdict = str(_av["label"] or rec.get("stage", rec.get("status", "")) or "planned")
+        _stats = read_statistics(result)
+        forgetting = _stats.get("mean_forgetting")
+        delta = _stats.get("mean_delta")
         metric_bits = []
         if isinstance(forgetting, (int, float)):
             metric_bits.append(f"forgetting={forgetting:.4f}")
@@ -1572,7 +1579,7 @@ stabilises the penalty's effect across seeds.
 def _render_generic_phase(phase_key: str, data: dict) -> str:
     """Fallback renderer for any phase JSON — inspects structure and produces a best-effort section."""
     phase_type = _detect_phase_type(data)
-    verdict = data.get("verdict", "")
+    verdict = read_advisory_verdict(data)["label"]
     completed = data.get("completed_at", "")
     phase_num = re.search(r"\d+", phase_key)
     num_str = phase_num.group(0) if phase_num else phase_key
@@ -1616,8 +1623,9 @@ def _render_phase13_subsection(data: dict) -> str:
     """SI hyperparameter robustness sweep — does SI collapse persist across c values?"""
     c_values   = data.get("c_values_tested", [0.01, 0.1, 0.5])
     agg        = data.get("aggregate", {})
-    vk         = data.get("verdict_key", "UNKNOWN")
-    verdict    = data.get("verdict", "")
+    _av13      = read_advisory_verdict(data)
+    vk         = _av13["label"] or "UNKNOWN"
+    verdict    = _av13["label"]
     threshold  = data.get("collapse_threshold", 0.55)
     tcl_ref    = data.get("phase10_tcl_ref", {})
     tcl_f      = tcl_ref.get("forgetting_mean", 0.1275)
@@ -1905,7 +1913,7 @@ def _generate_ewc_sweep_appendix(evidence: dict) -> str:
     agg12     = p12.get("aggregate",         {})
     pair12    = p12.get("pairwise_tcl_vs_ewc", {})
     tcl_ref   = p12.get("phase10_tcl_ref",   {})
-    verdict12 = p12.get("verdict",           "")
+    verdict12 = read_advisory_verdict(p12)["label"]
 
     tcl_f  = tcl_ref.get("forgetting_mean", 0.1275)
     tcl_fs = tcl_ref.get("forgetting_std",  0.026)
@@ -2500,26 +2508,41 @@ def _candidate_phase_result_paths_for_paper(workspace: Path, paper_entry: dict) 
         if path.exists() and path not in candidates:
             candidates.append(path)
 
+    def add_logical(logical_name: str, legacy_filename: str) -> None:
+        resolved = resolve_canonical_comparison_path(
+            workspace,
+            logical_name,
+            legacy_filename=legacy_filename,
+        )
+        if resolved is not None:
+            add(resolved)
+
     for raw in paper_entry.get("result_paths", []) or []:
         if raw:
-            add(Path(str(raw)))
+            candidate = Path(str(raw))
+            resolved = resolve_canonical_comparison_path(
+                workspace,
+                candidate.stem,
+                legacy_filename=candidate.name,
+            )
+            add(resolved or candidate)
 
     for frontier_id in paper_entry.get("frontier_problem_ids", []) or []:
         if frontier_id == "fp-class-incremental":
-            add(workspace / "tar_state" / "comparisons" / "phase15_class_incremental_search.json")
+            add_logical("phase15_class_incremental_search", "phase15_class_incremental_search.json")
         elif frontier_id == "fp-scale-up":
-            add(workspace / "tar_state" / "comparisons" / "phase16_scale_up.json")
-            add(workspace / "tar_state" / "comparisons" / "phase17_tinyimagenet.json")
+            add_logical("phase16_scale_up", "phase16_scale_up.json")
+            add_logical("phase17_tinyimagenet", "phase17_tinyimagenet.json")
         elif frontier_id in {
             "fp-catastrophic-forgetting",
             "fp-regime-detection-accuracy",
             "fp-hyperparameter-robustness",
         }:
-            add(workspace / "tar_state" / "comparisons" / "phase10_baseline.json")
-            add(workspace / "tar_state" / "comparisons" / "phase11_ablation.json")
-            add(workspace / "tar_state" / "comparisons" / "phase12_ewc_sweep.json")
-            add(workspace / "tar_state" / "comparisons" / "phase13_si_sweep.json")
-            add(workspace / "tar_state" / "comparisons" / "phase14_quantum_publishability.json")
+            add_logical("phase10_baseline", "phase10_baseline.json")
+            add_logical("phase11_ablation", "phase11_ablation.json")
+            add_logical("phase12_ewc_sweep", "phase12_ewc_sweep.json")
+            add_logical("phase13_si_sweep", "phase13_si_sweep.json")
+            add_logical("phase14_quantum_publishability", "phase14_quantum_publishability.json")
     return candidates
 
 
@@ -3468,6 +3491,15 @@ def write_planned_author_state(workspace: Path) -> dict:
     frontier_recommendations = (director.get("frontier_directives", []) if isinstance(director, dict) else [])[:5]
     evidence_directives = (director.get("evidence_directives", []) if isinstance(director, dict) else [])[:8]
     active_research_paths = (director.get("active_research_paths", []) if isinstance(director, dict) else [])[:8]
+    try:
+        from tar_validation_mode import is_active as _validation_mode_active
+    except Exception:
+        _validation_mode_active = None
+    if _validation_mode_active is not None and _validation_mode_active(workspace):
+        suggested_frontier_papers = []
+        frontier_recommendations = []
+        evidence_directives = []
+        active_research_paths = [{"path_id": "validation-hpc-claim", "status": "pursue_now"}]
     current = existing.get("current_paper", {}) if isinstance(existing, dict) else {}
     preserve_active = current.get("status") in {
         "starting", "writing", "revising", "revision_requested",
@@ -4243,6 +4275,11 @@ class TARAuthor:
 
 
 def _default_spec(workspace: Path) -> PaperSpec:
+    phase10_path = resolve_canonical_comparison_path(
+        workspace,
+        "phase10_baseline",
+        legacy_filename="phase10_baseline.json",
+    ) or (workspace / "tar_state" / "comparisons" / "phase10_baseline.json")
     return PaperSpec(
         title=(
             "Thermodynamic Continual Learning: "
@@ -4254,7 +4291,7 @@ def _default_spec(workspace: Path) -> PaperSpec:
         paper_dir=workspace / "paper",
         workspace=workspace,
         phase_result_paths=[
-            workspace / "tar_state" / "comparisons" / "phase10_baseline.json"
+            phase10_path
         ],
     )
 

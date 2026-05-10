@@ -37,6 +37,9 @@ from tar_optimizer_backend import split_optimizer_config
 from tar_lab.result_artifacts import (
     collect_environment_snapshot,
     load_canonical_comparison,
+    read_advisory_verdict,
+    read_statistics,
+    wrap_verdict_separation,
     write_append_only_result_pair,
 )
 from tar_lab.manifest import (
@@ -1766,9 +1769,11 @@ class ExperimentOrchestrator:
             },
         )
         try:
+            # RAIL 5: separate numerical statistics from advisory verdict labels.
+            result_payload = wrap_verdict_separation(asdict(result))
             write_append_only_result_pair(
                 result_path=path,
-                payload=asdict(result),
+                payload=result_payload,
                 env_payload=env_payload,
             )
         except Exception:
