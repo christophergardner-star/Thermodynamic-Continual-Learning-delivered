@@ -34,6 +34,17 @@ from pathlib import Path
 from typing import Any, Callable
 from tar_storage import ensure_workspace_layout, resolve_workspace
 from tar_optimizer_backend import split_optimizer_config
+from tar_lab.result_artifacts import (
+    collect_environment_snapshot,
+    load_canonical_comparison,
+    write_append_only_result_pair,
+)
+from tar_lab.manifest import (
+    ExecutionManifest,
+    ManifestGateError,
+    load_and_verify_manifest,
+    write_refuse_note,
+)
 
 try:
     import psutil as _psutil
@@ -271,7 +282,24 @@ class ExperimentOrchestrator:
         self._log_path   = workspace / "tar_state" / "experiment_orchestrator.log"
         self._exp_dir    = workspace / "tar_state" / "experiments"
         self._specs: dict[str, ExperimentSpec] = {}
+        # RAIL 3: execution requires a user-authorised manifest loaded via
+        # set_manifest() before any call to run_next / run_all / run_parallel.
+        self._active_manifest: ExecutionManifest | None = None
         self._load()
+
+    def set_manifest(self, manifest_path: Path) -> ExecutionManifest:
+        """
+        Load and verify an execution manifest. Must be called before any
+        training run is started. Raises ManifestGateError if invalid.
+        """
+        manifest = load_and_verify_manifest(manifest_path, repo_root=_REPO)
+        self._active_manifest = manifest
+        self._log(
+            f"[manifest] Loaded manifest '{manifest.manifest_id}' — "
+            f"{len(manifest.experiments)} experiment(s) authorised: "
+            f"{manifest.authorised_ids()}"
+        )
+        return manifest
 
     # ── persistence ───────────────────────────────────────────────────────────
     def _load(self) -> None:
@@ -1089,6 +1117,40 @@ class ExperimentOrchestrator:
         skip_preflight: bool = False,
         force_in_process: bool = False,
     ) -> ExperimentResult | None:
+        # RAIL 3 — manifest gate. Every training run requires a verified,
+        # user-committed manifest. Refuse and write an audit note if absent.
+        if self._active_manifest is None:
+            msg = (
+                f"Refusing to execute '{spec.id}': no execution manifest is loaded. "
+                f"Call orchestrator.set_manifest(path) with a committed manifest "
+                f"before running experiments. See tar_lab/manifest.py for schema."
+            )
+            self._log(f"[manifest_gate] {msg}")
+            write_refuse_note(
+                self.workspace,
+                component="ExperimentOrchestrator._execute",
+                reason=msg,
+                experiment_id=spec.id,
+            )
+            raise ManifestGateError(msg)
+
+        try:
+            entry = self._active_manifest.assert_experiment_authorised(spec.id)
+            self._log(
+                f"[manifest_gate] '{spec.id}' authorised by manifest "
+                f"'{self._active_manifest.manifest_id}'"
+            )
+        except ManifestGateError as exc:
+            self._log(f"[manifest_gate] {exc}")
+            write_refuse_note(
+                self.workspace,
+                component="ExperimentOrchestrator._execute",
+                reason=str(exc),
+                experiment_id=spec.id,
+                manifest_path=str(getattr(self._active_manifest, "_path", "")),
+            )
+            raise
+
         report: dict[str, Any] | None = None
         if not skip_preflight:
             report = self._prepare_execution(spec)
@@ -1646,27 +1708,75 @@ class ExperimentOrchestrator:
         )
 
     def _load_baseline(self) -> list[float]:
-        for p in [
-            self.workspace / "tar_state" / "comparisons" / "phase10_baseline.json",
-            _REPO / "tar_state" / "comparisons" / "phase10_baseline.json",
-        ]:
-            if p.exists():
-                try:
-                    data = json.loads(p.read_text(encoding="utf-8"))
-                    vals = [r["tcl_forgetting"] for r in data.get("per_seed", [])
-                            if "tcl_forgetting" in r]
-                    if vals: return vals
-                except Exception:
-                    pass
+        for root in [self.workspace, _REPO]:
+            _path, data = load_canonical_comparison(
+                root,
+                "phase10_baseline",
+                legacy_filename="phase10_baseline.json",
+            )
+            if data is None:
+                continue
+            vals = [r["tcl_forgetting"] for r in data.get("per_seed", [])
+                    if "tcl_forgetting" in r]
+            if vals:
+                return vals
         return [0.1269, 0.1294, 0.1697, 0.1007, 0.1108]
 
     def _save_result(self, spec: ExperimentSpec, result: ExperimentResult) -> Path:
         exp_dir = self._exp_dir / spec.id
         exp_dir.mkdir(parents=True, exist_ok=True)
         path = exp_dir / "result.json"
-        path.write_text(json.dumps(asdict(result), indent=2), encoding="utf-8")
-        # Also save spec alongside result for provenance
-        (exp_dir / "spec.json").write_text(json.dumps(asdict(spec), indent=2), encoding="utf-8")
+        spec_path = exp_dir / "spec.json"
+        if spec_path.exists():
+            raise FileExistsError(f"Refusing to overwrite existing experiment spec: {spec_path}")
+        spec_path.write_text(json.dumps(asdict(spec), indent=2), encoding="utf-8")
+        # RAIL 2 + RAIL 3: record manifest identity in every env snapshot so
+        # every result can be traced back to a specific user authorisation.
+        manifest_id = getattr(self._active_manifest, "manifest_id", None)
+        manifest_hash = getattr(self._active_manifest, "content_hash", None)
+        manifest_path = str(getattr(
+            getattr(self._active_manifest, "_path", None) or "", "__str__", lambda: ""
+        )())
+
+        env_payload = collect_environment_snapshot(
+            repo_root=_REPO,
+            workspace=self.workspace,
+            config={"experiment_spec": asdict(spec)},
+            trigger="orchestrator_queue_execution",
+            source_script=Path(__file__).name,
+            run_started_at=spec.started_at or spec.submitted_at,
+            run_ended_at=result.completed_at,
+            manifest_path=manifest_path,
+            manifest_hash=manifest_hash,
+            extra={
+                "experiment_id": spec.id,
+                "manifest_id": manifest_id,
+                "project_id": spec.project_id,
+                "hypothesis_name": spec.hypothesis_name,
+                "method": spec.method,
+                "dataset": spec.dataset,
+                "result_summary": {
+                    "mean_forgetting": result.mean_forgetting,
+                    "mean_accuracy": result.mean_accuracy,
+                    "mean_delta": result.mean_delta,
+                    "p_val": result.p_val,
+                    "cohens_d": result.cohens_d,
+                    "verdict": result.verdict,
+                },
+            },
+        )
+        try:
+            write_append_only_result_pair(
+                result_path=path,
+                payload=asdict(result),
+                env_payload=env_payload,
+            )
+        except Exception:
+            try:
+                spec_path.unlink()
+            except OSError:
+                pass
+            raise
         return path
 
     # ── status report ─────────────────────────────────────────────────────────

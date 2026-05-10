@@ -19,10 +19,12 @@ import time
 import ctypes
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from tar_lab.manifest import ManifestGateError, write_refuse_note
 
 from tar_storage import ensure_workspace_layout, preferred_python, storage_env
 
@@ -46,6 +48,31 @@ class ServiceConfig:
     stale_after_s: float = 0.0
     restart_cooldown_s: float = 20.0
     process_match: str = ""
+    # RAIL 3: if True this service can only be (re)started when a valid
+    # manifest exists at _MANIFEST_SLOT.  Safe monitoring services set this
+    # False; execution-adjacent services set it True.
+    requires_manifest: bool = False
+
+
+# Known location for the "active session" manifest pointer on the C: repo.
+# The user drops a committed manifest path here before granting execution.
+# Format: {"manifest_path": "manifests/run-xyz.json"}
+_MANIFEST_SLOT = _REPO / "manifests" / "active_session.json"
+
+
+def _active_manifest_present() -> bool:
+    """Return True if a plausible active-session manifest pointer exists."""
+    if not _MANIFEST_SLOT.exists():
+        return False
+    try:
+        raw = json.loads(_MANIFEST_SLOT.read_text(encoding="utf-8"))
+        mp = raw.get("manifest_path", "")
+        if not mp:
+            return False
+        full = _REPO / mp if not Path(mp).is_absolute() else Path(mp)
+        return full.exists()
+    except Exception:
+        return False
 
 
 def _utc_now() -> datetime:
@@ -185,6 +212,8 @@ class TARWatchdog:
                 state_file="living_research_daemon.json",
                 restart_cooldown_s=30.0,
                 process_match="tar_living_research.py --daemon",
+                # RAIL 3: this service has execution-adjacent authority.
+                requires_manifest=True,
             ),
             ServiceConfig(
                 service_id="queue_maintainer",
@@ -202,6 +231,10 @@ class TARWatchdog:
                 stale_after_s=180.0,
                 restart_cooldown_s=30.0,
                 process_match="tar_living_research.py --queue-maintainer",
+                # RAIL 3: queue maintainer submits to the orchestrator which
+                # in turn requires a manifest to execute. Requires manifest
+                # here as a defence-in-depth layer.
+                requires_manifest=True,
             ),
             ServiceConfig(
                 service_id="dashboard",
@@ -451,6 +484,26 @@ class TARWatchdog:
             status["restart_count"] = restart_count
             status["last_started_at"] = previous.get("last_started_at", "")
             status["last_restart_reason"] = previous.get("last_restart_reason", "")
+            return status
+
+        # RAIL 3: refuse to (re)start execution-adjacent services without a
+        # user-committed manifest slot.  Safe monitoring services (dashboard)
+        # have requires_manifest=False and pass through here without check.
+        if config.requires_manifest and not _active_manifest_present():
+            msg = (
+                f"Refusing to start service '{config.service_id}': this service "
+                f"requires an active execution manifest but none was found at "
+                f"'{_MANIFEST_SLOT}'. Create manifests/active_session.json "
+                f"pointing to a committed manifest before starting this service."
+            )
+            self._log(f"[manifest_gate] {msg}")
+            write_refuse_note(
+                self.workspace,
+                component=f"TARWatchdog._spawn:{config.service_id}",
+                reason=msg,
+            )
+            status["manifest_gate_blocked"] = True
+            status["manifest_gate_reason"] = msg
             return status
 
         restart_reason = str(status.get("reason", "restart"))
