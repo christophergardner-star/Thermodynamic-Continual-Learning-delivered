@@ -1580,7 +1580,11 @@ def _phase_result_records() -> list[dict[str, Any]]:
             r["title"]   = runtime.get("name", r["title"])
             r["program"] = "live phase"
 
-    # 4. RERUN_NEEDED: phases quarantined to _untrusted/ with no canonical result yet
+    # 4. RERUN_NEEDED: phases quarantined to _untrusted/ with no canonical result yet.
+    #    If active_rerun.json exists the chain is running that phase right now.
+    active_rerun = _jload(_WS / "tar_state" / "active_rerun.json") or {}
+    active_rerun_phase = int(active_rerun.get("phase", 0) or 0)
+
     seen_phases = {r["phase"] for r in results}
     untrusted_dir = _COMP / "_untrusted"
     if untrusted_dir.exists():
@@ -1610,6 +1614,35 @@ def _phase_result_records() -> list[dict[str, Any]]:
                     "vs_ewc_d":       None,
                     "notes":          runtime.get("context", {}).get("why", "")[:220],
                     "result_path":    runtime.get("result_path", ""),
+                    "completed_at":   "",
+                })
+            elif num == active_rerun_phase:
+                # Standalone chain script is running this phase right now
+                log_path = Path(str(active_rerun.get("log", "") or ""))
+                progress = _parse_training_progress(_tail(log_path, 200)) if log_path.exists() else {}
+                seeds_done  = int(progress.get("seeds_done",  0) or 0)
+                seeds_total = int(progress.get("seeds_total", 5) or 5)
+                live_note   = str(progress.get("live_compute_note", "") or "")
+                verdict_live = (
+                    f"{seeds_done}/{seeds_total} seeds complete — live rerun in progress. {live_note}"
+                ).strip()
+                results.append({
+                    "phase":          num,
+                    "label":          f"phase{num}_rerun_running",
+                    "title":          f"Phase {num} — Rerun Running",
+                    "program":        "live phase",
+                    "source_kind":    "phase",
+                    "status":         "running",
+                    "dataset":        "split_cifar10",
+                    "verdict_key":    "RUNNING",
+                    "verdict":        verdict_live[:120],
+                    "tcl_forgetting": None,
+                    "tcl_accuracy":   None,
+                    "mean_delta":     None,
+                    "vs_ewc_p":       None,
+                    "vs_ewc_d":       None,
+                    "notes":          f"Rerun chain active (manifest: {active_rerun.get('manifest_id','')}). Log: {log_path.name if log_path.name else '—'}",
+                    "result_path":    str(p),
                     "completed_at":   "",
                 })
             else:

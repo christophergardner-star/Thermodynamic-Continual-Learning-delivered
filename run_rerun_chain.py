@@ -44,13 +44,34 @@ def _wait_for(logical_name: str) -> None:
     print(f"[chain] '{logical_name}' confirmed in index.", flush=True)
 
 
-def _run_step(script: str, manifest: str, log: str) -> None:
+def _write_active_rerun(phase: int, logical_name: str, script: str, manifest: str, log: str) -> None:
+    state = {
+        "phase": phase,
+        "logical_name": logical_name,
+        "script": script,
+        "manifest_id": manifest,
+        "log": log,
+        "started_at": json.dumps(None),
+        "status": "running",
+    }
+    out = _ws / "tar_state" / "active_rerun.json"
+    out.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _clear_active_rerun() -> None:
+    out = _ws / "tar_state" / "active_rerun.json"
+    if out.exists():
+        out.unlink()
+
+
+def _run_step(script: str, manifest: str, log: str, phase: int, logical_name: str) -> None:
     print(f"\n[chain] Launching {script} (manifest={manifest})...", flush=True)
     env = os.environ.copy()
     env["TAR_MANIFEST_PATH"] = manifest
     env["PYTHONIOENCODING"] = "utf-8"
     log_path = Path(log)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_active_rerun(phase, logical_name, script, manifest, log)
     with open(log_path, "w", encoding="utf-8") as logf:
         proc = subprocess.run(
             [sys.executable, script],
@@ -59,6 +80,7 @@ def _run_step(script: str, manifest: str, log: str) -> None:
             stdout=logf,
             stderr=logf,
         )
+    _clear_active_rerun()
     if proc.returncode != 0:
         print(f"[chain] ERROR: {script} exited {proc.returncode}. Chain halted.", flush=True)
         sys.exit(proc.returncode)
@@ -67,22 +89,27 @@ def _run_step(script: str, manifest: str, log: str) -> None:
 
 CHAIN = [
     {
-        "wait_for":  "phase11_ablation",
-        "script":    "phase12_ewc_sweep.py",
-        "manifest":  "manifests/phase12_rerun_20260511.json",
-        "log":       str(_ws / "tar_state" / "stat_audit" / "phase12_rerun_20260511.log"),
+        "wait_for":     "phase11_ablation",
+        "phase":        12,
+        "logical_name": "phase12_ewc_sweep",
+        "script":       "phase12_ewc_sweep.py",
+        "manifest":     "manifests/phase12_rerun_20260511.json",
+        "log":          str(_ws / "tar_state" / "stat_audit" / "phase12_rerun_20260511.log"),
     },
     {
-        "wait_for":  "phase12_ewc_sweep",
-        "script":    "phase13_si_sweep.py",
-        "manifest":  "manifests/phase13_rerun_20260511.json",
-        "log":       str(_ws / "tar_state" / "stat_audit" / "phase13_rerun_20260511.log"),
+        "wait_for":     "phase12_ewc_sweep",
+        "phase":        13,
+        "logical_name": "phase13_si_sweep",
+        "script":       "phase13_si_sweep.py",
+        "manifest":     "manifests/phase13_rerun_20260511.json",
+        "log":          str(_ws / "tar_state" / "stat_audit" / "phase13_rerun_20260511.log"),
     },
 ]
 
 print("[chain] Rerun chain started: Phase 11 -> Phase 12 -> Phase 13", flush=True)
 for step in CHAIN:
     _wait_for(step["wait_for"])
-    _run_step(step["script"], step["manifest"], step["log"])
+    _run_step(step["script"], step["manifest"], step["log"],
+              phase=step["phase"], logical_name=step["logical_name"])
 
 print("\n[chain] All reruns complete: Phase 11, 12, 13.", flush=True)
