@@ -48,6 +48,7 @@ def _run_step(script: str, manifest: str, log: str) -> None:
     print(f"\n[chain] Launching {script} (manifest={manifest})...", flush=True)
     env = os.environ.copy()
     env["TAR_MANIFEST_PATH"] = manifest
+    env["PYTHONIOENCODING"] = "utf-8"
     log_path = Path(log)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "w", encoding="utf-8") as logf:
