@@ -1,0 +1,30 @@
+{
+  "manifest_id": "manifest-phase12-rerun-20260511",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "authorised_by": "Christopher Gardner",
+  "purpose": "Rerun Phase 12 EWC lambda sweep under manifest+rails, using corrected Phase 10 controlled rerun reference numbers. Replaces untrusted May-2 phase12_ewc_sweep.json.",
+  "global_time_limit_h": 8.0,
+  "experiments": [
+    {
+      "experiment_id": "phase12-ewc-sweep-rerun-20260511",
+      "name": "Phase 12 EWC lambda sweep (lambda in {10, 1000, 10000})",
+      "allowed_datasets": [
+        "split_cifar10"
+      ],
+      "allowed_methods": [
+        "ewc"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1,
+        2,
+        3
+      ],
+      "time_limit_h": 6.0,
+      "run_limit": 1,
+      "notes": "ResNet-18, Split-CIFAR-10 task_incremental, 40 epochs/task, 5 seeds, 3 lambda values. Reference numbers from phase10_controlled_rerun_20260509T132155Z.json."
+    }
+  ],
+  "content_hash": "3bf26fdc03f9f49b217905c7c19b576b6ca056f6804acdc7f51e61c36822a36a"
+}

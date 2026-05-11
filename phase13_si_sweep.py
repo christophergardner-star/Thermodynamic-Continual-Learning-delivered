@@ -39,17 +39,24 @@ workspace = str(ensure_workspace_layout(resolve_workspace(Path(_repo)), repo_roo
 
 from tar_lab.schemas import ContinualLearningBenchmarkConfig
 from tar_lab.multimodal_payloads import run_split_cifar10_benchmark
+from tar_lab.result_artifacts import collect_environment_snapshot, write_canonical_comparison_result
+from tar_lab.manifest import load_and_verify_manifest, ManifestGateError, write_refuse_note
 
 SEEDS    = [42, 0, 1]
 BACKBONE = "resnet18"
 EPOCHS   = 40
 XI_FIXED = 0.001
 C_VALUES = [0.01, 0.1, 0.5]   # c=0.1 is Phase 10 default
+BASE_CFG = ContinualLearningBenchmarkConfig(
+    seed=SEEDS[0],
+    train_epochs_per_task=EPOCHS,
+    si_xi=XI_FIXED,
+)
 
 # Phase 10 reference: SI c=0.1, ξ=0.001, all 5 seeds → acc=0.500 exactly
-# TCL reference (seeds 42/0/1) for comparison
-PHASE10_TCL_FORG = [0.1269, 0.1294, 0.1697]
-PHASE10_TCL_ACC  = [0.7672, 0.7691, 0.7309]
+# TCL reference (seeds 42/0/1) from phase10_controlled_rerun_20260509T132155Z.json
+PHASE10_TCL_FORG = [0.08780, 0.10620, 0.09570]
+PHASE10_TCL_ACC  = [0.7767, 0.7644, 0.7826]
 
 COLLAPSE_THRESHOLD = 0.55
 
@@ -62,12 +69,36 @@ def jaf(acc, forg):  return acc * (1.0 - forg)
 def collapsed(acc):  return acc <= COLLAPSE_THRESHOLD
 
 
+# ── RAIL 3: manifest gate ─────────────────────────────────────────────────────
+_manifest_path_str = os.environ.get("TAR_MANIFEST_PATH", "")
+if not _manifest_path_str:
+    print("REFUSED: TAR_MANIFEST_PATH not set. Set it to the path of the signed manifest and re-run.", flush=True)
+    sys.exit(1)
+_manifest_path = Path(_manifest_path_str)
+if not _manifest_path.is_absolute():
+    _manifest_path = Path(_repo) / _manifest_path
+try:
+    _manifest = load_and_verify_manifest(_manifest_path, Path(_repo))
+    _manifest.assert_experiment_authorised("phase13-si-sweep-rerun-20260511")
+except ManifestGateError as _e:
+    write_refuse_note(
+        Path(workspace),
+        component="phase13_si_sweep",
+        reason=str(_e),
+        experiment_id="phase13-si-sweep-rerun-20260511",
+        manifest_path=str(_manifest_path),
+    )
+    print(f"REFUSED: {_e}", flush=True)
+    sys.exit(1)
+print(f"[RAIL 3] Manifest gate: OK ({_manifest.manifest_id})", flush=True)
+
+run_started_at = datetime.utcnow().isoformat()
 print(f"\n{'='*70}")
 print(f"Phase 13 — SI Robustness Sweep")
 print(f"backbone={BACKBONE}  epochs={EPOCHS}  seeds={SEEDS}")
 print(f"c_values={C_VALUES}  xi_fixed={XI_FIXED}")
 print(f"collapse_threshold={COLLAPSE_THRESHOLD}")
-print(f"{datetime.utcnow().isoformat()}")
+print(f"{run_started_at}")
 print(f"{'='*70}", flush=True)
 
 # results[c] = {"forgetting": [...], "accuracy": [...]}
@@ -199,9 +230,8 @@ print(f"\n{verdict_key}: {verdict}")
 
 
 # ── write result ──────────────────────────────────────────────────────────────
-out = Path(workspace) / "tar_state" / "comparisons" / "phase13_si_sweep.json"
-out.parent.mkdir(parents=True, exist_ok=True)
-out.write_text(json.dumps({
+completed_at = datetime.utcnow().isoformat()
+payload = {
     "backbone":           BACKBONE,
     "epochs":             EPOCHS,
     "seeds":              SEEDS,
@@ -217,8 +247,38 @@ out.write_text(json.dumps({
     "aggregate":   {str(k): v for k, v in agg.items()},
     "verdict_key": verdict_key,
     "verdict":     verdict,
-    "completed_at": datetime.utcnow().isoformat(),
-}, indent=2, default=str))
+    "completed_at": completed_at,
+}
+env_payload = collect_environment_snapshot(
+    repo_root=Path(_repo),
+    workspace=Path(workspace),
+    config={
+        "suite": "phase13_si_sweep",
+        "base_benchmark_config": BASE_CFG.model_dump(mode="json"),
+        "c_values": C_VALUES,
+        "xi_fixed": XI_FIXED,
+        "collapse_threshold": COLLAPSE_THRESHOLD,
+        "backbone": BACKBONE,
+        "epochs": EPOCHS,
+    },
+    trigger="manual_script",
+    source_script=Path(__file__).name,
+    run_started_at=run_started_at,
+    run_ended_at=completed_at,
+    manifest_path=str(_manifest._path),
+    manifest_hash=_manifest.content_hash,
+    extra={"logical_name": "phase13_si_sweep", "manifest_id": _manifest.manifest_id},
+)
+artifacts = write_canonical_comparison_result(
+    workspace=Path(workspace),
+    logical_name="phase13_si_sweep",
+    payload=payload,
+    env_payload=env_payload,
+    phase_number=13,
+    source_script=Path(__file__).name,
+)
 
-print(f"\nResult written: {out}")
-print(f"[{datetime.utcnow().isoformat()}] Phase 13 SI sweep complete")
+print(f"\nResult written: {artifacts['result_path']}")
+print(f"Env snapshot: {artifacts['env_path']}")
+print(f"Index updated: {artifacts['index_path']}")
+print(f"[{completed_at}] Phase 13 SI sweep complete")

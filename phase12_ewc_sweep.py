@@ -33,15 +33,22 @@ workspace = str(ensure_workspace_layout(resolve_workspace(Path(_repo)), repo_roo
 
 from tar_lab.schemas import ContinualLearningBenchmarkConfig
 from tar_lab.multimodal_payloads import run_split_cifar10_benchmark
+from tar_lab.result_artifacts import collect_environment_snapshot, write_canonical_comparison_result
+from tar_lab.manifest import load_and_verify_manifest, ManifestGateError, write_refuse_note
 
 SEEDS    = [42, 0, 1, 2, 3]
 BACKBONE = "resnet18"
 EPOCHS   = 40
 LAMBDAS  = [10, 1000, 10000]   # λ=100 already in Phase 10
+BASE_CFG = ContinualLearningBenchmarkConfig(
+    seed=SEEDS[0],
+    train_epochs_per_task=EPOCHS,
+    ewc_lambda=100.0,
+)
 
-# Phase 10 reference numbers (λ=100, all 5 seeds) from phase10_baseline.json
-PHASE10_EWC_FORG  = [0.1640, 0.1530, 0.2520, 0.2366, 0.1598]   # EWC λ=100, seeds 42/0/1/2/3
-PHASE10_TCL_FORG  = [0.1269, 0.1294, 0.1697, 0.1007, 0.1108]   # TCL, seeds 42/0/1/2/3
+# Phase 10 reference numbers (λ=100, all 5 seeds) from phase10_controlled_rerun_20260509T132155Z.json
+PHASE10_EWC_FORG  = [0.20440, 0.20250, 0.17100, 0.16140, 0.21500]   # EWC λ=100, seeds 42/0/1/2/3
+PHASE10_TCL_FORG  = [0.08780, 0.10620, 0.09570, 0.16020, 0.13050]   # TCL, seeds 42/0/1/2/3
 
 
 def mean(v):  return sum(v) / len(v)
@@ -51,11 +58,35 @@ def std(v):
 def jaf(acc, forg):  return acc * (1.0 - forg)
 
 
+# ── RAIL 3: manifest gate ─────────────────────────────────────────────────────
+_manifest_path_str = os.environ.get("TAR_MANIFEST_PATH", "")
+if not _manifest_path_str:
+    print("REFUSED: TAR_MANIFEST_PATH not set. Set it to the path of the signed manifest and re-run.", flush=True)
+    sys.exit(1)
+_manifest_path = Path(_manifest_path_str)
+if not _manifest_path.is_absolute():
+    _manifest_path = Path(_repo) / _manifest_path
+try:
+    _manifest = load_and_verify_manifest(_manifest_path, Path(_repo))
+    _manifest.assert_experiment_authorised("phase12-ewc-sweep-rerun-20260511")
+except ManifestGateError as _e:
+    write_refuse_note(
+        Path(workspace),
+        component="phase12_ewc_sweep",
+        reason=str(_e),
+        experiment_id="phase12-ewc-sweep-rerun-20260511",
+        manifest_path=str(_manifest_path),
+    )
+    print(f"REFUSED: {_e}", flush=True)
+    sys.exit(1)
+print(f"[RAIL 3] Manifest gate: OK ({_manifest.manifest_id})", flush=True)
+
+run_started_at = datetime.utcnow().isoformat()
 print(f"\n{'='*70}")
 print(f"Phase 12 — EWC λ Sweep")
 print(f"backbone={BACKBONE}  epochs={EPOCHS}  seeds={SEEDS}")
 print(f"lambdas={LAMBDAS}  (λ=100 from Phase 10 as reference)")
-print(f"{datetime.utcnow().isoformat()}")
+print(f"{run_started_at}")
 print(f"{'='*70}", flush=True)
 
 # results[lam] = {"forgetting": [...], "accuracy": [...]}
@@ -215,9 +246,8 @@ print(f"\n{verdict_key}: {verdict}")
 
 
 # ── write result ──────────────────────────────────────────────────────────────
-out = Path(workspace) / "tar_state" / "comparisons" / "phase12_ewc_sweep.json"
-out.parent.mkdir(parents=True, exist_ok=True)
-out.write_text(json.dumps({
+completed_at = datetime.utcnow().isoformat()
+payload = {
     "backbone":         BACKBONE,
     "epochs":           EPOCHS,
     "seeds":            SEEDS,
@@ -239,8 +269,37 @@ out.write_text(json.dumps({
     "pairwise_tcl_vs_ewc": {str(k): v for k, v in pairwise.items()},
     "verdict_key":      verdict_key,
     "verdict":          verdict,
-    "completed_at":     datetime.utcnow().isoformat(),
-}, indent=2, default=str))
+    "completed_at":     completed_at,
+}
+env_payload = collect_environment_snapshot(
+    repo_root=Path(_repo),
+    workspace=Path(workspace),
+    config={
+        "suite": "phase12_ewc_sweep",
+        "base_benchmark_config": BASE_CFG.model_dump(mode="json"),
+        "lambdas_tested": LAMBDAS,
+        "phase10_reference_lambda": 100,
+        "backbone": BACKBONE,
+        "epochs": EPOCHS,
+    },
+    trigger="manual_script",
+    source_script=Path(__file__).name,
+    run_started_at=run_started_at,
+    run_ended_at=completed_at,
+    manifest_path=str(_manifest._path),
+    manifest_hash=_manifest.content_hash,
+    extra={"logical_name": "phase12_ewc_sweep", "manifest_id": _manifest.manifest_id},
+)
+artifacts = write_canonical_comparison_result(
+    workspace=Path(workspace),
+    logical_name="phase12_ewc_sweep",
+    payload=payload,
+    env_payload=env_payload,
+    phase_number=12,
+    source_script=Path(__file__).name,
+)
 
-print(f"\nResult written: {out}")
-print(f"[{datetime.utcnow().isoformat()}] Phase 12 EWC sweep complete")
+print(f"\nResult written: {artifacts['result_path']}")
+print(f"Env snapshot: {artifacts['env_path']}")
+print(f"Index updated: {artifacts['index_path']}")
+print(f"[{completed_at}] Phase 12 EWC sweep complete")

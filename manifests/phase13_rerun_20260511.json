@@ -1,0 +1,28 @@
+{
+  "manifest_id": "manifest-phase13-rerun-20260511",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "authorised_by": "Christopher Gardner",
+  "purpose": "Rerun Phase 13 SI robustness sweep under manifest+rails, using corrected Phase 10 controlled rerun reference numbers. Replaces untrusted May-2 phase13_si_sweep.json.",
+  "global_time_limit_h": 5.0,
+  "experiments": [
+    {
+      "experiment_id": "phase13-si-sweep-rerun-20260511",
+      "name": "Phase 13 SI robustness sweep (c in {0.01, 0.1, 0.5})",
+      "allowed_datasets": [
+        "split_cifar10"
+      ],
+      "allowed_methods": [
+        "si"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1
+      ],
+      "time_limit_h": 3.0,
+      "run_limit": 1,
+      "notes": "ResNet-18, Split-CIFAR-10 task_incremental, 40 epochs/task, 3 seeds, 3 c values. Reference numbers from phase10_controlled_rerun_20260509T132155Z.json."
+    }
+  ],
+  "content_hash": "6c702aae9d14c8cfb04c43d770988d24ed40f15610d4847d3a76c673578b1fb7"
+}

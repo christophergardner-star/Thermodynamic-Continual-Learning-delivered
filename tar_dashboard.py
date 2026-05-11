@@ -26,7 +26,7 @@ from typing import Any
 
 from flask import Flask, Response, abort, jsonify, request, send_file
 from tar_storage import ensure_workspace_layout
-from tar_lab.result_artifacts import read_advisory_verdict, read_statistics
+from tar_lab.result_artifacts import read_advisory_verdict, read_statistics, iter_canonical_comparison_records
 
 try:
     import psutil as _psutil
@@ -1496,7 +1496,7 @@ def api_phases():
 
 
 def _phase_result_records() -> list[dict[str, Any]]:
-    results = []
+    results: list[dict[str, Any]] = []
     runtime_by_phase = {
         rec["_phase_num"]: rec
         for rec in _runtime_experiment_records()
@@ -1504,46 +1504,137 @@ def _phase_result_records() -> list[dict[str, Any]]:
     }
     if not _COMP.exists():
         return results
+
+    # Build canonical-index map: trusted result path keyed by phase number.
+    # Index is the authoritative source; the glob below only handles phases
+    # not yet in the index (e.g. 14, 15, 16, 17).
+    canonical_by_phase: dict[int, Path] = {}
+    try:
+        for rec in iter_canonical_comparison_records(_WS):
+            pnum  = rec.get("phase_number")
+            rpath = rec.get("result_path", "")
+            if pnum is None or not rpath:
+                continue
+            p = Path(str(rpath))
+            if not p.exists():
+                continue
+            pnum = int(pnum)
+            # Latest created_at wins if there are multiple entries for a phase
+            existing = canonical_by_phase.get(pnum)
+            if existing is None:
+                canonical_by_phase[pnum] = p
+    except Exception:
+        pass
+
+    def _make_record(p: Path, num: int) -> dict[str, Any]:
+        data     = _jload(p) or {}
+        agg      = data.get("aggregate", {})
+        tcl      = agg.get("tcl", {}) or agg.get("full_tcl", {})
+        pw       = data.get("pairwise", {})
+        vs_e     = pw.get("ewc", {})
+        evidence = _result_evidence_payload(p) or {}
+        is_err   = data.get("status") == "ERROR" or "ERROR" in data.get("verdict", "")
+        is_bk    = (data.get("verdict_key") == "BREAKTHROUGH"
+                    or data.get("external_breakthrough_candidate") is True)
+        return {
+            "phase":          num,
+            "label":          p.stem,
+            "title":          f"Phase {num}",
+            "program":        "phase program",
+            "source_kind":    "phase",
+            "status":         "error" if is_err else "breakthrough" if is_bk else "complete",
+            "dataset":        data.get("dataset") or data.get("benchmark", "split_cifar10"),
+            "verdict_key":    data.get("verdict_key", ""),
+            "verdict":        evidence.get("verdict") or (data.get("verdict") or data.get("summary") or data.get("error", ""))[:120],
+            "tcl_forgetting": tcl.get("forgetting_mean"),
+            "tcl_accuracy":   tcl.get("acc_mean"),
+            "mean_delta":     evidence.get("mean_delta"),
+            "vs_ewc_p":       evidence.get("p_val") or vs_e.get("p_val") or data.get("p_value_vs_strong_baseline"),
+            "vs_ewc_d":       evidence.get("cohens_d") or vs_e.get("cohens_d") or data.get("effect_size_vs_strong_baseline"),
+            "notes":          evidence.get("notes", ""),
+            "result_path":    evidence.get("result_path", str(p)),
+            "completed_at":   str(data.get("completed_at", "") or "")[:19],
+        }
+
+    # 1. Trusted canonical results (from index)
+    for pnum, p in sorted(canonical_by_phase.items()):
+        results.append(_make_record(p, pnum))
+
+    # 2. Non-indexed phase files (phases 14+, not yet in canonical index)
+    indexed_phases = set(canonical_by_phase.keys())
     for p in sorted(_COMP.glob("phase*.json")):
         m = re.search(r"phase(\d+)", p.stem)
         if not m:
             continue
-        num  = int(m.group(1))
-        data = _jload(p) or {}
-        agg  = data.get("aggregate", {})
-        tcl  = agg.get("tcl", {}) or agg.get("full_tcl", {})
-        pw   = data.get("pairwise", {})
-        vs_e = pw.get("ewc", {})
-        vs_s = pw.get("sgd_baseline", {})
-        evidence = _result_evidence_payload(p) or {}
-        is_err = data.get("status") == "ERROR" or "ERROR" in data.get("verdict", "")
-        is_bk  = (data.get("verdict_key") == "BREAKTHROUGH"
-                  or data.get("external_breakthrough_candidate") is True)
-        results.append({
-            "phase":              num,
-            "label":              p.stem,
-            "title":              f"Phase {num}",
-            "program":            "phase program",
-            "source_kind":        "phase",
-            "status":             "error" if is_err else "breakthrough" if is_bk else "complete",
-            "dataset":            data.get("dataset") or data.get("benchmark", "split_cifar10"),
-            "verdict_key":        data.get("verdict_key", ""),
-            "verdict":            evidence.get("verdict") or (data.get("verdict") or data.get("summary") or data.get("error", ""))[:120],
-            "tcl_forgetting":     tcl.get("forgetting_mean"),
-            "tcl_accuracy":       tcl.get("acc_mean"),
-            "mean_delta":         evidence.get("mean_delta"),
-            "vs_ewc_p":           evidence.get("p_val") or vs_e.get("p_val") or data.get("p_value_vs_strong_baseline"),
-            "vs_ewc_d":           evidence.get("cohens_d") or vs_e.get("cohens_d") or data.get("effect_size_vs_strong_baseline"),
-            "notes":              evidence.get("notes", ""),
-            "result_path":        evidence.get("result_path", str(p)),
-            "completed_at":       str(data.get("completed_at", "") or "")[:19],
-        })
-        runtime = runtime_by_phase.get(num)
+        num = int(m.group(1))
+        if num in indexed_phases:
+            continue  # already covered by canonical
+        results.append(_make_record(p, num))
+
+    # 3. Overlay live/running runtime status where applicable
+    for r in results:
+        runtime = runtime_by_phase.get(r["phase"])
         if runtime and runtime.get("stage") in {"running", "queued", "planned", "stalled"}:
-            results[-1]["status"] = runtime["stage"]
-            results[-1]["verdict"] = runtime["context"]["projected_outcome"][:120]
-            results[-1]["title"] = runtime.get("name", results[-1]["title"])
-            results[-1]["program"] = "live phase"
+            r["status"]  = runtime["stage"]
+            r["verdict"] = runtime["context"]["projected_outcome"][:120]
+            r["title"]   = runtime.get("name", r["title"])
+            r["program"] = "live phase"
+
+    # 4. RERUN_NEEDED: phases quarantined to _untrusted/ with no canonical result yet
+    seen_phases = {r["phase"] for r in results}
+    untrusted_dir = _COMP / "_untrusted"
+    if untrusted_dir.exists():
+        for p in sorted(untrusted_dir.glob("phase*.json")):
+            m = re.search(r"phase(\d+)", p.stem)
+            if not m:
+                continue
+            num = int(m.group(1))
+            if num in seen_phases:
+                continue
+            runtime = runtime_by_phase.get(num)
+            if runtime and runtime.get("stage") in {"running", "queued", "planned", "stalled"}:
+                results.append({
+                    "phase":          num,
+                    "label":          runtime["id"],
+                    "title":          runtime.get("name", f"Phase {num}"),
+                    "program":        "live phase",
+                    "source_kind":    "phase",
+                    "status":         runtime["stage"],
+                    "dataset":        runtime.get("dataset", "split_cifar10"),
+                    "verdict_key":    "",
+                    "verdict":        runtime["context"]["projected_outcome"][:120],
+                    "tcl_forgetting": None,
+                    "tcl_accuracy":   None,
+                    "mean_delta":     None,
+                    "vs_ewc_p":       None,
+                    "vs_ewc_d":       None,
+                    "notes":          runtime.get("context", {}).get("why", "")[:220],
+                    "result_path":    runtime.get("result_path", ""),
+                    "completed_at":   "",
+                })
+            else:
+                results.append({
+                    "phase":          num,
+                    "label":          f"phase{num}_rerun_needed",
+                    "title":          f"Phase {num} — Rerun Needed",
+                    "program":        "rerun_needed",
+                    "source_kind":    "phase",
+                    "status":         "rerun_needed",
+                    "dataset":        "split_cifar10",
+                    "verdict_key":    "RERUN_NEEDED",
+                    "verdict":        "Untrusted result quarantined. Rerun pending.",
+                    "tcl_forgetting": None,
+                    "tcl_accuracy":   None,
+                    "mean_delta":     None,
+                    "vs_ewc_p":       None,
+                    "vs_ewc_d":       None,
+                    "notes":          "Original result quarantined to _untrusted/ — ran against corrupted Phase 10 baseline. Rerun queued.",
+                    "result_path":    str(p),
+                    "completed_at":   "",
+                })
+            seen_phases.add(num)
+
+    # 5. Runtime-only entries (running/queued with no result file of any kind)
     seen_phases = {r["phase"] for r in results}
     for phase_num, runtime in runtime_by_phase.items():
         if phase_num in seen_phases:
@@ -1551,24 +1642,25 @@ def _phase_result_records() -> list[dict[str, Any]]:
         if runtime.get("stage") not in {"running", "queued", "planned", "stalled"}:
             continue
         results.append({
-            "phase": phase_num,
-            "label": runtime["id"],
-            "title": runtime.get("name", runtime["id"]),
-            "program": "live phase",
-            "source_kind": "phase",
-            "status": runtime["stage"],
-            "dataset": runtime["dataset"],
-            "verdict_key": "",
-            "verdict": runtime["context"]["projected_outcome"][:120],
+            "phase":          phase_num,
+            "label":          runtime["id"],
+            "title":          runtime.get("name", runtime["id"]),
+            "program":        "live phase",
+            "source_kind":    "phase",
+            "status":         runtime["stage"],
+            "dataset":        runtime["dataset"],
+            "verdict_key":    "",
+            "verdict":        runtime["context"]["projected_outcome"][:120],
             "tcl_forgetting": None,
-            "tcl_accuracy": None,
-            "mean_delta": None,
-            "vs_ewc_p": None,
-            "vs_ewc_d": None,
-            "notes": runtime.get("context", {}).get("why", "")[:220],
-            "result_path": runtime.get("result_path", ""),
-            "completed_at": "",
+            "tcl_accuracy":   None,
+            "mean_delta":     None,
+            "vs_ewc_p":       None,
+            "vs_ewc_d":       None,
+            "notes":          runtime.get("context", {}).get("why", "")[:220],
+            "result_path":    runtime.get("result_path", ""),
+            "completed_at":   "",
         })
+
     results.sort(key=lambda x: x["phase"])
     return results
 
