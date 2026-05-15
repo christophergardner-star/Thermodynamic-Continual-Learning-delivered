@@ -33,7 +33,7 @@ workspace = str(ensure_workspace_layout(resolve_workspace(Path(_repo)), repo_roo
 
 from tar_lab.schemas import ContinualLearningBenchmarkConfig
 from tar_lab.multimodal_payloads import run_split_cifar10_benchmark
-from tar_lab.result_artifacts import collect_environment_snapshot, write_canonical_comparison_result
+from tar_lab.result_artifacts import collect_environment_snapshot, wrap_verdict_separation, write_canonical_comparison_result
 from tar_lab.manifest import load_and_verify_manifest, ManifestGateError, write_refuse_note
 
 SEEDS    = [42, 0, 1, 2, 3]
@@ -293,7 +293,7 @@ env_payload = collect_environment_snapshot(
 artifacts = write_canonical_comparison_result(
     workspace=Path(workspace),
     logical_name="phase12_ewc_sweep",
-    payload=payload,
+    payload=wrap_verdict_separation(payload),
     env_payload=env_payload,
     phase_number=12,
     source_script=Path(__file__).name,

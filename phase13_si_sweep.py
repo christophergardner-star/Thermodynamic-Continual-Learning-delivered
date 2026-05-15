@@ -39,7 +39,7 @@ workspace = str(ensure_workspace_layout(resolve_workspace(Path(_repo)), repo_roo
 
 from tar_lab.schemas import ContinualLearningBenchmarkConfig
 from tar_lab.multimodal_payloads import run_split_cifar10_benchmark
-from tar_lab.result_artifacts import collect_environment_snapshot, write_canonical_comparison_result
+from tar_lab.result_artifacts import collect_environment_snapshot, wrap_verdict_separation, write_canonical_comparison_result
 from tar_lab.manifest import load_and_verify_manifest, ManifestGateError, write_refuse_note
 
 SEEDS    = [42, 0, 1]
@@ -199,6 +199,12 @@ non_degen_configs = [
     for i, seed in enumerate(SEEDS)
     if not collapsed(results[c]["accuracy"][i])
 ]
+non_degen_c_values = [
+    c for c in C_VALUES
+    if any(not collapsed(acc) for acc in results[c]["accuracy"])
+]
+fully_non_degenerate = len(non_degen_c_values) == len(C_VALUES)
+partially_non_degenerate = bool(non_degen_c_values) and not fully_non_degenerate
 
 if all_degenerate:
     verdict_key = "ALL_DEGENERATE"
@@ -207,20 +213,19 @@ if all_degenerate:
         f"SI degeneracy claim holds across c∈{{{','.join(str(c) for c in C_VALUES)}}}, "
         f"ξ={XI_FIXED}. The collapse is not specific to the published default (c=0.1)."
     )
-elif len(non_degen_configs) < 3:
-    # Some but not all non-degenerate
+elif partially_non_degenerate:
     verdict_key = "PARTIAL_RECOVERY"
     verdict = (
-        f"Some SI configurations avoid collapse: "
-        f"{[(c, s) for c, s, _ in non_degen_configs]}. "
-        f"SI degeneracy claim must be scoped to specific hyperparameter settings. "
-        f"Non-degenerate configurations exist on this benchmark."
+        f"Some SI configurations avoid collapse, but not all. "
+        f"Non-degenerate c values: {non_degen_c_values}; "
+        f"collapsed c values: {[c for c in C_VALUES if c not in non_degen_c_values]}. "
+        f"SI degeneracy claim must be scoped to specific hyperparameter settings "
+        f"rather than the whole method family."
     )
 else:
-    # Most or all non-degenerate
     verdict_key = "FULL_RECOVERY"
     verdict = (
-        f"Most tested SI configurations avoid collapse. "
+        f"All tested SI configurations avoid collapse. "
         f"{len(non_degen_configs)}/{len(C_VALUES)*len(SEEDS)} seed-config pairs non-degenerate. "
         f"Degeneracy is specific to certain (c, ξ) combinations; "
         f"the claim must be narrowed to the published default hyperparameters."
@@ -272,7 +277,7 @@ env_payload = collect_environment_snapshot(
 artifacts = write_canonical_comparison_result(
     workspace=Path(workspace),
     logical_name="phase13_si_sweep",
-    payload=payload,
+    payload=wrap_verdict_separation(payload),
     env_payload=env_payload,
     phase_number=13,
     source_script=Path(__file__).name,

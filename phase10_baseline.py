@@ -19,6 +19,7 @@ import json
 import math
 from pathlib import Path
 from datetime import datetime
+from typing import Any
 from scipy import stats as _scipy_stats
 
 _repo = str(Path(__file__).resolve().parent)
@@ -28,11 +29,18 @@ workspace = str(ensure_workspace_layout(resolve_workspace(Path(_repo)), repo_roo
 
 from tar_lab.schemas import ContinualLearningBenchmarkConfig
 from tar_lab.multimodal_payloads import run_split_cifar10_benchmark
+from tar_lab.result_artifacts import collect_environment_snapshot, wrap_verdict_separation, write_canonical_comparison_result
+from tar_lab.manifest import load_and_verify_manifest, ManifestGateError, write_refuse_note
 
 SEEDS   = [42, 0, 1, 2, 3]
 BACKBONE = "resnet18"
 EPOCHS  = 40
 METHODS = ["tcl", "ewc", "si", "sgd_baseline"]
+BASE_CFG = ContinualLearningBenchmarkConfig(
+    seed=SEEDS[0],
+    train_epochs_per_task=EPOCHS,
+    ewc_lambda=100.0,
+)
 
 
 def mean(v):  return sum(v) / len(v)
@@ -41,11 +49,48 @@ def std(v):
     return math.sqrt(sum((x - m) ** 2 for x in v) / max(len(v) - 1, 1))
 
 
+def _require_manifest() -> tuple[Path, Any]:
+    manifest_path_str = os.environ.get("TAR_MANIFEST_PATH", "")
+    if not manifest_path_str:
+        print("REFUSED: TAR_MANIFEST_PATH not set. Set it to the path of the signed manifest and re-run.", flush=True)
+        sys.exit(1)
+    manifest_path = Path(manifest_path_str)
+    if not manifest_path.is_absolute():
+        manifest_path = Path(_repo) / manifest_path
+    try:
+        manifest = load_and_verify_manifest(manifest_path, Path(_repo))
+        for experiment_id in ("phase10_baseline", "phase10-baseline-rerun", "phase10-controlled-rerun"):
+            try:
+                manifest.assert_experiment_authorised(experiment_id)
+                print(f"[RAIL 3] Manifest gate: OK ({manifest.manifest_id})", flush=True)
+                return manifest_path, manifest
+            except ManifestGateError:
+                continue
+        raise ManifestGateError(
+            "Manifest does not authorise any accepted Phase 10 execution id "
+            "('phase10_baseline', 'phase10-baseline-rerun', 'phase10-controlled-rerun')."
+        )
+    except ManifestGateError as exc:
+        write_refuse_note(
+            Path(workspace),
+            component="phase10_baseline",
+            reason=str(exc),
+            experiment_id="phase10_baseline",
+            manifest_path=str(manifest_path),
+        )
+        print(f"REFUSED: {exc}", flush=True)
+        sys.exit(1)
+
+
+_manifest_path, _manifest = _require_manifest()
+
+
+run_started_at = datetime.utcnow().isoformat()
 print(f"\n{'='*70}")
 print(f"Phase 10 — Full 4-Way Baseline Comparison")
 print(f"backbone={BACKBONE}  epochs={EPOCHS}  seeds={SEEDS}")
 print(f"methods={METHODS}")
-print(f"{datetime.utcnow().isoformat()}")
+print(f"{run_started_at}")
 print(f"{'='*70}", flush=True)
 
 per_seed = []
@@ -157,9 +202,8 @@ print(f"\n{verdict}")
 
 
 # ── write result ──────────────────────────────────────────────────────────────
-out = Path(workspace) / "tar_state" / "comparisons" / "phase10_baseline.json"
-out.parent.mkdir(parents=True, exist_ok=True)
-out.write_text(json.dumps({
+completed_at = datetime.utcnow().isoformat()
+payload = {
     "backbone":     BACKBONE,
     "epochs":       EPOCHS,
     "seeds":        SEEDS,
@@ -168,8 +212,40 @@ out.write_text(json.dumps({
     "aggregate":    agg,
     "pairwise":     pairwise,
     "verdict":      verdict,
-    "completed_at": datetime.utcnow().isoformat(),
-}, indent=2, default=str))
+    "completed_at": completed_at,
+}
+env_payload = collect_environment_snapshot(
+    repo_root=Path(_repo),
+    workspace=Path(workspace),
+    config={
+        "suite": "phase10_baseline",
+        "base_benchmark_config": BASE_CFG.model_dump(mode="json"),
+        "methods": METHODS,
+        "backbone": BACKBONE,
+        "epochs": EPOCHS,
+        "per_method_overrides": {
+            "tcl": {},
+            "ewc": {"ewc_lambda": 100.0},
+            "si": {"si_c": BASE_CFG.si_c, "si_xi": BASE_CFG.si_xi},
+            "sgd_baseline": {},
+        },
+    },
+    trigger="manual_script",
+    source_script=Path(__file__).name,
+    run_started_at=run_started_at,
+    run_ended_at=completed_at,
+    extra={"logical_name": "phase10_baseline"},
+)
+artifacts = write_canonical_comparison_result(
+    workspace=Path(workspace),
+    logical_name="phase10_baseline",
+    payload=wrap_verdict_separation(payload),
+    env_payload=env_payload,
+    phase_number=10,
+    source_script=Path(__file__).name,
+)
 
-print(f"\nResult written: {out}")
-print(f"[{datetime.utcnow().isoformat()}] Phase 10 baseline complete")
+print(f"\nResult written: {artifacts['result_path']}")
+print(f"Env snapshot: {artifacts['env_path']}")
+print(f"Index updated: {artifacts['index_path']}")
+print(f"[{completed_at}] Phase 10 baseline complete")
