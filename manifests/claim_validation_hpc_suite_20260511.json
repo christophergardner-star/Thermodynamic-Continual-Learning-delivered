@@ -1,0 +1,36 @@
+{
+  "authorised_by": "Christopher Gardner",
+  "content_hash": "a753d7717d28a74e139f30c873076ed6b76daa626344d8d87a45c18764c51c4f",
+  "created_at": "2026-05-11T16:38:40.046302+00:00",
+  "experiments": [
+    {
+      "allowed_datasets": [
+        "split_cifar10"
+      ],
+      "allowed_methods": [
+        "validation_suite"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "experiment_id": "claim_validation_hpc_suite",
+      "name": "Claim Validation - HPC vs TCL/EWC on Split-CIFAR-10",
+      "notes": "Single bounded stabilisation-mode validation suite. Runs exactly one authorised experiment: SGD baseline, EWC(100), EWC(1000), SI(0.01), TCL baseline, and high_penalty_conservative on Split-CIFAR-10 task-incremental with ResNet-18 for the 10-seed minimum list. Wait for current non-primary rerun work to finish before launch; do not expand beyond this manifest.",
+      "run_limit": 1,
+      "time_limit_h": 84.0
+    }
+  ],
+  "global_time_limit_h": 96.0,
+  "manifest_id": "manifest-claim-validation-hpc-suite-20260511",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "purpose": "Authorise exactly one explicit claim-validation run for the high_penalty_conservative Split-CIFAR-10 result under stabilisation mode. This is a bounded, human-approved validation suite and is not permission for open-ended TAR autonomy."
+}
