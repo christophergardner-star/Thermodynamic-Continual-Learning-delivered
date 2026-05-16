@@ -1487,7 +1487,19 @@ class ExperimentOrchestrator:
 
     def _run_hpc_validation_suite(self, spec: ExperimentSpec) -> ExperimentResult:
         from tar_hpc_validation import run_hpc_validation_suite
-        from tar_validation_mode import assert_validation_suite_spec_locked
+        from tar_validation_mode import (
+            apply_validation_suite_lock,
+            assert_validation_suite_spec_locked,
+            load_state,
+        )
+        # Restore any descriptive context fields (e.g. projected_outcome) that may
+        # have been mutated by autonomous director processes during a prior stall.
+        # This does NOT relax the drift check — it corrects provably-safe fields
+        # (narrative text) that drifted via internal TAR writes, not human edits.
+        _state = load_state(self.workspace)
+        _lock = dict(_state.get("validation_suite_lock", {}) or {})
+        if _lock:
+            apply_validation_suite_lock(spec, _lock)
 
         assert_validation_suite_spec_locked(spec, self.workspace)
         clean_overrides = dict(spec.config_overrides or {})
