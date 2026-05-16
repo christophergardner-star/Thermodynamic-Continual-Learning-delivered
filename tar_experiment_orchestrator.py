@@ -1492,6 +1492,13 @@ class ExperimentOrchestrator:
         assert_validation_suite_spec_locked(spec, self.workspace)
         clean_overrides = dict(spec.config_overrides or {})
         seed_list = [int(seed) for seed in clean_overrides.get("min_seed_list", spec.seeds) or spec.seeds]
+        # Resume mode: runtime_context["resume_seeds"] narrows the seed list without
+        # touching the locked spec fields (which are drift-checked).
+        resume_seeds = list((spec.runtime_context or {}).get("resume_seeds") or [])
+        if resume_seeds:
+            resume_set = set(int(s) for s in resume_seeds)
+            seed_list = [s for s in seed_list if s in resume_set]
+            self._log(f"[hpc_resume] Resuming with seed subset: {seed_list}")
         raw = run_hpc_validation_suite(
             str(self.workspace),
             seeds=seed_list,
@@ -1652,7 +1659,9 @@ class ExperimentOrchestrator:
             for row in ((raw.get("per_method", {}) or {}).get("tcl_baseline", []))
             if row.get("seed") is not None
         }
-        for seed in spec.seeds:
+        # For a resume run, only report on seeds that were actually executed.
+        _resume_seeds = list((spec.runtime_context or {}).get("resume_seeds") or spec.seeds)
+        for seed in _resume_seeds:
             hpc_row = by_seed.get(int(seed), {})
             tcl_row = tcl_rows.get(int(seed), {})
             seed_results.append({
