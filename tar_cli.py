@@ -387,6 +387,8 @@ def parse_args() -> argparse.Namespace:
     group.add_argument("--resume-dashboard", action="store_true", dest="resume_dashboard")
     group.add_argument("--publication-handoff", action="store_true", dest="publication_handoff")
     group.add_argument("--publication-log", action="store_true", dest="publication_log")
+    group.add_argument("--write-paper", action="store_true", dest="write_paper",
+                       help="Run TAR-Author to write a full LaTeX/PDF paper for a project")
     group.add_argument("--portfolio-status", action="store_true", dest="portfolio_status")
     group.add_argument("--portfolio-review", action="store_true", dest="portfolio_review")
     group.add_argument("--portfolio-decide", action="store_true", dest="portfolio_decide")
@@ -681,6 +683,19 @@ def _direct_dispatch(orchestrator: TAROrchestrator, args: argparse.Namespace) ->
         return orchestrator.resume_dashboard(args.project_id or "")
     if args.publication_handoff:
         return orchestrator.publication_handoff(args.project_id or "")
+    if getattr(args, "write_paper", False):
+        from tar_author import (
+            TARAuthor, PaperSpec, _default_spec,
+            stabilisation_authoring_override,
+        )
+        from pathlib import Path as _Path
+        _workspace = _Path(orchestrator.workspace) if hasattr(orchestrator, "workspace") else _Path(__file__).resolve().parent
+        _spec = _default_spec(_workspace)
+        if args.project_id:
+            _spec.project_id = args.project_id
+        _reason = getattr(args, "message", None) or "cli --write-paper"
+        with stabilisation_authoring_override(_workspace, reason=_reason):
+            return TARAuthor(workspace=_workspace).write_paper(_spec)
     if args.publication_log:
         return orchestrator.publication_log(count=args.max_results)
     if args.portfolio_status:
@@ -2991,6 +3006,8 @@ def main() -> int:
             print(_render_resume_dashboard(payload))
         elif args.publication_handoff:
             print(_render_publication_handoff(payload))
+        elif getattr(args, "write_paper", False):
+            print(f"Paper written: {payload}")
         elif args.publication_log:
             print(_render_publication_log(payload))
         elif args.portfolio_status or args.rank_actions:

@@ -17,3 +17,35 @@ class ReproducibilityLockError(RuntimeError):
 class ExecutionPolicyViolation(RuntimeError):
     """Raised when TAR attempts a prohibited unsandboxed execution path."""
 
+
+class StabilisationGateError(RuntimeError):
+    """Base for all stabilisation authoring-gate failures."""
+
+
+class StabilisationGateStateUnreadableError(StabilisationGateError):
+    """Stabilisation state could not be read; treated as stabilised (fail-closed)."""
+
+
+class StabilisationGateMissingOverrideError(StabilisationGateError):
+    """write_paper called without an override context while stabilised."""
+
+
+class StabilisationGateStaleOverrideError(StabilisationGateError):
+    """Override minted while not stabilised, presented to a stabilised gate."""
+
+
+class StabilisationGateModeMismatchError(StabilisationGateError):
+    """Override mode_id/activated_at does not match current stabilisation state."""
+
+
+class StabilisationGateAlreadyConsumedError(StabilisationGateError):
+    """Override context already consumed; one write_paper call per context."""
+
+
+class StabilisationGateCategoricalBlockError(StabilisationGateError):
+    """Class-B mass-rewrite categorically blocked during stabilisation."""
+
+
+class StabilisationGateAutonomousContextError(StabilisationGateError):
+    """Autonomous authoring path inherited a human override context."""
+

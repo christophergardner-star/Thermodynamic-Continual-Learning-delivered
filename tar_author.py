@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import os
 import re
@@ -26,24 +27,63 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import textwrap
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 try:
     import winreg  # type: ignore
 except Exception:  # pragma: no cover - non-Windows fallback
     winreg = None  # type: ignore
 
 from tar_storage import ensure_workspace_layout, resolve_workspace
+from tar_lab.human_review import approved_paper_ids
+from tar_lab.phase_catalog import iter_phase_catalog_entries
 from tar_lab.result_artifacts import (
     resolve_canonical_comparison_path,
     read_advisory_verdict,
     read_statistics,
 )
+from tar_lab.validation import validate_paper_evidence
+
+# ── stabilisation authoring gate — context var, data types, context manager ───
+
+_AUTHORING_OVERRIDE: ContextVar = ContextVar('_AUTHORING_OVERRIDE', default=None)
+
+
+@dataclass
+class _OverrideContext:
+    mode_id: Optional[str]
+    activated_at: Optional[str]
+    reason: str
+    _consumed: bool = False
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+@contextmanager
+def stabilisation_authoring_override(workspace: Path, reason: str):
+    """Rule 1: wraps exactly one write_paper call, nothing else.
+    Rule 2: entered on the thread that calls write_paper; if
+    write_paper runs on a spawned thread, Thread.start() must be
+    called from inside this block."""
+    from tar_validation_mode import _read_stabilisation_state_strict
+    stab = _read_stabilisation_state_strict(workspace)  # raises fail-closed
+    active = bool(stab.get("active"))
+    ctx_obj = _OverrideContext(
+        mode_id=str(stab.get("mode_id")) if active else None,
+        activated_at=str(stab.get("activated_at")) if active else None,
+        reason=reason,
+    )
+    token = _AUTHORING_OVERRIDE.set(ctx_obj)
+    try:
+        yield
+    finally:
+        _AUTHORING_OVERRIDE.reset(token)
+
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
@@ -266,6 +306,10 @@ _STOPWORD_HINTS = {
     "paper", "papers", "problem", "research", "dataset", "method", "methods",
     "results", "their", "they", "your", "ours", "work", "learning", "model",
 }
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ── data structures ────────────────────────────────────────────────────────────
@@ -657,17 +701,17 @@ def _llm_provider() -> str:
 
 
 def _user_env_value(name: str) -> str:
-    direct = str(os.environ.get(name, "") or "").strip()
-    if direct:
-        return direct
-    if os.name != "nt" or winreg is None:
-        return ""
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
-            value, _ = winreg.QueryValueEx(key, name)
-    except Exception:
-        return ""
-    return str(value or "").strip()
+    # User registry wins over stale inherited process env (e.g. after TAR_LLM_PROVIDER
+    # was changed via SetEnvironmentVariable while the parent process is still running).
+    if os.name == "nt" and winreg is not None:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment") as key:
+                value, _ = winreg.QueryValueEx(key, name)
+            if value:
+                return str(value).strip()
+        except Exception:
+            pass
+    return str(os.environ.get(name, "") or "").strip()
 
 
 def _llm_api_key(provider: str = "openai_compatible") -> str:
@@ -1120,23 +1164,67 @@ def _generate_abstract(evidence: dict) -> str:
     tcl = results.get("tcl", {})
     ewc = results.get("ewc", {})
     sgd = results.get("sgd_baseline", {})
+    si = results.get("si", {})
     pairwise = evidence.get("pairwise", {})
     vs_ewc = pairwise.get("ewc", {})
     vs_sgd = pairwise.get("sgd_baseline", {})
+    phase11 = evidence.get("phase11", {}) if isinstance(evidence.get("phase11", {}), dict) else {}
+    phase11_agg = phase11.get("aggregate", {}) if isinstance(phase11.get("aggregate", {}), dict) else {}
+    phase11_pw = phase11.get("pairwise", {}) if isinstance(phase11.get("pairwise", {}), dict) else {}
+    penalty_only = phase11_agg.get("penalty_only", {}) if isinstance(phase11_agg.get("penalty_only", {}), dict) else {}
+    governor_only = phase11_agg.get("governor_only", {}) if isinstance(phase11_agg.get("governor_only", {}), dict) else {}
+    phase11_vs_penalty = phase11_pw.get("penalty_only", {}) if isinstance(phase11_pw.get("penalty_only", {}), dict) else {}
 
-    tcl_f = tcl.get("forgetting_mean", 0.1261)
-    tcl_fs = tcl.get("forgetting_std", 0.021)
-    tcl_a = tcl.get("acc_mean", 0.764)
-    ewc_f = ewc.get("forgetting_mean", 0.1192)
-    sgd_f = sgd.get("forgetting_mean", 0.2109)
-    sgd_fs = sgd.get("forgetting_std", 0.054)
-    delta = vs_ewc.get("mean_delta", 0.0069)
-    p_val = vs_ewc.get("p_val", 0.588)
-    d_val = vs_ewc.get("cohens_d", 0.263)
-    sgd_delta = vs_sgd.get("mean_delta", -0.085)
-    sgd_p = vs_sgd.get("p_val", 0.011)
-    sgd_d = vs_sgd.get("cohens_d", 1.993)
+    tcl_f = tcl.get("forgetting_mean", 0.1161)
+    tcl_fs = tcl.get("forgetting_std", 0.029)
+    tcl_a = tcl.get("acc_mean", 0.760)
+    ewc_f = ewc.get("forgetting_mean", 0.1909)
+    ewc_fs = ewc.get("forgetting_std", 0.023)
+    sgd_f = sgd.get("forgetting_mean", 0.2331)
+    sgd_fs = sgd.get("forgetting_std", 0.003)
+    si_f = si.get("forgetting_mean", 0.0920)
+    si_a = si.get("acc_mean", 0.500)
+    delta = vs_ewc.get("mean_delta", -0.0748)
+    p_val = vs_ewc.get("p_val", 0.0190)
+    d_val = vs_ewc.get("cohens_d", 1.70)
+    ewc_n = vs_ewc.get("n_tcl_better", 5)
+    sgd_delta = vs_sgd.get("mean_delta", -0.1170)
+    sgd_p = vs_sgd.get("p_val", 0.0012)
+    sgd_d = vs_sgd.get("cohens_d", 3.68)
     sgd_n = vs_sgd.get("n_tcl_better", 5)
+    penalty_f = penalty_only.get("forgetting_mean", 0.1429)
+    penalty_fs = penalty_only.get("forgetting_std", 0.018)
+    governor_f = governor_only.get("forgetting_mean", 0.2500)
+    penalty_p = phase11_vs_penalty.get("p_val", 0.3154)
+    penalty_d = phase11_vs_penalty.get("cohens_d", 0.51)
+
+    if float(delta) < 0 and float(p_val) < 0.05:
+        ewc_summary = (
+            f"TCL vs EWC: delta = {delta:+.4f}, p = {p_val:.4f}, Cohen's d = {d_val:.2f}, "
+            f"{ewc_n}/5 seeds TCL better — SIGNIFICANT"
+        )
+        honest_framing = (
+            "TCL significantly beats EWC on forgetting in the controlled rerun while also "
+            "beating SGD by a larger margin."
+        )
+    elif float(delta) < 0:
+        ewc_summary = (
+            f"TCL vs EWC: delta = {delta:+.4f}, p = {p_val:.4f}, Cohen's d = {d_val:.2f}, "
+            f"{ewc_n}/5 seeds TCL better — directional, not significant"
+        )
+        honest_framing = (
+            "TCL trends better than EWC on forgetting here, but the evidence is not yet "
+            "strong enough for a clean superiority claim."
+        )
+    else:
+        ewc_summary = (
+            f"TCL vs EWC: delta = {delta:+.4f} in EWC's favour, p = {p_val:.4f}, "
+            f"Cohen's d = {d_val:.2f}, {ewc_n}/5 seeds TCL better — NOT SIGNIFICANT"
+        )
+        honest_framing = (
+            "TCL clearly beats SGD. Relative to EWC, the thermodynamic mechanism is competitive "
+            "but not superior on forgetting in this configuration."
+        )
 
     prompt = textwrap.dedent(f"""\
         Write a 200-word abstract for an academic machine learning paper with the following evidence.
@@ -1148,23 +1236,24 @@ def _generate_abstract(evidence: dict) -> str:
         - Method: Thermodynamic Continual Learning (TCL)
         - Dataset: Split-CIFAR-10, task-incremental, 5 tasks, ResNet-18 backbone, 40 epochs/task, 5 seeds
         - TCL mean forgetting = {tcl_f:.4f} ± {tcl_fs:.3f}, accuracy = {tcl_a:.3f}
-        - EWC (lambda=100) mean forgetting = {ewc_f:.4f}
+        - EWC (lambda=100) mean forgetting = {ewc_f:.4f} +/- {ewc_fs:.3f}
         - SGD mean forgetting = {sgd_f:.4f} ± {sgd_fs:.3f}
         - TCL vs SGD: delta = {sgd_delta:+.4f}, p = {sgd_p:.4f}, Cohen's d = {sgd_d:.2f}, {sgd_n}/5 seeds TCL better — SIGNIFICANT
-        - TCL vs EWC: delta = {delta:+.4f} (EWC marginally lower forgetting), p = {p_val:.4f} — NOT SIGNIFICANT
-        - SI collapses to 0.500 accuracy (chance) on all 5 seeds at published default hyperparameters
-        - Ablation: governor-only = SGD (no benefit); penalty-only borderline (p=0.056);
-          full TCL p=0.030, d=1.48 over SGD; full TCL std=0.008 vs penalty-only std=0.065
+        - {ewc_summary}
+        - SI default: forgetting = {si_f:.4f}, accuracy = {si_a:.3f}; accuracy collapse remains visible at the published default
+        - Ablation: governor-only forgetting = {governor_f:.4f}; penalty-only = {penalty_f:.4f} +/- {penalty_fs:.3f};
+          full-vs-penalty p = {penalty_p:.4f}, d = {penalty_d:.2f} (small-sample unresolved)
         - TCL requires no Fisher matrix; uses only activation entropy as consolidation signal
 
-        HONEST FRAMING: TCL clearly beats SGD. TCL is NOT significantly better than EWC on forgetting-only.
-        TCL's contribution is: (1) Fisher-free mechanism that matches EWC without importance weights,
-        (2) much lower seed variance, (3) immunity to the EWC/SI collapse failure mode.
+        HONEST FRAMING: {honest_framing}
+        TCL's contribution is: (1) Fisher-free mechanism driven by activation entropy,
+        (2) reproducible forgetting reduction on the controlled Phase 10 benchmark,
+        (3) a methodological warning that default importance-weighted baselines can hide accuracy collapse.
 
         CONTRIBUTIONS:
         1. TCL method: per-task activation entropy anchoring + D_PR-weighted L2 regularisation
         2. JAF metric as minimal two-dimensional standard exposing chance-level collapse
-        3. Methodological observation: importance-weighted methods can collapse to chance (SI, EWC at high lambda)
+        3. Methodological observation: importance-weighted methods can collapse to chance (SI default, high-lambda EWC)
 
         Write the abstract now (LaTeX only, no \\begin{{abstract}} wrapper):
     """)
@@ -1188,14 +1277,15 @@ def _generate_abstract(evidence: dict) -> str:
         On Split-CIFAR-10 with a ResNet-18 backbone across five random seeds, TCL achieves
         mean forgetting ${tcl_f:.4f} \\pm {tcl_fs:.3f}$ against SGD's ${sgd_f:.4f} \\pm {sgd_fs:.3f}$
         ($\\Delta = {sgd_delta:+.4f}$, $p = {sgd_p:.4f}$, Cohen's $d = {sgd_d:.2f}$, {sgd_n}/5 seeds TCL
-        better). TCL and EWC ($\\lambda = 100$) achieve comparable forgetting on this benchmark
-        (mean delta ${delta:+.4f}$ in EWC's favour, $p = {p_val:.4f}$, not significant); we report this
-        honestly and identify the regime where TCL's thermodynamic mechanism outperforms
-        importance-weighted regularisation. Synaptic Intelligence at published default
-        hyperparameters collapses to $0.500$ accuracy on all five seeds, demonstrating
-        the failure mode of forgetting-only evaluation. A pre-registered ablation shows the
-        L2 anchor penalty is the primary mechanistic component: the governor provides variance
-        stabilisation (full TCL std $= 0.008$ vs.~penalty-only $= 0.065$). We propose the
+        better). Relative to EWC ($\\lambda = 100$), TCL records ${tcl_f:.4f} \\pm {tcl_fs:.3f}$
+        versus ${ewc_f:.4f} \\pm {ewc_fs:.3f}$ (mean delta ${delta:+.4f}$, $p = {p_val:.4f}$,
+        Cohen's $d = {d_val:.2f}$, {ewc_n}/5 seeds). Synaptic Intelligence at published default
+        hyperparameters reaches chance-level accuracy ($0.500$), demonstrating the failure mode
+        of forgetting-only evaluation. A pre-registered ablation shows the L2 anchor penalty is
+        load-bearing: governor-only tracks SGD, while penalty-only closes most of the gap
+        (forgetting ${penalty_f:.4f} \\pm {penalty_fs:.3f}$) and the full method remains best,
+        though the full-vs-penalty comparison is not resolved at $n=5$ ($p = {penalty_p:.4f}$,
+        $d = {penalty_d:.2f}$). We propose the
         joint accuracy-forgetting (JAF) metric as a minimal two-dimensional reporting standard
         that exposes degenerate solutions invisible to forgetting-only evaluation.
     """).strip()
@@ -1368,18 +1458,28 @@ def _generate_discussion(evidence: dict) -> str:
     vs_ewc = pairwise.get("ewc", {})
     p_val = vs_ewc.get("p_val", 0.031)
     d_val = vs_ewc.get("cohens_d", 1.46)
+    phase11 = evidence.get("phase11", {}) if isinstance(evidence.get("phase11", {}), dict) else {}
+    phase11_agg = phase11.get("aggregate", {}) if isinstance(phase11.get("aggregate", {}), dict) else {}
+    phase11_pw = phase11.get("pairwise", {}) if isinstance(phase11.get("pairwise", {}), dict) else {}
+    penalty_only = phase11_agg.get("penalty_only", {}) if isinstance(phase11_agg.get("penalty_only", {}), dict) else {}
+    full_tcl = phase11_agg.get("full_tcl", {}) if isinstance(phase11_agg.get("full_tcl", {}), dict) else {}
+    phase11_vs_penalty = phase11_pw.get("penalty_only", {}) if isinstance(phase11_pw.get("penalty_only", {}), dict) else {}
+    penalty_p = phase11_vs_penalty.get("p_val", 0.3154)
+    penalty_d = phase11_vs_penalty.get("cohens_d", 0.51)
+    penalty_fs = penalty_only.get("forgetting_std", 0.018)
+    full_fs = full_tcl.get("forgetting_std", 0.022)
 
     prompt = textwrap.dedent(f"""\
         Write a Discussion and Limitations section (500 words) in LaTeX for the TCL paper.
         Cover:
         - Scope: task-incremental only (not class-incremental or domain-incremental)
         - Dataset: single benchmark (Split-CIFAR-10); CIFAR-100/TinyImageNet would strengthen claims
-        - Sample size: n=5 seeds; larger n would resolve the penalty-only vs full-TCL comparison (p=0.056)
+        - Sample size: n=5 seeds; larger n would resolve the penalty-only vs full-TCL comparison (p={penalty_p:.4f}, d={penalty_d:.2f})
         - The SI collapse as a methodological finding, not a criticism of SI per se
         - Future work: Fisher-weighted scaling for the L2 penalty, class-incremental setting (phase 15),
           larger backbones, online D_PR computation
         - Honest framing: TCL's advantage over EWC is statistically clear (p={p_val:.4f}, d={d_val:.2f})
-          but the mechanism is not fully confirmed (governor stabilises penalty, but causality is unclear)
+          but the mechanism is not fully confirmed (penalty-only carries most of the gain; the incremental benefit of the governor remains unresolved)
         Return raw LaTeX with \\section and \\subsection.
     """)
     llm_out = _call_llm(_author_prompt_with_citations(prompt, evidence))
@@ -1407,17 +1507,18 @@ would provide stronger evidence; we leave these to future work.
 
 \textbf{{Statistical power.}}
 With $n=5$ seeds, the comparison between full TCL and penalty-only does not reach
-significance ($p = 0.056$, $d = 1.20$). The directional signal is consistent across
-all five seeds, but resolving this comparison would require $n \geq 10$ seeds.
+significance ($p = {penalty_p:.4f}$, $d = {penalty_d:.2f}$). The mean forgetting gap
+favours full TCL, but resolving that comparison would require more seeds.
 We report this honestly; the pre-registered comparison against SGD and EWC are both
 significant.
 
 \textbf{{Mechanism.}}
-The ablation is consistent with the hypothesis that the governor stabilises the
-penalty's effect, but we cannot confirm the causal mechanism from these data alone.
-The variance reduction (std $0.008$ for full TCL vs.\ $0.065$ for penalty-only) is
-the clearest signal; the exact interaction between LR modulation and the anchor
-penalty requires further study.
+The ablation indicates that the anchor penalty is load-bearing and that the
+governor-only path is insufficient. What remains unresolved is whether the full
+thermodynamic loop provides a robust improvement over the penalty-only variant:
+the mean forgetting is lower for full TCL, but the gap is modest at $n=5$, and the
+forgetting standard deviations ({full_fs:.3f} for full TCL vs.\ {penalty_fs:.3f}
+for penalty-only) do not support a simple variance-compression story.
 
 \subsection{{SI Collapse as a Methodological Finding}}
 
@@ -1448,11 +1549,16 @@ def _generate_conclusion(evidence: dict) -> str:
         return _generate_generic_paper_conclusion(evidence)
     results = evidence.get("aggregate_results", {})
     tcl = results.get("tcl", {})
+    ewc = results.get("ewc", {})
     pairwise = evidence.get("pairwise", {})
     vs_ewc = pairwise.get("ewc", {})
-    p_val = vs_ewc.get("p_val", 0.031)
-    d_val = vs_ewc.get("cohens_d", 1.46)
-    tcl_f = tcl.get("forgetting_mean", 0.1275)
+    p_val = vs_ewc.get("p_val", 0.0190)
+    d_val = vs_ewc.get("cohens_d", 1.70)
+    delta = vs_ewc.get("mean_delta", -0.0748)
+    tcl_f = tcl.get("forgetting_mean", 0.1161)
+    tcl_fs = tcl.get("forgetting_std", 0.029)
+    ewc_f = ewc.get("forgetting_mean", 0.1909)
+    ewc_fs = ewc.get("forgetting_std", 0.023)
 
     llm_out = _call_llm(_author_prompt_with_citations(textwrap.dedent(f"""\
         Write a 200-word Conclusion section in LaTeX for the TCL paper.
@@ -1471,12 +1577,12 @@ def _generate_conclusion(evidence: dict) -> str:
 We have introduced Thermodynamic Continual Learning (TCL), a method that uses
 per-task activation entropy as a consolidation signal to regulate weight anchoring
 in sequential learning. Across five seeds on Split-CIFAR-10 with a ResNet-18 backbone,
-TCL achieves mean forgetting ${tcl_f:.4f} \pm 0.026$ against EWC's $0.1931 \pm 0.047$
-($p = {p_val:.4f}$, Cohen's $d = {d_val:.2f}$, 5/5 seeds; pre-registered Outcome~A).
-A pre-registered ablation shows that neither the thermodynamic governor nor the L2
-anchor penalty is individually sufficient; the combination provides statistically
-significant forgetting reduction with substantially lower seed-to-seed variance
-than any component alone.
+TCL achieves mean forgetting ${tcl_f:.4f} \pm {tcl_fs:.3f}$ against EWC's
+${ewc_f:.4f} \pm {ewc_fs:.3f}$ (mean delta ${delta:+.4f}$, $p = {p_val:.4f}$,
+Cohen's $d = {d_val:.2f}$, 5/5 seeds; controlled-rerun Outcome~A).
+A pre-registered ablation shows that the anchor penalty is load-bearing, while the
+incremental benefit of the full thermodynamic loop over penalty-only remains a
+small-sample question rather than a settled mechanistic claim.
 
 We have also demonstrated a failure mode of forgetting-only evaluation: at published
 default hyperparameters, Synaptic Intelligence collapses to chance-level accuracy on
@@ -1507,6 +1613,24 @@ def _render_phase10_subsection(data: dict) -> str:
     ve = pw.get("ewc", {}); vg = pw.get("sgd_baseline", {})
     e_delta = ve.get("mean_delta", 0); e_p = ve.get("p_val", 1); e_d = ve.get("cohens_d", 0); e_n = ve.get("n_tcl_better", 0)
     g_delta = vg.get("mean_delta", 0); g_p = vg.get("p_val", 1); g_d = vg.get("cohens_d", 0); g_n = vg.get("n_tcl_better", 0)
+    if float(e_delta) < 0 and float(e_p) < 0.05:
+        ewc_text = (
+            f"\\textbf{{TCL vs.\\ EWC.}} TCL reduces mean forgetting by ${abs(e_delta):.4f}$ "
+            f"relative to EWC ($p = {e_p:.4f}$, $d = {e_d:.2f}$, {e_n}/5 seeds), "
+            "showing a statistically supported improvement without Fisher-matrix estimation."
+        )
+    elif float(e_delta) < 0:
+        ewc_text = (
+            f"\\textbf{{TCL vs.\\ EWC.}} TCL trends better than EWC (delta ${e_delta:+.4f}$, "
+            f"$p = {e_p:.4f}$, $d = {e_d:.2f}$, {e_n}/5 seeds), but the five-seed comparison "
+            "does not yet support a clean superiority claim."
+        )
+    else:
+        ewc_text = (
+            f"\\textbf{{TCL vs.\\ EWC.}} EWC achieves lower forgetting in this configuration "
+            f"(delta ${e_delta:+.4f}$, $p = {e_p:.4f}$, $d = {e_d:.2f}$, {e_n}/5 seeds TCL better). "
+            "TCL remains competitive while avoiding Fisher-matrix computation."
+        )
     return textwrap.dedent(rf"""
 \subsection{{Phase 10: Four-Way Baseline Comparison}}
 \label{{sec:baseline}}
@@ -1533,10 +1657,7 @@ SGD (no reg.)       & ${g_f:.4f} \pm {g_fs:.3f}$ & ${g_a:.3f}$ \\
 \textbf{{TCL vs.\ SGD.}} TCL reduces mean forgetting by ${abs(g_delta):.4f}$
 ($p = {g_p:.4f}$, $d = {g_d:.2f}$, {g_n}/5 seeds), a statistically significant result.
 
-\textbf{{TCL vs.\ EWC.}} EWC achieves marginally lower forgetting (delta ${e_delta:+.4f}$,
-$p = {e_p:.4f}$, $d = {e_d:.3f}$, {e_n}/5 seeds TCL better) — not statistically
-significant. TCL matches EWC without Fisher matrix computation, using only activation
-entropy as a consolidation signal.
+{ewc_text}
     """).strip()
 
 
@@ -1549,6 +1670,7 @@ def _render_phase11_subsection(data: dict) -> str:
     pe_f = pen.get("forgetting_mean", 0); pe_fs = pen.get("forgetting_std", 0)
     t_f  = tcl.get("forgetting_mean", 0); t_fs  = tcl.get("forgetting_std", 0)
     p_gov = pw.get("governor_only", {}); p_pen = pw.get("penalty_only", {}); p_sgd = pw.get("sgd", {})
+    pen_p = p_pen.get("p_val", 1); pen_d = p_pen.get("cohens_d", 0)
     return textwrap.dedent(rf"""
 \subsection{{Phase 11: Component Ablation}}
 \label{{sec:ablation}}
@@ -1569,10 +1691,10 @@ Full TCL (ours)         & $\mathbf{{{t_f:.4f} \pm {t_fs:.3f}}}$ & --- \\
 \end{{tabular}}
 \end{{table}}
 
-Governor-only matches SGD exactly (delta $\approx 0$), confirming the LR modulation
-alone provides no consolidation. Penalty-only reduces forgetting with high variance
-(std ${pe_fs:.3f}$ vs.\ ${t_fs:.3f}$ for full TCL), suggesting the governor
-stabilises the penalty's effect across seeds.
+Governor-only tracks SGD closely, confirming that LR modulation alone does not deliver
+the forgetting reduction. Penalty-only carries most of the gain, and full TCL remains
+best on mean forgetting (${t_f:.4f}$ vs.\ ${pe_f:.4f}$), but the full-vs.-penalty
+comparison is not yet resolved at $n=5$ ($p = {pen_p:.4f}$, $d = {pen_d:.2f}$).
     """).strip()
 
 
@@ -1624,7 +1746,6 @@ def _render_phase13_subsection(data: dict) -> str:
     c_values   = data.get("c_values_tested", [0.01, 0.1, 0.5])
     agg        = data.get("aggregate", {})
     _av13      = read_advisory_verdict(data)
-    vk         = _av13["label"] or "UNKNOWN"
     verdict    = _av13["label"]
     threshold  = data.get("collapse_threshold", 0.55)
     tcl_ref    = data.get("phase10_tcl_ref", {})
@@ -1640,20 +1761,32 @@ def _render_phase13_subsection(data: dict) -> str:
         tag = r"\textbf{[collapse]}" if a <= threshold else ""
         rows.append(rf"SI ($c={c}$) & ${f:.4f} \pm {fs:.3f}$ & ${a:.3f}$ {tag} \\")
     rows_tex = "\n".join(rows)
+    non_collapsed_cs = [
+        c for c in c_values
+        if float(agg.get(str(c), {}).get("acc_mean", 0.0) or 0.0) > float(threshold)
+    ]
+    collapsed_cs = [c for c in c_values if c not in non_collapsed_cs]
+    if not non_collapsed_cs:
+        recovery_mode = "ALL_DEGENERATE"
+    elif not collapsed_cs:
+        recovery_mode = "FULL_RECOVERY"
+    else:
+        recovery_mode = "PARTIAL_RECOVERY"
 
     collapse_framing = {
         "ALL_DEGENERATE":   "SI collapses to chance accuracy across all tested $c$ values, "
                             "confirming the collapse is not a hyperparameter artefact but a "
                             "structural property of importance-weighted regularisation under "
                             "this benchmark configuration.",
-        "PARTIAL_RECOVERY": "SI recovers non-trivial accuracy at some $c$ values but not "
-                            "others, indicating the collapse is hyperparameter-sensitive. "
-                            "The safest published defaults remain collapsed on this benchmark.",
+        "PARTIAL_RECOVERY": f"SI recovers non-trivial accuracy only for $c \\in \\{{{', '.join(str(c) for c in non_collapsed_cs)}}}$, "
+                            f"while $c \\in \\{{{', '.join(str(c) for c in collapsed_cs)}}}$ remains collapsed. "
+                            "The failure mode is therefore specific to part of the default neighbourhood, "
+                            "not to the entire SI family.",
         "FULL_RECOVERY":    "SI recovers non-trivial accuracy across all tested $c$ values, "
                             "suggesting the collapse observed in Phase~10 is specific to the "
                             "published default $c=0.1$ and does not reflect a fundamental "
                             "limitation of the importance-weighting family.",
-    }.get(vk, verdict[:200] if verdict else "See verdict_key for interpretation.")
+    }.get(recovery_mode, verdict[:200] if verdict else "See verdict_key for interpretation.")
 
     return textwrap.dedent(rf"""
 \subsection{{Phase 13: SI Hyperparameter Robustness}}
@@ -1816,6 +1949,168 @@ $p = {p_val:.4f}$, $d = {effect_size:.2f}$).
     """).strip()
 
 
+def _render_hpc_claim_validation_subsection(data: dict) -> str:
+    """Phase 16: HPC 6-method 10-seed claim validation on Split-CIFAR-10."""
+    methods = data.get("methods", {})
+    n_seeds = data.get("n_seeds_complete", 0)
+    dataset = str(data.get("dataset", "split_cifar10")).replace("split_", "Split-").replace("cifar10", "CIFAR-10")
+    backbone = str(data.get("backbone", "resnet18"))
+    threshold = data.get("hpc_pre_registered_threshold", 0.1161)
+    seeds_pass = data.get("seeds_passing_threshold", 0)
+    null_observed = data.get("null_observed", False)
+    delta = data.get("hpc_vs_tcl_delta")
+    status = data.get("status", "partial")
+
+    METHOD_DISPLAY: dict[str, str] = {
+        "sgd_baseline":              "SGD Baseline",
+        "ewc_lambda_100":            r"EWC ($\lambda=100$)",
+        "ewc_lambda_1000":           r"EWC ($\lambda=1000$)",
+        "si_c_0_01":                 r"SI ($c=0.01$)",
+        "tcl_baseline":              "TCL Baseline",
+        "high_penalty_conservative": r"\textbf{HPC (ours)}",
+    }
+    order = ["sgd_baseline", "ewc_lambda_100", "ewc_lambda_1000",
+             "si_c_0_01", "tcl_baseline", "high_penalty_conservative"]
+
+    tcl_f = _safe_float((methods.get("tcl_baseline") or {}).get("forgetting_mean"))
+
+    rows: list[str] = []
+    for mk in order:
+        m = methods.get(mk)
+        if not m:
+            continue
+        name = METHOD_DISPLAY.get(mk, mk.replace("_", r"\_"))
+        f  = _safe_float(m.get("forgetting_mean"))
+        fs = _safe_float(m.get("forgetting_std")) or 0.0
+        a  = _safe_float(m.get("acc_mean"))
+        j  = _safe_float(m.get("jaf_mean"))
+        n  = int(m.get("n_seeds", 0) or 0)
+        f_str   = rf"${f:.4f} \pm {fs:.4f}$" if f is not None else "---"
+        a_str   = rf"${a:.3f}$"               if a is not None else "---"
+        jaf_str = rf"${j:.3f}$"               if j is not None else "---"
+        if mk == "tcl_baseline":
+            d_str = r"\textit{ref.}"
+        elif f is not None and tcl_f is not None:
+            d = f - tcl_f
+            d_str = rf"${'+' if d >= 0 else ''}{d:.4f}$"
+        else:
+            d_str = "---"
+        rows.append(rf"{name} & {n} & {f_str} & {a_str} & {jaf_str} & {d_str} \\")
+
+    rows_tex = "\n".join(rows) if rows else r"\multicolumn{6}{c}{Results pending.} \\"
+
+    # Compute within-suite TCL mean for the primary comparator text.
+    # The external pre-registered threshold (0.1161) serves as a pass/fail gate only;
+    # the paper's defensible comparison is HPC vs. TCL run under identical conditions
+    # in the same suite (same code, seeds, environment, epoch count).
+    tcl_in_suite = tcl_f  # within-suite TCL mean forgetting
+    hpc_data = methods.get("high_penalty_conservative") or {}
+    hpc_f = _safe_float(hpc_data.get("forgetting_mean"))
+    hpc_jaf = _safe_float(hpc_data.get("jaf_mean"))
+    si_data = methods.get("si_c_0_01") or {}
+    si_f = _safe_float(si_data.get("forgetting_mean"))
+    si_jaf = _safe_float(si_data.get("jaf_mean"))
+    ewc1000_data = methods.get("ewc_lambda_1000") or {}
+    # Detect collapsed seeds by per-seed accuracy (chance = 0.500 on Split-CIFAR-10).
+    # Canonical Phase 12 collapse: seed 3, acc=0.500, forgetting=0.3158
+    # (phase12_ewc_sweep__20260511T203414Z.json, verified 2026-05-16).
+    ewc1000_seeds = ewc1000_data.get("seeds", [])
+    ewc1000_collapsed = [
+        s for s in ewc1000_seeds
+        if _safe_float(s.get("acc")) is not None and abs((_safe_float(s.get("acc")) or 1.0) - 0.5) < 0.02
+    ]
+    ewc1000_collapsed_seed_nums = [s["seed"] for s in ewc1000_collapsed if s.get("seed") is not None]
+    ewc1000_collapse = len(ewc1000_collapsed)
+
+    within_suite_delta = (hpc_f - tcl_in_suite) if (hpc_f is not None and tcl_in_suite) else delta
+    if tcl_in_suite and within_suite_delta is not None:
+        pct_within = round(abs(within_suite_delta) / tcl_in_suite * 100)
+    else:
+        pct_within = None
+
+    if status == "complete" and within_suite_delta is not None and tcl_in_suite:
+        si_note = ""
+        if si_f is not None and hpc_jaf is not None and si_jaf is not None:
+            si_note = (
+                rf" SI ($c=0.01$) achieves comparable forgetting (${si_f:.3f}$) "
+                rf"but trails HPC on JAF ($\text{{JAF}}_\text{{HPC}}={hpc_jaf:.3f}$ vs.\ "
+                rf"$\text{{JAF}}_\text{{SI}}={si_jaf:.3f}$), confirming that the "
+                rf"accuracy-forgetting joint position differentiates the methods."
+            )
+        ewc_note = ""
+        if ewc1000_collapsed and ewc1000_collapsed_seed_nums == [3]:
+            suite_forg = _safe_float(ewc1000_collapsed[0].get("forgetting"))
+            suite_forg_str = rf"${suite_forg:.3f}$" if suite_forg is not None else "---"
+            ewc_note = (
+                rf" EWC ($\lambda=1000$) exhibits a deterministic, seed-specific collapse: "
+                rf"seed~3 reaches exactly chance accuracy (0.500) in both the Phase~12 sweep "
+                rf"and this validation suite run independently. "
+                rf"The forgetting metric on the collapsed seed differs between runs "
+                rf"(Phase~12: $0.316$; this suite: {suite_forg_str}), "
+                rf"consistent with our finding that forgetting is uninterpretable once "
+                rf"accuracy reaches chance (see Section~\ref{{sec:forgetting-degeneracy}})."
+            )
+        elif ewc1000_collapse:
+            seed_str = ", ".join(str(s) for s in ewc1000_collapsed_seed_nums) or "unknown"
+            ewc_note = (
+                rf" EWC ($\lambda=1000$) exhibits accuracy collapse on "
+                rf"seed(s)~{seed_str}, reproducing the fragility finding from Phase~12."
+            )
+        collapse_note = (r"No accuracy collapse was observed for HPC across any seed." if not null_observed
+                         else r"\textbf{Warning:} accuracy collapse detected in at least one HPC seed.")
+        verdict_tex = (
+            rf"The primary within-suite comparison shows HPC mean forgetting "
+            rf"${hpc_f:.4f}$ vs.\ TCL-in-suite ${tcl_in_suite:.4f}$ "
+            rf"($\Delta = {within_suite_delta:+.4f}$, {pct_within}\% reduction). "
+            rf"The pre-registered gate (forgetting $< {threshold}$) is "
+            rf"{'met' if (hpc_f is not None and hpc_f < threshold) else 'not met'}: "
+            rf"{seeds_pass}/{n_seeds} seeds pass. "
+            + collapse_note + si_note + ewc_note
+        )
+    elif within_suite_delta is not None and tcl_in_suite:
+        pct_str = rf"{pct_within}\%" if pct_within else "substantial"
+        verdict_tex = (
+            rf"Partial results ({n_seeds} seeds complete). "
+            rf"Within-suite comparison: HPC ${hpc_f:.4f}$ vs.\ TCL-in-suite ${tcl_in_suite:.4f}$ "
+            rf"($\Delta = {within_suite_delta:+.4f}$, {pct_str} reduction). "
+            rf"Pre-registered gate (forgetting $< {threshold}$): "
+            rf"{seeds_pass}/{n_seeds} seeds pass. Final verdict pending."
+        )
+    else:
+        verdict_tex = rf"Partial results ({n_seeds} seeds complete). Final verdict pending."
+
+    return textwrap.dedent(rf"""
+\subsection{{Phase 16: HPC Claim Validation}}
+\label{{sec:hpc-claim-validation}}
+
+We conducted a pre-registered {n_seeds}-seed replication study to verify whether the
+\emph{{high-penalty conservative}} (HPC) TCL configuration reduces catastrophic forgetting
+relative to the TCL baseline run under identical conditions in the same suite
+({dataset}, backbone \texttt{{{backbone}}}). All six methods share the same code, seeds,
+environment, and epoch count, making the within-suite TCL comparison the
+apples-to-apples reference for the paper's claim. The pre-registered forgetting gate
+($< {threshold}$) is a secondary pass/fail criterion. HPC uses
+$\lambda = 0.05$, ordered LR scale $= 0.3$, $\alpha = 0.45$.
+
+\begin{{table}}[h]
+\centering
+\caption{{Phase 16: Six-method comparison on {dataset} over {n_seeds} seeds.
+$\Delta$ vs.\ TCL = method forgetting minus within-suite TCL mean (negative = method is better).
+Pre-registered gate: forgetting $< {threshold}$. Boldface row = TAR's autonomous hypothesis.}}
+\label{{tab:hpc-validation}}
+\begin{{tabular}}{{lccccc}}
+\toprule
+Method & $n$ & Forgetting $\downarrow$ & Accuracy $\uparrow$ & JAF $\uparrow$ & $\Delta$ vs.\ TCL-in-suite \\
+\midrule
+{rows_tex}
+\bottomrule
+\end{{tabular}}
+\end{{table}}
+
+{verdict_tex}
+    """).strip()
+
+
 # Registry: phase number -> renderer function.
 # To add custom rendering for a new phase, add an entry here.
 _PHASE_RENDERERS: dict[int, Any] = {
@@ -1824,6 +2119,7 @@ _PHASE_RENDERERS: dict[int, Any] = {
     13: _render_phase13_subsection,
     14: _render_phase14_subsection,
     15: _render_phase15_subsection,
+    16: _render_hpc_claim_validation_subsection,
     # Phase 12 is rendered in the appendix (_generate_ewc_sweep_appendix)
 }
 
@@ -1977,6 +2273,456 @@ collapse by design.
 
 # ── main assembler ─────────────────────────────────────────────────────────────
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _validated_result_payload(data: dict[str, Any]) -> bool:
+    if not isinstance(data, dict) or not data:
+        return False
+    verdict = str(read_advisory_verdict(data)["label"] or "").upper()
+    status_hint = str(data.get("status", "") or "").upper()
+    return verdict != "ERROR" and status_hint != "ERROR"
+
+
+def _plot_metric_bars(
+    output_path: Path,
+    *,
+    title: str,
+    labels: list[str],
+    forgetting_values: list[float],
+    accuracy_values: list[float],
+) -> bool:
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return False
+    if not labels:
+        return False
+    x = list(range(len(labels)))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.6))
+    _bar_palette = ["#224e7a", "#587792", "#9c6644", "#7f5539", "#356859", "#b56576", "#6a4c93", "#1982c4"]
+    axes[0].bar(x, forgetting_values, color=(_bar_palette * 4)[: len(labels)])
+    axes[0].set_title("Mean Forgetting")
+    axes[0].set_ylabel("Forgetting")
+    axes[0].set_xticks(x, labels, rotation=20, ha="right")
+    _acc_palette = ["#356859", "#6b9080", "#b08968", "#7f5539", "#224e7a", "#2a9d8f", "#e76f51", "#457b9d"]
+    axes[1].bar(x, accuracy_values, color=(_acc_palette * 4)[: len(labels)])
+    axes[1].set_title("Final Accuracy")
+    axes[1].set_ylabel("Accuracy")
+    axes[1].set_xticks(x, labels, rotation=20, ha="right")
+    fig.suptitle(title, fontsize=12)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return output_path.exists()
+
+
+def _plot_pairwise_deltas(
+    output_path: Path,
+    *,
+    title: str,
+    labels: list[str],
+    delta_values: list[float],
+) -> bool:
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return False
+    if not labels:
+        return False
+    fig, ax = plt.subplots(figsize=(8.4, 4.6))
+    colors = ["#2a9d8f" if value <= 0 else "#e76f51" for value in delta_values]
+    x = list(range(len(labels)))
+    ax.bar(x, delta_values, color=colors)
+    ax.axhline(0.0, color="#333333", linewidth=1.0)
+    ax.set_title(title)
+    ax.set_ylabel("TCL minus baseline forgetting")
+    ax.set_xticks(x, labels, rotation=20, ha="right")
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return output_path.exists()
+
+
+def _plot_sweep_curves(
+    output_path: Path,
+    *,
+    title: str,
+    x_labels: list[str],
+    forgetting_values: list[float],
+    accuracy_values: list[float],
+    x_title: str,
+) -> bool:
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return False
+    if not x_labels:
+        return False
+    x = list(range(len(x_labels)))
+    fig, ax1 = plt.subplots(figsize=(9.0, 4.8))
+    ax2 = ax1.twinx()
+    ax1.plot(x, forgetting_values, marker="o", linewidth=2.0, color="#224e7a")
+    ax2.plot(x, accuracy_values, marker="s", linewidth=2.0, color="#b56576")
+    ax1.set_xticks(x, x_labels)
+    ax1.set_xlabel(x_title)
+    ax1.set_ylabel("Forgetting", color="#224e7a")
+    ax2.set_ylabel("Accuracy", color="#b56576")
+    ax1.set_title(title)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return output_path.exists()
+
+
+def _plot_six_method_comparison(
+    output_path: Path,
+    *,
+    title: str,
+    method_data: dict,
+    method_order: list[str],
+) -> bool:
+    """Three-panel bar chart (forgetting, accuracy, JAF) for a 6-method comparison."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception:
+        return False
+    SHORT = {
+        "sgd_baseline": "SGD", "ewc_lambda_100": "EWC\n(λ=100)",
+        "ewc_lambda_1000": "EWC\n(λ=1k)", "si_c_0_01": "SI\n(c=0.01)",
+        "tcl_baseline": "TCL\nBase", "high_penalty_conservative": "HPC\n(ours)",
+    }
+    PALETTE = ["#587792", "#9c6644", "#7f5539", "#4a7c6f", "#2b4d6e", "#2a9d8f"]
+    labels, f_vals, a_vals, j_vals = [], [], [], []
+    for mk in method_order:
+        m = method_data.get(mk)
+        if not m:
+            continue
+        f = _safe_float(m.get("forgetting_mean"))
+        a = _safe_float(m.get("acc_mean"))
+        j = _safe_float(m.get("jaf_mean"))
+        if f is None or a is None:
+            continue
+        labels.append(SHORT.get(mk, mk))
+        f_vals.append(f); a_vals.append(a); j_vals.append(j or 0.0)
+    if not labels:
+        return False
+    hpc_i = len(labels) - 1
+    colors = (PALETTE * 4)[: len(labels)]
+    x = np.arange(len(labels))
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig.suptitle(title, fontsize=12, fontweight="bold")
+    for ax, vals, lbl in zip(axes, [f_vals, a_vals, j_vals],
+                              ["Mean Forgetting ↓", "Final Accuracy ↑", "JAF ↑"]):
+        bars = ax.bar(x, vals, color=colors, edgecolor="none", width=0.65)
+        bars[hpc_i].set_edgecolor("#ffffff"); bars[hpc_i].set_linewidth(1.8)
+        ax.set_title(lbl, fontsize=10); ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=8)
+        ax.tick_params(axis="y", labelsize=8)
+        ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return output_path.exists()
+
+
+def _plot_architecture_diagram(output_path: Path) -> bool:
+    """Render a TAR research-loop architecture diagram."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import FancyBboxPatch
+    except Exception:
+        return False
+    fig, ax = plt.subplots(figsize=(14, 4.5))
+    ax.set_xlim(0, 14); ax.set_ylim(0, 4.5); ax.axis("off")
+    BG = "#0d1f35"; BOX = "#1e3a5f"; EDGE = "#4a90c4"
+    HUMAN = "#5c2d6e"; HEDGE = "#a855c8"; ARR = "#6ea8d4"; TXT = "#e8f4ff"
+    fig.patch.set_facecolor(BG); ax.set_facecolor(BG)
+    nodes = [
+        (1.1, 2.2, "Frontier\nProblems"), (3.0, 2.2, "Research\nDirector"),
+        (5.0, 2.2, "Experiment\nQueue"),  (7.1, 2.2, "Worker\n(Training)"),
+        (9.1, 2.2, "Comparisons\n& Stats"), (11.1, 2.2, "Author\n(LaTeX)"),
+        (13.0, 2.2, "PDF\nOutput"),
+    ]
+    for nx, ny, lbl in nodes:
+        ax.add_patch(FancyBboxPatch((nx - 0.8, ny - 0.65), 1.6, 1.3,
+                                    boxstyle="round,pad=0.07",
+                                    facecolor=BOX, edgecolor=EDGE, linewidth=1.6, zorder=2))
+        ax.text(nx, ny, lbl, ha="center", va="center",
+                fontsize=8, color=TXT, fontweight="bold", zorder=3)
+    for i in range(len(nodes) - 1):
+        x1, y1, _ = nodes[i]; x2, y2, _ = nodes[i + 1]
+        ax.annotate("", xy=(x2 - 0.8, y2), xytext=(x1 + 0.8, y1),
+                    arrowprops=dict(arrowstyle="-|>", color=ARR, lw=1.6), zorder=1)
+    # Human review gate (floats above queue→worker arrow)
+    hx, hy = 6.05, 3.8
+    ax.add_patch(FancyBboxPatch((hx - 0.85, hy - 0.4), 1.7, 0.8,
+                                 boxstyle="round,pad=0.07",
+                                 facecolor=HUMAN, edgecolor=HEDGE, linewidth=1.6, zorder=2))
+    ax.text(hx, hy, "Human Review", ha="center", va="center",
+            fontsize=7.5, color=TXT, fontweight="bold", zorder=3)
+    ax.annotate("", xy=(hx, hy - 0.4), xytext=(5.8, 2.2 + 0.65),
+                arrowprops=dict(arrowstyle="-|>", color=HEDGE, lw=1.2, linestyle="dashed"), zorder=1)
+    ax.set_title("TAR Autonomous Research Loop", color=TXT, fontsize=13,
+                 fontweight="bold", pad=8)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return output_path.exists()
+
+
+def _plot_continual_learning_schematic(
+    output_path: Path,
+    *,
+    n_tasks: int = 5,
+    backbone: str = "ResNet-18",
+) -> bool:
+    """Render a Split-CIFAR-10 task sequence schematic."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+    except Exception:
+        return False
+    TASK_COLORS = ["#264e8a", "#2a7c5a", "#7a3d2a", "#5c2d6e", "#4a6a2e"]
+    PAIRS = [("airplane", "auto"), ("bird", "cat"), ("deer", "dog"),
+             ("frog", "horse"), ("ship", "truck")]
+    fig, ax = plt.subplots(figsize=(12, 3.2))
+    ax.set_xlim(0, 12); ax.set_ylim(0, 3.2); ax.axis("off")
+    fig.patch.set_facecolor("#f5f5f5"); ax.set_facecolor("#f5f5f5")
+    tw = 1.8
+    for i in range(n_tasks):
+        x = 0.5 + i * (tw + 0.35)
+        ax.add_patch(mpatches.FancyBboxPatch((x, 0.9), tw, 1.5,
+                                              boxstyle="round,pad=0.06",
+                                              facecolor=TASK_COLORS[i % len(TASK_COLORS)],
+                                              edgecolor="none", alpha=0.92))
+        ax.text(x + tw / 2, 2.1, f"Task {i + 1}", ha="center", va="center",
+                color="white", fontsize=9, fontweight="bold")
+        c1, c2 = PAIRS[i]
+        ax.text(x + tw / 2, 1.5, f"{c1} / {c2}", ha="center", va="center",
+                color="white", fontsize=8)
+        if i < n_tasks - 1:
+            ax.annotate("", xy=(x + tw + 0.35, 1.65), xytext=(x + tw, 1.65),
+                        arrowprops=dict(arrowstyle="-|>", color="#444444", lw=1.4))
+    # Forgetting span annotation
+    x0 = 0.5 + tw / 2; xN = 0.5 + (n_tasks - 1) * (tw + 0.35) + tw / 2
+    ax.annotate("", xy=(x0, 0.55), xytext=(xN, 0.55),
+                arrowprops=dict(arrowstyle="<->", color="#cc3333", lw=1.5))
+    ax.text((x0 + xN) / 2, 0.25, "forgetting measured across tasks",
+            ha="center", va="center", color="#cc3333", fontsize=8, style="italic")
+    ax.set_title(f"Split-CIFAR-10 — {n_tasks} sequential binary tasks, {backbone} backbone",
+                 fontsize=11, fontweight="bold", color="#222222", pad=6)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return output_path.exists()
+
+
+def _figure_record(figure_id: str, path: Path, caption: str, source_phases: list[str]) -> dict[str, Any]:
+    return {
+        "figure_id": figure_id,
+        "path": str(path),
+        "caption": caption,
+        "source_phases": source_phases,
+    }
+
+
+def _generate_validated_result_figures(evidence: dict[str, Any], out_dir: Path) -> dict[str, Any]:
+    figures_dir = out_dir / "figures"
+    required: list[dict[str, Any]] = []
+    generated: list[dict[str, Any]] = []
+
+    phase10 = evidence.get("phase10", {})
+    if _validated_result_payload(phase10):
+        required.append({"figure_id": "phase10_main_comparison", "source_phases": ["phase10"]})
+        aggregate = phase10.get("aggregate", {}) if isinstance(phase10.get("aggregate", {}), dict) else {}
+        labels: list[str] = []
+        forgetting_values: list[float] = []
+        accuracy_values: list[float] = []
+        for method in ("tcl", "ewc", "si", "sgd_baseline"):
+            rec = aggregate.get(method, {}) if isinstance(aggregate.get(method, {}), dict) else {}
+            f_val = _safe_float(rec.get("forgetting_mean"))
+            a_val = _safe_float(rec.get("acc_mean"))
+            if f_val is None or a_val is None:
+                continue
+            labels.append(method.replace("_", " ").upper())
+            forgetting_values.append(f_val)
+            accuracy_values.append(a_val)
+        main_path = figures_dir / "phase10_main_comparison.png"
+        if _plot_metric_bars(main_path, title="Phase 10: Validated forgetting and accuracy", labels=labels, forgetting_values=forgetting_values, accuracy_values=accuracy_values):
+            generated.append(_figure_record("phase10_main_comparison", main_path, "Validated Phase 10 comparison across TCL, EWC, SI, and SGD using mean forgetting and final accuracy.", ["phase10"]))
+
+        required.append({"figure_id": "phase10_pairwise_deltas", "source_phases": ["phase10"]})
+        pairwise = phase10.get("pairwise", {}) if isinstance(phase10.get("pairwise", {}), dict) else {}
+        delta_labels: list[str] = []
+        delta_values: list[float] = []
+        for baseline in ("ewc", "si", "sgd_baseline"):
+            rec = pairwise.get(baseline, {}) if isinstance(pairwise.get(baseline, {}), dict) else {}
+            delta = _safe_float(rec.get("mean_delta"))
+            if delta is None:
+                continue
+            delta_labels.append(baseline.replace("_", " ").upper())
+            delta_values.append(delta)
+        delta_path = figures_dir / "phase10_pairwise_deltas.png"
+        if _plot_pairwise_deltas(delta_path, title="Phase 10: TCL forgetting delta versus baselines", labels=delta_labels, delta_values=delta_values):
+            generated.append(_figure_record("phase10_pairwise_deltas", delta_path, "Phase 10 TCL-minus-baseline forgetting deltas; negative values indicate lower forgetting for TCL.", ["phase10"]))
+
+    phase11 = evidence.get("phase11", {})
+    if _validated_result_payload(phase11):
+        required.append({"figure_id": "phase11_ablation", "source_phases": ["phase11"]})
+        aggregate = phase11.get("aggregate", {}) if isinstance(phase11.get("aggregate", {}), dict) else {}
+        labels = []
+        forgetting_values = []
+        accuracy_values = []
+        for method in ("sgd_baseline", "governor_only", "penalty_only", "tcl_full"):
+            rec = aggregate.get(method, {}) if isinstance(aggregate.get(method, {}), dict) else {}
+            f_val = _safe_float(rec.get("forgetting_mean"))
+            a_val = _safe_float(rec.get("acc_mean"))
+            if f_val is None or a_val is None:
+                continue
+            labels.append(method.replace("_", " ").upper())
+            forgetting_values.append(f_val)
+            accuracy_values.append(a_val)
+        phase11_path = figures_dir / "phase11_ablation.png"
+        if _plot_metric_bars(phase11_path, title="Phase 11: Validated ablation comparison", labels=labels, forgetting_values=forgetting_values, accuracy_values=accuracy_values):
+            generated.append(_figure_record("phase11_ablation", phase11_path, "Validated Phase 11 ablation comparison for SGD, governor-only, penalty-only, and full TCL.", ["phase11"]))
+
+    phase12 = evidence.get("phase12", {})
+    if _validated_result_payload(phase12):
+        required.append({"figure_id": "phase12_lambda_sweep", "source_phases": ["phase12"]})
+        aggregate = phase12.get("aggregate", {}) if isinstance(phase12.get("aggregate", {}), dict) else {}
+        labels = []
+        forgetting_values = []
+        accuracy_values = []
+        for lam in [str(item) for item in phase12.get("lambdas_tested", []) or [] if str(item).strip()]:
+            rec = aggregate.get(lam, {}) if isinstance(aggregate.get(lam, {}), dict) else {}
+            f_val = _safe_float(rec.get("forgetting_mean"))
+            a_val = _safe_float(rec.get("acc_mean"))
+            if f_val is None or a_val is None:
+                continue
+            labels.append(lam)
+            forgetting_values.append(f_val)
+            accuracy_values.append(a_val)
+        phase12_path = figures_dir / "phase12_lambda_sweep.png"
+        if _plot_sweep_curves(phase12_path, title="Phase 12: Validated EWC lambda sweep", x_labels=labels, forgetting_values=forgetting_values, accuracy_values=accuracy_values, x_title="EWC lambda"):
+            generated.append(_figure_record("phase12_lambda_sweep", phase12_path, "Validated Phase 12 EWC lambda sweep showing forgetting and accuracy across tested penalty scales.", ["phase12"]))
+
+    phase13 = evidence.get("phase13", {})
+    if _validated_result_payload(phase13):
+        required.append({"figure_id": "phase13_si_sweep", "source_phases": ["phase13"]})
+        aggregate = phase13.get("aggregate", {}) if isinstance(phase13.get("aggregate", {}), dict) else {}
+        labels = []
+        forgetting_values = []
+        accuracy_values = []
+        for c_value in [str(item) for item in phase13.get("c_values_tested", []) or [] if str(item).strip()]:
+            rec = aggregate.get(c_value, {}) if isinstance(aggregate.get(c_value, {}), dict) else {}
+            f_val = _safe_float(rec.get("forgetting_mean"))
+            a_val = _safe_float(rec.get("acc_mean"))
+            if f_val is None or a_val is None:
+                continue
+            labels.append(c_value)
+            forgetting_values.append(f_val)
+            accuracy_values.append(a_val)
+        phase13_path = figures_dir / "phase13_si_sweep.png"
+        if _plot_sweep_curves(phase13_path, title="Phase 13: Validated SI c-value sweep", x_labels=labels, forgetting_values=forgetting_values, accuracy_values=accuracy_values, x_title="SI c value"):
+            generated.append(_figure_record("phase13_si_sweep", phase13_path, "Validated Phase 13 SI sweep showing forgetting and accuracy across tested c values.", ["phase13"]))
+
+    # ── Phase 16: HPC claim validation ────────────────────────────────────────
+    phase16 = evidence.get("phase16", {})
+    if isinstance(phase16, dict) and phase16.get("phase_type") == "hpc_claim_validation":
+        methods16 = phase16.get("methods", {})
+        order16   = phase16.get("method_order", list(methods16.keys()))
+        required.append({"figure_id": "phase16_hpc_comparison", "source_phases": ["phase16"]})
+        p16_path = figures_dir / "phase16_hpc_comparison.png"
+        if _plot_six_method_comparison(
+            p16_path,
+            title="Phase 16: HPC vs Baselines — Forgetting, Accuracy, JAF",
+            method_data=methods16,
+            method_order=order16,
+        ):
+            generated.append(_figure_record(
+                "phase16_hpc_comparison", p16_path,
+                "Phase 16 six-method comparison: HPC vs SGD, EWC, SI, and TCL baselines "
+                "on Split-CIFAR-10. HPC (ours, highlighted) is the autonomous TAR hypothesis.",
+                ["phase16"],
+            ))
+
+    # ── System diagrams (always generated when matplotlib is available) ────────
+    arch_path = figures_dir / "tar_architecture.png"
+    required.append({"figure_id": "tar_architecture", "source_phases": []})
+    if _plot_architecture_diagram(arch_path):
+        generated.append(_figure_record(
+            "tar_architecture", arch_path,
+            "TAR (Thermodynamic Active Research) autonomous research loop. "
+            "Human review gates the transition from experiment queue to training worker.",
+            [],
+        ))
+
+    cl_path = figures_dir / "continual_learning_schematic.png"
+    required.append({"figure_id": "continual_learning_schematic", "source_phases": []})
+    if _plot_continual_learning_schematic(cl_path, n_tasks=5, backbone="ResNet-18"):
+        generated.append(_figure_record(
+            "continual_learning_schematic", cl_path,
+            "Split-CIFAR-10 task structure: five sequential binary classification tasks. "
+            "Forgetting is measured as the accuracy drop on previous tasks after each new task is learned.",
+            [],
+        ))
+
+    manifest = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "required_figures": required,
+        "generated_figures": generated,
+    }
+    manifest_path = out_dir / "figure_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"required_figures": required, "generated_figures": generated, "manifest_path": str(manifest_path)}
+
+
+def _build_evidence_figures_tex(figure_records: list[dict[str, Any]]) -> str:
+    if not figure_records:
+        return ""
+    blocks = [
+        r"\subsection{Evidence Figures}",
+        (
+            "All figures in this subsection are generated directly from validated result artifacts loaded into the paper evidence pack. "
+            "They are evidence summaries, not decorative illustrations."
+        ),
+    ]
+    for rec in figure_records:
+        rel_path = Path(str(rec.get("path", ""))).name
+        caption = _latex_escape(str(rec.get("caption", "") or "Validated evidence figure."))
+        figure_id = _latex_escape(str(rec.get("figure_id", "") or "figure"))
+        blocks.append(textwrap.dedent(rf"""
+\begin{{figure}}[t]
+\centering
+\includegraphics[width=0.92\linewidth]{{figures/{rel_path}}}
+\caption{{{caption}}}
+\label{{fig:{figure_id}}}
+\end{{figure}}
+        """).strip())
+    return "\n\n".join(blocks)
+
+
 def _assemble_main_tex(sections: dict[str, str], spec: PaperSpec, bib_path: Path) -> str:
     authors_latex = " \\and ".join(
         f"\\textbf{{{a}}}" for a in spec.authors
@@ -1988,6 +2734,7 @@ def _assemble_main_tex(sections: dict[str, str], spec: PaperSpec, bib_path: Path
     sec_background  = sections.get("s2_background", "")
     sec_method      = sections.get("s3_method", "")
     sec_experiments = sections.get("s4_experiments", "")
+    sec_figures     = sections.get("figures", "")
     sec_discussion  = sections.get("s5_discussion", "")
     sec_conclusion  = sections.get("s6_conclusion", "")
     sec_ewc_app     = sections.get("sA_ewc_sweep", "")
@@ -2039,6 +2786,8 @@ def _assemble_main_tex(sections: dict[str, str], spec: PaperSpec, bib_path: Path
 {sec_method}
 
 {sec_experiments}
+
+{sec_figures}
 
 {sec_discussion}
 
@@ -2108,6 +2857,85 @@ def _detect_phase_type(data: dict) -> str:
     return "generic"
 
 
+def _load_hpc_replication_evidence(workspace: Path) -> "dict | None":
+    """Auto-discover the most recent HPC replication suite and return evidence dict."""
+    val_root = workspace / "tar_state" / "validation"
+    if not val_root.exists():
+        return None
+    candidates = sorted(
+        [d for d in val_root.iterdir() if d.is_dir() and "hpc_claim_validation" in d.name],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for bundle in candidates:
+        obs_root = bundle / "outputs" / "replication_suite" / "observability" / "per_method"
+        if not obs_root.exists():
+            continue
+        method_keys = [
+            "sgd_baseline", "ewc_lambda_100", "ewc_lambda_1000",
+            "si_c_0_01", "tcl_baseline", "high_penalty_conservative",
+        ]
+        methods: dict[str, Any] = {}
+        for mk in method_keys:
+            p = obs_root / f"{mk}.json"
+            if not p.exists():
+                continue
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+                agg = d.get("aggregate_so_far", {})
+                methods[mk] = {
+                    "n_seeds": d.get("completed_seed_count", 0),
+                    "forgetting_mean": agg.get("forgetting_mean"),
+                    "forgetting_std":  agg.get("forgetting_std"),
+                    "acc_mean":        agg.get("acc_mean"),
+                    "acc_std":         agg.get("acc_std"),
+                    "jaf_mean":        agg.get("jaf_mean"),
+                    "jaf_std":         agg.get("jaf_std"),
+                    "collapse_suspicious": agg.get("collapse_summary", {}).get("suspicious", False),
+                    "seeds": [
+                        {
+                            "seed":     r.get("seed"),
+                            "forgetting": r.get("mean_forgetting"),
+                            "acc":      r.get("final_mean_accuracy"),
+                            "jaf":      r.get("jaf"),
+                        }
+                        for r in d.get("rows", [])
+                    ],
+                }
+            except Exception:
+                continue
+        if not methods:
+            continue
+        hpc_m = methods.get("high_penalty_conservative", {})
+        tcl_m = methods.get("tcl_baseline", {})
+        hpc_f = _safe_float(hpc_m.get("forgetting_mean"))
+        tcl_f = _safe_float(tcl_m.get("forgetting_mean"))
+        delta = (hpc_f - tcl_f) if (hpc_f is not None and tcl_f is not None) else None
+        threshold = 0.1161
+        seeds_passing = sum(
+            1 for s in hpc_m.get("seeds", [])
+            if _safe_float(s.get("forgetting")) is not None
+            and (_safe_float(s["forgetting"]) or 1.0) < threshold
+        )
+        n_seeds = int(hpc_m.get("n_seeds", 0) or 0)
+        return {
+            "phase_type":                   "hpc_claim_validation",
+            "dataset":                      "split_cifar10",
+            "backbone":                     "resnet18",
+            "methods":                      methods,
+            "method_order":                 method_keys,
+            "hpc_vs_tcl_delta":             delta,
+            "hpc_pre_registered_threshold": threshold,
+            "seeds_passing_threshold":      seeds_passing,
+            "n_seeds_complete":             n_seeds,
+            "null_prediction":              "Aggressive anchoring collapses new-task learning before reducing forgetting",
+            "null_observed":                any(m.get("collapse_suspicious", False) for m in methods.values()),
+            "source_dir":                   str(bundle),
+            "status":                       "complete" if n_seeds >= 10 else "partial",
+        }
+    return None
+
+
 def _load_evidence(
     workspace: Path,
     phase_result_paths: list[Path],
@@ -2115,31 +2943,31 @@ def _load_evidence(
     paper_title: str = "",
 ) -> dict:
     evidence: dict[str, Any] = {}
-    comparisons = workspace / "tar_state" / "comparisons"
     external_results: list[dict[str, Any]] = []
 
     # ── Auto-discover ALL phase*.json files ───────────────────────────────────
     # Any new phase JSON dropped into comparisons/ is picked up without code changes.
     discovered: dict[int, tuple[str, dict]] = {}  # phase_num -> (filename, data)
 
-    if comparisons.exists():
-        for p in sorted(comparisons.glob("phase*.json")):
-            m = re.search(r"phase(\d+)", p.stem)
-            if not m:
-                continue
-            num = int(m.group(1))
-            # If multiple files match the same phase number, prefer the newer one
-            if num in discovered and p.stat().st_mtime < comparisons.glob(f"phase{num}*.json").__next__().stat().st_mtime:
-                continue
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-                discovered[num] = (p.stem, data)
-                print(f"[TAR-Author] Loaded phase{num} from {p.name}", flush=True)
-            except Exception:
-                pass
-
-    # Also accept explicit phase_result_paths. Non-phase files are stored as external results.
+    selected_paths: list[Path] = []
     for p in phase_result_paths:
+        if p not in selected_paths:
+            selected_paths.append(p)
+    if paper_project_id and not selected_paths:
+        for entry in iter_phase_catalog_entries():
+            if entry.target_paper_id != paper_project_id:
+                continue
+            resolved = resolve_canonical_comparison_path(
+                workspace,
+                entry.logical_name,
+                legacy_filename=entry.legacy_filename,
+            )
+            if resolved is not None and resolved not in selected_paths:
+                selected_paths.append(resolved)
+
+    # Only load the explicitly selected or catalog-derived result paths. This
+    # keeps unrelated domains out of the paper evidence pack.
+    for p in selected_paths:
         if p.exists():
             m = re.search(r"phase(\d+)", p.stem)
             try:
@@ -2169,8 +2997,16 @@ def _load_evidence(
             "per_seed":          p10.get("per_seed", []),
             "pairwise":          p10.get("pairwise", {}),
             "methods":           p10.get("methods", []),
-            "verdict":           p10.get("verdict", ""),
+            "verdict":           read_advisory_verdict(p10)["label"],
         })
+
+    # ── HPC claim validation — auto-detect replication suite ─────────────────
+    # Only injects if phase16 wasn't already loaded from a comparison file.
+    if "phase16" not in evidence:
+        _hpc_ev = _load_hpc_replication_evidence(workspace)
+        if _hpc_ev:
+            evidence["phase16"] = _hpc_ev
+            evidence["phase16_type"] = "hpc_claim_validation"
 
     if paper_project_id:
         paper_summary = _paper_evidence_from_library(workspace, paper_project_id)
@@ -2226,6 +3062,86 @@ def _load_evidence(
     discovered_keys = sorted(k for k in evidence if re.match(r"phase\d+$", k))
     print(f"[TAR-Author] Phases in evidence: {discovered_keys}", flush=True)
     return evidence
+
+
+def _write_paper_validation_bundle(
+    workspace: Path,
+    *,
+    spec: PaperSpec,
+    evidence: dict[str, Any],
+    out_dir: Path,
+    blocked_by: list[str],
+) -> dict[str, str]:
+    gate = _paper_gate_context(
+        workspace,
+        project_id=spec.project_id,
+        experiment_ids=list((evidence.get("paper_summary", {}) or {}).get("experiment_ids", []) or []),
+        waiting_for_experiments=blocked_by,
+    )
+    phase_records = []
+    for phase_path in spec.phase_result_paths:
+        phase_records.append({
+            "path": str(phase_path),
+            "exists": phase_path.exists(),
+        })
+    evidence_manifest = {
+        "schema": "tar_paper_evidence_manifest_v1",
+        "project_id": spec.project_id,
+        "paper_title": spec.title,
+        "created_at": _now_iso(),
+        "phase_result_paths": phase_records,
+        "paper_truth_status": str(evidence.get("paper_truth_status", "weak") or "weak"),
+        "paper_recommendation": str(evidence.get("paper_recommendation", "") or ""),
+        "human_approved": gate["human_approved"],
+        "evidence_ready": gate["evidence_ready"],
+        "validation_issues": list((gate.get("evidence_status", {}) or {}).get("issues", []) or []),
+    }
+    figure_manifest = {
+        "schema": "tar_paper_figure_manifest_v1",
+        "project_id": spec.project_id,
+        "created_at": _now_iso(),
+        "required_figures": list(evidence.get("required_figures", []) or []),
+        "generated_figures": list(evidence.get("generated_figures", []) or []),
+        "source_manifest_path": str(evidence.get("figure_manifest_path", "") or ""),
+    }
+    claim_support_matrix = {
+        "schema": "tar_claim_support_matrix_v1",
+        "project_id": spec.project_id,
+        "created_at": _now_iso(),
+        "claim_policy": "scientifically_backed_only",
+        "claims": [
+            {
+                "claim_id": "paper_scope",
+                "status": "supported" if gate["evidence_ready"] else "blocked",
+                "reason": "validated evidence available" if gate["evidence_ready"] else "validation or experiment blockers remain",
+                "blocking_experiment_ids": blocked_by,
+            }
+        ],
+    }
+    blocked_claims = {
+        "schema": "tar_blocked_claims_v1",
+        "project_id": spec.project_id,
+        "created_at": _now_iso(),
+        "blocked_claims": [
+            {
+                "claim_id": "paper_scope",
+                "reason": "waiting_for_experiments_or_validation",
+                "blocking_experiment_ids": blocked_by,
+                "validation_issues": list((gate.get("evidence_status", {}) or {}).get("issues", []) or []),
+            }
+        ] if (blocked_by or not gate["evidence_ready"]) else [],
+    }
+    outputs = {
+        "evidence_manifest": out_dir / "evidence_manifest.json",
+        "figure_manifest": out_dir / "figure_manifest.json",
+        "claim_support_matrix": out_dir / "claim_support_matrix.json",
+        "blocked_claims": out_dir / "blocked_claims.json",
+    }
+    outputs["evidence_manifest"].write_text(json.dumps(evidence_manifest, indent=2), encoding="utf-8")
+    outputs["figure_manifest"].write_text(json.dumps(figure_manifest, indent=2), encoding="utf-8")
+    outputs["claim_support_matrix"].write_text(json.dumps(claim_support_matrix, indent=2), encoding="utf-8")
+    outputs["blocked_claims"].write_text(json.dumps(blocked_claims, indent=2), encoding="utf-8")
+    return {key: str(path) for key, path in outputs.items()}
 
 
 # ── author state tracker ──────────────────────────────────────────────────────
@@ -2297,7 +3213,7 @@ def _write_author_state(
             "progress": progress,
         })
         if has_pdf:
-            plan["compile_status"] = "draft_compiled" if (waiting_for_experiments or []) else "published"
+            plan["compile_status"] = "draft_compiled"
         _write_paper_plan(Path(plan_path), plan)
 
     updated_queue: list[dict[str, Any]] = []
@@ -2311,7 +3227,7 @@ def _write_author_state(
                 entry["status"] = "blocked"
                 entry["plan_status"] = "blocked"
             else:
-                entry["plan_status"] = "published" if has_pdf else action
+                entry["plan_status"] = "draft_compiled" if has_pdf else action
         updated_queue.append(entry)
     paper_queue = updated_queue
 
@@ -2333,7 +3249,7 @@ def _write_author_state(
             "readiness":               existing_current.get("readiness", ""),
             "has_pdf":                 has_pdf,
             "progress":                progress,
-            "compile_status":          ("draft_compiled" if (has_pdf and (waiting_for_experiments or [])) else ("published" if has_pdf else compile_status)),
+            "compile_status":          ("draft_compiled" if has_pdf else compile_status),
         },
         "paper_queue":    paper_queue,
         "activity_log":   activity_log,
@@ -2527,22 +3443,14 @@ def _candidate_phase_result_paths_for_paper(workspace: Path, paper_entry: dict) 
             )
             add(resolved or candidate)
 
-    for frontier_id in paper_entry.get("frontier_problem_ids", []) or []:
-        if frontier_id == "fp-class-incremental":
-            add_logical("phase15_class_incremental_search", "phase15_class_incremental_search.json")
-        elif frontier_id == "fp-scale-up":
-            add_logical("phase16_scale_up", "phase16_scale_up.json")
-            add_logical("phase17_tinyimagenet", "phase17_tinyimagenet.json")
-        elif frontier_id in {
-            "fp-catastrophic-forgetting",
-            "fp-regime-detection-accuracy",
-            "fp-hyperparameter-robustness",
-        }:
-            add_logical("phase10_baseline", "phase10_baseline.json")
-            add_logical("phase11_ablation", "phase11_ablation.json")
-            add_logical("phase12_ewc_sweep", "phase12_ewc_sweep.json")
-            add_logical("phase13_si_sweep", "phase13_si_sweep.json")
-            add_logical("phase14_quantum_publishability", "phase14_quantum_publishability.json")
+    frontier_ids = {
+        str(frontier_id)
+        for frontier_id in paper_entry.get("frontier_problem_ids", []) or []
+        if str(frontier_id).strip()
+    }
+    for entry in iter_phase_catalog_entries():
+        if entry.frontier_problem_id in frontier_ids:
+            add_logical(entry.logical_name, entry.legacy_filename)
     return candidates
 
 
@@ -2570,6 +3478,10 @@ def _build_author_spec_from_queue_entry(workspace: Path, paper_entry: dict) -> P
         abstract_hint = f"{abstract_hint} Scope: {writing_policy}".strip()
     if revision_reason:
         abstract_hint = f"{abstract_hint} Revision request: {revision_reason}".strip()
+    abstract_hint = (
+        f"{abstract_hint} Policy: use only scientifically backed claims, include validated-result figures, "
+        "do not mix domains, and do not target a fixed page limit."
+    ).strip()
     return PaperSpec(
         title=str(paper_entry.get("title", "") or project_id.replace("_", " ").replace("-", " ").title()),
         authors=["Christopher Gardner", "TAR (Thermodynamic Autonomous Researcher)"],
@@ -2709,7 +3621,34 @@ def _write_paper_plan(path: Path, data: dict) -> None:
         pass
 
 
-def _normalize_paper_plan_state(plan: dict, *, waiting_for_experiments: list[str], has_pdf: bool) -> dict[str, str]:
+def _paper_gate_context(
+    workspace: Path,
+    *,
+    project_id: str,
+    experiment_ids: list[str] | None,
+    waiting_for_experiments: list[str] | None,
+) -> dict[str, Any]:
+    evidence_status = validate_paper_evidence(
+        workspace,
+        paper_id=project_id,
+        linked_experiment_ids=[str(item) for item in (experiment_ids or []) if str(item or "")],
+        waiting_for_experiment_ids=[str(item) for item in (waiting_for_experiments or []) if str(item or "")],
+    )
+    return {
+        "human_approved": project_id in approved_paper_ids(workspace),
+        "evidence_ready": bool(evidence_status.get("evidence_ready")),
+        "evidence_status": evidence_status,
+    }
+
+
+def _normalize_paper_plan_state(
+    plan: dict,
+    *,
+    waiting_for_experiments: list[str],
+    has_pdf: bool,
+    evidence_ready: bool = True,
+    human_approved: bool = True,
+) -> dict[str, str]:
     waiting = [str(item) for item in waiting_for_experiments if str(item).strip()]
     status = str(plan.get("status", "") or "").strip().lower()
     compile_status = str(plan.get("compile_status", "") or "").strip().lower()
@@ -2728,11 +3667,25 @@ def _normalize_paper_plan_state(plan: dict, *, waiting_for_experiments: list[str
             "plan_stage": "blocked",
         }
 
+    if not evidence_ready:
+        return {
+            "status": "awaiting_validation",
+            "compile_status": "draft_compiled" if has_pdf else (compile_status or "awaiting_validation"),
+            "plan_stage": "awaiting_validation",
+        }
+
+    if not human_approved:
+        return {
+            "status": "awaiting_human_review",
+            "compile_status": "draft_compiled" if has_pdf else (compile_status or "awaiting_human_review"),
+            "plan_stage": "awaiting_human_review",
+        }
+
     if has_pdf:
         return {
-            "status": "published",
-            "compile_status": "published",
-            "plan_stage": "published",
+            "status": "draft_compiled",
+            "compile_status": "draft_compiled",
+            "plan_stage": "draft_compiled",
         }
 
     if status in {"done", "complete", "published"}:
@@ -2766,6 +3719,8 @@ def _paper_progress_payload(
     has_pdf: bool = False,
     experiment_progress: dict[str, Any] | None = None,
     compile_status: str = "",
+    evidence_ready: bool = True,
+    human_approved: bool = True,
 ) -> dict[str, Any]:
     sections_complete = list(dict.fromkeys(sections_complete or []))
     sections_pending = list(dict.fromkeys(sections_pending or []))
@@ -2814,16 +3769,42 @@ def _paper_progress_payload(
             "compile_status": compile_status or ("draft_compiled" if has_pdf else ""),
         }
 
-    if has_pdf:
+    if not evidence_ready:
+        pct = 94 if has_pdf else min(94, max(15, int(round(94.0 * section_done / max(section_total, 1)))))
         return {
-            "stage": "published",
-            "pct": 100,
-            "label": "PDF compiled and published",
+            "stage": "awaiting_validation",
+            "pct": pct,
+            "label": "Draft waiting on validation gate",
             "sections_complete_count": section_done,
             "sections_total": section_total,
             "experiments_complete_count": exp_done,
             "experiments_total": exp_total,
-            "compile_status": "published",
+            "compile_status": compile_status or ("draft_compiled" if has_pdf else "awaiting_validation"),
+        }
+
+    if not human_approved:
+        pct = 95 if has_pdf else min(95, max(15, int(round(95.0 * section_done / max(section_total, 1)))))
+        return {
+            "stage": "awaiting_human_review",
+            "pct": pct,
+            "label": "Waiting for explicit human authorisation",
+            "sections_complete_count": section_done,
+            "sections_total": section_total,
+            "experiments_complete_count": exp_done,
+            "experiments_total": exp_total,
+            "compile_status": compile_status or ("draft_compiled" if has_pdf else "awaiting_human_review"),
+        }
+
+    if has_pdf:
+        return {
+            "stage": "draft_compiled",
+            "pct": 100,
+            "label": "PDF compiled from validated evidence",
+            "sections_complete_count": section_done,
+            "sections_total": section_total,
+            "experiments_complete_count": exp_done,
+            "experiments_total": exp_total,
+            "compile_status": "draft_compiled",
         }
 
     if status in {"done", "complete"}:
@@ -2914,9 +3895,9 @@ def _refresh_registry_paper_artifacts(workspace: Path, project_id: str, pdf_path
             return
         if pdf_path:
             project.paper_pdf = pdf_path
-            project.paper_status = "published"
+            project.paper_status = "draft_compiled"
             project.status = STATUS_COMPLETE
-        registry.register(project)
+        registry.register(project, overwrite_existing=True)
     except Exception:
         pass
 
@@ -2944,8 +3925,7 @@ def _compile_paper_if_needed(
     compiler = _find_latex_compiler()
     last_attempt = _parse_iso(str(plan.get("last_compile_attempted_at", "") or ""))
     last_compile_status = str(plan.get("compile_status", "") or "")
-    waiting_for = plan.get("waiting_for_experiments", []) if isinstance(plan.get("waiting_for_experiments", []), list) else []
-    publish_status = "draft_compiled" if waiting_for else "published"
+    publish_status = "draft_compiled"
     now = datetime.now(timezone.utc)
 
     if pdf_path.exists() and pdf_path.stat().st_mtime >= tex_path.stat().st_mtime:
@@ -2953,8 +3933,7 @@ def _compile_paper_if_needed(
         plan["pdf_path"] = str(pdf_path)
         plan["last_compile_succeeded_at"] = now.isoformat()
         _write_paper_plan(plan_path, plan)
-        if publish_status == "published":
-            _refresh_registry_paper_artifacts(workspace, project_id, str(pdf_path))
+        _refresh_registry_paper_artifacts(workspace, project_id, str(pdf_path))
         return {"attempted": False, "pdf_path": str(pdf_path), "compile_status": publish_status}
 
     if not compiler:
@@ -2982,8 +3961,7 @@ def _compile_paper_if_needed(
         plan["last_compile_succeeded_at"] = now.isoformat()
         plan["pdf_path"] = str(pdf)
         _write_paper_plan(plan_path, plan)
-        if publish_status == "published":
-            _refresh_registry_paper_artifacts(workspace, project_id, str(pdf))
+        _refresh_registry_paper_artifacts(workspace, project_id, str(pdf))
         _append_paper_record(workspace, {
             "project_id": project_id,
             "title": title,
@@ -3001,6 +3979,12 @@ def _compile_paper_if_needed(
 
 
 def ensure_completed_papers_compiled(workspace: Path, author_state: dict | None = None, max_papers: int = 2) -> list[dict[str, Any]]:
+    from tar_validation_mode import load_state as _vm_load_state
+    try:
+        if bool(_vm_load_state(workspace).get("active")):
+            return []
+    except Exception:
+        return []
     state = author_state if isinstance(author_state, dict) else {}
     current = state.get("current_paper", {}) if isinstance(state, dict) else {}
     queue = state.get("paper_queue", []) if isinstance(state, dict) else []
@@ -3137,9 +4121,30 @@ def _bootstrap_planned_paper_workspace(workspace: Path, paper_entry: dict) -> di
     }
 
 
+def _is_supported_scientific_paper_directive(directive: dict[str, Any]) -> bool:
+    if not isinstance(directive, dict):
+        return False
+    paper_id = str(directive.get("paper_id", "") or "")
+    frontier_id = str(directive.get("frontier_problem_id", "") or "")
+    scope_status = str(directive.get("scope_status", "") or "").strip().lower()
+    if not paper_id:
+        return False
+    if not frontier_id and (
+        scope_status in {"domain_watch", "out_of_scope", "incubating", "unscoped"}
+        or paper_id.startswith("director-")
+    ):
+        return False
+    return True
+
+
 def _build_paper_queue(workspace: Path) -> list[dict]:
     director = _load_director_state(workspace)
-    paper_directives = director.get("paper_directives", []) if isinstance(director, dict) else []
+    raw_paper_directives = director.get("paper_directives", []) if isinstance(director, dict) else []
+    paper_directives = [
+        directive
+        for directive in raw_paper_directives
+        if _is_supported_scientific_paper_directive(directive)
+    ]
     directive_by_paper = {
         str(rec.get("paper_id", "") or ""): rec
         for rec in paper_directives
@@ -3254,6 +4259,15 @@ def _build_paper_queue(workspace: Path) -> list[dict]:
             "pending": entry["pending_count"],
             "total": len(entry["experiment_ids"]),
         }
+        gate = _paper_gate_context(
+            workspace,
+            project_id=str(entry.get("project_id", "") or ""),
+            experiment_ids=list(entry.get("experiment_ids", []) or []),
+            waiting_for_experiments=list(entry.get("waiting_for_experiments", []) or []),
+        )
+        entry["human_approved"] = gate["human_approved"]
+        entry["evidence_ready"] = gate["evidence_ready"]
+        entry["validation_issues"] = list((gate.get("evidence_status", {}) or {}).get("issues", []) or [])
         plan = _load_paper_plan(Path(entry["plan_path"])) if entry["plan_path"] else {}
         plan_status = str(plan.get("status", "") or "")
         entry["revision_reason"] = str(plan.get("last_revision_reason", "") or "")
@@ -3266,6 +4280,8 @@ def _build_paper_queue(workspace: Path) -> list[dict]:
             plan,
             waiting_for_experiments=entry["waiting_for_experiments"],
             has_pdf=entry["has_pdf"],
+            evidence_ready=entry["evidence_ready"],
+            human_approved=entry["human_approved"],
         )
         if (
             normalized_plan["status"] != str(plan.get("status", "") or "")
@@ -3287,12 +4303,26 @@ def _build_paper_queue(workspace: Path) -> list[dict]:
                 if entry["waiting_for_experiments"] and entry["has_pdf"]
                 else normalized_plan["compile_status"]
             ),
+            evidence_ready=entry["evidence_ready"],
+            human_approved=entry["human_approved"],
         )
         if plan.get("progress") != entry["paper_progress"]:
             plan["progress"] = entry["paper_progress"]
             plan["updated_at"] = datetime.now(timezone.utc).isoformat()
             _write_paper_plan(Path(entry["plan_path"]), plan)
-    queue_entries = list(grouped.values())
+    queue_entries = [
+        entry
+        for entry in queue_entries
+        if (
+            str(entry.get("project_id", "") or "") in directive_by_paper
+            or list(entry.get("frontier_problem_ids", []) or [])
+            or not str(entry.get("project_id", "") or "").startswith("director-")
+        )
+    ]
+    queued_paper_ids = {
+        str(entry.get("project_id", "") or "")
+        for entry in queue_entries
+    }
 
     readiness_to_status = {
         "write_now": "ready",
@@ -3306,7 +4336,7 @@ def _build_paper_queue(workspace: Path) -> list[dict]:
     }
     for directive in paper_directives:
         paper_id = str(directive.get("paper_id", "") or "")
-        if not paper_id or paper_id in grouped:
+        if not paper_id or paper_id in queued_paper_ids:
             continue
         registry_rec = registry_by_id.get(paper_id, {})
         waiting_for = sorted(set(
@@ -3360,10 +4390,21 @@ def _build_paper_queue(workspace: Path) -> list[dict]:
             if isinstance(plan.get("revision_requests", []), list)
             else []
         )[-20:]
+        gate = _paper_gate_context(
+            workspace,
+            project_id=str(entry.get("project_id", "") or ""),
+            experiment_ids=list(entry.get("experiment_ids", []) or []),
+            waiting_for_experiments=list(entry.get("waiting_for_experiments", []) or []),
+        )
+        entry["human_approved"] = gate["human_approved"]
+        entry["evidence_ready"] = gate["evidence_ready"]
+        entry["validation_issues"] = list((gate.get("evidence_status", {}) or {}).get("issues", []) or [])
         normalized_plan = _normalize_paper_plan_state(
             plan,
             waiting_for_experiments=entry["waiting_for_experiments"],
             has_pdf=entry["has_pdf"],
+            evidence_ready=entry["evidence_ready"],
+            human_approved=entry["human_approved"],
         )
         if (
             normalized_plan["status"] != str(plan.get("status", "") or "")
@@ -3385,6 +4426,8 @@ def _build_paper_queue(workspace: Path) -> list[dict]:
                 if entry["waiting_for_experiments"] and entry["has_pdf"]
                 else normalized_plan["compile_status"]
             ),
+            evidence_ready=entry["evidence_ready"],
+            human_approved=entry["human_approved"],
         )
         if plan.get("progress") != entry["paper_progress"]:
             plan["progress"] = entry["paper_progress"]
@@ -3411,7 +4454,10 @@ def _build_paper_queue(workspace: Path) -> list[dict]:
                 if "paper_progress" in existing_entry:
                     merged["paper_progress"] = existing_entry["paper_progress"]
                 validation_entry = merged
-            queue_entries = [validation_entry]
+            queue_entries = [validation_entry] + [
+                rec for rec in queue_entries
+                if str(rec.get("project_id", "") or "") != str(validation_entry.get("project_id", "") or "")
+            ]
     except Exception:
         pass
 
@@ -3581,6 +4627,14 @@ def auto_start_priority_paper(workspace: Path) -> dict | None:
     Start the highest-priority paper marked write_now/outline_now by the
     Research Director, while respecting experiment blockers.
     """
+    from tar_lab.errors import StabilisationGateAutonomousContextError
+    _ctx = _AUTHORING_OVERRIDE.get()
+    if _ctx is not None:
+        raise StabilisationGateAutonomousContextError(
+            f"auto_start_priority_paper found override context "
+            f"(reason={_ctx.reason!r}); autonomous authoring must never "
+            f"inherit a human override context"
+        )
     try:
         configure_live_author_llm(workspace)
     except Exception:
@@ -3748,6 +4802,10 @@ def request_paper_revision(workspace: Path, project_id: str, reason: str = "") -
         "last_revision_reason": reason,
         "revision_requests": revision_history[-20:],
         "revision_pending": True,
+        "rewrite_scope": "full_paper",
+        "claim_policy": "scientifically_backed_only",
+        "require_validated_figures": True,
+        "page_budget_policy": "no_fixed_page_limit",
         "progress": progress,
     })
     _write_paper_plan(plan_path, plan)
@@ -3852,6 +4910,45 @@ def request_paper_revision(workspace: Path, project_id: str, reason: str = "") -
         "paper_dir": target["paper_dir"],
         "reason": reason,
     }
+
+
+def request_full_paper_rewrite(workspace: Path, reason: str = "") -> list[dict[str, Any]]:
+    """
+    Route every known paper back through TAR-Author revision.
+
+    This is the hard reset path used after major evidence corrections so stale
+    manuscripts cannot survive on old claims, weak framing, or missing figures.
+    """
+    rewrite_reason = str(reason or "").strip() or (
+        "Full rewrite required. Rebuild every paper from current validated evidence only; "
+        "remove unsupported claims, do not mix domains, include figures and diagrams generated "
+        "from validated results, and do not target a fixed page limit."
+    )
+    state = write_planned_author_state(workspace)
+    registry_records = _load_registry_records(workspace)
+    project_ids = {
+        str(entry.get("project_id", "") or "")
+        for entry in state.get("paper_queue", []) if isinstance(entry, dict)
+    }
+    project_ids |= {
+        project_id
+        for project_id, record in registry_records.items()
+        if isinstance(record, dict)
+        and str(record.get("project_type", "paper") or "paper") == "paper"
+        and not (
+            not list(record.get("frontier_problem_ids", []) or [])
+            and (
+                str(project_id).startswith("director-")
+                or str(record.get("scope_status", "") or "").strip().lower() in {"domain_watch", "out_of_scope", "incubating", "unscoped"}
+            )
+        )
+    }
+    requested: list[dict[str, Any]] = []
+    for project_id in sorted(pid for pid in project_ids if pid):
+        rec = request_paper_revision(workspace, project_id, rewrite_reason)
+        if rec is not None:
+            requested.append(rec)
+    return requested
 
 
 def run_paper_revision(
@@ -3990,6 +5087,27 @@ def _register_in_registry(
         print(f"[TAR-Author] Registry update skipped: {exc}", flush=True)
 
 
+def _log_authoring_override_audit(workspace: Path, spec: Any, ctx: Any) -> None:
+    """Audit trail only (W4: logs reason, does not validate it)."""
+    try:
+        root = workspace / "tar_state" / "stat_audit"
+        root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        payload = {
+            "event": "stabilisation_authoring_override_consumed",
+            "logged_at": datetime.now(timezone.utc).isoformat(),
+            "project_id": str(getattr(spec, "project_id", "")),
+            "override_mode_id": ctx.mode_id,
+            "override_activated_at": ctx.activated_at,
+            "reason": ctx.reason,
+        }
+        (root / f"authoring_override__{stamp}.json").write_text(
+            json.dumps(payload, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
 # ── main entry point ───────────────────────────────────────────────────────────
 
 class TARAuthor:
@@ -3997,6 +5115,52 @@ class TARAuthor:
         self.workspace = workspace
 
     def write_paper(self, spec: PaperSpec) -> Path:
+        from tar_validation_mode import _read_stabilisation_state_strict
+        from tar_lab.errors import (
+            StabilisationGateMissingOverrideError,
+            StabilisationGateStaleOverrideError,
+            StabilisationGateModeMismatchError,
+            StabilisationGateAlreadyConsumedError,
+        )
+        stab = _read_stabilisation_state_strict(spec.workspace)
+        active = bool(stab.get("active"))
+        ctx = _AUTHORING_OVERRIDE.get()
+
+        if not active:
+            if ctx is not None:
+                _log_authoring_override_audit(spec.workspace, spec, ctx)
+            return self._write_paper_impl(spec)
+
+        if ctx is None:
+            raise StabilisationGateMissingOverrideError(
+                "write_paper called without override context while stabilised. "
+                "Class-A human authoring must enter "
+                "stabilisation_authoring_override(workspace, reason) and call "
+                "write_paper from inside that block. If this is an autonomous "
+                "call, it must not reach write_paper under stabilisation."
+            )
+        if ctx.mode_id is None:
+            raise StabilisationGateStaleOverrideError(
+                "override minted while not stabilised; cannot authorise under "
+                "current stabilisation"
+            )
+        if ctx.mode_id != str(stab.get("mode_id")) or \
+                ctx.activated_at != str(stab.get("activated_at")):
+            raise StabilisationGateModeMismatchError(
+                "override mode_id/activated_at mismatch — stabilisation state "
+                "changed since mint"
+            )
+        with ctx._lock:
+            if ctx._consumed:
+                raise StabilisationGateAlreadyConsumedError(
+                    "override context already consumed; with block may wrap "
+                    "exactly one write_paper call"
+                )
+            ctx._consumed = True
+        _log_authoring_override_audit(spec.workspace, spec, ctx)
+        return self._write_paper_impl(spec)
+
+    def _write_paper_impl(self, spec: PaperSpec) -> Path:
         out_dir = spec.paper_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         llm_state = _effective_author_llm_config(spec)
@@ -4045,6 +5209,21 @@ class TARAuthor:
                             "s3_method", "s4_experiments", "s5_discussion",
                             "s6_conclusion", "sA_ewc_sweep"]
         blocked_by = _get_blocked_by(spec.workspace, required_experiment_ids) if required_experiment_ids else []
+        paper_gate = _paper_gate_context(
+            spec.workspace,
+            project_id=spec.project_id,
+            experiment_ids=required_experiment_ids,
+            waiting_for_experiments=blocked_by,
+        )
+        if not paper_gate["human_approved"]:
+            raise RuntimeError(
+                f"Paper rewrite for '{spec.project_id}' requires explicit human approval."
+            )
+        if not paper_gate["evidence_ready"]:
+            raise RuntimeError(
+                f"Paper rewrite for '{spec.project_id}' is blocked until validation passes: "
+                f"{paper_gate['evidence_status'].get('issues', [])}"
+            )
 
         _write_author_state(
             workspace=spec.workspace,
@@ -4064,6 +5243,20 @@ class TARAuthor:
             paper_project_id=spec.project_id,
             paper_title=spec.title,
         )
+        figure_bundle = _generate_validated_result_figures(evidence, out_dir)
+        evidence["required_figures"] = figure_bundle.get("required_figures", [])
+        evidence["generated_figures"] = figure_bundle.get("generated_figures", [])
+        evidence["figure_manifest_path"] = figure_bundle.get("manifest_path", "")
+        validation_bundle = _write_paper_validation_bundle(
+            spec.workspace,
+            spec=spec,
+            evidence=evidence,
+            out_dir=out_dir,
+            blocked_by=blocked_by,
+        )
+        evidence["evidence_manifest_path"] = validation_bundle.get("evidence_manifest", "")
+        evidence["claim_support_matrix_path"] = validation_bundle.get("claim_support_matrix", "")
+        evidence["blocked_claims_path"] = validation_bundle.get("blocked_claims", "")
         if spec.abstract_hint and not evidence.get("paper_recommendation"):
             evidence["paper_recommendation"] = spec.abstract_hint
         if revision_mode:
@@ -4073,8 +5266,23 @@ class TARAuthor:
             evidence["revision_context"] = _revision_context_block(revision_reason, revision_requests)
 
         # ── collect sections ───────────────────────────────────────────────────
+        existing_plan.update({
+            "require_validated_figures": True,
+            "page_budget_policy": "no_fixed_page_limit",
+            "claim_policy": "scientifically_backed_only",
+            "required_figures": evidence.get("required_figures", []),
+            "generated_figures": evidence.get("generated_figures", []),
+            "figure_manifest_path": evidence.get("figure_manifest_path", ""),
+            "figures_complete": bool(evidence.get("required_figures")) and (
+                len(evidence.get("generated_figures", [])) >= len(evidence.get("required_figures", []))
+            ),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        _write_paper_plan(plan_path, existing_plan)
+
         sections: dict[str, str] = {}
         sections_complete: list[str] = []
+        sections["figures"] = _build_evidence_figures_tex(evidence.get("generated_figures", []))
 
         section_map: dict[str, tuple[str, Any, bool]] = {
             "abstract":        ("abstract",        _generate_abstract,            False),
@@ -4208,6 +5416,11 @@ class TARAuthor:
             "revision_targets": sorted(revision_targets) if revision_mode else [],
             "citation_keys": evidence.get("allowed_citation_keys", []),
             "citation_count": len(evidence.get("allowed_citation_keys", [])),
+            "required_figures": evidence.get("required_figures", []),
+            "generated_figures": evidence.get("generated_figures", []),
+            "figure_manifest_path": evidence.get("figure_manifest_path", ""),
+            "page_budget_policy": "no_fixed_page_limit",
+            "claim_policy": "scientifically_backed_only",
             "sections":    {k: v[:120] + "..." if len(v) > 120 else v for k, v in sections.items()},
         }
         (out_dir / "paper_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -4216,8 +5429,8 @@ class TARAuthor:
         pdf = _compile_pdf(tex_path)
         plan = _load_paper_plan(plan_path)
         plan["last_compile_attempted_at"] = datetime.now(timezone.utc).isoformat()
-        plan["compile_status"] = "draft_compiled" if (pdf and blocked_by) else ("published" if pdf else "compile_failed")
-        plan["status"] = "blocked" if blocked_by else ("published" if pdf else completion_status)
+        plan["compile_status"] = "draft_compiled" if pdf else "compile_failed"
+        plan["status"] = "blocked" if blocked_by else ("draft_compiled" if pdf else completion_status)
         plan["pdf_path"] = str(pdf) if pdf else ""
         if pdf:
             plan["last_compile_succeeded_at"] = datetime.now(timezone.utc).isoformat()
@@ -4247,7 +5460,7 @@ class TARAuthor:
             "tex_path":     str(tex_path),
             "pdf_path":     str(pdf) if pdf else None,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "compile_status": "draft_compiled" if (pdf and blocked_by) else ("published" if pdf else "compile_failed"),
+            "compile_status": "draft_compiled" if pdf else "compile_failed",
             "revision_reason": revision_reason,
         }
         _append_paper_record(spec.workspace, record)

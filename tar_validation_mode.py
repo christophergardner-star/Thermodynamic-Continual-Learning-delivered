@@ -100,6 +100,34 @@ def is_active(workspace: Path) -> bool:
     return bool(load_state(workspace).get("active"))
 
 
+def _read_stabilisation_state_strict(workspace: Path) -> dict:
+    """Fail-closed stabilisation read for the authoring gate.
+    Returns the raw state dict on success. Raises
+    StabilisationGateStateUnreadableError on ANY read failure
+    (missing file, parse error, permissions, non-dict).
+    Unlike load_state (fail-open by design for non-gate callers),
+    this NEVER silently returns {}."""
+    from tar_lab.errors import StabilisationGateStateUnreadableError
+    path = state_path(workspace)
+    try:
+        if not path.exists():
+            raise StabilisationGateStateUnreadableError(
+                f"stabilisation_mode.json absent at {path}; fail-closed"
+            )
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except StabilisationGateStateUnreadableError:
+        raise
+    except Exception as e:
+        raise StabilisationGateStateUnreadableError(
+            f"cannot read stabilisation state at {path}; fail-closed: {e}"
+        ) from e
+    if not isinstance(data, dict):
+        raise StabilisationGateStateUnreadableError(
+            f"stabilisation state at {path} is not a dict; fail-closed"
+        )
+    return data
+
+
 def method_matrix() -> list[dict[str, Any]]:
     return [
         {

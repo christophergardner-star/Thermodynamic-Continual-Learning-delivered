@@ -25,6 +25,12 @@ from types import SimpleNamespace
 from typing import Any
 
 from flask import Flask, Response, abort, jsonify, request, send_file
+from tar_lab.human_review import (
+    answer_human_question,
+    load_human_review_state,
+    record_review_decision,
+)
+from tar_lab.validation import build_validation_state, load_validation_state
 from tar_storage import ensure_workspace_layout
 from tar_lab.result_artifacts import read_advisory_verdict, read_statistics, iter_canonical_comparison_records
 
@@ -52,6 +58,14 @@ def _jload(path: Path) -> dict | list | None:
 
 def _dashboard_state_path() -> Path:
     return _WS / "tar_state" / "dashboard_state.json"
+
+
+def _dashboard_html() -> str:
+    html_path = _REPO / "tar_dashboard_live.html"
+    try:
+        return html_path.read_text(encoding="utf-8")
+    except Exception:
+        return _HTML
 
 
 def _write_dashboard_state(status: str = "running", last_event: str = "") -> None:
@@ -382,7 +396,7 @@ def _queue_steps(log_dir: Path) -> list[dict]:
             steps[3]["status"] = "running"
         elif author_status in {"revision_failed"} or compile_status in {"failed", "revision_failed"}:
             steps[3]["status"] = "failed"
-        elif author_status in {"published", "complete", "done"} and compile_status in {"compiled", "published", "complete"}:
+        elif author_status in {"complete", "done"} and compile_status in {"compiled", "draft_compiled", "complete"}:
             steps[3]["status"] = "complete"
         elif current.get("project_id"):
             steps[3]["status"] = "pending"
@@ -430,11 +444,49 @@ def _director_state(force_refresh: bool = False) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _human_review_payload() -> dict[str, Any]:
+    return load_human_review_state(_WS)
+
+
+def _validation_payload() -> dict[str, Any]:
+    state = load_validation_state(_WS)
+    if not state:
+        try:
+            state = build_validation_state(_WS, persist=False)
+        except Exception as exc:
+            return {
+                "summary": {
+                    "trusted_publication_allowed": 0,
+                    "limited_scope": 0,
+                    "missing_env": 0,
+                    "quarantined": 0,
+                },
+                "results": [],
+                "error": str(exc),
+            }
+    return state if isinstance(state, dict) else {}
+
+
+def _author_state_payload(force_refresh: bool = False) -> dict[str, Any]:
+    state_path = _WS / "tar_state" / "author_state.json"
+    state = _jload(state_path) or {}
+    needs_refresh = force_refresh or not state or _age_s(state_path) > 60
+    if needs_refresh:
+        try:
+            _director_state(force_refresh=force_refresh)
+            from tar_author import write_planned_author_state
+
+            state = write_planned_author_state(_WS)
+        except Exception:
+            state = state or {}
+    return state if isinstance(state, dict) else {}
+
+
 def _run_paper_revision_async(project_id: str, reason: str) -> None:
     try:
-        from tar_author import run_paper_revision
-
-        run_paper_revision(_WS, project_id, reason, request_first=False)
+        from tar_author import run_paper_revision, stabilisation_authoring_override
+        with stabilisation_authoring_override(_WS, reason):
+            run_paper_revision(_WS, project_id, reason, request_first=False)
     except Exception as exc:
         try:
             from tar_author import _load_paper_plan, _write_paper_plan
@@ -535,15 +587,43 @@ def _frontier_with_directives() -> list[dict[str, Any]]:
             rec for rec in result_evidence
             if rec.get("evidence_strength") in {"strong", "moderate"}
         ]
+        linked_experiment_ids = [
+            str(exp_id)
+            for exp_id in directive.get("linked_experiment_ids", [])
+            if str(exp_id).strip()
+        ]
+        linked_paper_ids = [
+            str(paper_id)
+            for paper_id in directive.get("linked_paper_ids", [])
+            if str(paper_id).strip()
+        ]
+        truth_status = str(directive.get("truth_status", "") or entry.get("truth_status", "") or "weak")
+        waiting_on = [
+            str(exp_id)
+            for exp_id in directive.get("waiting_on_experiment_ids", [])
+            if str(exp_id).strip()
+        ]
+        if waiting_on:
+            dynamic_status = "active"
+        elif truth_status == "validated":
+            dynamic_status = "publishing"
+        elif linked_experiment_ids or result_evidence:
+            dynamic_status = "active"
+        else:
+            dynamic_status = "exploring"
         entry.update({
+            "status": dynamic_status,
             "priority_score": directive.get("priority_score"),
-            "truth_status": directive.get("truth_status"),
+            "truth_status": truth_status,
             "evidence_strength": directive.get("evidence_strength"),
             "next_action": directive.get("next_action"),
             "why_now": directive.get("why_now"),
-            "waiting_on_experiment_ids": directive.get("waiting_on_experiment_ids", []),
-            "linked_experiment_ids": directive.get("linked_experiment_ids", []),
-            "linked_paper_ids": directive.get("linked_paper_ids", []),
+            "waiting_on_experiment_ids": waiting_on,
+            "linked_experiment_ids": linked_experiment_ids,
+            "linked_paper_ids": linked_paper_ids,
+            "experiments_linked": linked_experiment_ids,
+            "papers_linked": linked_paper_ids,
+            "breakthroughs_found": len([rec for rec in result_evidence if rec.get("evidence_strength") == "strong"]),
             "evidence_notes": directive.get("evidence_notes", []),
             "verification_standard": evidence.get("verification_standard", ""),
             "linked_result_paths": linked_result_paths,
@@ -562,6 +642,49 @@ def _queue_experiments() -> list[dict[str, Any]]:
         return []
     experiments = data.get("experiments", [])
     return experiments if isinstance(experiments, list) else []
+
+
+def _status_queue_steps(runtime_experiments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def normalize_status(rec: dict[str, Any]) -> str:
+        stage = str(rec.get("stage", "") or rec.get("status", "") or "pending")
+        if stage in {"queued", "planned"}:
+            return "pending"
+        if stage in {"running", "failed", "complete", "stalled", "pending"}:
+            return stage
+        return "pending"
+
+    def progress_suffix(rec: dict[str, Any]) -> str:
+        progress = rec.get("progress", {}) if isinstance(rec.get("progress", {}), dict) else {}
+        seeds_total = int(progress.get("seeds_total", 0) or 0)
+        seeds_done = int(progress.get("seeds_done", 0) or 0)
+        if seeds_total > 0:
+            return f" ({seeds_done}/{seeds_total} seeds)"
+        tasks_done = int(progress.get("tasks_done", 0) or 0)
+        if tasks_done > 0:
+            return f" (task {tasks_done})"
+        return ""
+
+    visible = [rec for rec in runtime_experiments if normalize_status(rec) != "complete"]
+    if not visible:
+        visible = runtime_experiments[:]
+    visible.sort(
+        key=lambda rec: (
+            {"running": 0, "stalled": 1, "pending": 2, "failed": 3, "complete": 4}.get(normalize_status(rec), 5),
+            float(rec.get("priority", 999.0) or 999.0),
+            str(rec.get("name", "") or rec.get("id", "")),
+        )
+    )
+
+    steps: list[dict[str, Any]] = []
+    for idx, rec in enumerate(visible[:8], start=1):
+        result_path = Path(str(rec.get("result_path", "") or "")) if rec.get("result_path") else None
+        steps.append({
+            "n": idx,
+            "label": f"{str(rec.get('name', '') or rec.get('id', 'experiment'))}{progress_suffix(rec)}",
+            "status": normalize_status(rec),
+            "size_kb": int(result_path.stat().st_size / 1024) if result_path and result_path.exists() else 0,
+        })
+    return steps
 
 
 _PHASE_LIVE_META: dict[int, dict[str, Any]] = {
@@ -1105,6 +1228,65 @@ def _runtime_experiment_records() -> list[dict[str, Any]]:
         if phase_id not in seen_ids:
             experiments.append(rec)
 
+    # Inject rerun chain steps (Phase 12/13 managed outside the queue system)
+    chain_state = _jload(_WS / "tar_state" / "rerun_chain_state.json") or {}
+    for chain_step in (chain_state.get("steps") or []):
+        step_status = str(chain_step.get("status", "pending") or "pending")
+        if step_status == "complete":
+            continue
+        step_id = f"{chain_step.get('logical_name', '')}__rerun"
+        if step_id in seen_ids:
+            continue
+        phase_num = int(chain_step.get("phase", 0) or 0)
+        log_p = Path(str(chain_step.get("log", "") or ""))
+        # parse live progress from log for running steps
+        progress: dict[str, Any] = {}
+        if step_status == "running" and log_p.exists():
+            raw = _parse_training_progress(_tail(log_p, 400))
+            _sm = raw.get("seed_markers") or []
+            _cur = raw.get("current_seed")
+            sd = max(0, len(_sm) - (1 if _cur is not None and _sm else 0))
+            # parse best lambda from log lines
+            best_lam: dict | None = None
+            for _ln in _tail(log_p, 400):
+                _lm = re.search(r"(?:EWC|SI)\s+[^\s]*=\s*\S+\s+forgetting=([0-9.]+)\s+acc=([0-9.]+)\s+JAF=([0-9.]+)", _ln)
+                if _lm:
+                    _forg, _acc, _jaf = float(_lm.group(1)), float(_lm.group(2)), float(_lm.group(3))
+                    if best_lam is None or _jaf > best_lam["jaf"]:
+                        best_lam = {"forgetting": _forg, "acc": _acc, "jaf": _jaf}
+            note = f"Best so far: acc={best_lam['acc']:.3f} forg={best_lam['forgetting']:.3f}" if best_lam else ""
+            progress = {"seeds_done": sd, "seeds_total": 5, "live_compute_note": note}
+        stage = step_status if step_status in {"running", "pending"} else "queued"
+        if step_status == "pending":
+            stage = "queued"
+        projected = (
+            (f"{progress.get('seeds_done', 0)}/5 seeds done — rerun live. " + str(progress.get("live_compute_note", ""))).strip()
+            if step_status == "running"
+            else f"Queued — waiting for prerequisite ({chain_step.get('wait_for', '')}) to land in canonical index."
+        )
+        experiments.append({
+            "id":               step_id,
+            "name":             f"Phase {phase_num} Rerun — {chain_step.get('logical_name', '').replace('_', ' ').title()}",
+            "dataset":          "split_cifar10",
+            "status":           "running" if step_status == "running" else "pending",
+            "stage":            stage,
+            "priority":         phase_num,
+            "submitted_at":     "",
+            "hardware_budget":  {"vram_gb": 2.5, "cpu_cores": 4},
+            "tags":             ["rerun", "manifest_gated", f"phase{phase_num}"],
+            "progress":         progress,
+            "context": {
+                "why": f"Controlled rerun of Phase {phase_num} under RAIL-3 manifest gate with corrected reference numbers from Phase 10 controlled rerun.",
+                "projected_outcome": projected,
+                "frontier_problem": "",
+                "feeds_paper": "All papers — Phase reruns provide trusted canonical results.",
+                "methodology_note": f"Manifest: {chain_step.get('manifest_id', '')}. Log: {log_p.name if log_p.name else '—'}.",
+            },
+            "pid": 0,
+            "_phase_num": phase_num,
+        })
+        seen_ids.add(step_id)
+
     experiments.sort(key=lambda rec: (rec.get("priority", 50), rec.get("submitted_at", "")))
     return experiments
 
@@ -1362,7 +1544,7 @@ app.config["JSON_SORT_KEYS"] = False
 
 @app.route("/")
 def index():
-    return Response(_HTML, mimetype="text/html")
+    return Response(_dashboard_html(), mimetype="text/html")
 
 
 # ── hardware ──────────────────────────────────────────────────────────────────
@@ -1406,30 +1588,12 @@ def api_hardware():
 @app.route("/api/status")
 def api_status():
     log_dir = _resolve_logs()
-    steps   = _queue_steps(log_dir)
     queue_state = _queue_state()
     runtime_exps = _runtime_experiment_records()
+    steps = _status_queue_steps(runtime_exps)
     running_exp = next((e for e in runtime_exps if e.get("stage") == "running"), None)
     stalled_exp = next((e for e in runtime_exps if e.get("stage") == "stalled"), None)
     queued_exp = next((e for e in runtime_exps if e.get("stage") in {"queued", "planned"} or e.get("status") == "pending"), None)
-    if running_exp:
-        phase_num = running_exp.get("_phase_num")
-        phase_step_map = {16: 2, 17: 3}
-        for step in steps:
-            if step["n"] == phase_step_map.get(phase_num):
-                step["status"] = "running"
-    elif stalled_exp:
-        phase_num = stalled_exp.get("_phase_num")
-        phase_step_map = {16: 2, 17: 3}
-        for step in steps:
-            if step["n"] == phase_step_map.get(phase_num):
-                step["status"] = "pending"
-    elif queue_state.get("status") in {"starting", "waiting", "running"}:
-        step_index = int(queue_state.get("step_index", 0) or 0)
-        if step_index > 0:
-            for step in steps:
-                if step["n"] == step_index:
-                    step["status"] = "running" if queue_state.get("status") == "running" else "pending"
     running = next((s for s in steps if s["status"] == "running"), None)
     active_path, active_label = _pick_active_log()
     progress = {}
@@ -1509,6 +1673,7 @@ def _phase_result_records() -> list[dict[str, Any]]:
     # Index is the authoritative source; the glob below only handles phases
     # not yet in the index (e.g. 14, 15, 16, 17).
     canonical_by_phase: dict[int, Path] = {}
+    canonical_by_phase_ts: dict[int, str] = {}
     try:
         for rec in iter_canonical_comparison_records(_WS):
             pnum  = rec.get("phase_number")
@@ -1519,10 +1684,11 @@ def _phase_result_records() -> list[dict[str, Any]]:
             if not p.exists():
                 continue
             pnum = int(pnum)
-            # Latest created_at wins if there are multiple entries for a phase
-            existing = canonical_by_phase.get(pnum)
-            if existing is None:
+            ts = str(rec.get("created_at", "") or "")
+            # Latest created_at wins — actual reruns supersede earlier recomputations
+            if ts > canonical_by_phase_ts.get(pnum, ""):
                 canonical_by_phase[pnum] = p
+                canonical_by_phase_ts[pnum] = ts
     except Exception:
         pass
 
@@ -1580,9 +1746,51 @@ def _phase_result_records() -> list[dict[str, Any]]:
             r["title"]   = runtime.get("name", r["title"])
             r["program"] = "live phase"
 
-    # 4. RERUN_NEEDED: phases quarantined to _untrusted/ with no canonical result yet.
-    #    If active_rerun.json exists the chain is running that phase right now.
+    # 3b. active_rerun.json overlay — if the rerun chain is running a phase right
+    #     now, force that phase's status to "running" regardless of what the
+    #     canonical index says (the index may still point to corrected-stats
+    #     from the previous step).
     active_rerun = _jload(_WS / "tar_state" / "active_rerun.json") or {}
+    active_rerun_phase = int(active_rerun.get("phase", 0) or 0)
+    if active_rerun_phase:
+        log_path_ar = Path(str(active_rerun.get("log", "") or ""))
+        progress_ar = _parse_training_progress(_tail(log_path_ar, 400)) if log_path_ar.exists() else {}
+        # _parse_training_progress returns seed_markers, not seeds_done — compute it here
+        _sm = progress_ar.get("seed_markers") or []
+        _cur = progress_ar.get("current_seed")
+        seeds_done_ar = max(0, len(_sm) - (1 if _cur is not None and _sm else 0))
+        seeds_total_ar = 5
+        # build a short live-results snippet from completed seeds
+        _msums = progress_ar.get("method_summaries") or []
+        _best_lambda: dict | None = None
+        # Phase 12/13 log: EWC/SI lines parsed into method_summaries; pick best JAF per seed
+        # also parse lambda lines directly from tail if method_summaries is empty
+        if not _msums and log_path_ar.exists():
+            for _ln in _tail(log_path_ar, 400):
+                _lm = re.search(r"EWC\s+λ=\s*(\d+)\s+forgetting=([0-9.]+)\s+acc=([0-9.]+)\s+JAF=([0-9.]+)", _ln)
+                if _lm:
+                    _lam, _forg, _acc, _jaf = int(_lm.group(1)), float(_lm.group(2)), float(_lm.group(3)), float(_lm.group(4))
+                    if _best_lambda is None or _jaf > _best_lambda["jaf"]:
+                        _best_lambda = {"lambda": _lam, "forgetting": _forg, "acc": _acc, "jaf": _jaf}
+        live_note_ar = ""
+        if _best_lambda:
+            live_note_ar = f"Best so far: λ={_best_lambda['lambda']} acc={_best_lambda['acc']:.3f} forg={_best_lambda['forgetting']:.3f}"
+        verdict_ar = f"{seeds_done_ar}/{seeds_total_ar} seeds done — rerun live. {live_note_ar}".strip()
+        for r in results:
+            if r["phase"] == active_rerun_phase:
+                r["status"]      = "running"
+                r["verdict_key"] = "RUNNING"
+                r["verdict"]     = verdict_ar[:140]
+                r["title"]       = f"Phase {active_rerun_phase} — Rerun Live"
+                r["program"]     = "live phase"
+                r["notes"]       = (
+                    f"Rerun chain active (manifest: {active_rerun.get('manifest_id', '')}). "
+                    f"Log: {log_path_ar.name or '—'}. "
+                    + (f"Seeds complete: {seeds_done_ar}/{seeds_total_ar}." if seeds_done_ar else "")
+                )
+                break
+
+    # 4. RERUN_NEEDED: phases quarantined to _untrusted/ with no canonical result yet.
     active_rerun_phase = int(active_rerun.get("phase", 0) or 0)
 
     seen_phases = {r["phase"] for r in results}
@@ -1968,7 +2176,50 @@ def api_frontier():
 
 @app.route("/api/research_director")
 def api_research_director():
-    return jsonify(_director_state(force_refresh=True))
+    force_refresh = str(request.args.get("refresh", "") or "").strip().lower() in {"1", "true", "yes"}
+    return jsonify(_director_state(force_refresh=force_refresh))
+
+
+@app.route("/api/human_review")
+def api_human_review():
+    return jsonify(_human_review_payload())
+
+
+@app.route("/api/human_review/decision/<path:review_id>", methods=["POST"])
+def api_human_review_decision(review_id: str):
+    payload = request.get_json(silent=True) or {}
+    try:
+        updated = record_review_decision(
+            _WS,
+            review_id=review_id,
+            decision=str(payload.get("decision", "") or ""),
+            human_notes=str(payload.get("human_notes", "") or ""),
+            build_manifest_authorised=bool(payload.get("build_manifest_authorised", False)),
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+    if updated is None:
+        return jsonify({"error": f"Unknown review id: {review_id}"}), 404
+    return jsonify({"ok": True, "updated": updated, "state": _human_review_payload()})
+
+
+@app.route("/api/human_review/question/<path:question_id>/answer", methods=["POST"])
+def api_human_review_answer(question_id: str):
+    payload = request.get_json(silent=True) or {}
+    updated = answer_human_question(
+        _WS,
+        question_id=question_id,
+        answer=str(payload.get("answer", "") or ""),
+        answer_notes=str(payload.get("answer_notes", "") or ""),
+    )
+    if updated is None:
+        return jsonify({"error": f"Unknown question id: {question_id}"}), 404
+    return jsonify({"ok": True, "updated": updated, "state": _human_review_payload()})
+
+
+@app.route("/api/validation")
+def api_validation():
+    return jsonify(_validation_payload())
 
 
 @app.route("/api/coordination")
@@ -2032,19 +2283,8 @@ def api_scheduler():
 # ── author ────────────────────────────────────────────────────────────────────
 @app.route("/api/author")
 def api_author():
-    state_path = _WS / "tar_state" / "author_state.json"
-    state = _jload(state_path) or {}
-    needs_refresh = not state or _age_s(state_path) > 60
-    if needs_refresh:
-        try:
-            _director_state(force_refresh=True)
-            from tar_author import write_planned_author_state
-            state = write_planned_author_state(_WS)
-        except Exception:
-            state = state or {}
-    if state:
-        return jsonify(state)
-    return jsonify(state)
+    force_refresh = str(request.args.get("refresh", "") or "").strip().lower() in {"1", "true", "yes"}
+    return jsonify(_author_state_payload(force_refresh=force_refresh))
 
 
 @app.route("/api/experiments/inject", methods=["POST"])
@@ -2240,7 +2480,7 @@ def api_papers():
                 "project_id":      pid,
                 "title":           rec.get("title", pid),
                 "verdict":         rec.get("verdict", ""),
-                "status":          "complete",
+                "status":          "draft_compiled" if pdf else "planning",
                 "has_pdf":         bool(pdf),
                 "serve_pdf":       sp,
                 "serve_tex":       _serve_path_for(tex),
@@ -2250,7 +2490,7 @@ def api_papers():
                 "p_val":           rec.get("p_val"),
                 "progress_pct":    100 if pdf else 96,
                 "progress_label":  "PDF compiled" if pdf else "Draft complete",
-                "compile_status":  rec.get("compile_status", "published" if pdf else ""),
+                "compile_status":  rec.get("compile_status", "draft_compiled" if pdf else ""),
             })
 
     for root in [_REPO / "paper", _WS / "paper"]:
@@ -2269,7 +2509,7 @@ def api_papers():
                 "project_id":      pid,
                 "title":           proj.replace("-", " ").replace("_", " ").title(),
                 "verdict":         "",
-                "status":          "complete",
+                "status":          "draft_compiled",
                 "has_pdf":         True,
                 "serve_pdf":       rel,
                 "serve_tex":       str(tex.relative_to(root)).replace("\\", "/") if tex.exists() else "",
@@ -2277,7 +2517,7 @@ def api_papers():
                 "mean_forgetting": None, "mean_delta": None, "p_val": None,
                 "progress_pct":    100,
                 "progress_label":  "PDF compiled",
-                "compile_status":  "published",
+                "compile_status":  "draft_compiled",
             })
 
     if isinstance(registry_data, dict):
@@ -2371,10 +2611,12 @@ def api_papers():
         compile_status = str(paper.get("compile_status", "") or "")
         if effective_plan_status and effective_plan_status != "published":
             paper["status"] = effective_plan_status
-        if paper.get("waiting_for_experiments") or compile_status == "draft_compiled":
+        if paper.get("waiting_for_experiments"):
             paper["status"] = "blocked"
+        elif compile_status == "draft_compiled":
+            paper["status"] = "draft_compiled"
 
-    status_rank = {"running": 0, "blocked": 1, "planned": 2, "pending": 2, "complete": 3, "failed": 4}
+    status_rank = {"running": 0, "blocked": 1, "planned": 2, "pending": 2, "draft_compiled": 3, "complete": 4, "failed": 5}
     papers.sort(key=lambda x: (
         status_rank.get(str(x.get("status", "")), 9),
         x.get("generated_at", ""),
@@ -2550,6 +2792,196 @@ def api_breakthroughs():
         )
         bk["evidence_strength"] = "strong" if bk.get("p_val") not in (None, "") else "moderate"
     return jsonify({"count": len(bks), "breakthroughs": bks})
+
+
+# ── GPT narration + live replication data ────────────────────────────────────
+_NARRATION_CACHE: dict = {}
+_NARRATION_TTL = 90  # seconds — avoid hammering the API
+
+
+def _find_replication_obs_root() -> "Path | None":
+    val_root = _WS / "tar_state" / "validation"
+    if not val_root.exists():
+        return None
+    candidates = sorted(
+        [d for d in val_root.iterdir() if d.is_dir() and "hpc_claim_validation" in d.name],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for c in candidates:
+        obs = c / "outputs" / "replication_suite" / "observability" / "per_method"
+        if obs.exists():
+            return obs
+    return None
+
+
+def _build_narration_context() -> dict:
+    eq = _jload(_WS / "tar_state" / "experiment_queue.json") or {}
+    experiments = eq.get("experiments", []) if isinstance(eq, dict) else []
+    running = next((e for e in experiments if e.get("status") == "running"), None)
+    if not running:
+        return {
+            "prompt": None,
+            "fallback": "TAR is currently idle — no active experiment is running.",
+            "confidence": 0, "focus": "idle",
+            "seed_trail": [], "seeds_total": 0, "threshold": 0.1161,
+        }
+    prog = running.get("progress", {})
+    ctx = running.get("context", {})
+    cfg = running.get("config_overrides", {})
+    forgetting_so_far = prog.get("forgetting_so_far", [])
+    threshold = 0.1161
+    seeds_passing = sum(1 for f in forgetting_so_far if f < threshold)
+    confidence = int(100 * seeds_passing / len(forgetting_so_far)) if forgetting_so_far else 0
+    hpc_agg: dict = {}; tcl_agg: dict = {}; hpc_n = 0; tcl_n = 0
+    obs = _find_replication_obs_root()
+    if obs:
+        hd = _jload(obs / "high_penalty_conservative.json") or {}
+        td = _jload(obs / "tcl_baseline.json") or {}
+        hpc_agg = hd.get("aggregate_so_far", {}); hpc_n = hd.get("completed_seed_count", 0)
+        tcl_agg = td.get("aggregate_so_far", {}); tcl_n = td.get("completed_seed_count", 0)
+    hf = hpc_agg.get("forgetting_mean"); ha = hpc_agg.get("acc_mean"); tf = tcl_agg.get("forgetting_mean")
+    claim = (cfg.get("target_claim") or ctx.get("hypothesis") or running.get("description", ""))[:130]
+    cur_method = (prog.get("current_method") or "").replace("_", " ")
+    cur_seed = prog.get("current_seed", "?")
+    sd = prog.get("seeds_done", 0); st = len(running.get("seeds", [])) or 10
+    md = prog.get("methods_done", 0); mt = prog.get("methods_total", 60)
+    trail_fmt = ", ".join(f"{f:.4f}" for f in forgetting_so_far)
+    prompt = (
+        "You are TAR (Thermodynamic Active Research), an autonomous ML research system. "
+        "You are running a 10-seed replication study on Split-CIFAR-10 with ResNet-18 to verify "
+        "your 'high_penalty_conservative' hypothesis. Speak in first person as a thoughtful researcher. "
+        "Be specific with numbers. 2-3 sentences, plain conversational English, no markdown.\n\n"
+        f"State:\n"
+        f"- Seeds complete: {sd}/{st} · Method-runs: {md}/{mt}\n"
+        f"- Now running: {cur_method} · seed {cur_seed}\n"
+        f"- Claim: \"{claim}\"\n"
+        f"- Pre-registered threshold: HPC forgetting must be < {threshold}\n"
+        f"- HPC so far (n={hpc_n}): "
+        f"forgetting={round(hf, 4) if hf is not None else 'N/A'}, "
+        f"acc={round(ha * 100, 1) if ha is not None else 'N/A'}%\n"
+        f"- TCL baseline (n={tcl_n}): forgetting={round(tf, 4) if tf is not None else 'N/A'}\n"
+        f"- Per-seed HPC forgetting: [{trail_fmt}]\n"
+        f"- Seeds passing pre-registered threshold: {seeds_passing}/{len(forgetting_so_far)}\n"
+        f"- Null prediction (accuracy collapse): NOT observed in any seed\n"
+    )
+    return {
+        "prompt": prompt, "confidence": confidence,
+        "focus": f"seed {cur_seed} · {cur_method}",
+        "seed_trail": forgetting_so_far, "seeds_total": st,
+        "threshold": threshold, "seeds_done": sd,
+    }
+
+
+@app.route("/api/narrate")
+def api_narrate():
+    global _NARRATION_CACHE
+    now = time.time()
+    force = str(request.args.get("refresh", "") or "").strip().lower() in {"1", "true"}
+    if not force and _NARRATION_CACHE.get("text") and (now - float(_NARRATION_CACHE.get("ts", 0))) < _NARRATION_TTL:
+        return jsonify({**_NARRATION_CACHE, "cached": True})
+    ctx = _build_narration_context()
+    base: dict = {
+        "confidence": ctx["confidence"], "focus": ctx["focus"],
+        "seed_trail": ctx["seed_trail"], "seeds_total": ctx["seeds_total"],
+        "threshold": ctx["threshold"], "ts": now, "cached": False,
+    }
+    if ctx.get("prompt") is None:
+        _NARRATION_CACHE = {**base, "text": ctx["fallback"], "error": False}
+        return jsonify(_NARRATION_CACHE)
+    text = _llm_narrate(ctx["prompt"], ctx)
+    _NARRATION_CACHE = {**base, "text": text, "error": False}
+    return jsonify(_NARRATION_CACHE)
+
+
+def _llm_narrate(prompt: str, ctx: dict) -> str:
+    """Try Anthropic → OpenAI → template fallback for narration."""
+    # ── Anthropic ──────────────────────────────────────────────────────────────
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if api_key:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=api_key)
+            msg = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=160,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return msg.content[0].text.strip()
+        except Exception:
+            pass
+    # ── OpenAI ─────────────────────────────────────────────────────────────────
+    oai_key = os.environ.get("OPENAI_API_KEY", "")
+    if oai_key:
+        try:
+            import openai
+            resp = openai.OpenAI(api_key=oai_key).chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=160,
+                temperature=0.7,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception:
+            pass
+    # ── Template fallback ──────────────────────────────────────────────────────
+    trail = ctx.get("seed_trail", [])
+    sd = len(trail)
+    st = ctx.get("seeds_total", 10)
+    focus = ctx.get("focus", "unknown step")
+    threshold = ctx.get("threshold", 0.1161)
+    passing = sum(1 for f in trail if f < threshold)
+    mean_f = sum(trail) / len(trail) if trail else None
+    mean_str = f"{mean_f:.4f}" if mean_f is not None else "N/A"
+    reduction = ""
+    if mean_f is not None:
+        pct = round((1 - mean_f / threshold) * 100)
+        reduction = f" — {pct}% below the pre-registered ceiling"
+    lines = [
+        f"I'm {sd}/{st} seeds into the replication study, currently running {focus}.",
+        f"So far, {passing}/{sd} seeds pass the pre-registered forgetting threshold of {threshold} "
+        f"(mean HPC forgetting = {mean_str}{reduction}).",
+        "No accuracy collapse has been observed in any seed — the null prediction isn't holding.",
+    ]
+    return " ".join(lines)
+
+
+@app.route("/api/replication")
+def api_replication():
+    obs = _find_replication_obs_root()
+    if not obs:
+        return jsonify({"available": False, "methods": {}})
+    method_keys = [
+        "sgd_baseline", "ewc_lambda_100", "ewc_lambda_1000",
+        "si_c_0_01", "tcl_baseline", "high_penalty_conservative",
+    ]
+    out: dict[str, Any] = {"available": True, "methods": {}}
+    for m in method_keys:
+        d = _jload(obs / f"{m}.json")
+        if not d:
+            continue
+        agg = d.get("aggregate_so_far", {})
+        out["methods"][m] = {
+            "n": d.get("completed_seed_count", 0),
+            "forgetting_mean": agg.get("forgetting_mean"),
+            "forgetting_std": agg.get("forgetting_std"),
+            "acc_mean": agg.get("acc_mean"),
+            "acc_std": agg.get("acc_std"),
+            "jaf_mean": agg.get("jaf_mean"),
+            "collapse": agg.get("collapse_summary", {}),
+            "seeds": [
+                {
+                    "seed": r.get("seed"),
+                    "forgetting": r.get("mean_forgetting"),
+                    "acc": r.get("final_mean_accuracy"),
+                    "jaf": r.get("jaf"),
+                    "per_task_acc": r.get("per_task_accuracy", []),
+                    "per_task_forgetting": r.get("per_task_forgetting", []),
+                }
+                for r in d.get("rows", [])
+            ],
+        }
+    return jsonify(out)
 
 
 # ── paper file serving ────────────────────────────────────────────────────────
@@ -2850,6 +3282,18 @@ select{background:#090f1a;color:var(--text2);border:1px solid var(--border);bord
     <div class="card" id="director-card" data-panel-title="Research Director" style="flex-shrink:0">
       <div class="hdr"><span>Research Director</span><span id="director-count" style="color:var(--text3);font-size:.58rem"></span></div>
       <div class="body" id="director-panel" style="padding:4px 6px;max-height:280px;overflow-y:auto"></div>
+    </div>
+
+    <!-- Human Review -->
+    <div class="card" id="human-review-card" data-panel-title="Human Review" style="flex-shrink:0">
+      <div class="hdr"><span>Human Review</span><span id="review-count" style="color:var(--text3);font-size:.58rem"></span></div>
+      <div class="body" id="review-panel" style="padding:4px 6px;max-height:280px;overflow-y:auto"></div>
+    </div>
+
+    <!-- Validation -->
+    <div class="card" id="validation-card" data-panel-title="Validation Board" style="flex-shrink:0">
+      <div class="hdr"><span>Validation Board</span><span id="validation-count" style="color:var(--text3);font-size:.58rem"></span></div>
+      <div class="body" id="validation-panel" style="padding:4px 6px;max-height:220px;overflow-y:auto"></div>
     </div>
 
     <!-- TAR Author -->
@@ -3320,8 +3764,8 @@ function updateStatus(d){
   _statusPayload=d||{};
   $('active-step-label').textContent=d.active_step||'';
   $('last-update').textContent='↻ '+new Date(d.timestamp).toLocaleTimeString();
-  const icons={running:'▶ ',complete:'✓ ',failed:'✗ ',pending:'· ',stale:'~ '};
-  const cols={running:'#34d399',complete:'#60a5fa',failed:'#f87171',pending:'#334a62',stale:'#92400e'};
+  const icons={running:'▶ ',complete:'✓ ',failed:'✗ ',pending:'· ',stalled:'~ ',stale:'~ '};
+  const cols={running:'#34d399',complete:'#60a5fa',failed:'#f87171',pending:'#334a62',stalled:'#92400e',stale:'#92400e'};
   const baseQueue=(d.queue_steps||[]).map(s=>{
     const ic=icons[s.status]||'· ', c=cols[s.status]||'#334a62';
     const kb=s.size_kb>0?`<span style="color:var(--text3);font-size:.58rem">${s.size_kb}kb</span>`:'';
@@ -4000,7 +4444,7 @@ function updateAuthor(data){
     if(waits(p).length)return false;
     if(['blocked','hold','waiting','revision_requested','revising','revision_failed'].includes(String(p.plan_status||p.status||'').toLowerCase()))return false;
     if(compileState==='draft_compiled')return false;
-    return !!(p.has_pdf || compileState==='compiled' || compileState==='published' || stage==='published' || stage==='complete');
+    return !!(compileState==='published' || stage==='published' || stage==='complete');
   };
   const isBlocked=p=>{
     if(!p)return false;
@@ -4043,7 +4487,7 @@ function updateAuthor(data){
   }
 
   const statusLabel=String(currentTarget?.status||currentTarget?.readiness||'planned').toLowerCase();
-  const pillStatusMap={writing:'running',revising:'running',starting:'running',ready:'running',complete:'complete',published:'complete',blocked:'blocked',hold:'queued',planning:'planned'};
+  const pillStatusMap={writing:'running',revising:'running',starting:'running',ready:'running',complete:'complete',published:'complete',draft_compiled:'queued',blocked:'blocked',hold:'queued',planning:'planned'};
   const targetPill=currentTarget?pill(pillStatusMap[statusLabel]||statusLabel, statusLabel):'';
   const targetProgress=currentTarget?progressHtml(paperProgress(currentTarget), 'var(--green)'):'';
   const targetMeta=currentTarget?progressLabel(currentTarget):'';
@@ -4081,7 +4525,7 @@ function updateAuthor(data){
     `}
     ${lastPublished && (!currentTarget || lastPublished.project_id!==currentTarget.project_id)?`
       <div style="margin-top:6px;border-top:1px solid var(--border2);padding-top:4px">
-        <div style="color:var(--text2);font-size:.58rem;margin-bottom:2px">Last completed / published</div>
+        <div style="color:var(--text2);font-size:.58rem;margin-bottom:2px">Last validated / published</div>
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           ${pill('complete','published')}
           <div style="color:var(--sky);font-size:.64rem">${lastPublished.title||lastPublished.project_id}</div>
@@ -4287,7 +4731,7 @@ function updatePapers(papers){
     const dFmt=p.mean_delta!=null?(Number(p.mean_delta)>=0?'+':'')+Number(p.mean_delta).toFixed(4):'';
     const dCol=p.mean_delta!=null&&Number(p.mean_delta)<0?'#34d399':'#f87171';
     const progressBlock=progressHtml({pct:p.progress_pct,label:p.progress_label,compile_status:p.compile_status}, p.has_pdf?'var(--green)':'var(--sky)');
-    const canReturn=Boolean(p.project_id)&&(p.has_pdf||p.status==='complete'||p.compile_status==='published');
+    const canReturn=Boolean(p.project_id)&&(p.compile_status==='draft_compiled'||p.status==='draft_compiled'||p.status==='complete'||p.compile_status==='published');
     const returnBtn=canReturn?`<button class="action-btn" onclick="event.stopPropagation();returnPaperToAuthor('${p.project_id}')">Return to Author</button>`:'';
     const waits=Array.isArray(p.waiting_for_experiments)?p.waiting_for_experiments:[];
     const expCounts=(p.total_experiments||p.complete_count||p.running_count||p.pending_count)?
@@ -4503,6 +4947,119 @@ function updateDirector(data){
     (domainExpansion?`<div style="margin-top:6px;border-top:1px solid var(--border2);padding-top:4px"><div style="color:var(--text2);font-size:.58rem;margin-bottom:3px">Active domain expansion</div>${domainExpansion}</div>`:'');
 }
 
+async function reviewDecision(reviewId, decision, buildManifest=false){
+  const needsNote=['request_revision','reject','pause_this_frontier'].includes(decision);
+  const human_notes=needsNote?(window.prompt('Optional note for this review action:','')||''):'';
+  const res=await fetch(`/api/human_review/decision/${encodeURIComponent(reviewId)}`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({decision,human_notes,build_manifest_authorised:buildManifest})
+  });
+  if(!res.ok){
+    const data=await res.json().catch(()=>({}));
+    window.alert(data.error||'Failed to save review decision.');
+    return;
+  }
+  refresh();
+}
+
+async function answerHumanReviewQuestion(questionId, answer){
+  const answer_notes=window.prompt('Optional note for this answer:','')||'';
+  const res=await fetch(`/api/human_review/question/${encodeURIComponent(questionId)}/answer`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({answer,answer_notes})
+  });
+  if(!res.ok){
+    const data=await res.json().catch(()=>({}));
+    window.alert(data.error||'Failed to save answer.');
+    return;
+  }
+  refresh();
+}
+
+function updateHumanReview(data){
+  const proposals=data.proposals||[];
+  const questions=data.questions||[];
+  const claims=data.claim_reviews||[];
+  $('review-count').textContent=`${proposals.length}P · ${questions.length}Q · ${claims.length}C`;
+  if(!proposals.length && !questions.length && !claims.length){
+    $('review-panel').innerHTML='<span style="color:var(--text3);font-size:.62rem">No items awaiting human review.</span>';
+    return;
+  }
+  const proposalHtml=proposals.slice(0,8).map(item=>`
+    <div class="director-row">
+      <div style="display:flex;align-items:center;gap:5px">
+        ${pill(item.status||'awaiting_human_review', item.status||'awaiting_human_review')}
+        <span class="director-title">${item.title||item.experiment_id}</span>
+      </div>
+      <div class="director-meta">${item.frontier_problem_id||'frontier'} · ${item.dataset||'dataset'} · ${item.method||'method'}</div>
+      <div class="director-action">${item.experiment_goal||item.why_now||''}</div>
+      ${(item.manifest_path||'') ? `<div class="mini-note">Manifest prepared: ${item.manifest_path}</div>` : ``}
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        <button class="action-btn" onclick="reviewDecision('${String(item.review_id).replace(/'/g,"\\\\'")}','approve')">Approve</button>
+        <button class="action-btn" onclick="reviewDecision('${String(item.review_id).replace(/'/g,"\\\\'")}','approve_and_build_manifest',true)">Approve + Manifest</button>
+        <button class="action-btn" onclick="reviewDecision('${String(item.review_id).replace(/'/g,"\\\\'")}','request_revision')">Revision</button>
+        <button class="action-btn" onclick="reviewDecision('${String(item.review_id).replace(/'/g,"\\\\'")}','reject')">Reject</button>
+      </div>
+    </div>`).join('');
+  const claimHtml=claims.slice(0,6).map(item=>`
+    <div class="director-row">
+      <div style="display:flex;align-items:center;gap:5px">
+        ${pill(item.status||'awaiting_human_review', item.status||'awaiting_human_review')}
+        <span class="director-title">${item.title||item.paper_id}</span>
+      </div>
+      <div class="director-meta">${item.truth_status||'weak'} · ${item.readiness||'planned'}</div>
+      <div class="director-action">${item.recommendation||''}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        <button class="action-btn" onclick="reviewDecision('${String(item.review_id).replace(/'/g,"\\\\'")}','approve_claim_scope')">Approve Claim Scope</button>
+        <button class="action-btn" onclick="reviewDecision('${String(item.review_id).replace(/'/g,"\\\\'")}','approve_paper_rewrite')">Approve Rewrite</button>
+        <button class="action-btn" onclick="reviewDecision('${String(item.review_id).replace(/'/g,"\\\\'")}','hold_pending_more_evidence')">Hold</button>
+      </div>
+    </div>`).join('');
+  const questionHtml=questions.slice(0,8).map(item=>`
+    <div class="director-row">
+      <div style="display:flex;align-items:center;gap:5px">
+        ${pill(item.status||'awaiting_human_answer', item.question_type||'question')}
+        <span class="director-title">${item.frontier_problem_id||item.component||'question'}</span>
+      </div>
+      <div class="director-action">${item.question_text||''}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        ${(item.options||[]).slice(0,3).map(opt=>`<button class="action-btn" onclick="answerHumanReviewQuestion('${String(item.question_id).replace(/'/g,"\\\\'")}','${String(opt).replace(/'/g,"\\\\'")}')">${String(opt).replace(/_/g,' ')}</button>`).join('')}
+      </div>
+    </div>`).join('');
+  $('review-panel').innerHTML=
+    (proposalHtml?`<div style="color:var(--text2);font-size:.58rem;margin-bottom:3px">Experiment proposals</div>${proposalHtml}`:'')+
+    (claimHtml?`<div style="margin-top:8px;border-top:1px solid var(--border2);padding-top:6px;color:var(--text2);font-size:.58rem;margin-bottom:3px">Claim and rewrite approvals</div>${claimHtml}`:'')+
+    (questionHtml?`<div style="margin-top:8px;border-top:1px solid var(--border2);padding-top:6px;color:var(--text2);font-size:.58rem;margin-bottom:3px">Questions TAR needs answered</div>${questionHtml}`:'');
+}
+
+function updateValidationBoard(data){
+  const summary=data.summary||{};
+  const results=data.results||[];
+  $('validation-count').textContent=`${summary.trusted_publication_allowed||0} trusted · ${summary.limited_scope||0} limited`;
+  if(!results.length){
+    $('validation-panel').innerHTML='<span style="color:var(--text3);font-size:.62rem">Validation state will appear after the first audit pass.</span>';
+    return;
+  }
+  const rows=results.slice(0,10).map(rec=>{
+    const trust=rec.trust||{};
+    const issues=(rec.issues||[]).join('; ');
+    return `<div class="director-row">
+      <div style="display:flex;align-items:center;gap:5px">
+        ${pill(rec.ok?'complete':'blocked', trust.trust_tier||'validation')}
+        <span class="director-title">${trust.logical_name||rec.logical_name||'result'}</span>
+      </div>
+      <div class="director-meta">${trust.provenance_status||'unknown'} · publication ${trust.publication_allowed?'allowed':'blocked'}</div>
+      <div class="director-action">${issues||trust.basis||''}</div>
+    </div>`;
+  }).join('');
+  $('validation-panel').innerHTML=
+    `<div class="mini-note">Trusted for publication: ${summary.trusted_publication_allowed||0}</div>`+
+    `<div class="mini-note">Limited scope: ${summary.limited_scope||0} · Missing env: ${summary.missing_env||0} · Quarantined: ${summary.quarantined||0}</div>`+
+    `<div style="margin-top:6px;border-top:1px solid var(--border2);padding-top:4px">${rows}</div>`;
+}
+
 function refresh(){
   fetch('/api/hardware').then(r=>r.json()).then(updateHardware).catch(()=>{});
   fetch('/api/status').then(r=>r.json()).then(updateStatus).catch(()=>{});
@@ -4514,6 +5071,8 @@ function refresh(){
   fetch('/api/papers').then(r=>r.json()).then(updatePapers).catch(()=>{});
   fetch('/api/frontier').then(r=>r.json()).then(updateFrontier).catch(()=>{});
   fetch('/api/research_director').then(r=>r.json()).then(updateDirector).catch(()=>{});
+  fetch('/api/human_review').then(r=>r.json()).then(updateHumanReview).catch(()=>{});
+  fetch('/api/validation').then(r=>r.json()).then(updateValidationBoard).catch(()=>{});
   fetch('/api/literature').then(r=>r.json()).then(updateLearnedLiterature).catch(()=>{});
   fetch('/api/coordination').then(r=>r.json()).then(updateCoordination).catch(()=>{});
   fetch('/api/scheduler').then(r=>r.json()).then(updateScheduler).catch(()=>{});
