@@ -1,0 +1,2554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TAR Research Dashboard</title>
+<style>
+:root{
+  --bg:#07111a;
+  --bg2:#0d1824;
+  --panel:#0f1c29;
+  --panel2:#132334;
+  --line:#24384d;
+  --line-strong:#36506c;
+  --text:#edf4fb;
+  --muted:#9bb2c8;
+  --soft:#6c879f;
+  --good:#3dd5a0;
+  --warn:#ffbf5f;
+  --bad:#ff7f7f;
+  --info:#67b7ff;
+  --accent:#7ae0d5;
+  --shadow:0 22px 60px rgba(1, 6, 12, 0.28);
+  --radius:18px;
+  --radius-sm:12px;
+  --font-ui:"Aptos","Segoe UI Variable","Segoe UI",sans-serif;
+  --font-mono:"Cascadia Code","JetBrains Mono","Consolas",monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;
+  min-height:100vh;
+  background:
+    radial-gradient(circle at top left, rgba(61,213,160,.10), transparent 28%),
+    radial-gradient(circle at top right, rgba(103,183,255,.12), transparent 32%),
+    linear-gradient(180deg, var(--bg), #050b12 74%);
+  color:var(--text);
+  font-family:var(--font-ui);
+}
+a{color:var(--info);text-decoration:none}
+a:hover{text-decoration:underline}
+button,input,textarea,select{
+  font:inherit;
+}
+code,pre,.mono{
+  font-family:var(--font-mono);
+}
+.shell{
+  max-width:1600px;
+  margin:0 auto;
+  padding:22px 22px 40px;
+}
+.hero{
+  display:grid;
+  grid-template-columns:minmax(0,1.4fr) minmax(320px,.9fr);
+  gap:18px;
+  margin-bottom:18px;
+}
+.hero-card,
+.summary-card,
+.panel,
+.raw-card{
+  background:linear-gradient(180deg, rgba(19,35,52,.96), rgba(11,20,31,.96));
+  border:1px solid var(--line);
+  border-radius:var(--radius);
+  box-shadow:var(--shadow);
+}
+.hero-card{
+  padding:24px 24px 20px;
+}
+.hero-card h1{
+  margin:0 0 8px;
+  font-size:2rem;
+  line-height:1.05;
+  letter-spacing:-.03em;
+}
+.hero-card p{
+  margin:0;
+  color:var(--muted);
+  line-height:1.6;
+  max-width:72ch;
+}
+.hero-meta{
+  margin-top:18px;
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px;
+}
+.chip{
+  display:inline-flex;
+  align-items:center;
+  gap:7px;
+  padding:8px 12px;
+  border-radius:999px;
+  border:1px solid var(--line);
+  background:rgba(7,17,26,.65);
+  color:var(--muted);
+  font-size:.92rem;
+}
+.dot{
+  width:9px;
+  height:9px;
+  border-radius:50%;
+  background:var(--soft);
+  box-shadow:0 0 0 3px rgba(255,255,255,.03);
+}
+.dot.good{background:var(--good)}
+.dot.warn{background:var(--warn)}
+.dot.bad{background:var(--bad)}
+.hero-actions{
+  padding:22px;
+  display:flex;
+  flex-direction:column;
+  gap:14px;
+}
+.hero-actions h2{
+  margin:0;
+  font-size:1.05rem;
+}
+.hero-actions p{
+  margin:0;
+  color:var(--muted);
+  line-height:1.55;
+}
+.toolbar{
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px;
+}
+.btn{
+  appearance:none;
+  border:1px solid var(--line-strong);
+  color:var(--text);
+  background:linear-gradient(180deg, rgba(27,52,76,.95), rgba(17,34,52,.95));
+  padding:10px 14px;
+  border-radius:12px;
+  cursor:pointer;
+  font-weight:600;
+  transition:transform .15s ease, border-color .15s ease, background .15s ease;
+}
+.btn:hover{
+  transform:translateY(-1px);
+  border-color:var(--info);
+}
+.btn.secondary{
+  background:rgba(8,16,24,.68);
+  color:var(--muted);
+}
+.btn.good{border-color:rgba(61,213,160,.45)}
+.btn.warn{border-color:rgba(255,191,95,.45)}
+.btn.bad{border-color:rgba(255,127,127,.45)}
+.btn.small{
+  padding:8px 10px;
+  font-size:.88rem;
+  border-radius:10px;
+}
+.toolbar label{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  color:var(--muted);
+  font-size:.94rem;
+}
+.summary-grid{
+  display:grid;
+  grid-template-columns:repeat(6, minmax(0, 1fr));
+  gap:14px;
+  margin-bottom:18px;
+}
+.summary-card{
+  padding:16px;
+}
+.summary-label{
+  color:var(--soft);
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  font-size:.74rem;
+}
+.summary-value{
+  margin-top:8px;
+  font-size:1.9rem;
+  font-weight:700;
+  letter-spacing:-.04em;
+}
+.summary-note{
+  margin-top:6px;
+  color:var(--muted);
+  font-size:.92rem;
+}
+.tabbar{
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px;
+  margin-bottom:18px;
+}
+.tab-btn{
+  padding:11px 14px;
+  border-radius:12px;
+  border:1px solid var(--line);
+  background:rgba(9,17,26,.76);
+  color:var(--muted);
+  cursor:pointer;
+  font-weight:600;
+}
+.tab-btn.active{
+  border-color:var(--info);
+  color:var(--text);
+  background:linear-gradient(180deg, rgba(25,47,68,.95), rgba(14,28,42,.95));
+}
+.tab-panel{
+  display:none;
+}
+.tab-panel.active{
+  display:block;
+}
+.grid-2{
+  display:grid;
+  grid-template-columns:minmax(0,1.18fr) minmax(320px,.82fr);
+  gap:18px;
+}
+.stack{
+  display:flex;
+  flex-direction:column;
+  gap:18px;
+}
+.panel{
+  overflow:hidden;
+}
+.panel-head{
+  display:flex;
+  justify-content:space-between;
+  gap:14px;
+  align-items:flex-start;
+  padding:18px 20px 0;
+}
+.panel-head h2{
+  margin:0;
+  font-size:1.05rem;
+}
+.panel-head p{
+  margin:6px 0 0;
+  color:var(--muted);
+  line-height:1.45;
+  font-size:.94rem;
+}
+.panel-head .meta{
+  color:var(--soft);
+  font-size:.9rem;
+  white-space:nowrap;
+}
+.panel-body{
+  padding:18px 20px 20px;
+}
+.warning-list{
+  display:grid;
+  gap:10px;
+}
+.warning{
+  border:1px solid rgba(255,191,95,.28);
+  background:rgba(255,191,95,.08);
+  color:#ffe0a8;
+  padding:12px 14px;
+  border-radius:12px;
+  line-height:1.5;
+  display:flex;
+  align-items:flex-start;
+  gap:10px;
+}
+.warning-text{ flex:1; }
+.warning-close{
+  flex-shrink:0;
+  background:none;
+  border:none;
+  color:inherit;
+  opacity:.5;
+  font-size:.85rem;
+  cursor:pointer;
+  padding:0 2px;
+  line-height:1;
+  margin-top:1px;
+}
+.warning-close:hover{ opacity:1; }
+.warning.bad{
+  border-color:rgba(255,127,127,.30);
+  background:rgba(255,127,127,.08);
+  color:#ffd4d4;
+}
+.warning.good{
+  border-color:rgba(61,213,160,.28);
+  background:rgba(61,213,160,.07);
+  color:#cffff0;
+}
+.list{
+  display:grid;
+  gap:12px;
+}
+.item{
+  border:1px solid var(--line);
+  background:rgba(7,14,22,.58);
+  border-radius:14px;
+  padding:14px;
+}
+.item-head{
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+  align-items:flex-start;
+}
+.item-title{
+  margin:0;
+  font-size:1rem;
+  line-height:1.35;
+}
+.item-subtitle,
+.item-meta{
+  margin-top:6px;
+  color:var(--muted);
+  font-size:.92rem;
+  line-height:1.5;
+}
+.item-meta-grid{
+  margin-top:12px;
+  display:grid;
+  grid-template-columns:repeat(3, minmax(0,1fr));
+  gap:10px;
+}
+.kv{
+  padding:10px;
+  border-radius:12px;
+  background:rgba(255,255,255,.02);
+  border:1px solid rgba(255,255,255,.04);
+}
+.kv .k{
+  color:var(--soft);
+  text-transform:uppercase;
+  font-size:.72rem;
+  letter-spacing:.08em;
+}
+.kv .v{
+  margin-top:5px;
+  color:var(--text);
+  word-break:break-word;
+  font-size:.95rem;
+}
+.pills{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+}
+.pill{
+  padding:6px 10px;
+  border-radius:999px;
+  border:1px solid var(--line);
+  color:var(--muted);
+  background:rgba(255,255,255,.03);
+  font-size:.82rem;
+  font-weight:700;
+  letter-spacing:.02em;
+}
+.pill.good{color:#d8fff1;border-color:rgba(61,213,160,.32);background:rgba(61,213,160,.11)}
+.pill.warn{color:#ffe8b6;border-color:rgba(255,191,95,.32);background:rgba(255,191,95,.10)}
+.pill.bad{color:#ffd6d6;border-color:rgba(255,127,127,.34);background:rgba(255,127,127,.10)}
+.pill.info{color:#ddf0ff;border-color:rgba(103,183,255,.35);background:rgba(103,183,255,.11)}
+.table-wrap{
+  overflow:auto;
+  border:1px solid var(--line);
+  border-radius:14px;
+}
+table{
+  width:100%;
+  border-collapse:collapse;
+  min-width:720px;
+}
+th,td{
+  padding:12px 14px;
+  border-bottom:1px solid rgba(255,255,255,.05);
+  vertical-align:top;
+  text-align:left;
+}
+th{
+  position:sticky;
+  top:0;
+  background:#101c29;
+  color:var(--soft);
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  font-size:.74rem;
+}
+td{
+  color:var(--text);
+  font-size:.94rem;
+  line-height:1.5;
+}
+tr:hover td{
+  background:rgba(255,255,255,.018);
+}
+.detail{
+  margin-top:12px;
+  border-top:1px solid rgba(255,255,255,.06);
+  padding-top:12px;
+}
+.detail summary{
+  cursor:pointer;
+  color:var(--accent);
+  font-weight:600;
+}
+pre{
+  margin:12px 0 0;
+  padding:14px;
+  border-radius:12px;
+  border:1px solid var(--line);
+  background:#07111a;
+  color:#d8e8f8;
+  white-space:pre-wrap;
+  word-break:break-word;
+  overflow:auto;
+  max-height:440px;
+}
+.field{
+  display:grid;
+  gap:6px;
+  margin-top:12px;
+}
+.field label{
+  color:var(--soft);
+  font-size:.88rem;
+}
+.field textarea,
+.field select,
+.field input{
+  width:100%;
+  border:1px solid var(--line);
+  background:#08121c;
+  color:var(--text);
+  border-radius:12px;
+  padding:11px 12px;
+}
+.field textarea{
+  min-height:90px;
+  resize:vertical;
+}
+.actions{
+  margin-top:12px;
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+}
+.empty{
+  border:1px dashed rgba(255,255,255,.12);
+  border-radius:14px;
+  padding:18px;
+  color:var(--muted);
+  background:rgba(255,255,255,.02);
+}
+.log-box{
+  max-height:520px;
+  overflow:auto;
+  border:1px solid var(--line);
+  border-radius:14px;
+  padding:14px;
+  background:#08111a;
+  line-height:1.55;
+}
+.raw-grid{
+  display:grid;
+  grid-template-columns:repeat(2, minmax(0,1fr));
+  gap:18px;
+}
+.raw-card{
+  padding:16px;
+}
+.raw-card h3{
+  margin:0 0 10px;
+  font-size:1rem;
+}
+.badge-row{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:10px;
+}
+.small{
+  font-size:.88rem;
+}
+.muted{
+  color:var(--muted);
+}
+.split-actions{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:14px;
+}
+@media (max-width: 1320px){
+  .summary-grid{
+    grid-template-columns:repeat(3, minmax(0,1fr));
+  }
+  .grid-2, .hero, .raw-grid{
+    grid-template-columns:1fr;
+  }
+}
+@media (max-width: 860px){
+  .shell{padding:14px 14px 28px}
+  .summary-grid{grid-template-columns:repeat(2, minmax(0,1fr))}
+  .item-meta-grid{grid-template-columns:1fr}
+}
+
+/* Log line highlighting */
+.log-error{color:#ff9090;font-weight:700}
+.log-warn{color:#ffcf7a}
+.log-ts{color:#4a6a8a}
+
+/* Per-panel mtime stamp */
+.panel-mtime{color:var(--soft);font-size:.78rem;white-space:nowrap;margin-top:2px}
+
+/* Tab badge */
+.tab-badge{
+  display:inline-flex;align-items:center;justify-content:center;
+  min-width:18px;height:18px;padding:0 5px;
+  border-radius:999px;font-size:.72rem;font-weight:700;
+  background:var(--bad);color:#fff;margin-left:5px;
+  vertical-align:middle;
+}
+.tab-badge.good{background:var(--good);color:#07111a}
+.tab-badge.warn{background:var(--warn);color:#07111a}
+
+/* Hardware gauge bar */
+.gauge-wrap{margin-top:8px}
+.gauge-label{display:flex;justify-content:space-between;font-size:.82rem;color:var(--muted);margin-bottom:4px}
+.gauge-track{height:6px;border-radius:999px;background:rgba(255,255,255,.07)}
+.gauge-fill{height:6px;border-radius:999px;transition:width .6s ease}
+.gauge-fill.good{background:var(--good)}
+.gauge-fill.warn{background:var(--warn)}
+.gauge-fill.bad{background:var(--bad)}
+.gauge-fill.info{background:var(--info)}
+
+/* Experiment progress bar */
+.exp-progress{margin-top:10px}
+.exp-progress-label{display:flex;justify-content:space-between;font-size:.82rem;color:var(--muted);margin-bottom:4px}
+.exp-progress-track{height:8px;border-radius:999px;background:rgba(255,255,255,.07)}
+.exp-progress-fill{height:8px;border-radius:999px;background:var(--good);transition:width .6s ease}
+
+/* API error state in panels */
+.api-error-state{border:1px solid rgba(255,127,127,.30);background:rgba(255,127,127,.06);color:#ffd4d4;padding:12px 14px;border-radius:12px;font-size:.92rem}
+.api-error-state code{color:#ff9090}
+
+/* Active step chip highlight */
+.chip.active-step{border-color:rgba(122,224,213,.5);background:rgba(122,224,213,.08);color:var(--accent)}
+
+/* Statistical significance coloring */
+.sig-breakthrough{color:#3dd5a0;font-weight:700}
+.sig-significant{color:#67b7ff}
+.sig-trending{color:#ffbf5f}
+.sig-null{color:var(--soft)}
+
+/* Pulsing dot for running */
+@keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.35}}
+.dot.running{background:var(--good);animation:pulse-dot 1.6s ease infinite}
+
+/* Filter input */
+.filter-input{width:100%;border:1px solid var(--line);background:#08121c;color:var(--text);border-radius:10px;padding:8px 12px;font-size:.92rem;margin-bottom:12px}
+.filter-input:focus{outline:none;border-color:var(--info)}
+
+/* Review summary widget */
+.review-widget{display:flex;gap:10px;flex-wrap:wrap;padding:12px 0 0}
+.review-chip{display:inline-flex;align-items:center;gap:7px;padding:7px 11px;border-radius:999px;border:1px solid var(--line);background:rgba(255,191,95,.07);color:#ffe0a8;font-size:.85rem;font-weight:600;cursor:pointer}
+.review-chip:hover{border-color:rgba(255,191,95,.5)}
+.review-chip.none{background:rgba(61,213,160,.06);color:#cffff0;border-color:rgba(61,213,160,.2)}
+
+/* Metric interpretation */
+.metric-interp{font-size:.82rem;margin-top:4px;padding:6px 10px;border-radius:8px;background:rgba(255,255,255,.03)}
+
+/* ── TAR Intelligence tab ───────────────────────────────────────── */
+.intel-grid{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,.7fr);gap:18px;margin-bottom:18px}
+@media(max-width:860px){.intel-grid{grid-template-columns:1fr}}
+.narration-bubble{
+  background:linear-gradient(135deg,rgba(8,18,30,.95),rgba(12,24,40,.95));
+  border:1px solid rgba(61,213,160,.22);border-radius:14px;
+  padding:20px 22px 16px;min-height:100px;position:relative;
+  font-size:.97rem;line-height:1.7;color:var(--text);transition:border-color .4s;
+}
+.narration-bubble.loading{border-color:rgba(103,183,255,.15)}
+.narration-refresh{
+  position:absolute;top:14px;right:16px;
+  background:none;border:1px solid var(--line);border-radius:999px;
+  color:var(--soft);font-size:.72rem;padding:3px 11px;cursor:pointer;
+  transition:border-color .2s,color .2s;
+}
+.narration-refresh:hover{border-color:var(--good);color:var(--good)}
+.narration-ts{font-size:.71rem;color:var(--soft);margin-top:10px}
+.narration-focus{font-size:.79rem;color:var(--info);margin-top:5px;font-style:italic}
+.narration-error-note{color:var(--bad);font-size:.82rem}
+.confidence-block{display:flex;flex-direction:column;gap:12px}
+.confidence-label-row{display:flex;justify-content:space-between;align-items:center;font-size:.82rem}
+.confidence-pct{font-size:1.6rem;font-weight:700;color:var(--good);line-height:1}
+.confidence-pct.uncertain{color:var(--warn)}
+.confidence-track{height:8px;border-radius:999px;background:rgba(255,255,255,.07);overflow:hidden}
+.confidence-fill{height:100%;border-radius:999px;transition:width 1.2s cubic-bezier(.4,0,.2,1)}
+.confidence-fill.high{background:linear-gradient(90deg,#1d6b4a,#3dd5a0)}
+.confidence-fill.mid{background:linear-gradient(90deg,#7a5a1d,#fbbf24)}
+.confidence-fill.low{background:linear-gradient(90deg,#6b1d1d,#f87171)}
+.threshold-note{font-size:.75rem;color:var(--soft)}
+.seed-trail{display:flex;gap:7px;align-items:center;flex-wrap:wrap;padding:4px 0}
+.seed-pip{width:14px;height:14px;border-radius:50%;cursor:default;position:relative;transition:transform .15s;flex-shrink:0}
+.seed-pip:hover{transform:scale(1.5)}
+.seed-pip.pass{background:#3dd5a0;box-shadow:0 0 7px #3dd5a055}
+.seed-pip.warn{background:#fbbf24;box-shadow:0 0 7px #fbbf2455}
+.seed-pip.fail{background:#f87171}
+.seed-pip.running{background:#67b7ff;animation:pulse-dot 1.4s ease infinite}
+.seed-pip.pending{background:#1d3555}
+.rep-table{width:100%;border-collapse:collapse;font-size:.87rem}
+.rep-table th{text-align:left;color:var(--soft);font-weight:500;padding:8px 10px;border-bottom:1px solid var(--line);font-size:.77rem;letter-spacing:.04em;text-transform:uppercase}
+.rep-table td{padding:10px 10px;border-bottom:1px solid rgba(36,56,77,.45);vertical-align:middle}
+.rep-table tr.rep-row{cursor:pointer;transition:background .14s}
+.rep-table tr.rep-row:hover td{background:rgba(255,255,255,.025)}
+.rep-table tr.rep-row.expanded td{background:rgba(61,213,160,.04);border-bottom:none}
+.rep-table tr.rep-expand-row{display:none}
+.rep-table tr.rep-expand-row.open{display:table-row}
+.rep-table tr.rep-expand-row td{padding:0 10px 14px 28px;background:rgba(61,213,160,.02);border-bottom:1px solid var(--line)}
+.rep-expand-inner{display:flex;gap:10px;flex-wrap:wrap;padding-top:8px}
+.rep-seed-card{background:#08121c;border:1px solid var(--line);border-radius:8px;padding:9px 12px;min-width:130px;font-size:.79rem}
+.rep-seed-card .sc-head{color:var(--info);font-weight:600;margin-bottom:5px}
+.rep-seed-card .sc-row{display:flex;justify-content:space-between;color:var(--soft);gap:12px;line-height:1.6}
+.rep-seed-card .sc-val{color:var(--text)}
+.rep-method-name{font-weight:600;color:var(--text)}
+.rep-method-name.hpc{color:var(--good)}
+.rep-caret{color:var(--soft);font-size:.75rem;margin-left:5px;transition:transform .2s;display:inline-block}
+.rep-row.expanded .rep-caret{transform:rotate(90deg)}
+.rep-forgetting{font-variant-numeric:tabular-nums}
+.rep-better{color:var(--good)}
+.rep-worse{color:var(--bad)}
+.next-grid{display:flex;flex-direction:column;gap:8px}
+.next-hyp{display:flex;align-items:flex-start;gap:14px;padding:12px 15px;border-radius:10px;border:1px solid var(--line);background:rgba(255,255,255,.02)}
+.next-hyp-name{font-weight:600;font-size:.9rem;color:var(--text);margin-bottom:2px}
+.next-hyp-pred{font-size:.79rem;color:var(--soft);line-height:1.5}
+.next-hyp-status{font-size:.72rem;padding:3px 9px;border-radius:999px;white-space:nowrap;align-self:flex-start;margin-top:2px}
+.next-hyp-status.complete{background:rgba(61,213,160,.13);color:var(--good)}
+.next-hyp-status.partial{background:rgba(103,183,255,.13);color:var(--info)}
+.next-hyp-status.pending{background:rgba(255,191,95,.09);color:var(--warn)}
+</style>
+</head>
+<body>
+<div class="shell">
+  <section class="hero">
+    <article class="hero-card">
+      <h1>TAR Research Dashboard</h1>
+      <p>
+        One control surface for the whole system: live runtime, queued work, human approvals,
+        validation trust, research direction, papers, and raw state. The goal here is to make
+        the system readable first, and only then clever.
+      </p>
+      <div class="hero-meta" id="hero-meta"></div>
+    </article>
+    <aside class="hero-actions">
+      <div>
+        <h2>Operator Controls</h2>
+        <p>Use a normal refresh for live state. Use deep refresh only when you want TAR to recompute planned author or director views.</p>
+      </div>
+      <div class="toolbar">
+        <button class="btn" id="refresh-btn" type="button">Refresh Live State</button>
+        <button class="btn secondary" id="deep-refresh-btn" type="button">Deep Refresh Plans</button>
+      </div>
+      <div class="toolbar">
+        <label><input type="checkbox" id="auto-refresh" checked> Auto refresh every 20s</label>
+      </div>
+      <div class="small muted" id="status-line">Loading dashboard state...</div>
+    </aside>
+  </section>
+
+  <section class="summary-grid" id="summary-grid"></section>
+
+  <nav class="tabbar" id="tabbar">
+    <button class="tab-btn active" data-tab="overview" type="button">Overview</button>
+    <button class="tab-btn" data-tab="review" type="button">Human Review</button>
+    <button class="tab-btn" data-tab="evidence" type="button">Validation & Results</button>
+    <button class="tab-btn" data-tab="research" type="button">Research State</button>
+    <button class="tab-btn" data-tab="papers" type="button">Papers</button>
+    <button class="tab-btn" data-tab="intel" type="button">TAR Intelligence</button>
+    <button class="tab-btn" data-tab="raw" type="button">Raw API Explorer</button>
+  </nav>
+
+  <section class="tab-panel active" id="tab-overview">
+    <div class="grid-2">
+      <div class="stack">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>System Warnings</h2>
+              <p>Derived from live processes, queue state, validation scope, and paper blocks.</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="warning-list" id="warnings-panel"></div>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Queued & Active Experiments</h2>
+              <p>The live queue, not the story TAR tells about itself.</p>
+            </div>
+            <div class="meta" id="experiments-meta"></div>
+          </div>
+          <div class="panel-body" id="experiments-overview"></div>
+        </article>
+
+        <article class="panel" id="review-summary-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Human Review Queue</h2>
+              <p>Items waiting for your decision. Delays here block the experiment queue.</p>
+            </div>
+            <div class="meta" id="review-summary-meta"></div>
+          </div>
+          <div class="panel-body" id="review-summary-body">
+            <div class="muted small">Loading…</div>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Processes</h2>
+              <p>Actual running Python processes seen by the hardware monitor.</p>
+            </div>
+            <div class="meta" id="process-meta"></div>
+          </div>
+          <div class="panel-body" id="processes-panel"></div>
+        </article>
+      </div>
+
+      <div class="stack">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Runtime & Hardware</h2>
+              <p>Current active step, queue step status, and machine load.</p>
+            </div>
+          </div>
+          <div class="panel-body" id="runtime-panel"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Live Log</h2>
+              <p>Tail of the active log with selector for other available logs.</p>
+            </div>
+            <div class="meta" id="log-meta"></div>
+          </div>
+          <div class="panel-body">
+            <div class="field">
+              <label for="log-select">Choose log</label>
+              <select id="log-select"></select>
+            </div>
+            <div class="split-actions">
+              <button class="btn secondary small" id="reload-log-btn" type="button">Reload Log</button>
+            </div>
+            <div class="log-box mono" id="log-panel"></div>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="tab-intel">
+    <div class="intel-grid">
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>What TAR Is Thinking</h2>
+            <p>Claude narrates the live experiment in plain English. Auto-refreshes every 90 seconds.</p>
+          </div>
+          <div class="meta" id="narration-meta"></div>
+        </div>
+        <div class="panel-body">
+          <div class="narration-bubble loading" id="narration-bubble">
+            <button class="narration-refresh" id="narration-refresh-btn" type="button">↻ Refresh</button>
+            <div id="narration-text" style="color:var(--soft);font-style:italic">Asking TAR what it's thinking…</div>
+            <div class="narration-focus" id="narration-focus"></div>
+            <div class="narration-ts" id="narration-ts"></div>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Hypothesis Confidence</h2>
+            <p>Fraction of seeds passing the pre-registered forgetting threshold.</p>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="confidence-block">
+            <div class="confidence-label-row">
+              <span class="small muted">Seeds passing threshold</span>
+              <span class="confidence-pct" id="confidence-pct">—</span>
+            </div>
+            <div class="confidence-track">
+              <div class="confidence-fill" id="confidence-fill" style="width:0%"></div>
+            </div>
+            <div class="threshold-note" id="threshold-note">Pre-registered: forgetting &lt; 0.1161</div>
+            <div style="margin-top:16px">
+              <div class="small muted" style="margin-bottom:8px">Each dot = one completed seed</div>
+              <div class="seed-trail" id="seed-trail"></div>
+            </div>
+          </div>
+        </div>
+      </article>
+    </div>
+
+    <article class="panel" style="margin-bottom:18px">
+      <div class="panel-head">
+        <div>
+          <h2>Live Method Comparison</h2>
+          <p>All 6 methods with partial results as seeds complete. Click any row to expand per-seed breakdown.</p>
+        </div>
+        <div class="meta" id="rep-meta"></div>
+      </div>
+      <div class="panel-body" id="rep-panel">
+        <div class="muted small">Loading replication data…</div>
+      </div>
+    </article>
+
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>What's Next — Autonomous Research Queue</h2>
+          <p>Hypotheses TAR generated and registered. These run after stabilisation mode ends.</p>
+        </div>
+      </div>
+      <div class="panel-body" id="whats-next-panel">
+        <div class="muted small">Loading…</div>
+      </div>
+    </article>
+  </section>
+
+  <section class="tab-panel" id="tab-review">
+    <div class="grid-2">
+      <div class="stack">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Experiment Proposals</h2>
+              <p>Approve, reject, or build a manifest from TAR suggestions.</p>
+            </div>
+            <div class="meta" id="proposal-meta"></div>
+          </div>
+          <div class="panel-body" id="proposal-panel"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Human Questions Inbox</h2>
+              <p>TAR should ask here when scientific scope or strategy is ambiguous.</p>
+            </div>
+            <div class="meta" id="question-meta"></div>
+          </div>
+          <div class="panel-body" id="question-panel"></div>
+        </article>
+      </div>
+
+      <div class="stack">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Claim & Paper Reviews</h2>
+              <p>Separate the evidence decision from paper writing.</p>
+            </div>
+            <div class="meta" id="claim-meta"></div>
+          </div>
+          <div class="panel-body" id="claim-panel"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Review History</h2>
+              <p>Auditable trail of recent approvals, holds, answers, and manifest preparation.</p>
+            </div>
+          </div>
+          <div class="panel-body" id="history-panel"></div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="tab-evidence">
+    <div class="grid-2">
+      <div class="stack">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Validation Board</h2>
+              <p>Trust tier, provenance, and publication allowance for visible canonical results.</p>
+            </div>
+            <div class="meta" id="validation-meta"></div>
+          </div>
+          <div class="panel-body" id="validation-panel"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Canonical Results</h2>
+              <p>Human-readable result summaries with raw JSON on demand.</p>
+            </div>
+            <div class="meta" id="results-meta"></div>
+          </div>
+          <div class="panel-body" id="results-panel"></div>
+        </article>
+      </div>
+
+      <div class="stack">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Breakthrough Alerts</h2>
+              <p>Visible, but still treated as evidence-backed advisory labels.</p>
+            </div>
+          </div>
+          <div class="panel-body" id="breakthrough-panel"></div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="tab-research">
+    <div class="grid-2">
+      <div class="stack">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Active Research Paths</h2>
+              <p>What the research director currently believes is worth pursuing.</p>
+            </div>
+            <div class="meta" id="director-meta"></div>
+          </div>
+          <div class="panel-body" id="director-panel"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Frontier Problems</h2>
+              <p>Real-world problem anchors and their linked evidence.</p>
+            </div>
+            <div class="meta" id="frontier-meta"></div>
+          </div>
+          <div class="panel-body" id="frontier-panel"></div>
+        </article>
+      </div>
+
+      <div class="stack">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Project Registry</h2>
+              <p>The registry should be readable, but not automatically believed.</p>
+            </div>
+            <div class="meta" id="registry-meta"></div>
+          </div>
+          <div class="panel-body" id="registry-panel"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Scheduler</h2>
+              <p>Current scheduler rationale, start permission, and hold reasons.</p>
+            </div>
+          </div>
+          <div class="panel-body" id="scheduler-panel"></div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="tab-papers">
+    <div class="grid-2">
+      <div class="stack">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Papers</h2>
+              <p>Readable paper state with evidence blockers and return-to-author action.</p>
+            </div>
+            <div class="meta" id="papers-meta"></div>
+          </div>
+          <div class="panel-body" id="papers-panel"></div>
+        </article>
+      </div>
+
+      <div class="stack">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Author State</h2>
+              <p>Current author queue, activity log, and revision context.</p>
+            </div>
+          </div>
+          <div class="panel-body" id="author-panel"></div>
+        </article>
+      </div>
+    </div>
+
+    <div style="margin-top:1.5rem;">
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Website Publication</h2>
+            <p>Canonically verified papers only. Stage &#8594; review all claims &#8594; approve to publish live.</p>
+          </div>
+          <div class="meta" id="website-papers-meta"></div>
+        </div>
+        <div class="panel-body">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;" id="website-papers-grid">
+            <div>
+              <div style="font-size:.7rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted,#8a8a9a);margin-bottom:.75rem;">Staged — awaiting review</div>
+              <div id="website-staged-panel"><div class="empty">No papers staged.</div></div>
+            </div>
+            <div>
+              <div style="font-size:.7rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted,#8a8a9a);margin-bottom:.75rem;">Live on tar-research-lab.com</div>
+              <div id="website-live-panel"><div class="empty">No papers published yet.</div></div>
+            </div>
+          </div>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="tab-panel" id="tab-raw">
+    <div class="raw-grid" id="raw-panel"></div>
+  </section>
+</div>
+<script>
+const state = {
+  data: {},
+  errors: {},
+  selectedTab: "overview",
+  selectedLog: "",
+  autoRefreshHandle: null,
+  loading: false,
+};
+
+const endpointBuilders = {
+  status: () => "/api/status",
+  hardware: () => "/api/hardware",
+  experiments: () => "/api/experiments",
+  processes: () => "/api/processes",
+  results: () => "/api/results",
+  breakthroughs: () => "/api/breakthroughs",
+  humanReview: () => "/api/human_review",
+  validation: () => "/api/validation",
+  frontier: () => "/api/frontier",
+  researchDirector: (deep) => deep ? "/api/research_director?refresh=1" : "/api/research_director",
+  scheduler: () => "/api/scheduler",
+  author: (deep) => deep ? "/api/author?refresh=1" : "/api/author",
+  registry: () => "/api/registry",
+  papers: () => "/api/papers",
+  logs: () => "/api/logs",
+  log: () => state.selectedLog ? `/api/log/${encodeURIComponent(state.selectedLog)}` : "/api/log",
+  autonomous: () => "/api/autonomous",
+  replication: () => "/api/replication",
+  websitePapers: () => "/api/website_papers",
+};
+
+const rawOrder = [
+  "status", "hardware", "experiments", "processes", "results",
+  "breakthroughs", "humanReview", "validation", "frontier",
+  "researchDirector", "scheduler", "author", "registry", "papers", "logs", "log",
+  "autonomous", "replication", "websitePapers"
+];
+
+function $(id){ return document.getElementById(id); }
+
+function escapeHtml(value){
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function pretty(value){ return JSON.stringify(value ?? null, null, 2); }
+function num(value, fallback = "0"){
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "number") return String(value);
+  return String(value);
+}
+function formatPct(value){
+  if (value === null || value === undefined || value === "") return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  return `${n.toFixed(1)}%`;
+}
+function formatShortDate(value){
+  const text = String(value || "").trim();
+  if (!text) return "—";
+  const dt = new Date(text);
+  if (Number.isNaN(dt.getTime())) return text;
+  return dt.toLocaleString();
+}
+function formatList(values){
+  if (!Array.isArray(values) || !values.length) return "—";
+  return values.map((item) => String(item)).join(", ");
+}
+function slug(value){
+  return String(value || "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "");
+}
+function toneForStatus(status){
+  const s = String(status || "").toLowerCase();
+  if (["running", "approved", "approved_manifest_ready", "complete", "validated", "published"].includes(s)) return "good";
+  if (["blocked", "held", "limited_scope", "planned", "queued", "pending", "awaiting_human_review", "awaiting_human_answer", "draft_compiled"].includes(s)) return "warn";
+  if (["failed", "error", "rejected", "quarantined_untrusted"].includes(s)) return "bad";
+  return "info";
+}
+function pill(text, tone = "info"){
+  return `<span class="pill ${tone}">${escapeHtml(text)}</span>`;
+}
+function cardMetaGrid(items){
+  if (!items.length) return "";
+  return `
+    <div class="item-meta-grid">
+      ${items.map(({k, v}) => `
+        <div class="kv">
+          <div class="k">${escapeHtml(k)}</div>
+          <div class="v">${escapeHtml(v)}</div>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+function detailJson(label, payload){
+  return `
+    <details class="detail">
+      <summary>${escapeHtml(label)}</summary>
+      <pre>${escapeHtml(pretty(payload))}</pre>
+    </details>
+  `;
+}
+
+async function fetchJson(url, options = {}){
+  const response = await fetch(url, {
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+    ...options,
+  });
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+  if (!response.ok) {
+    const message = payload && payload.error ? payload.error : `${response.status} ${response.statusText}`;
+    throw new Error(message);
+  }
+  return payload;
+}
+
+async function loadAll({ deep = false } = {}){
+  if (state.loading) return;
+  state.loading = true;
+  $("status-line").textContent = deep ? "Refreshing live + planned state..." : "Refreshing live state...";
+  const entries = Object.entries(endpointBuilders);
+  const results = await Promise.all(entries.map(async ([key, builder]) => {
+    try {
+      const url = builder(deep);
+      const payload = await fetchJson(url);
+      return { key, payload, error: "" };
+    } catch (error) {
+      return { key, payload: null, error: error.message || String(error) };
+    }
+  }));
+  state.errors = {};
+  for (const result of results) {
+    if (!result.error) {
+      const { key, payload } = result;
+      state.data[key] = payload;
+    } else {
+      state.errors[result.key] = result.error;
+    }
+  }
+  renderAll();
+  const errorCount = Object.keys(state.errors).length;
+  const errorKeys = Object.keys(state.errors);
+  const ts = new Date().toLocaleTimeString();
+  if (errorCount) {
+    $("status-line").innerHTML = `<span style="color:var(--bad)">⚠ ${errorCount} API error${errorCount === 1 ? "" : "s"}</span> (${errorKeys.slice(0,3).join(", ")}${errorKeys.length > 3 ? "…" : ""}) — see Raw API tab`;
+    document.title = `⚠ TAR Dashboard`;
+  } else {
+    $("status-line").textContent = `✓ All systems • Last refresh: ${ts}`;
+    document.title = `TAR Research Dashboard`;
+  }
+  state._lastRefreshTs = ts;
+  updateTabBadges();
+  state.loading = false;
+}
+
+function buildWarnings(){
+  const warnings = [];
+  const experiments = state.data.experiments || {};
+  const status = state.data.status || {};
+  const processes = (state.data.processes && state.data.processes.processes) || [];
+  const validation = state.data.validation || {};
+  const papers = Array.isArray(state.data.papers) ? state.data.papers : [];
+  const review = state.data.humanReview || {};
+  const running = Number(experiments.running || 0);
+  const pending = Number(experiments.pending || 0);
+  const queueSteps = Array.isArray(status.queue_steps) ? status.queue_steps : [];
+  const limited = Number(validation.summary?.limited_scope || 0);
+  const missingEnv = Number(validation.summary?.missing_env || 0);
+  const duplicateDashboard = processes.filter((proc) => !proc.experiment_id).length > 1;
+
+  if (duplicateDashboard) warnings.push({ tone: "bad", text: "Multiple non-experiment Python processes are visible. This usually means duplicate dashboard or control processes are still live." });
+  if (running === 0 && pending > 0) warnings.push({ tone: "warn", text: `There are ${pending} queued or planned experiment entries but nothing is running. The queue is not progressing on its own.` });
+  if (limited > 0 || missingEnv > 0) warnings.push({ tone: "warn", text: `${limited} validation records are limited-scope and ${missingEnv} visible canonical results are missing env provenance.` });
+  const blockedPapers = papers.filter((paper) => String(paper.status || "") === "blocked");
+  if (blockedPapers.length) warnings.push({ tone: "warn", text: `${blockedPapers.length} paper(s) are blocked pending evidence and should not be treated as publication-ready.` });
+  const { proposals: _rp, questions: _rq, claims: _rc } = pendingReviewItems(review);
+  const reviewCount = _rp.length + _rq.length + _rc.length;
+  if (reviewCount) warnings.push({ tone: "info", text: `${reviewCount} human review item(s) are waiting for attention across proposals, claims, or questions.` });
+  if (!warnings.length && queueSteps.length) warnings.push({ tone: "good", text: "No immediate dashboard-level contradictions detected in the current snapshot." });
+  if (!warnings.length) warnings.push({ tone: "good", text: "Dashboard state loaded. No active queue or validation warnings were derived from the current snapshot." });
+  return warnings;
+}
+
+function renderHero(){
+  const status = state.data.status || {};
+  const experiments = state.data.experiments || {};
+  const validation = state.data.validation || {};
+  const isRunning = Number(experiments.running || 0) > 0;
+  const activeStep = status.active_step || "No active step reported";
+  $("hero-meta").innerHTML = [
+    `<span class="chip"><span class="dot info"></span> Workspace: ${escapeHtml(status.workspace || "—")}</span>`,
+    `<span class="chip"><span class="dot ${isRunning ? "running" : "warn"}"></span> Running: ${escapeHtml(num(experiments.running || 0))}</span>`,
+    `<span class="chip"><span class="dot ${Number(experiments.pending || 0) > 0 ? "warn" : "good"}"></span> Queued: ${escapeHtml(num(experiments.pending || 0))}</span>`,
+    `<span class="chip ${activeStep !== "No active step reported" ? "active-step" : ""}"><strong>${escapeHtml(activeStep)}</strong></span>`,
+    `<span class="chip"><span class="dot ${Number(validation.summary?.trusted_publication_allowed || 0) > 0 ? "good" : "warn"}"></span> Trusted results: ${escapeHtml(num(validation.summary?.trusted_publication_allowed || 0))}</span>`,
+  ].join("");
+}
+
+function renderSummary(){
+  const experiments = state.data.experiments || {};
+  const validation = state.data.validation || {};
+  const review = state.data.humanReview || {};
+  const papers = Array.isArray(state.data.papers) ? state.data.papers : [];
+  const processes = (state.data.processes && state.data.processes.processes) || [];
+  const runningVal = Number(experiments.running || 0);
+  const pendingVal = Number(experiments.pending || 0);
+  const reviewVal = (review.proposals||[]).length + (review.claim_reviews||[]).length + (review.questions||[]).length;
+  const blockedVal = papers.filter((p) => String(p.status||"") === "blocked").length;
+  const trustedVal = Number(validation.summary?.trusted_publication_allowed || 0);
+  const limitedVal = Number(validation.summary?.limited_scope || 0);
+  // Order: operational first, archival last
+  const cards = [
+    { label: "Running", value: String(runningVal), note: "Active experiment processes", tone: runningVal > 0 ? "good" : "" },
+    { label: "Queued", value: String(pendingVal), note: "Pending or planned experiments", tone: pendingVal > 0 && runningVal === 0 ? "warn" : "" },
+    { label: "Blocked Papers", value: String(blockedVal), note: "Papers pending evidence", tone: blockedVal > 0 ? "warn" : "" },
+    { label: "Review Items", value: String(reviewVal), note: "Need human attention", tone: reviewVal > 0 ? "warn" : "" },
+    { label: "Trusted Results", value: String(trustedVal), note: "Publication-allowed validations", tone: trustedVal > 0 ? "good" : "" },
+    { label: "Limited Scope", value: String(limitedVal), note: "Visible but not strong enough", tone: "" },
+  ];
+  $("summary-grid").innerHTML = cards.map((card) => `
+    <article class="summary-card" style="${card.tone === "good" ? "border-color:rgba(61,213,160,.3)" : card.tone === "warn" ? "border-color:rgba(255,191,95,.3)" : ""}">
+      <div class="summary-label">${escapeHtml(card.label)}</div>
+      <div class="summary-value" style="${card.tone === "good" ? "color:var(--good)" : card.tone === "warn" ? "color:var(--warn)" : ""}">${escapeHtml(card.value)}</div>
+      <div class="summary-note">${escapeHtml(card.note)}</div>
+    </article>
+  `).join("");
+}
+
+const dismissedWarnings = new Set();
+function renderWarnings(){
+  const apiErrors = Object.keys(state.errors);
+  const warnings = buildWarnings().filter(w => !dismissedWarnings.has(w.text));
+  let html = "";
+  if (apiErrors.length && !dismissedWarnings.has("__api_errors__")) {
+    html += `<div class="warning bad"><span class="warning-text">⚠ <strong>${apiErrors.length} API endpoint${apiErrors.length===1?"":"s"} failed</strong>: ${escapeHtml(apiErrors.join(", "))} — panels showing these may appear empty. Check Raw API tab for details.</span><button class="warning-close" data-wkey="__api_errors__" title="Dismiss">✕</button></div>`;
+  }
+  html += warnings.map((w) => `
+    <div class="warning ${w.tone === "good" ? "good" : w.tone === "bad" ? "bad" : ""}">
+      <span class="warning-text">${escapeHtml(w.text)}</span>
+      <button class="warning-close" data-wkey="${escapeHtml(w.text)}" title="Dismiss">✕</button>
+    </div>
+  `).join("");
+  $("warnings-panel").innerHTML = html;
+  $("warnings-panel").querySelectorAll(".warning-close[data-wkey]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      dismissedWarnings.add(btn.dataset.wkey);
+      renderWarnings();
+    });
+  });
+}
+
+function renderRuntime(){
+  const status = state.data.status || {};
+  const hardware = state.data.hardware || {};
+  const queueSteps = Array.isArray(status.queue_steps) ? status.queue_steps : [];
+  const cpu = hardware.cpu || {};
+  const gpu = hardware.gpu || {};
+  const ram = hardware.ram || {};
+  const progress = status.progress || {};
+  const hasHwError = !!state.errors.hardware;
+
+  function mkGauge(label, value, max, unit, forceTone){
+    const pct = max > 0 ? Math.min(100, Math.round(value / max * 100)) : 0;
+    const tone = forceTone || (pct > 85 ? "bad" : pct > 60 ? "warn" : "good");
+    const disp = (value !== undefined && value !== null) ? value + unit : "—";
+    return '<div class="gauge-wrap">'
+      + '<div class="gauge-label"><span>' + escapeHtml(label) + '</span><span>' + escapeHtml(String(disp)) + '</span></div>'
+      + '<div class="gauge-track"><div class="gauge-fill ' + tone + '" style="width:' + pct + '%"></div></div>'
+      + '</div>';
+  }
+
+  let hwHtml = "";
+  if (gpu.available) {
+    hwHtml += mkGauge("GPU", gpu.utilization_pct || 0, 100, "%", gpu.utilization_pct > 85 ? "warn" : "good");
+    hwHtml += mkGauge("VRAM", Number((gpu.vram_used_gb||0)).toFixed(1), Number(gpu.vram_total_gb||4), "GB", "info");
+    hwHtml += mkGauge("CPU", cpu.utilization_pct || 0, 100, "%", "");
+    hwHtml += mkGauge("RAM", Number((ram.used_gb||0)).toFixed(1), Number(ram.total_gb||16), "GB", "");
+    hwHtml += '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">'
+      + pill(gpu.name || "GPU", "good")
+      + pill((gpu.temperature_c || "—") + " °C", Number(gpu.temperature_c||0) > 80 ? "bad" : "info")
+      + pill((gpu.power_w || "—") + " W", "info")
+      + '</div>';
+  } else {
+    hwHtml = '<div class="muted small">GPU unavailable</div>'
+      + cardMetaGrid([
+        { k: "CPU", v: formatPct(cpu.utilization_pct) },
+        { k: "RAM", v: num(ram.used_gb,"—") + " / " + num(ram.total_gb,"—") + " GB" },
+      ]);
+  }
+
+  $("runtime-panel").innerHTML = `
+    <div class="list">
+      <div class="item">
+        <div class="item-title">Current runtime state</div>
+        <div class="item-subtitle">${escapeHtml(status.active_step || "No active step reported")}</div>
+        ${cardMetaGrid([
+          { k: "Workspace", v: status.workspace || "—" },
+          { k: "Timestamp", v: formatShortDate(status.timestamp) },
+          { k: "Active log", v: status.active_log || "—" },
+        ])}
+      </div>
+      <div class="item">
+        <div class="item-title">Hardware snapshot${hasHwError ? ' <span style="color:var(--bad);font-size:.82rem">⚠ stale</span>' : ""}</div>
+        ${hwHtml}
+      </div>
+      <div class="item">
+        <div class="item-title">Queue steps</div>
+        <div class="pills">${queueSteps.map((step) => pill(step.n + ". " + step.label + " · " + step.status, toneForStatus(step.status))).join("") || pill("No queue steps visible", "warn")}</div>
+      </div>
+      <div class="item">
+        <div class="item-title">Progress markers</div>
+        ${cardMetaGrid([
+          { k: "Current method", v: progress.current_method || "—" },
+          { k: "Current seed", v: num(progress.current_seed, "—") },
+          { k: "Methods done", v: progress.methods_done !== undefined ? progress.methods_done + " / " + (progress.methods_total || "?") : "—" },
+          { k: "Seeds done", v: progress.seeds_done !== undefined ? progress.seeds_done + " / " + (progress.seeds_total || "?") : "—" },
+          { k: "Latest accuracies", v: Array.isArray(progress.latest_accs) && progress.latest_accs.length ? progress.latest_accs.join(", ") : "—" },
+          { k: "HPC forgetting", v: Array.isArray(progress.forgetting_so_far) && progress.forgetting_so_far.length ? progress.forgetting_so_far.map(function(v){ return Number(v).toFixed(4); }).join(", ") : "—" },
+        ])}
+        ${detailJson("Raw status payload", status)}
+      </div>
+    </div>
+  `;
+}
+
+function renderExperimentsOverview(){
+  const data = state.data.experiments || {};
+  const experiments = Array.isArray(data.experiments) ? data.experiments : [];
+  const hasError = !!state.errors.experiments;
+  $("experiments-meta").textContent = `${num(data.running || 0)} running · ${num(data.pending || 0)} pending · ${num(data.complete || 0)} complete`;
+  if (hasError) {
+    $("experiments-overview").innerHTML = `<div class="api-error-state">⚠ <strong>API Error</strong> — could not load experiments.<br><code>${escapeHtml(state.errors.experiments)}</code></div>`;
+    return;
+  }
+  if (!experiments.length) {
+    $("experiments-overview").innerHTML = `<div class="empty">Queue is empty — no active or pending experiments.</div>`;
+    return;
+  }
+  $("experiments-overview").innerHTML = `
+    <input class="filter-input" id="exp-filter" type="text" placeholder="Filter experiments by name, id, method, status…" oninput="filterExperiments(this.value)">
+    <div class="list" id="exp-list">
+      ${experiments.map((exp) => {
+        const statusTone = toneForStatus(exp.stage || exp.status);
+        const progress = exp.progress || {};
+        const methodsDone = Number(progress.methods_done || 0);
+        const methodsTotal = Number(progress.methods_total || 0);
+        const seedsDone = Number(progress.seeds_done || 0);
+        const seedsTotal = Number(progress.seeds_total || 0);
+        const pct = methodsTotal > 0 ? Math.round(methodsDone / methodsTotal * 100) : 0;
+        const isRunning = (exp.stage || exp.status) === "running";
+        const hpcForgetting = Array.isArray(progress.forgetting_so_far) ? progress.forgetting_so_far : [];
+        return `
+          <article class="item" data-exp-id="${escapeHtml(exp.id||"")}" data-exp-name="${escapeHtml((exp.name||exp.id||"").toLowerCase())}" data-exp-method="${escapeHtml((exp.method||"").toLowerCase())}" data-exp-status="${escapeHtml((exp.stage||exp.status||"").toLowerCase())}">
+            <div class="item-head">
+              <div>
+                <h3 class="item-title">${escapeHtml(exp.name || exp.id)}</h3>
+                <div class="item-meta">${escapeHtml(exp.id || "")}</div>
+              </div>
+              <div class="pills">
+                ${pill(exp.stage || exp.status || "unknown", statusTone)}
+                ${pill(exp.dataset || "no dataset", "info")}
+                ${exp.priority ? pill("pri " + exp.priority, "info") : ""}
+              </div>
+            </div>
+            <div class="item-subtitle">${escapeHtml((exp.context_why || exp.projected_outcome || "No rationale supplied.").substring(0, 160))}${(exp.context_why || exp.projected_outcome || "").length > 160 ? "…" : ""}</div>
+            ${isRunning && methodsTotal > 0 ? `
+              <div class="exp-progress">
+                <div class="exp-progress-label">
+                  <span>${methodsDone} / ${methodsTotal} method-runs · seed ${seedsDone}/${seedsTotal} done</span>
+                  <span>${pct}%</span>
+                </div>
+                <div class="exp-progress-track"><div class="exp-progress-fill" style="width:${pct}%"></div></div>
+                ${progress.current_method ? `<div style="margin-top:6px;font-size:.82rem;color:var(--muted)">Current: <strong style="color:var(--text)">${escapeHtml(progress.current_method)}</strong> · seed ${escapeHtml(String(progress.current_seed ?? "—"))}</div>` : ""}
+                ${hpcForgetting.length ? `<div style="margin-top:4px;font-size:.82rem;color:var(--muted)">HPC forgetting: ${hpcForgetting.map((v) => Number(v).toFixed(4)).join(", ")}</div>` : ""}
+              </div>
+            ` : ""}
+            ${cardMetaGrid([
+              { k: "Method", v: exp.method || "—" },
+              { k: "Runtime est", v: num(exp.est_h, "—") + " h" },
+              { k: "Seeds", v: formatList(exp.seeds) },
+              { k: "Frontier", v: exp.frontier_problem_id || "—" },
+              { k: "Hardware", v: exp.hardware_budget ? (exp.hardware_budget.vram_gb || "?") + "GB VRAM · " + (exp.hardware_budget.cpu_cores || "?") + "cores" : "—" },
+              { k: "Started", v: exp.started_at ? formatShortDate(exp.started_at) : "—" },
+            ])}
+            ${detailJson("Raw experiment record", exp)}
+          </article>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function filterExperiments(query){
+  const q = (query || "").toLowerCase().trim();
+  document.querySelectorAll("#exp-list article.item").forEach((item) => {
+    const name = (item.dataset.expName || "");
+    const id = (item.dataset.expId || "").toLowerCase();
+    const method = (item.dataset.expMethod || "");
+    const status = (item.dataset.expStatus || "");
+    item.style.display = (!q || name.includes(q) || id.includes(q) || method.includes(q) || status.includes(q)) ? "" : "none";
+  });
+}
+
+function renderProcesses(){
+  const processesPayload = state.data.processes || {};
+  const processes = Array.isArray(processesPayload.processes) ? processesPayload.processes : [];
+  $("process-meta").textContent = `${processes.length} visible process${processes.length === 1 ? "" : "es"}`;
+  if (state.errors.processes) {
+    $("processes-panel").innerHTML = `<div class="api-error-state">⚠ <strong>API Error</strong><br><code>${escapeHtml(state.errors.processes)}</code></div>`;
+    return;
+  }
+  if (!processes.length) {
+    $("processes-panel").innerHTML = `<div class="empty">No process data available from <code>/api/processes</code>.</div>`;
+    return;
+  }
+  $("processes-panel").innerHTML = `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>PID</th>
+            <th>Name</th>
+            <th>Status</th>
+            <th>Experiment</th>
+            <th>CPU</th>
+            <th>RAM</th>
+            <th>VRAM</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${processes.map((proc) => `
+            <tr>
+              <td class="mono">${escapeHtml(num(proc.pid, "—"))}</td>
+              <td>${escapeHtml(proc.cmd_short || proc.name || "python")}</td>
+              <td>${pill(proc.status || "unknown", toneForStatus(proc.status))}</td>
+              <td>${escapeHtml(proc.experiment_id || "—")}</td>
+              <td>${escapeHtml(formatPct(proc.cpu_pct))}</td>
+              <td>${escapeHtml(num(proc.ram_gb, "—"))} GB</td>
+              <td>${escapeHtml(num(proc.vram_gb, "—"))} GB</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+    ${detailJson("Raw process payload", processesPayload)}
+  `;
+}
+
+function renderLogSelector(){
+  const logs = Array.isArray(state.data.logs) ? state.data.logs : [];
+  const status = state.data.status || {};
+  const activeLabel = String(status.active_log || "").trim();
+  const logSelect = $("log-select");
+  const selected = state.selectedLog;
+  const hasSelected = logs.some((log) => log.name === selected);
+  const defaultValue = hasSelected ? selected : "";
+  logSelect.innerHTML = `<option value="">Active log (${escapeHtml(activeLabel || "default")})</option>` + logs.map((log) => `
+    <option value="${escapeHtml(log.name)}">${escapeHtml(log.name)} · ${escapeHtml(num(log.size_kb, "0"))} KB · ${escapeHtml(log.mtime || "")}</option>
+  `).join("");
+  logSelect.value = defaultValue;
+}
+
+function renderLogPanel(){
+  const payload = state.data.log || {};
+  $("log-meta").textContent = payload.label || "Active log";
+  const lines = Array.isArray(payload.lines) ? payload.lines : [];
+  if (!lines.length) {
+    $("log-panel").innerHTML = `<span class="log-ts">(no log lines returned)</span>`;
+    return;
+  }
+  const highlighted = lines.map((line) => {
+    const escaped = escapeHtml(line);
+    if (/error|failed|exception|traceback|refused/i.test(line)) return `<span class="log-error">${escaped}</span>`;
+    if (/warning|warn/i.test(line)) return `<span class="log-warn">${escaped}</span>`;
+    if (/^\[20\d\d-\d\d-\d\d/.test(line) || /^\d{4}-\d\d-\d\d/.test(line)) return `<span class="log-ts">${escaped}</span>`;
+    return escaped;
+  }).join("\n");
+  $("log-panel").innerHTML = highlighted;
+  // Auto-scroll to bottom
+  const box = $("log-panel");
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderProposalCard(proposal){
+  const id = slug(proposal.review_id);
+  return `
+    <article class="item">
+      <div class="item-head">
+        <div>
+          <h3 class="item-title">${escapeHtml(proposal.title || proposal.experiment_id)}</h3>
+          <div class="item-meta">${escapeHtml(proposal.experiment_id || "")}</div>
+        </div>
+        <div class="pills">
+          ${pill(proposal.status || "awaiting_human_review", toneForStatus(proposal.status))}
+          ${proposal.dataset ? pill(proposal.dataset, "info") : ""}
+        </div>
+      </div>
+      <div class="item-subtitle">${escapeHtml(proposal.why_now || proposal.experiment_goal || "No proposal rationale supplied.")}</div>
+      ${cardMetaGrid([
+        { k: "Frontier", v: proposal.frontier_problem_id || "—" },
+        { k: "Method", v: proposal.method || "—" },
+        { k: "Seeds", v: formatList(proposal.seeds) },
+        { k: "Priority score", v: num(proposal.priority_score, "—") },
+        { k: "Target paper", v: proposal.target_paper_id || "—" },
+        { k: "Status", v: proposal.status || "—" },
+      ])}
+      <div class="field">
+        <label for="review-notes-${id}">Human notes</label>
+        <textarea id="review-notes-${id}" placeholder="Add rationale, constraints, or approval conditions">${escapeHtml(proposal.human_notes || "")}</textarea>
+      </div>
+      <div class="actions">
+        <button class="btn good small" type="button" data-review-id="${escapeHtml(proposal.review_id)}" data-decision="approve">Approve</button>
+        <button class="btn good small" type="button" data-review-id="${escapeHtml(proposal.review_id)}" data-decision="approve_and_build_manifest" data-build-manifest="true">Approve + Manifest</button>
+        <button class="btn warn small" type="button" data-review-id="${escapeHtml(proposal.review_id)}" data-decision="request_revision">Request Revision</button>
+        <button class="btn warn small" type="button" data-review-id="${escapeHtml(proposal.review_id)}" data-decision="pause_this_frontier">Pause Frontier</button>
+        <button class="btn bad small" type="button" data-review-id="${escapeHtml(proposal.review_id)}" data-decision="reject">Reject</button>
+      </div>
+      ${proposal.manifest_path ? `<div class="badge-row">${pill("Manifest ready", "good")} <span class="muted small mono">${escapeHtml(proposal.manifest_path)}</span></div>` : ""}
+      ${detailJson("Raw proposal", proposal)}
+    </article>
+  `;
+}
+
+function renderQuestionCard(question){
+  const id = slug(question.question_id);
+  const options = Array.isArray(question.options) ? question.options : [];
+  return `
+    <article class="item">
+      <div class="item-head">
+        <div>
+          <h3 class="item-title">${escapeHtml(question.question_type || "question")}</h3>
+          <div class="item-meta">${escapeHtml(question.frontier_problem_id || question.component || "")}</div>
+        </div>
+        <div class="pills">${pill(question.status || "awaiting_human_answer", toneForStatus(question.status))}</div>
+      </div>
+      <div class="item-subtitle">${escapeHtml(question.question_text || "")}</div>
+      ${question.why_this_blocks_progress ? `<div class="item-meta">${escapeHtml(question.why_this_blocks_progress)}</div>` : ""}
+      <div class="field">
+        <label for="question-answer-${id}">Answer</label>
+        <select id="question-answer-${id}">
+          ${options.map((option) => `<option value="${escapeHtml(option)}" ${option === question.answer ? "selected" : ""}>${escapeHtml(option)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field">
+        <label for="question-notes-${id}">Answer notes</label>
+        <textarea id="question-notes-${id}" placeholder="Explain the decision or boundary">${escapeHtml(question.answer_notes || "")}</textarea>
+      </div>
+      <div class="actions">
+        <button class="btn good small" type="button" data-question-id="${escapeHtml(question.question_id)}">Submit Answer</button>
+      </div>
+      ${detailJson("Raw question", question)}
+    </article>
+  `;
+}
+
+function renderClaimCard(review){
+  const id = slug(review.review_id);
+  return `
+    <article class="item">
+      <div class="item-head">
+        <div>
+          <h3 class="item-title">${escapeHtml(review.title || review.paper_id)}</h3>
+          <div class="item-meta">${escapeHtml(review.paper_id || "")}</div>
+        </div>
+        <div class="pills">
+          ${pill(review.status || "awaiting_human_review", toneForStatus(review.status))}
+          ${review.truth_status ? pill(`Truth: ${review.truth_status}`, toneForStatus(review.truth_status)) : ""}
+        </div>
+      </div>
+      <div class="item-subtitle">${escapeHtml(review.recommendation || "No claim recommendation supplied.")}</div>
+      ${cardMetaGrid([
+        { k: "Readiness", v: review.readiness || "—" },
+        { k: "Scope", v: review.scope_status || "—" },
+        { k: "Frontier", v: review.frontier_problem_id || "—" },
+        { k: "Waiting experiments", v: formatList(review.waiting_for_experiments) },
+      ])}
+      <div class="field">
+        <label for="claim-notes-${id}">Human notes</label>
+        <textarea id="claim-notes-${id}" placeholder="Explain the scope or evidence standard">${escapeHtml(review.human_notes || "")}</textarea>
+      </div>
+      <div class="actions">
+        <button class="btn good small" type="button" data-review-id="${escapeHtml(review.review_id)}" data-decision="approve_claim_scope">Approve Claim Scope</button>
+        <button class="btn good small" type="button" data-review-id="${escapeHtml(review.review_id)}" data-decision="approve_paper_rewrite">Approve Paper Rewrite</button>
+        <button class="btn good small" type="button" data-review-id="${escapeHtml(review.review_id)}" data-decision="approve_figure_set">Approve Figure Set</button>
+        <button class="btn warn small" type="button" data-review-id="${escapeHtml(review.review_id)}" data-decision="hold_pending_more_evidence">Hold Pending Evidence</button>
+        <button class="btn bad small" type="button" data-review-id="${escapeHtml(review.review_id)}" data-decision="reject">Reject</button>
+      </div>
+      ${detailJson("Raw claim review", review)}
+    </article>
+  `;
+}
+
+const DONE_STATUSES = new Set([
+  "approved", "approved_manifest_ready", "approved_claim_scope",
+  "approved_paper_rewrite", "approved_figure_set",
+  "complete", "validated", "published", "rejected",
+]);
+function pendingReviewItems(review) {
+  const proposals = (Array.isArray(review.proposals) ? review.proposals : [])
+    .filter(p => !DONE_STATUSES.has(p.status));
+  const questions = (Array.isArray(review.questions) ? review.questions : [])
+    .filter(q => !DONE_STATUSES.has(q.status) && !q.answer);
+  const claims = (Array.isArray(review.claim_reviews) ? review.claim_reviews : [])
+    .filter(c => !DONE_STATUSES.has(c.status));
+  return { proposals, questions, claims };
+}
+
+function renderHumanReview(){
+  const review = state.data.humanReview || {};
+  const { proposals, questions, claims } = pendingReviewItems(review);
+  const history = Array.isArray(review.history) ? review.history : [];
+  $("proposal-meta").textContent = `${proposals.length} proposal${proposals.length === 1 ? "" : "s"}`;
+  $("question-meta").textContent = `${questions.length} question${questions.length === 1 ? "" : "s"}`;
+  $("claim-meta").textContent = `${claims.length} review${claims.length === 1 ? "" : "s"}`;
+  $("proposal-panel").innerHTML = proposals.length ? `<div class="list">${proposals.map(renderProposalCard).join("")}</div>` : `<div class="empty">No experiment proposals are waiting for review.</div>`;
+  $("question-panel").innerHTML = questions.length ? `<div class="list">${questions.map(renderQuestionCard).join("")}</div>` : `<div class="empty">No human questions are waiting right now.</div>`;
+  $("claim-panel").innerHTML = claims.length ? `<div class="list">${claims.map(renderClaimCard).join("")}</div>` : `<div class="empty">No claim or paper scope reviews are waiting right now.</div>`;
+  $("history-panel").innerHTML = history.length ? `
+    <div class="list">
+      ${history.slice().reverse().slice(0, 20).map((entry) => `
+        <div class="item">
+          <div class="item-head">
+            <div>
+              <div class="item-title">${escapeHtml(entry.kind || "review")} · ${escapeHtml(entry.review_id || entry.question_id || "")}</div>
+              <div class="item-meta">${escapeHtml(formatShortDate(entry.timestamp))}</div>
+            </div>
+            <div class="pills">${entry.decision ? pill(entry.decision, toneForStatus(entry.decision)) : entry.answer ? pill(entry.answer, "info") : ""}</div>
+          </div>
+          ${entry.human_notes ? `<div class="item-subtitle">${escapeHtml(entry.human_notes)}</div>` : entry.answer_notes ? `<div class="item-subtitle">${escapeHtml(entry.answer_notes)}</div>` : ""}
+          ${detailJson("Raw history entry", entry)}
+        </div>
+      `).join("")}
+    </div>
+  ` : `<div class="empty">No review history has been recorded yet.</div>`;
+}
+
+function renderReviewSummary(){
+  const review = state.data.humanReview || {};
+  const { proposals, questions, claims } = pendingReviewItems(review);
+  const total = proposals.length + questions.length + claims.length;
+  $("review-summary-meta").textContent = total + " item" + (total === 1 ? "" : "s") + " pending";
+  if (!total) {
+    $("review-summary-body").innerHTML = `<div class="warning good">No human review items waiting — queue is not blocked by reviews.</div>`;
+    return;
+  }
+  $("review-summary-body").innerHTML = `
+    <div class="review-widget">
+      ${proposals.length ? `<span class="review-chip" onclick="setTab('review')">${proposals.length} proposal${proposals.length>1?"s":""} →</span>` : ""}
+      ${questions.length ? `<span class="review-chip" onclick="setTab('review')">${questions.length} question${questions.length>1?"s":""} →</span>` : ""}
+      ${claims.length ? `<span class="review-chip" onclick="setTab('review')">${claims.length} claim review${claims.length>1?"s":""} →</span>` : ""}
+    </div>
+    <div class="muted small" style="margin-top:10px">Click any item to go to the Human Review tab.</div>
+  `;
+}
+
+function renderValidation(){
+  const validation = state.data.validation || {};
+  const summary = validation.summary || {};
+  const results = Array.isArray(validation.results) ? validation.results : [];
+  const hasError = !!state.errors.validation;
+  $("validation-meta").textContent = `${results.length} validation record${results.length === 1 ? "" : "s"}`;
+  if (hasError) {
+    $("validation-panel").innerHTML = `<div class="api-error-state">⚠ <strong>API Error</strong> — validation data unavailable.<br><code>${escapeHtml(state.errors.validation)}</code></div>`;
+    return;
+  }
+  $("validation-panel").innerHTML = `
+    <div class="summary-grid" style="margin-bottom:16px;">
+      <article class="summary-card"><div class="summary-label">Trusted</div><div class="summary-value">${escapeHtml(num(summary.trusted_publication_allowed, "0"))}</div><div class="summary-note">Publication allowed</div></article>
+      <article class="summary-card"><div class="summary-label">Limited Scope</div><div class="summary-value">${escapeHtml(num(summary.limited_scope, "0"))}</div><div class="summary-note">Visible but not strong enough</div></article>
+      <article class="summary-card"><div class="summary-label">Missing Env</div><div class="summary-value">${escapeHtml(num(summary.missing_env, "0"))}</div><div class="summary-note">No provenance snapshot</div></article>
+      <article class="summary-card"><div class="summary-label">Quarantined</div><div class="summary-value">${escapeHtml(num(summary.quarantined, "0"))}</div><div class="summary-note">Should not drive claims</div></article>
+    </div>
+    ${results.length ? `
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Logical name</th>
+              <th>Trust tier</th>
+              <th>Validation</th>
+              <th>Publication</th>
+              <th>Provenance</th>
+              <th>Issues</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${results.map((row) => `
+              <tr>
+                <td>${escapeHtml(row.logical_name || "—")}</td>
+                <td>${pill(row.trust?.trust_tier || "unknown", toneForStatus(row.trust?.trust_tier))}</td>
+                <td>${pill(row.trust?.validation_state || (row.ok ? "validated" : "issues"), toneForStatus(row.trust?.validation_state || ""))}</td>
+                <td>${row.trust?.publication_allowed ? pill("allowed", "good") : pill("not allowed", "warn")}</td>
+                <td>${escapeHtml(row.trust?.provenance_status || "—")}</td>
+                <td>${escapeHtml((row.issues || []).join("; ") || "—")}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    ` : `<div class="empty">No validation records returned.</div>`}
+    ${detailJson("Raw validation payload", validation)}
+  `;
+}
+
+function renderResults(){
+  const payload = state.data.results || {};
+  const rows = Array.isArray(payload.results) ? payload.results : [];
+  const hasError = !!state.errors.results;
+  $("results-meta").textContent = `${num(payload.running || 0)} running · ${num(payload.complete || 0)} complete · ${num(payload.breakthroughs || 0)} breakthrough`;
+  if (hasError) {
+    $("results-panel").innerHTML = `<div class="api-error-state">⚠ <strong>API Error</strong><br><code>${escapeHtml(state.errors.results)}</code></div>`;
+    return;
+  }
+  if (!rows.length) {
+    $("results-panel").innerHTML = `<div class="empty">No results were returned.</div>`;
+    return;
+  }
+  function sigClass(row){
+    const verdict = String(row.verdict || row.notes || "").toUpperCase();
+    if (verdict.includes("BREAKTHROUGH")) return "sig-breakthrough";
+    const p = Number(row.vs_ewc_p || row.p_val || 1);
+    if (p < 0.05) return "sig-significant";
+    if (p < 0.1) return "sig-trending";
+    return "sig-null";
+  }
+  function sigLabel(row){
+    const verdict = String(row.verdict || row.notes || "").toUpperCase();
+    if (verdict.includes("BREAKTHROUGH")) return "BREAKTHROUGH";
+    const p = Number(row.vs_ewc_p || row.p_val || 1);
+    const d = Number(row.vs_ewc_d || row.cohens_d || 0);
+    const delta = Number(row.mean_delta || 0);
+    if (p >= 1) return "";
+    const dir = delta < 0 ? "improvement" : "decline";
+    const sig = p < 0.05 ? "significant" : p < 0.1 ? "trending" : "not significant";
+    const sz = d > 0.8 ? "large" : d > 0.5 ? "medium" : "small";
+    return dir + " · " + sig + " (p=" + p.toFixed(3) + ", d=" + sz + ")";
+  }
+  // Sort: breakthroughs first, then by p-value
+  const sorted = [...rows].sort((a, b) => {
+    const aBreak = String(a.verdict||"").toUpperCase().includes("BREAKTHROUGH") ? 0 : 1;
+    const bBreak = String(b.verdict||"").toUpperCase().includes("BREAKTHROUGH") ? 0 : 1;
+    if (aBreak !== bBreak) return aBreak - bBreak;
+    return Number(a.vs_ewc_p || 1) - Number(b.vs_ewc_p || 1);
+  });
+  $("results-panel").innerHTML = `
+    <div class="list">
+      ${sorted.map((row) => {
+        const sc = sigClass(row);
+        const sl = sigLabel(row);
+        const delta = Number(row.mean_delta || 0);
+        return `
+          <article class="item">
+            <div class="item-head">
+              <div>
+                <h3 class="item-title">${escapeHtml(row.title || row.id || row.label || "result")}</h3>
+                <div class="item-meta">${escapeHtml(row.id || row.label || "")}</div>
+              </div>
+              <div class="pills">
+                ${pill(row.status || "unknown", toneForStatus(row.status))}
+                ${row.dataset ? pill(row.dataset, "info") : ""}
+              </div>
+            </div>
+            <div class="item-subtitle ${sc}">${escapeHtml(row.verdict || row.notes || "No result narrative.")}</div>
+            ${sl ? `<div class="metric-interp ${sc}">${escapeHtml(sl)}</div>` : ""}
+            ${cardMetaGrid([
+              { k: "Mean delta", v: row.mean_delta !== undefined ? (delta >= 0 ? "+" : "") + Number(row.mean_delta).toFixed(4) : "—" },
+              { k: "p-value", v: row.vs_ewc_p !== undefined ? Number(row.vs_ewc_p).toFixed(4) + (Number(row.vs_ewc_p) < 0.05 ? " ✓" : "") : "—" },
+              { k: "Effect size d", v: num(row.vs_ewc_d, "—") },
+              { k: "Forgetting", v: row.tcl_forgetting !== undefined ? Number(row.tcl_forgetting).toFixed(4) : "—" },
+              { k: "Accuracy", v: row.tcl_accuracy !== undefined ? (Number(row.tcl_accuracy)*100).toFixed(1) + "%" : "—" },
+              { k: "Completed", v: formatShortDate(row.completed_at) },
+            ])}
+            ${row.result_path ? `<div class="item-meta mono small">${escapeHtml(row.result_path)}</div>` : ""}
+            ${detailJson("Raw result row", row)}
+          </article>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderBreakthroughs(){
+  const payload = state.data.breakthroughs || {};
+  const rows = Array.isArray(payload.breakthroughs) ? payload.breakthroughs : [];
+  $("breakthrough-panel").innerHTML = rows.length ? `
+    <div class="list">
+      ${rows.map((row) => `
+        <article class="item">
+          <div class="item-head">
+            <div>
+              <h3 class="item-title">${escapeHtml(row.name || row.project_id || "breakthrough")}</h3>
+              <div class="item-meta">${escapeHtml(row.source || "")}</div>
+            </div>
+            <div class="pills">
+              ${pill(row.verdict || "breakthrough", "good")}
+              ${pill(row.evidence_strength || "moderate", toneForStatus(row.evidence_strength))}
+            </div>
+          </div>
+          <div class="item-subtitle">${escapeHtml(row.summary || row.notes || "")}</div>
+          ${cardMetaGrid([
+            { k: "Dataset", v: row.dataset || "—" },
+            { k: "Mean delta", v: num(row.mean_delta, "—") },
+            { k: "p-value", v: num(row.p_val, "—") },
+            { k: "Effect size", v: num(row.cohens_d, "—") },
+            { k: "Found at", v: row.found_at || "—" },
+            { k: "Project", v: row.project_id || "—" },
+          ])}
+          ${(row.serve_pdf || row.serve_tex) ? `<div class="badge-row">${row.serve_pdf ? `<a href="/serve/paper/${encodeURI(row.serve_pdf)}" target="_blank" rel="noopener">Open PDF</a>` : ""}</div>` : ""}
+          ${detailJson("Raw breakthrough", row)}
+        </article>
+      `).join("")}
+    </div>
+  ` : `<div class="empty">No breakthrough rows were returned.</div>`;
+}
+
+function renderResearch(){
+  const director = state.data.researchDirector || {};
+  const activePaths = Array.isArray(director.active_research_paths) ? director.active_research_paths : [];
+  const frontier = Array.isArray(state.data.frontier) ? state.data.frontier : [];
+  const registry = Array.isArray(state.data.registry) ? state.data.registry : [];
+  const scheduler = state.data.scheduler || {};
+  $("director-meta").textContent = `${activePaths.length} active path${activePaths.length === 1 ? "" : "s"}`;
+  $("frontier-meta").textContent = `${frontier.length} frontier problem${frontier.length === 1 ? "" : "s"}`;
+  $("registry-meta").textContent = `${registry.length} project${registry.length === 1 ? "" : "s"}`;
+
+  $("director-panel").innerHTML = activePaths.length ? `<div class="list">${activePaths.map((path) => `
+    <article class="item">
+      <div class="item-head">
+        <div>
+          <h3 class="item-title">${escapeHtml(path.title || path.target_frontier_title || path.path_id)}</h3>
+          <div class="item-meta">${escapeHtml(path.domain_label || path.domain_id || "")}</div>
+        </div>
+        <div class="pills">
+          ${pill(path.status || "unknown", toneForStatus(path.status))}
+          ${pill(`priority ${num(path.priority_score, "0")}`, "info")}
+        </div>
+      </div>
+      <div class="item-subtitle">${escapeHtml(path.problem_statement || path.why_this_now || "")}</div>
+      ${cardMetaGrid([
+        { k: "Frontier", v: path.target_frontier_problem_id || "—" },
+        { k: "Target paper", v: path.target_paper_id || "—" },
+        { k: "Required experiments", v: formatList(path.required_experiment_ids) },
+        { k: "Allowed topics", v: formatList(path.allowed_topics) },
+        { k: "Blocked topics", v: formatList(path.blocked_topics) },
+        { k: "Verified sources", v: num(path.verified_source_count, "0") },
+      ])}
+      ${detailJson("Raw research path", path)}
+    </article>
+  `).join("")}</div>` : `<div class="empty">No active research paths were returned.</div>`;
+
+  $("frontier-panel").innerHTML = frontier.length ? `<div class="list">${frontier.map((row) => `
+    <article class="item">
+      <div class="item-head">
+        <div>
+          <h3 class="item-title">${escapeHtml(row.title || row.industry_problem_title || row.id)}</h3>
+          <div class="item-meta">${escapeHtml(row.id || "")}</div>
+        </div>
+        <div class="pills">
+          ${pill(row.status || "unknown", toneForStatus(row.status))}
+          ${pill(`priority ${num(row.priority_score, "0")}`, "info")}
+        </div>
+      </div>
+      <div class="item-subtitle">${escapeHtml(row.global_problem_statement || row.description || "")}</div>
+      ${cardMetaGrid([
+        { k: "Domain", v: row.domain || "—" },
+        { k: "Evidence strength", v: row.evidence_strength || "—" },
+        { k: "Linked papers", v: formatList(row.linked_paper_ids || row.papers_linked) },
+        { k: "Linked experiments", v: formatList(row.linked_experiment_ids || row.experiments_linked) },
+        { k: "Baselines", v: formatList(row.external_baselines) },
+        { k: "Next action", v: row.next_action || "—" },
+      ])}
+      ${detailJson("Raw frontier problem", row)}
+    </article>
+  `).join("")}</div>` : `<div class="empty">No frontier problem payload was returned.</div>`;
+
+  $("registry-panel").innerHTML = registry.length ? `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Project</th>
+            <th>Status</th>
+            <th>Paper status</th>
+            <th>Truth</th>
+            <th>Waiting for</th>
+            <th>PDF</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${registry.map((row) => `
+            <tr>
+              <td><div>${escapeHtml(row.name || row.id)}</div><div class="muted small mono">${escapeHtml(row.id || "")}</div></td>
+              <td>${pill(row.status || "unknown", toneForStatus(row.status))}</td>
+              <td>${pill(row.paper_status || row.readiness || "unknown", toneForStatus(row.paper_status || row.readiness))}</td>
+              <td>${escapeHtml(row.director_truth_status || "—")}</td>
+              <td>${escapeHtml(formatList(row.waiting_for_experiment_ids))}</td>
+              <td>${row.has_pdf ? pill("pdf present", "warn") : pill("no pdf", "info")}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+    ${detailJson("Raw registry payload", registry)}
+  ` : `<div class="empty">No registry projects were returned.</div>`;
+
+  const holdReasons = Array.isArray(scheduler.hold_reasons) ? scheduler.hold_reasons : [];
+  $("scheduler-panel").innerHTML = `
+    <div class="list">
+      <div class="item">
+        <div class="item-title">Scheduler verdict</div>
+        <div class="pills">
+          ${pill(scheduler.can_start ? "can start" : "cannot start", scheduler.can_start ? "good" : "warn")}
+          ${scheduler.timestamp ? pill(formatShortDate(scheduler.timestamp), "info") : ""}
+        </div>
+        <div class="item-subtitle">${escapeHtml(scheduler.rationale || "No scheduler rationale returned.")}</div>
+      </div>
+      <div class="item">
+        <div class="item-title">Hold reasons</div>
+        ${holdReasons.length ? `<div class="list">${holdReasons.map((reason) => `
+          <div class="item" style="padding:12px;">
+            <div class="item-title">${escapeHtml(reason.experiment_name || reason.experiment_id || "hold")}</div>
+            <div class="item-meta mono">${escapeHtml(reason.experiment_id || "")}</div>
+            <div class="item-subtitle">${escapeHtml(reason.reason || "")}</div>
+          </div>
+        `).join("")}</div>` : `<div class="empty">No explicit hold reasons returned.</div>`}
+      </div>
+      ${detailJson("Raw scheduler payload", scheduler)}
+    </div>
+  `;
+}
+
+function safePaperDisplayStatus(paper){
+  const waiting = Array.isArray(paper.waiting_for_experiments) ? paper.waiting_for_experiments : [];
+  if (waiting.length) return "blocked";
+  if (paper.truth_status === "weak" && paper.has_pdf) return "draft_only";
+  return paper.status || paper.plan_status || "unknown";
+}
+
+function renderPapers(){
+  const papers = Array.isArray(state.data.papers) ? state.data.papers : [];
+  $("papers-meta").textContent = `${papers.length} paper${papers.length === 1 ? "" : "s"}`;
+  $("papers-panel").innerHTML = papers.length ? `<div class="list">${papers.map((paper) => {
+    const displayStatus = safePaperDisplayStatus(paper);
+    const id = slug(paper.project_id);
+    return `
+      <article class="item">
+        <div class="item-head">
+          <div>
+            <h3 class="item-title">${escapeHtml(paper.title || paper.project_id)}</h3>
+            <div class="item-meta mono">${escapeHtml(paper.project_id || "")}</div>
+          </div>
+          <div class="pills">
+            ${pill(displayStatus, toneForStatus(displayStatus))}
+            ${paper.truth_status ? pill(`truth ${paper.truth_status}`, toneForStatus(paper.truth_status)) : ""}
+          </div>
+        </div>
+        <div class="item-subtitle">${escapeHtml(paper.recommendation || paper.revision_reason || paper.progress_label || "No paper note supplied.")}</div>
+        ${cardMetaGrid([
+          { k: "Readiness", v: paper.readiness || "—" },
+          { k: "Plan status", v: paper.plan_status || "—" },
+          { k: "Waiting experiments", v: formatList(paper.waiting_for_experiments) },
+          { k: "Progress", v: paper.progress_label || "—" },
+          { k: "Generated", v: formatShortDate(paper.generated_at) },
+          { k: "Compile status", v: paper.compile_status || "—" },
+        ])}
+        <div class="badge-row">
+          ${paper.serve_pdf ? `<a href="/serve/paper/${encodeURI(paper.serve_pdf)}" target="_blank" rel="noopener">Open PDF</a>` : ""}
+          ${paper.serve_tex ? `<a href="/serve/paper/${encodeURI(paper.serve_tex)}" target="_blank" rel="noopener">Open TeX</a>` : ""}
+        </div>
+        <div class="field">
+          <label for="paper-reason-${id}">Return-to-author reason</label>
+          <textarea id="paper-reason-${id}" placeholder="Explain what needs revising or re-grounding">${escapeHtml(paper.revision_reason || "")}</textarea>
+        </div>
+        <div class="actions">
+          <button class="btn warn small" type="button" data-paper-id="${escapeHtml(paper.project_id)}">Return To Author</button>
+        </div>
+        ${detailJson("Raw paper record", paper)}
+      </article>
+    `;
+  }).join("")}</div>` : `<div class="empty">No papers were returned.</div>`;
+
+  const author = state.data.author || {};
+  const queue = Array.isArray(author.paper_queue) ? author.paper_queue : [];
+  const activity = Array.isArray(author.activity_log) ? author.activity_log : [];
+  $("author-panel").innerHTML = `
+    <div class="list">
+      <div class="item">
+        <div class="item-title">Current author focus</div>
+        <div class="item-subtitle">${escapeHtml(author.current_paper?.project_id || "No current paper reported")}</div>
+        ${cardMetaGrid([
+          { k: "Queue length", v: num(queue.length, "0") },
+          { k: "Active paths", v: Array.isArray(author.active_research_paths) ? author.active_research_paths.map((item) => item.path_id || item.status || "").join(", ") : "—" },
+          { k: "Last update", v: formatShortDate(author.updated_at) },
+        ])}
+      </div>
+      <div class="item">
+        <div class="item-title">Recent author activity</div>
+        ${activity.length ? `<div class="list">${activity.slice().reverse().slice(0, 12).map((entry) => `
+          <div class="item" style="padding:12px;">
+            <div class="item-head">
+              <div>
+                <div class="item-title">${escapeHtml(entry.action || "activity")} · ${escapeHtml(entry.project_id || entry.section || "")}</div>
+                <div class="item-meta">${escapeHtml(formatShortDate(entry.timestamp))}</div>
+              </div>
+            </div>
+            ${entry.reason ? `<div class="item-subtitle">${escapeHtml(entry.reason)}</div>` : ""}
+          </div>
+        `).join("")}</div>` : `<div class="empty">No recent author activity entries returned.</div>`}
+      </div>
+      ${detailJson("Raw author payload", author)}
+    </div>
+  `;
+}
+
+const WEBSITE_REVIEW_CHECKS = [
+  "All claims are directly supported by experimental results in this paper",
+  "Numbers, tables and figures are accurate and match the underlying data",
+  "No overclaiming — conclusions do not exceed what the evidence shows",
+  "Null results and limitations are stated honestly",
+  "References and citations are correct",
+  "Abstract accurately represents the paper body",
+];
+
+function renderWebsitePapers(){
+  const wp = state.data.websitePapers || {};
+  const staged = Array.isArray(wp.staged) ? wp.staged : [];
+  const live   = Array.isArray(wp.live)   ? wp.live   : [];
+
+  $("website-papers-meta").textContent =
+    `${staged.length} staged · ${live.length} live`;
+
+  // ── Staged panel ──
+  $("website-staged-panel").innerHTML = staged.length ? staged.map((p) => `
+    <article class="item" style="margin-bottom:.75rem;">
+      <div class="item-head">
+        <div>
+          <h3 class="item-title">${escapeHtml(p.title || p.id)}</h3>
+          <div class="item-meta mono">${escapeHtml(p.id || "")}</div>
+        </div>
+        ${pill("staged", "warn")}
+      </div>
+      <div class="item-subtitle">${escapeHtml((p.authors||[]).join(", "))} &mdash; ${escapeHtml(p.staged_on || p.date || "")}</div>
+      ${cardMetaGrid([
+        { k: "Area",   v: p.area   || "—" },
+        { k: "Status", v: p.status || "—" },
+        { k: "PDF",    v: p.pdf    || "—" },
+      ])}
+      <details style="margin:.6rem 0;">
+        <summary style="cursor:pointer;font-size:.8rem;color:var(--accent,#3dd5a0);">Review checklist</summary>
+        <ul style="margin:.5rem 0 0 1rem;font-size:.8rem;line-height:1.7;color:var(--muted,#8a8a9a);">
+          ${WEBSITE_REVIEW_CHECKS.map((c) => `<li>${escapeHtml(c)}</li>`).join("")}
+        </ul>
+      </details>
+      <div class="actions">
+        <button class="btn good small" type="button"
+          data-approve-paper="${escapeHtml(p.id)}"
+          data-approve-title="${escapeHtml(p.title || p.id)}">
+          Approve &amp; Publish
+        </button>
+      </div>
+    </article>
+  `).join("") : `<div class="empty">No papers are staged for review.</div>`;
+
+  // ── Live panel ──
+  $("website-live-panel").innerHTML = live.length ? live.map((p) => `
+    <article class="item" style="margin-bottom:.75rem;">
+      <div class="item-head">
+        <div>
+          <h3 class="item-title">${escapeHtml(p.title || p.id)}</h3>
+          <div class="item-meta mono">${escapeHtml(p.id || "")}</div>
+        </div>
+        ${pill(p.status || "live", "good")}
+      </div>
+      <div class="item-subtitle">${escapeHtml((p.authors||[]).join(", "))} &mdash; ${escapeHtml(p.date || "")}</div>
+      ${cardMetaGrid([
+        { k: "Area",  v: p.area  || "—" },
+        { k: "Venue", v: p.venue || "—" },
+      ])}
+      <div class="badge-row">
+        ${p.pdf ? `<a href="https://tar-research-lab.com/${escapeHtml(p.pdf)}" target="_blank" rel="noopener">View on website</a>` : ""}
+      </div>
+    </article>
+  `).join("") : `<div class="empty">No papers are live yet.</div>`;
+}
+
+// ── Approve & Publish click handler ──────────────────────────────────────────
+document.addEventListener("click", async function(e){
+  const btn = e.target.closest("[data-approve-paper]");
+  if (!btn) return;
+  const paperId = btn.dataset.approvePaper;
+  const title   = btn.dataset.approveTitle;
+  const checklist = WEBSITE_REVIEW_CHECKS.map((c, i) => `${i+1}. ${c}`).join("\n");
+  const confirmed = confirm(
+    `Approve "${title}" for publication?\n\n` +
+    `Confirm all of the following are satisfied:\n\n${checklist}\n\n` +
+    `Click OK only if all checks pass.`
+  );
+  if (!confirmed) return;
+  btn.disabled = true;
+  btn.textContent = "Publishing…";
+  try {
+    const res = await fetch(`/api/website/approve/${encodeURIComponent(paperId)}`, { method: "POST" });
+    const data = await res.json();
+    if (data.ok){
+      btn.textContent = "Published ✓";
+      btn.classList.remove("good");
+      setTimeout(() => fetchAll(), 1500);
+    } else {
+      btn.disabled = false;
+      btn.textContent = "Approve & Publish";
+      alert(`Approval failed: ${data.error || "unknown error"}`);
+    }
+  } catch(err){
+    btn.disabled = false;
+    btn.textContent = "Approve & Publish";
+    alert(`Network error: ${err}`);
+  }
+});
+
+function renderRaw(){
+  $("raw-panel").innerHTML = rawOrder.map((key) => `
+    <article class="raw-card">
+      <h3>${escapeHtml(key)}</h3>
+      ${state.errors[key] ? `<div class="warning bad">${escapeHtml(state.errors[key])}</div>` : ""}
+      <pre>${escapeHtml(pretty(state.data[key] ?? null))}</pre>
+    </article>
+  `).join("");
+}
+
+// ── TAR Intelligence ──────────────────────────────────────────────────────────
+let _narrationPollHandle = null;
+
+function _fmtAgo(epochMs){
+  const s = Math.round((Date.now() - epochMs) / 1000);
+  if (s < 5) return "just now";
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
+}
+
+async function pollNarration(force = false){
+  const bubble = $("narration-bubble");
+  const textEl = $("narration-text");
+  const focusEl = $("narration-focus");
+  const tsEl = $("narration-ts");
+  const metaEl = $("narration-meta");
+  if (!bubble) return;
+  try {
+    const d = await fetchJson("/api/narrate" + (force ? "?refresh=1" : ""));
+    bubble.classList.remove("loading");
+    if (d.error){
+      textEl.innerHTML = `<span class="narration-error-note">⚠ Claude call failed — showing last cached text.</span><br><br>${escapeHtml(d.text || "")}`;
+    } else {
+      textEl.textContent = d.text || "";
+    }
+    focusEl.textContent = d.focus && d.focus !== "idle" ? `Currently: ${d.focus}` : "";
+    tsEl.textContent = d.ts ? `Updated ${_fmtAgo(d.ts * 1000)}${d.cached ? " (cached)" : ""}` : "";
+    if (metaEl) metaEl.textContent = d.cached ? "cached" : "live from Claude";
+    renderConfidenceMeter(d);
+    renderSeedTrail(d.seed_trail || [], d.seeds_total || 10, d.threshold || 0.1161);
+  } catch(e){
+    if (textEl) textEl.innerHTML = `<span class="narration-error-note">⚠ /api/narrate unreachable. Restart the dashboard server to enable this feature.</span>`;
+    if (metaEl) metaEl.textContent = "unavailable";
+  }
+}
+
+function renderConfidenceMeter(d){
+  const pctEl = $("confidence-pct");
+  const fillEl = $("confidence-fill");
+  const pct = d.confidence ?? 0;
+  if (pctEl){
+    pctEl.textContent = pct + "%";
+    pctEl.className = "confidence-pct" + (pct < 70 ? " uncertain" : "");
+  }
+  if (fillEl){
+    fillEl.style.width = pct + "%";
+    fillEl.className = "confidence-fill " + (pct >= 80 ? "high" : pct >= 50 ? "mid" : "low");
+  }
+}
+
+function renderSeedTrail(trail, total, threshold){
+  const el = $("seed-trail");
+  if (!el) return;
+  let html = "";
+  for (let i = 0; i < total; i++){
+    if (i < trail.length){
+      const f = trail[i];
+      const cls = f < threshold * 0.55 ? "pass" : f < threshold ? "warn" : "fail";
+      html += `<div class="seed-pip ${cls}" title="Seed ${i}: forgetting=${f.toFixed(4)}"></div>`;
+    } else if (i === trail.length){
+      html += `<div class="seed-pip running" title="Seed ${i}: currently running"></div>`;
+    } else {
+      html += `<div class="seed-pip pending" title="Seed ${i}: pending"></div>`;
+    }
+  }
+  html += `<span class="small muted" style="margin-left:6px">${trail.length}/${total} done</span>`;
+  el.innerHTML = html;
+}
+
+const METHOD_LABELS = {
+  sgd_baseline: "SGD Baseline",
+  ewc_lambda_100: "EWC (λ=100)",
+  ewc_lambda_1000: "EWC (λ=1000)",
+  si_c_0_01: "SI (c=0.01)",
+  tcl_baseline: "TCL Baseline",
+  high_penalty_conservative: "HPC — TAR's hypothesis",
+};
+
+function renderReplication(){
+  const panel = $("rep-panel");
+  const metaEl = $("rep-meta");
+  if (!panel) return;
+  const d = state.data.replication || {};
+  if (!d.available){
+    panel.innerHTML = `<div class="empty">Replication observability data not yet available.</div>`;
+    return;
+  }
+  const methods = Object.keys(METHOD_LABELS);
+  const baselineF = d.methods["tcl_baseline"] ? d.methods["tcl_baseline"].forgetting_mean : null;
+  const ready = methods.filter(m => d.methods[m]).length;
+  if (metaEl) metaEl.textContent = `${ready}/6 methods with data`;
+
+  let rows = "";
+  for (const key of methods){
+    const m = d.methods[key];
+    if (!m) continue;
+    const isHpc = key === "high_penalty_conservative";
+    const fmean = m.forgetting_mean != null ? m.forgetting_mean.toFixed(4) : "—";
+    const fstd = m.forgetting_std != null ? `<span class="small muted"> ±${m.forgetting_std.toFixed(4)}</span>` : "";
+    const acc = m.acc_mean != null ? (m.acc_mean * 100).toFixed(1) + "%" : "—";
+    const jaf = m.jaf_mean != null ? m.jaf_mean.toFixed(3) : "—";
+    let deltaHtml = "<span class='muted'>—</span>";
+    if (baselineF !== null && m.forgetting_mean != null && key !== "tcl_baseline"){
+      const delta = m.forgetting_mean - baselineF;
+      const cls = delta < 0 ? "rep-better" : "rep-worse";
+      deltaHtml = `<span class="${cls}">${delta >= 0 ? "+" : ""}${delta.toFixed(4)}</span>`;
+    }
+    const uid = `rep-${key.replace(/_/g, "-")}`;
+    const seedCards = (m.seeds || []).map(s => `
+      <div class="rep-seed-card">
+        <div class="sc-head">Seed ${s.seed}</div>
+        <div class="sc-row"><span>Forgetting</span><span class="sc-val">${s.forgetting != null ? s.forgetting.toFixed(4) : "—"}</span></div>
+        <div class="sc-row"><span>Accuracy</span><span class="sc-val">${s.acc != null ? (s.acc * 100).toFixed(1) + "%" : "—"}</span></div>
+        <div class="sc-row"><span>JAF</span><span class="sc-val">${s.jaf != null ? s.jaf.toFixed(3) : "—"}</span></div>
+      </div>`).join("");
+    rows += `
+      <tr class="rep-row" data-uid="${uid}" onclick="toggleRepRow('${uid}')">
+        <td class="rep-method-name${isHpc ? " hpc" : ""}">${escapeHtml(METHOD_LABELS[key] || key)}<span class="rep-caret">▶</span></td>
+        <td>${m.n}</td>
+        <td class="rep-forgetting">${fmean}${fstd}</td>
+        <td>${deltaHtml}</td>
+        <td>${acc}</td>
+        <td>${jaf}</td>
+      </tr>
+      <tr class="rep-expand-row" id="${uid}-expand">
+        <td colspan="6"><div class="rep-expand-inner">${seedCards || "<span class='muted small'>No seed data yet.</span>"}</div></td>
+      </tr>`;
+  }
+  panel.innerHTML = `
+    <table class="rep-table">
+      <thead><tr>
+        <th>Method</th><th>n</th><th>Forgetting ↓</th><th>Δ vs TCL</th><th>Accuracy ↑</th><th>JAF ↑</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function toggleRepRow(uid){
+  const row = document.querySelector(`[data-uid="${uid}"]`);
+  const expand = $(`${uid}-expand`);
+  if (!row || !expand) return;
+  const open = expand.classList.contains("open");
+  expand.classList.toggle("open", !open);
+  row.classList.toggle("expanded", !open);
+}
+
+function renderWhatsNext(){
+  const panel = $("whats-next-panel");
+  if (!panel) return;
+  const d = state.data.autonomous || {};
+  const hyps = d.hypotheses || [];
+  if (!hyps.length){
+    panel.innerHTML = `<div class="empty">No autonomous hypotheses registered.</div>`;
+    return;
+  }
+  panel.innerHTML = `<div class="next-grid">${hyps.map(h => {
+    const sCls = h.status === "complete" ? "complete" : h.status === "partial" ? "partial" : "pending";
+    const sLabel = h.status === "complete"
+      ? (h.verdict || "complete")
+      : h.status === "partial"
+      ? `partial · ${h.seeds_done} seed${h.seeds_done === 1 ? "" : "s"}`
+      : "pending";
+    return `<div class="next-hyp">
+      <div style="flex:1">
+        <div class="next-hyp-name">${escapeHtml(h.name || "")}</div>
+        ${h.prediction ? `<div class="next-hyp-pred">${escapeHtml(h.prediction)}</div>` : ""}
+      </div>
+      <span class="next-hyp-status ${sCls}">${escapeHtml(sLabel)}</span>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function startNarrationPolling(){
+  if (_narrationPollHandle) clearInterval(_narrationPollHandle);
+  pollNarration();
+  _narrationPollHandle = setInterval(() => pollNarration(), 90000);
+}
+
+function updateTabBadges(){
+  const review = state.data.humanReview || {};
+  const experiments = state.data.experiments || {};
+  const { proposals: _rp, questions: _rq, claims: _rc } = pendingReviewItems(review);
+  const reviewCount = _rp.length + _rq.length + _rc.length;
+  const runningCount = Number(experiments.running || 0);
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    // remove old badge
+    const old = btn.querySelector(".tab-badge");
+    if (old) old.remove();
+    const tab = btn.dataset.tab;
+    let badge = null;
+    if (tab === "overview" && runningCount > 0) {
+      badge = document.createElement("span");
+      badge.className = "tab-badge good";
+      badge.textContent = runningCount + " running";
+    } else if (tab === "review" && reviewCount > 0) {
+      badge = document.createElement("span");
+      badge.className = "tab-badge warn";
+      badge.textContent = reviewCount;
+    }
+    if (badge) btn.appendChild(badge);
+  });
+}
+
+function renderAll(){
+  renderHero();
+  renderSummary();
+  renderWarnings();
+  renderRuntime();
+  renderExperimentsOverview();
+  renderReviewSummary();
+  renderProcesses();
+  renderLogSelector();
+  renderLogPanel();
+  renderHumanReview();
+  renderValidation();
+  renderResults();
+  renderBreakthroughs();
+  renderResearch();
+  renderPapers();
+  renderWebsitePapers();
+  renderReplication();
+  renderWhatsNext();
+  renderRaw();
+}
+
+async function handleReviewDecision(button){
+  const reviewId = button.dataset.reviewId;
+  const decision = button.dataset.decision;
+  const buildManifest = button.dataset.buildManifest === "true";
+  const notesBox = $(`review-notes-${slug(reviewId)}`) || $(`claim-notes-${slug(reviewId)}`);
+  const humanNotes = notesBox ? notesBox.value : "";
+  button.disabled = true;
+  try {
+    await fetchJson(`/api/human_review/decision/${encodeURIComponent(reviewId)}`, {
+      method: "POST",
+      body: JSON.stringify({
+        decision,
+        human_notes: humanNotes,
+        build_manifest_authorised: buildManifest,
+      }),
+    });
+    await loadAll();
+  } catch (error) {
+    alert(`Review action failed: ${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function handleQuestionAnswer(button){
+  const questionId = button.dataset.questionId;
+  const select = $(`question-answer-${slug(questionId)}`);
+  const notes = $(`question-notes-${slug(questionId)}`);
+  button.disabled = true;
+  try {
+    await fetchJson(`/api/human_review/question/${encodeURIComponent(questionId)}/answer`, {
+      method: "POST",
+      body: JSON.stringify({
+        answer: select ? select.value : "",
+        answer_notes: notes ? notes.value : "",
+      }),
+    });
+    await loadAll();
+  } catch (error) {
+    alert(`Question answer failed: ${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function handleReturnToAuthor(button){
+  const paperId = button.dataset.paperId;
+  const reasonBox = $(`paper-reason-${slug(paperId)}`);
+  button.disabled = true;
+  try {
+    await fetchJson(`/api/paper/return-to-author/${encodeURIComponent(paperId)}`, {
+      method: "POST",
+      body: JSON.stringify({
+        reason: reasonBox ? reasonBox.value : "",
+      }),
+    });
+    await loadAll();
+  } catch (error) {
+    alert(`Return-to-author failed: ${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function setTab(tab){
+  state.selectedTab = tab;
+  document.querySelectorAll(".tab-btn").forEach((button) => {
+    button.classList.toggle("active", button.dataset.tab === tab);
+  });
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    panel.classList.toggle("active", panel.id === `tab-${tab}`);
+  });
+}
+
+function resetAutoRefresh(){
+  if (state.autoRefreshHandle) {
+    clearInterval(state.autoRefreshHandle);
+    state.autoRefreshHandle = null;
+  }
+  if ($("auto-refresh").checked) {
+    state.autoRefreshHandle = setInterval(() => {
+      loadAll();
+    }, 20000);
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  if (target.matches(".tab-btn")) {
+    setTab(target.dataset.tab);
+    return;
+  }
+  if (target.dataset.reviewId && target.dataset.decision) {
+    handleReviewDecision(target);
+    return;
+  }
+  if (target.dataset.questionId) {
+    handleQuestionAnswer(target);
+    return;
+  }
+  if (target.dataset.paperId) {
+    handleReturnToAuthor(target);
+    return;
+  }
+});
+
+$("refresh-btn").addEventListener("click", () => loadAll());
+$("deep-refresh-btn").addEventListener("click", () => loadAll({ deep: true }));
+$("auto-refresh").addEventListener("change", resetAutoRefresh);
+$("reload-log-btn").addEventListener("click", async () => {
+  try {
+    state.data.log = await fetchJson(endpointBuilders.log());
+    renderLogPanel();
+    renderRaw();
+  } catch (error) {
+    alert(`Log reload failed: ${error.message}`);
+  }
+});
+$("log-select").addEventListener("change", async (event) => {
+  state.selectedLog = event.target.value || "";
+  try {
+    state.data.log = await fetchJson(endpointBuilders.log());
+    renderLogPanel();
+    renderRaw();
+  } catch (error) {
+    alert(`Log switch failed: ${error.message}`);
+  }
+});
+
+document.addEventListener("click", (e) => {
+  if (e.target && e.target.id === "narration-refresh-btn") {
+    e.target.textContent = "↻ Refreshing…";
+    e.target.disabled = true;
+    pollNarration(true).finally(() => {
+      e.target.textContent = "↻ Refresh";
+      e.target.disabled = false;
+    });
+  }
+});
+
+setTab("overview");
+resetAutoRefresh();
+loadAll();
+startNarrationPolling();
+</script>
+</body>
+</html>
