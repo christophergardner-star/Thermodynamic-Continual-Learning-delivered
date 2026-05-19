@@ -561,7 +561,17 @@ class ExperimentOrchestrator:
                 "This run appears to have stalled after partial progress. "
                 "TAR should resume or restart it from the last safe boundary."
             )
-        if context.get("projected_outcome") != projected:
+        # Do not overwrite locked spec context fields — if this spec is the active
+        # validation suite spec, projected_outcome is a locked field and writing it
+        # causes drift-check failures at next execution.
+        try:
+            from tar_validation_mode import load_state as _load_vs
+            _lock = (_load_vs(self.workspace) or {}).get("validation_suite_lock") or {}
+            _locked_spec_id = str(_lock.get("spec", {}).get("id", "") or "")
+            _is_locked = bool(_locked_spec_id and spec.id == _locked_spec_id)
+        except Exception:
+            _is_locked = False
+        if not _is_locked and context.get("projected_outcome") != projected:
             context["projected_outcome"] = projected
             spec.context = context
             changed = True
