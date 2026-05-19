@@ -439,7 +439,26 @@ class TARScheduler:
         if hw.gpu_temp_c > 75:
             parts.append(f"Note: GPU temp {hw.gpu_temp_c}°C — monitoring.")
 
-        return " ".join(parts)
+        template = " ".join(parts)
+        try:
+            from tar_lab.llm_bridge import narrate_scheduler_decision
+            narrated = narrate_scheduler_decision(
+                self.workspace,
+                gpu_name=hw.gpu_name,
+                gpu_util_pct=hw.gpu_util_pct,
+                vram_used_gb=used_vram,
+                vram_total_gb=hw.vram_total_gb,
+                gpu_temp_c=hw.gpu_temp_c,
+                running_names=[s.name for s in running],
+                can_start=can_start,
+                hold_reasons=[{"experiment_name": h.experiment_name, "reason": h.reason} for h in holds],
+                template_fallback=template,
+            )
+            if narrated:
+                return narrated
+        except Exception:
+            pass
+        return template
 
     def _save(self, decision: SchedulerDecision) -> None:
         self._state_path.parent.mkdir(parents=True, exist_ok=True)

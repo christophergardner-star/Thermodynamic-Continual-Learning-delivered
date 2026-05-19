@@ -247,6 +247,14 @@ class ResearchDirector:
             rec["scheduler_rank"] = experiment_rank[rec["experiment_id"]]
             rec["author_rank"] = paper_rank.get(str(rec.get("target_paper_id", "") or ""), len(paper_directives) + 1)
 
+        # LLM annotation: enrich top directives with Claude insights (cached, best-effort)
+        try:
+            self._annotate_directives_with_llm(
+                frontier_directives, experiment_directives, evidence_directives, knowledge_domains
+            )
+        except Exception:
+            pass
+
         validated_claims = sum(1 for rec in frontier_directives if rec["truth_status"] == "validated")
         weak_claims = sum(1 for rec in frontier_directives if rec["truth_status"] == "weak")
         top_frontier = frontier_directives[0]["problem_id"] if frontier_directives else ""
@@ -317,6 +325,23 @@ class ResearchDirector:
             "evidence_directives": evidence_directives,
             "active_research_paths": [asdict(path) for path in active_research_paths],
             "knowledge_domains": [asdict(d) for d in knowledge_domains],
+            "llm_insights": {
+                "frontier_syntheses": [
+                    {"frontier_id": rec["problem_id"], "synthesis": rec["llm_synthesis"]}
+                    for rec in frontier_directives[:3]
+                    if rec.get("llm_synthesis")
+                ],
+                "experiment_evaluations": [
+                    {"experiment_id": rec["experiment_id"], "evaluation": rec["llm_evaluation"]}
+                    for rec in experiment_directives[:5]
+                    if rec.get("llm_evaluation")
+                ],
+                "claim_verifications": [
+                    {"task_id": rec["task_id"], "verification": rec["llm_claim_check"]}
+                    for rec in evidence_directives[:3]
+                    if rec.get("llm_claim_check")
+                ],
+            },
         }
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -2246,6 +2271,108 @@ class ResearchDirector:
                     return data["result"]
                 return data
         return {}
+
+
+    def _annotate_directives_with_llm(
+        self,
+        frontier_directives: list[dict],
+        experiment_directives: list[dict],
+        evidence_directives: list[dict],
+        knowledge_domains: list[KnowledgeDomain],
+    ) -> None:
+        """
+        Enrich top directives with Claude-generated insights.
+        Annotations are cached; this is a no-op when Anthropic key is absent.
+        Mutates the passed lists in-place by adding llm_* fields.
+
+        Limits: top 3 frontiers, top 4 experiments (non-running), top 3 evidence tasks.
+        """
+        from tar_lab.llm_bridge import (
+            synthesize_frontier_literature,
+            evaluate_experiment_proposal,
+            verify_result_claim,
+        )
+        domain_by_id = {dom.id: dom for dom in knowledge_domains}
+
+        def _dom_summary(domain_id: str) -> tuple[str, list[str]]:
+            dom = domain_by_id.get(domain_id)
+            if not dom:
+                return "", []
+            return dom.learned_summary, dom.top_verified_titles[:]
+
+        # 3 a. Frontier literature synthesis
+        for rec in frontier_directives[:3]:
+            frontier_id = str(rec.get("problem_id", "") or "")
+            if not frontier_id:
+                continue
+            inferred_domain = self._infer_domain_id(" ".join([
+                str(rec.get("domain", "") or ""),
+                str(rec.get("title", "") or ""),
+            ]))
+            learned_summary, top_titles = _dom_summary(inferred_domain)
+            synthesis = synthesize_frontier_literature(
+                self.workspace,
+                frontier_id,
+                str(rec.get("title", frontier_id) or frontier_id),
+                evidence_notes=list(rec.get("evidence_notes", []) or []),
+                domain_learned_summary=learned_summary,
+                top_verified_titles=top_titles,
+                truth_status=str(rec.get("truth_status", "weak") or "weak"),
+            )
+            rec["llm_synthesis"] = synthesis
+
+        # 3 b. Experiment proposal evaluation (skip running/complete)
+        evaluated = 0
+        for rec in experiment_directives:
+            if evaluated >= 4:
+                break
+            status = str(rec.get("status", "") or "")
+            if status in {"running", "complete"}:
+                continue
+            frontier_id = str(rec.get("frontier_problem_id", "") or "")
+            frontier_rec = next(
+                (f for f in frontier_directives if f.get("problem_id") == frontier_id), {}
+            )
+            inferred_domain = self._infer_domain_id(
+                str(rec.get("frontier_problem_title", "") or rec.get("title", "") or "")
+            )
+            learned_summary, _ = _dom_summary(inferred_domain)
+            evaluation = evaluate_experiment_proposal(
+                self.workspace,
+                str(rec.get("experiment_id", "") or ""),
+                frontier_title=str(rec.get("frontier_problem_title", "") or ""),
+                experiment_goal=str(rec.get("experiment_goal", "") or ""),
+                mechanism_focus=str(rec.get("mechanism_focus", "") or ""),
+                dataset=str(rec.get("dataset", "") or ""),
+                method=str(rec.get("method", "") or ""),
+                status=status,
+                evidence_notes=list(frontier_rec.get("evidence_notes", []) or []),
+            )
+            rec["llm_evaluation"] = evaluation
+            evaluated += 1
+
+        # 3 c. Claim verification for evidence directives
+        for rec in evidence_directives[:3]:
+            frontier_id = str(rec.get("frontier_problem_id", "") or "")
+            claim_text = str(rec.get("claim_under_test", "") or "")
+            if not frontier_id or not claim_text:
+                continue
+            frontier_rec = next(
+                (f for f in frontier_directives if f.get("problem_id") == frontier_id), {}
+            )
+            inferred_domain = self._infer_domain_id(
+                str(frontier_rec.get("domain", "") or frontier_rec.get("title", "") or "")
+            )
+            learned_summary, _ = _dom_summary(inferred_domain)
+            verification = verify_result_claim(
+                self.workspace,
+                frontier_id,
+                claim_text,
+                evidence_notes=list(frontier_rec.get("evidence_notes", []) or []),
+                truth_status=str(rec.get("truth_status", "weak") or "weak"),
+                domain_learned_summary=learned_summary,
+            )
+            rec["llm_claim_check"] = verification
 
 
 def main() -> None:

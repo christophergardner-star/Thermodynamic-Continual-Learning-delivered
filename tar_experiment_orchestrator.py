@@ -1295,6 +1295,25 @@ class ExperimentOrchestrator:
                 except Exception:
                     pass
             self._archive_terminal_experiment(spec, reason="completed")
+            try:
+                from tar_lab.llm_bridge import generate_findings_memo
+                result_payload = {}
+                if spec.result_path:
+                    try:
+                        import json as _json
+                        result_payload = _json.loads(Path(spec.result_path).read_text(encoding="utf-8"))
+                    except Exception:
+                        pass
+                generate_findings_memo(
+                    self.workspace,
+                    spec.id,
+                    result_payload,
+                    frontier_title=str(getattr(spec, "frontier_problem_id", "") or ""),
+                    dataset=str(getattr(spec, "dataset", "") or ""),
+                    method=str(getattr(spec, "method", "") or ""),
+                )
+            except Exception:
+                pass
             return result
 
         except Exception as exc:
@@ -1317,6 +1336,17 @@ class ExperimentOrchestrator:
             self._log(f"[execute] FAILED  {spec.id}: {exc}")
             self._log(traceback.format_exc())
             self._archive_terminal_experiment(spec, reason="failed")
+            try:
+                from tar_lab.llm_bridge import generate_failure_diagnosis
+                generate_failure_diagnosis(
+                    self.workspace,
+                    spec.id,
+                    str(exc),
+                    dataset=str(getattr(spec, "dataset", "") or ""),
+                    method=str(getattr(spec, "method", "") or ""),
+                )
+            except Exception:
+                pass
             return None
 
     def _prepare_execution(self, spec: ExperimentSpec) -> dict[str, Any]:

@@ -2663,6 +2663,49 @@ def api_return_paper_to_author(project_id: str):
     })
 
 
+# ── website publication ───────────────────────────────────────────────────────
+_PUBLISH_ROOT = _REPO.parent
+_STAGED_JSON  = _PUBLISH_ROOT / "staged_papers.json"
+_WEBSITE_JSON = _PUBLISH_ROOT / "website" / "data" / "papers.json"
+
+
+@app.route("/api/website_papers")
+def api_website_papers():
+    staged = []
+    live   = []
+    if _STAGED_JSON.exists():
+        try:
+            data = json.loads(_STAGED_JSON.read_text(encoding="utf-8"))
+            staged = data.get("staged", [])
+        except Exception:
+            pass
+    if _WEBSITE_JSON.exists():
+        try:
+            data = json.loads(_WEBSITE_JSON.read_text(encoding="utf-8"))
+            live = data.get("papers", [])
+        except Exception:
+            pass
+    return jsonify({"staged": staged, "live": live})
+
+
+@app.route("/api/website/approve/<paper_id>", methods=["POST"])
+def api_website_approve(paper_id: str):
+    paper_id = str(paper_id or "").strip()
+    if not paper_id:
+        return jsonify({"ok": False, "error": "paper_id required"}), 400
+    try:
+        import sys as _sys
+        if str(_PUBLISH_ROOT) not in _sys.path:
+            _sys.path.insert(0, str(_PUBLISH_ROOT))
+        from publish_paper import approve_paper_headless
+        result = approve_paper_headless(paper_id)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    if not result.get("ok"):
+        return jsonify(result), 400
+    return jsonify(result)
+
+
 # ── breakthroughs ─────────────────────────────────────────────────────────────
 @app.route("/api/breakthroughs")
 def api_breakthroughs():
@@ -2982,6 +3025,62 @@ def api_replication():
             ],
         }
     return jsonify(out)
+
+
+@app.route("/api/findings")
+def api_findings():
+    """Return all cached LLM findings memos and failure diagnoses."""
+    cache_dir = _WS / "tar_state" / "llm_cache"
+    findings: list[dict] = []
+    failures: list[dict] = []
+    if cache_dir.exists():
+        for path in sorted(cache_dir.glob("findings_*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            data = _jload(path)
+            if isinstance(data, dict) and data.get("content"):
+                findings.append({
+                    "experiment_id": data.get("experiment_id", path.stem.removeprefix("findings_")),
+                    "content": data["content"],
+                    "written_at": data.get("written_at", 0),
+                })
+        for path in sorted(cache_dir.glob("failure_*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            data = _jload(path)
+            if isinstance(data, dict) and data.get("content"):
+                failures.append({
+                    "experiment_id": data.get("experiment_id", path.stem.removeprefix("failure_")),
+                    "content": data["content"],
+                    "error_text": data.get("error_text", ""),
+                    "written_at": data.get("written_at", 0),
+                })
+    return jsonify({
+        "findings_memos": findings,
+        "failure_diagnoses": failures,
+        "total_findings": len(findings),
+        "total_failures": len(failures),
+    })
+
+
+@app.route("/api/llm_insights")
+def api_llm_insights():
+    """Return Claude-generated insights from the research director (synthesis, evals, claim checks)."""
+    director_data = _jload(_WS / "tar_state" / "research_director_state.json") or {}
+    llm_insights = director_data.get("llm_insights", {})
+
+    cache_dir = _WS / "tar_state" / "llm_cache"
+    scheduler_rationale: str = ""
+    if cache_dir.exists():
+        candidates = sorted(cache_dir.glob("scheduler_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for path in candidates[:1]:
+            data = _jload(path)
+            if isinstance(data, dict):
+                scheduler_rationale = str(data.get("content", "") or "")
+
+    return jsonify({
+        "frontier_syntheses": llm_insights.get("frontier_syntheses", []),
+        "experiment_evaluations": llm_insights.get("experiment_evaluations", []),
+        "claim_verifications": llm_insights.get("claim_verifications", []),
+        "scheduler_rationale": scheduler_rationale,
+        "available": bool(llm_insights or scheduler_rationale),
+    })
 
 
 # ── paper file serving ────────────────────────────────────────────────────────
