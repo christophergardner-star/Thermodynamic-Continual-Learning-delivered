@@ -1268,7 +1268,7 @@ function renderSummary(){
   const cards = [
     { label: "Running", value: String(runningVal), note: "Active experiment processes", tone: runningVal > 0 ? "good" : "" },
     { label: "Queued", value: String(pendingVal), note: "Pending or planned experiments", tone: pendingVal > 0 && runningVal === 0 ? "warn" : "" },
-    { label: "Blocked Papers", value: String(blockedVal), note: "Papers pending evidence", tone: blockedVal > 0 ? "warn" : "" },
+    { label: "Blocked Papers", value: String(blockedVal), note: "Papers pending evidence", tone: blockedVal > 0 && runningVal === 0 && pendingVal === 0 ? "warn" : "" },
     { label: "Review Items", value: String(reviewVal), note: "Need human attention", tone: reviewVal > 0 ? "warn" : "" },
     { label: "Trusted Results", value: String(trustedVal), note: "Publication-allowed validations", tone: trustedVal > 0 ? "good" : "" },
     { label: "Limited Scope", value: String(limitedVal), note: "Visible but not strong enough", tone: "" },
