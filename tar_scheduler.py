@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 _REPO = Path(__file__).resolve().parent
+from tar_lab.human_review import approved_experiment_ids
 from tar_storage import ensure_workspace_layout, resolve_workspace
 
 # ── VRAM estimates per dataset (conservative, includes overhead) ──────────────
@@ -293,10 +294,18 @@ class TARScheduler:
         archived_status = self._archive_status()
         experiment_ranks = self._director_experiment_ranks()
         frontier_ranks = self._director_frontier_ranks()
+        approved_ids = approved_experiment_ids(self.workspace)
 
         for spec in sorted(pending_specs, key=lambda rec: self._priority_key(rec, experiment_ranks, frontier_ranks)):
             exp_vram = _spec_vram_budget(spec)
             is_cpu_only = spec.dataset == "cpu_only"
+            if str(getattr(spec, "id", "") or "") not in approved_ids:
+                hold_reasons.append(HoldReason(
+                    experiment_id=spec.id,
+                    experiment_name=spec.name,
+                    reason="Awaiting explicit human approval in the dashboard and a committed execution manifest.",
+                ))
+                continue
             unmet = []
             for dep_id in getattr(spec, "depends_on", []) or []:
                 if not self._dependency_complete(str(dep_id or ""), known_status, archived_status):

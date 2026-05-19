@@ -40,6 +40,12 @@ _PHASE16_VRAM_BUDGET_GB = 3.2
 _PHASE17_VRAM_BUDGET_GB = 3.3
 _MIN_ACTIVE_EXPERIMENTS = 3
 _MIN_QUEUED_EXPERIMENTS = 2
+
+
+def _bounded_execution_enabled() -> bool:
+    return str(os.environ.get("TAR_ENABLE_BOUNDED_EXECUTION", "") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 _LEGACY_DIRECTOR_EXPERIMENT_ALIASES = {
     "director-regime-detection-accuracy-01": "director-regime-detection-accuracy-regime-probe",
     "director-catastrophic-forgetting-01": "director-catastrophic-forgetting-carryover-probe",
@@ -1315,6 +1321,7 @@ def _ensure_director_seeded_queue(
     if validation_mode.get("active"):
         return _ensure_validation_mode_queue(workspace, orch)
 
+    from tar_lab.human_review import approved_experiment_ids
     from tar_research_director import ResearchDirector
 
     _normalize_live_experiment_specs(orch)
@@ -1344,6 +1351,7 @@ def _ensure_director_seeded_queue(
         director_state.get("summary", {}).get("active_frontier_problem_ids", [])
         if isinstance(director_state, dict) else []
     )
+    approved_ids = approved_experiment_ids(workspace)
     allowed_frontier_ids = set(
         coordination_state.get("allowed_frontier_problem_ids", [])
         if isinstance(coordination_state, dict) else []
@@ -1356,6 +1364,8 @@ def _ensure_director_seeded_queue(
         )
     for spec in canonical_specs:
         if spec.id in existing_ids:
+            continue
+        if spec.id not in approved_ids:
             continue
         if active_frontier_ids and spec.frontier_problem_id and spec.frontier_problem_id not in active_frontier_ids:
             continue
@@ -1382,6 +1392,8 @@ def _ensure_director_seeded_queue(
             if spec.id in retryable_failed_ids and _resubmit_failed_archived_spec(orch, spec):
                 submitted_ids.append(spec.id)
                 retryable_failed_ids.discard(spec.id)
+            continue
+        if spec.id not in approved_ids:
             continue
         orch.submit(spec)
         submitted_ids.append(spec.id)
@@ -1633,6 +1645,10 @@ def run_portfolio(
     director_state = ResearchDirector(workspace).update_state()
     coordination_state = write_research_coordination_state(workspace, orch, director_state, author_state)
     _ensure_director_seeded_queue(workspace, orch, coordination_state=coordination_state)
+    if not _bounded_execution_enabled():
+        _log(workspace, "planner-only mode active; living research portfolio will not start execution without explicit bounded execution enablement.")
+        heartbeat_from_env(workspace, status="running", message="living research planner-only mode")
+        return []
     orch.run_parallel()
     heartbeat_from_env(workspace, status="running", message="living research portfolio active")
 
@@ -1688,6 +1704,7 @@ def run_portfolio_daemon(
     coordination_state = write_research_coordination_state(workspace, orch, director_state, author_state)
     _ensure_director_seeded_queue(workspace, orch, coordination_state=coordination_state)
     daemon_status = {"status": "starting", "last_event": "daemon boot"}
+    execution_enabled = _bounded_execution_enabled()
     heartbeat_interval_s = max(15.0, min(60.0, poll_interval_s))
 
     def _scheduler_summary() -> dict[str, object]:
@@ -1739,6 +1756,15 @@ def run_portfolio_daemon(
             author_state = write_planned_author_state(workspace)
             coordination_state = write_research_coordination_state(workspace, orch, director_state, author_state)
             _ensure_director_seeded_queue(workspace, orch, coordination_state=coordination_state)
+            if not execution_enabled:
+                daemon_status.update({
+                    "status": "planning_only",
+                    "last_event": "awaiting human-approved manifest execution",
+                })
+                _emit_daemon_state(refresh_scheduler=True)
+                heartbeat_from_env(workspace, status="running", message="living research daemon planning-only mode")
+                time.sleep(poll_interval_s)
+                continue
             result = orch.run_scheduled_once(scheduler=scheduler)
             finalized = finalize_autonomous_results(workspace, plans) if include_autonomous else []
             director_state = ResearchDirector(workspace).update_state()

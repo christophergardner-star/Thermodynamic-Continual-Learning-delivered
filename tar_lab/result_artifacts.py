@@ -217,6 +217,13 @@ def write_canonical_comparison_result(
     env_payload: dict[str, Any],
     phase_number: Optional[int] = None,
     source_script: str,
+    trust_tier: Optional[str] = None,
+    provenance_status: Optional[str] = None,
+    basis: Optional[str] = None,
+    publication_allowed: Optional[bool] = None,
+    supersedes: Optional[list[str]] = None,
+    superseded_by: Optional[str] = None,
+    extra_record: Optional[dict[str, Any]] = None,
 ) -> dict[str, Path]:
     comparisons_dir = workspace / "tar_state" / "comparisons"
     stamp = utc_stamp()
@@ -237,7 +244,15 @@ def write_canonical_comparison_result(
         "result_path": str(result_path),
         "env_path": str(env_path),
         "artifact_schema": "tar_canonical_comparison_record_v1",
+        "trust_tier": trust_tier or "trusted_rerun_with_env",
+        "provenance_status": provenance_status or "env_snapshot_present",
+        "basis": basis or "append_only_canonical_write_with_env",
+        "publication_allowed": True if publication_allowed is None else bool(publication_allowed),
+        "supersedes": supersedes or [],
+        "superseded_by": superseded_by or "",
     }
+    if extra_record:
+        record.update(_normalize_payload(extra_record))
 
     try:
         _write_new_json(result_path, payload)

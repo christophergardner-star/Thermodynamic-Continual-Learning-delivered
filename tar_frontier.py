@@ -250,6 +250,9 @@ _DEFAULT_PROBLEMS: list[dict] = [
         "priority": 30,
     },
 ]
+_DEFAULT_PROBLEM_BY_ID: dict[str, dict[str, Any]] = {
+    str(rec["id"]): rec for rec in _DEFAULT_PROBLEMS
+}
 
 
 # ── registry ──────────────────────────────────────────────────────────────────
@@ -332,8 +335,59 @@ class FrontierRegistry:
         }
         self._path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
+    def reset_to_real_world_defaults(self, *, preserve_links: bool = False) -> None:
+        """
+        Rebuild the frontier registry from the known real-world ML problem set.
+
+        This intentionally drops speculative or stale frontier entries so the
+        module remains a registry of externally grounded problems rather than
+        an open-ended idea generator.
+        """
+        prior = self._problems
+        rebuilt: dict[str, FrontierProblem] = {}
+        for default in _DEFAULT_PROBLEMS:
+            problem_id = str(default["id"])
+            preserved = prior.get(problem_id)
+            payload = {
+                k: v for k, v in default.items()
+                if k in FrontierProblem.__dataclass_fields__
+            }
+            if preserve_links and preserved is not None:
+                payload["experiments_linked"] = preserved.experiments_linked[:]
+                payload["papers_linked"] = preserved.papers_linked[:]
+                payload["breakthroughs_found"] = int(preserved.breakthroughs_found)
+                payload["status"] = str(preserved.status or payload.get("status", FP_ACTIVE))
+                payload["created_at"] = preserved.created_at
+            rebuilt[problem_id] = FrontierProblem(**payload)
+        self._problems = rebuilt
+        self._save()
+
     # ── mutations ─────────────────────────────────────────────────────────────
     def register(self, problem: FrontierProblem) -> FrontierProblem:
+        if not problem.well_known_problem:
+            raise ValueError(
+                "Frontier problems must be real-world, externally grounded ML problems. "
+                "Speculative or self-invented frontier entries are not allowed."
+            )
+        required_text = {
+            "industry_problem_title": problem.industry_problem_title or problem.title,
+            "global_problem_statement": problem.global_problem_statement,
+            "why_important": problem.why_important,
+            "research_guidance": problem.research_guidance,
+        }
+        missing_text = [key for key, value in required_text.items() if not str(value or "").strip()]
+        if missing_text:
+            raise ValueError(
+                f"Frontier problem '{problem.id}' is missing required real-world grounding fields: {missing_text}"
+            )
+        if not problem.external_baselines or not problem.candidate_datasets or not problem.candidate_backbones:
+            raise ValueError(
+                f"Frontier problem '{problem.id}' must name external baselines, candidate datasets, and candidate backbones."
+            )
+        if problem.id not in _DEFAULT_PROBLEM_BY_ID and not str(problem.domain or "").strip():
+            raise ValueError(
+                f"Custom frontier problem '{problem.id}' must declare an explicit ML domain."
+            )
         existing = self._problems.get(problem.id)
         if existing:
             problem.created_at = existing.created_at

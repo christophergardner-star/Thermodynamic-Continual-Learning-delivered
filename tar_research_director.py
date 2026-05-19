@@ -18,10 +18,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tar_lab.phase_catalog import iter_phase_catalog_entries
+from tar_lab.human_review import sync_human_review_from_director_state
+from tar_lab.result_artifacts import (
+    read_advisory_verdict,
+    read_statistics,
+    resolve_canonical_comparison_path,
+)
+from tar_lab.validation import build_validation_state
 from tar_storage import ensure_workspace_layout, resolve_workspace
 
 
 _REPO = Path(__file__).resolve().parent
+_STRICT_REAL_WORLD_FRONTIER_ONLY = True
 
 _DEFAULT_DOMAIN_SPECS: list[dict[str, Any]] = [
     {
@@ -315,9 +324,25 @@ class ResearchDirector:
         except OSError:
             return payload
         try:
-            from tar_project_registry import sync_director_paper_projects
+            build_validation_state(self.workspace, persist=True)
+        except Exception:
+            pass
+        try:
+            human_review = sync_human_review_from_director_state(self.workspace, payload)
+            payload["human_review_summary"] = {
+                "proposal_count": len(human_review.get("proposals", [])),
+                "question_count": len(human_review.get("questions", [])),
+                "claim_review_count": len(human_review.get("claim_reviews", [])),
+            }
+            self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError:
+            return payload
+        except Exception:
+            pass
+        try:
+            from tar_project_registry import rebuild_registry_from_director_state
 
-            sync_director_paper_projects(self.workspace, payload)
+            rebuild_registry_from_director_state(self.workspace, payload)
         except Exception:
             pass
         return payload
@@ -328,6 +353,51 @@ class ResearchDirector:
             problems = data.get("problems", [])
             return problems if isinstance(problems, list) else []
         return []
+
+    def _canonical_phase_experiments(self) -> list[dict]:
+        synthetic: list[dict] = []
+        for entry in iter_phase_catalog_entries():
+            result_path = resolve_canonical_comparison_path(
+                self.workspace,
+                entry.logical_name,
+                legacy_filename=entry.legacy_filename,
+            )
+            if result_path is None or not result_path.exists():
+                continue
+            result = _jload(result_path)
+            if not isinstance(result, dict):
+                continue
+            advisory = read_advisory_verdict(result)
+            verdict = str(advisory.get("label", "") or result.get("verdict", "") or "")
+            status = "complete"
+            if str(result.get("status", "") or "").upper() == "ERROR" or "ERROR" in verdict.upper():
+                status = "failed"
+            synthetic.append({
+                "id": entry.experiment_id,
+                "name": entry.title,
+                "title": entry.title,
+                "status": status,
+                "stage": status,
+                "dataset": entry.dataset,
+                "method": "phase_result",
+                "logical_name": entry.logical_name,
+                "legacy_result_filename": entry.legacy_filename,
+                "result_path": str(result_path),
+                "frontier_problem_id": entry.frontier_problem_id,
+                "author_paper_id": entry.target_paper_id,
+                "project_id": entry.target_paper_id,
+                "paper_title": entry.target_paper_title,
+                "domain_profile": entry.primary_domain_id,
+                "context": {
+                    "why": entry.research_goal,
+                    "hypothesis": entry.research_goal,
+                    "frontier_problem": entry.frontier_problem_id,
+                    "feeds_paper": entry.target_paper_title,
+                    "methodology_note": f"Canonical phase result for {entry.title}.",
+                },
+                "_phase_num": entry.phase_number,
+            })
+        return synthetic
 
     def _load_experiments(self) -> list[dict]:
         combined: dict[str, dict] = {}
@@ -347,6 +417,28 @@ class ResearchDirector:
                 for exp in experiments:
                     if isinstance(exp, dict) and exp.get("id"):
                         combined.setdefault(str(exp.get("id")), exp)
+
+        for exp in self._canonical_phase_experiments():
+            exp_id = str(exp.get("id", "") or "")
+            if not exp_id:
+                continue
+            existing = combined.get(exp_id)
+            if not existing:
+                combined[exp_id] = exp
+                continue
+            merged = dict(existing)
+            for key, value in exp.items():
+                if key == "context":
+                    context = dict(merged.get("context", {}) or {})
+                    for ckey, cvalue in dict(value or {}).items():
+                        if cvalue and not context.get(ckey):
+                            context[ckey] = cvalue
+                    if context:
+                        merged["context"] = context
+                    continue
+                if merged.get(key) in ("", None, [], {}):
+                    merged[key] = value
+            combined[exp_id] = merged
 
         return list(combined.values())
 
@@ -433,9 +525,23 @@ class ResearchDirector:
                 res = self._load_experiment_result(exp)
                 if not res:
                     continue
-                verdict = str(res.get("verdict") or "").upper()
-                p_val = res.get("p_val")
-                mean_delta = res.get("mean_delta")
+                stats = read_statistics(res)
+                advisory = read_advisory_verdict(res)
+                verdict = str(advisory.get("label", "") or res.get("verdict") or "").upper()
+                p_val = stats.get("p_val", res.get("p_val"))
+                mean_delta = stats.get("mean_delta", res.get("mean_delta"))
+                if mean_delta is None or p_val is None:
+                    pairwise = stats.get("pairwise") or res.get("pairwise", {})
+                    if isinstance(pairwise, dict):
+                        for key in ("ewc", "sgd_baseline", "sgd"):
+                            candidate = pairwise.get(key, {})
+                            if not isinstance(candidate, dict):
+                                continue
+                            candidate_delta = candidate.get("mean_delta")
+                            if isinstance(candidate_delta, (int, float)):
+                                mean_delta = candidate_delta
+                                p_val = candidate.get("p_val", p_val)
+                                break
                 if verdict == "BREAKTHROUGH":
                     significant_hits += 1
                     evidence_notes.append(f"{exp_id} reached BREAKTHROUGH.")
@@ -450,8 +556,11 @@ class ResearchDirector:
                         directional_hits += 1
                         evidence_notes.append(f"{exp_id} improved delta without full significance.")
 
-            breakthrough_count = int(problem.get("breakthroughs_found", 0) or 0)
-            linked_papers = problem.get("papers_linked", [])
+            breakthrough_count = significant_hits
+            linked_papers = paper_ids or [
+                str(item) for item in problem.get("papers_linked", [])
+                if str(item).strip()
+            ]
             problem_priority = int(problem.get("priority", 50) or 50)
 
             impact_score = max(5.0, 110.0 - problem_priority) + breakthrough_count * 12.0
@@ -459,13 +568,10 @@ class ResearchDirector:
             truth_score = breakthrough_count * 20.0 + significant_hits * 18.0 + complete * 8.0 + len(linked_papers) * 6.0
             priority_score = round(impact_score + evidence_score + truth_score, 1)
 
-            if breakthrough_count > 0:
+            if breakthrough_count > 0 and not waiting_on:
                 truth_status = "validated"
                 evidence_strength = "strong"
-            elif truth_score >= 60 and significant_hits > 0:
-                truth_status = "validated"
-                evidence_strength = "strong"
-            elif truth_score >= 28 or complete > 0:
+            elif significant_hits > 0 or complete > 0:
                 truth_status = "supported"
                 evidence_strength = "moderate"
             elif running > 0 or pending > 0:
@@ -498,6 +604,15 @@ class ResearchDirector:
                 readiness = "landscape_scan"
                 publication_lane = "problem_scoping"
 
+            if waiting_on:
+                live_status = "active"
+            elif truth_status == "validated":
+                live_status = "publishing"
+            elif complete > 0 or running > 0:
+                live_status = "active"
+            else:
+                live_status = "exploring"
+
             why_now = (
                 f"{complete} complete, {running} running, {pending} pending experiments; "
                 f"{breakthrough_count} breakthroughs and {len(linked_papers)} linked papers so far."
@@ -506,7 +621,7 @@ class ResearchDirector:
                 "problem_id": pid,
                 "title": problem_title,
                 "domain": problem.get("domain", ""),
-                "status": problem.get("status", ""),
+                "status": live_status,
                 "global_problem_statement": global_problem_statement,
                 "industry_contexts": industry_contexts,
                 "well_known_problem": bool(problem.get("well_known_problem", True)),
@@ -592,7 +707,12 @@ class ResearchDirector:
                 str(project.get("domain_profile", "")),
             ])
             domain_id = self._infer_domain_id(signal_text)
-            strong = str(project.get("status", "")).lower() in {"complete", "validated", "published"}
+            project_status = str(project.get("status", "") or "").lower()
+            paper_status = str(project.get("paper_status", "") or "").lower()
+            strong = (
+                project_status in {"complete", "validated"}
+                and paper_status not in {"blocked", "awaiting_validation", "awaiting_human_review", "revision_requested"}
+            )
             note_domain(domain_id=domain_id, signal=str(project.get("title", "")), strong=strong)
 
         for dom in domains.values():
@@ -812,7 +932,9 @@ class ResearchDirector:
             ))
             represented_domain_ids.add(domain.id)
 
-        for domain in active_domains:
+        exploratory_domains = [] if _STRICT_REAL_WORLD_FRONTIER_ONLY else active_domains
+
+        for domain in exploratory_domains:
             candidate = self._pick_novel_problem_for_domain(domain.id)
             if candidate:
                 paper_id = f"frontier-paper-{domain.id}-{_slug(candidate['title'])[:48]}"
@@ -879,7 +1001,7 @@ class ResearchDirector:
                 ))
                 represented_domain_ids.add(domain.id)
 
-        for domain in active_domains:
+        for domain in exploratory_domains:
             if domain.id in represented_domain_ids:
                 continue
             paths.append(ActiveResearchPath(
@@ -945,6 +1067,8 @@ class ResearchDirector:
         return selected
 
     def _pick_novel_problem_for_domain(self, domain_id: str) -> dict[str, Any] | None:
+        if _STRICT_REAL_WORLD_FRONTIER_ONLY:
+            return None
         literature_domain = _LITERATURE_DOMAIN_MAP.get(domain_id, "")
         if not literature_domain or not self.literature_db_path.exists():
             return None
@@ -1146,6 +1270,8 @@ class ResearchDirector:
             if not paper_id:
                 continue
             frontier_id = str(exp.get("frontier_problem_id") or "")
+            if not frontier_id and paper_id.startswith("director-"):
+                continue
             frontier = by_frontier.get(frontier_id, {})
             entry = by_paper.setdefault(paper_id, {
                 "paper_id": paper_id,
@@ -1237,23 +1363,37 @@ class ResearchDirector:
 
         paper_directives: list[dict] = []
         for entry in by_paper.values():
+            if not str(entry.get("frontier_problem_id", "") or "") and str(entry.get("paper_id", "") or "").startswith("director-"):
+                continue
             total_complete = entry["complete_count"]
             total_waiting = entry["running_count"] + entry["pending_count"]
             if total_complete > 0 and total_waiting == 0:
                 entry["readiness"] = "write_now"
-                entry["recommendation"] = "Prioritize writing now; the supporting experiment set is complete."
+                entry["recommendation"] = (
+                    "Prioritize a full rewrite now. Keep only scientifically backed claims, cite exact validated result files, "
+                    "and include evidence-backed figures/diagrams generated from the completed runs."
+                )
                 entry["publication_lane"] = "conference_candidate"
             elif total_complete > 0:
                 entry["readiness"] = "outline_now"
-                entry["recommendation"] = "Write introduction/methods and partial results while waiting on the remaining runs."
+                entry["recommendation"] = (
+                    "Rewrite from current validated evidence and generate figures for the completed runs, "
+                    "but keep any claim that depends on unfinished experiments explicitly provisional."
+                )
                 entry["publication_lane"] = "conference_material_in_progress"
             elif entry["running_count"] > 0:
                 entry["readiness"] = "prepare_now"
-                entry["recommendation"] = "Prepare outline and figures, but keep claims provisional until runs complete."
+                entry["recommendation"] = (
+                    "Prepare the full rewrite scaffold and the validated-results figure plan, "
+                    "but do not promote unvalidated claims until the running experiments finish."
+                )
                 entry["publication_lane"] = "evidence_building"
             elif entry["pending_count"] > 0:
                 entry["readiness"] = "blocked"
-                entry["recommendation"] = "Do not prioritize writing yet; experiments are still queued."
+                entry["recommendation"] = (
+                    "Do not advance scientific claims yet. Keep only the rewrite checklist, evidence checklist, "
+                    "and figure requirements tied to the queued experiments."
+                )
                 entry["publication_lane"] = "evidence_building"
             entry["waiting_for_experiments"] = sorted(set(entry["waiting_for_experiments"]))
             entry["linked_experiment_ids"] = sorted(set(entry["linked_experiment_ids"]))
@@ -1525,6 +1665,8 @@ class ResearchDirector:
         return []
 
     def _active_path_experiment_catalog(self, path: ActiveResearchPath) -> list[dict[str, Any]]:
+        if _STRICT_REAL_WORLD_FRONTIER_ONLY:
+            return []
         if path.path_kind not in {"novel_problem", "domain_frontier_scan"}:
             return []
         if path.status not in {"pursue_now", "incubate"}:
@@ -2035,6 +2177,22 @@ class ResearchDirector:
         if rp:
             candidates.append(Path(rp))
         exp_id = str(exp.get("id", "") or "")
+        logical_name = str(exp.get("logical_name", "") or "")
+        legacy_result_filename = str(exp.get("legacy_result_filename", "") or "")
+        if not logical_name and exp_id:
+            for entry in iter_phase_catalog_entries():
+                if entry.experiment_id == exp_id:
+                    logical_name = entry.logical_name
+                    legacy_result_filename = entry.legacy_filename
+                    break
+        if logical_name:
+            resolved = resolve_canonical_comparison_path(
+                self.workspace,
+                logical_name,
+                legacy_filename=legacy_result_filename or None,
+            )
+            if resolved is not None:
+                candidates.append(resolved)
         if exp_id:
             candidates.append(self.workspace / "tar_state" / "experiments" / exp_id / "result.json")
         for path in candidates:

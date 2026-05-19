@@ -48,6 +48,12 @@ from tar_lab.manifest import (
     load_and_verify_manifest,
     write_refuse_note,
 )
+from tar_lab.runtime_ledger import (
+    RuntimeLeaseError,
+    acquire_runtime_lease,
+    release_runtime_lease,
+)
+from tar_lab.validation import build_validation_state, validate_execution_request
 
 try:
     import psutil as _psutil
@@ -289,6 +295,12 @@ class ExperimentOrchestrator:
         # set_manifest() before any call to run_next / run_all / run_parallel.
         self._active_manifest: ExecutionManifest | None = None
         self._load()
+        env_manifest = str(os.environ.get("TAR_MANIFEST_PATH", "") or "").strip()
+        if env_manifest:
+            try:
+                self.set_manifest(Path(env_manifest))
+            except Exception as exc:
+                self._log(f"[manifest] Failed to auto-load TAR_MANIFEST_PATH={env_manifest}: {exc}")
 
     def set_manifest(self, manifest_path: Path) -> ExecutionManifest:
         """
@@ -1154,6 +1166,27 @@ class ExperimentOrchestrator:
             )
             raise
 
+        validation = validate_execution_request(
+            self.workspace,
+            spec=spec,
+            manifest=self._active_manifest,
+            conflict_keys=[f"experiment:{spec.id}"],
+        )
+        if not validation.get("ok"):
+            msg = (
+                f"Execution validation failed for '{spec.id}': "
+                f"{validation.get('issues', [])}"
+            )
+            self._log(f"[validation_gate] {msg}")
+            write_refuse_note(
+                self.workspace,
+                component="ExperimentOrchestrator._execute",
+                reason=msg,
+                experiment_id=spec.id,
+                manifest_path=str(getattr(self._active_manifest, "_path", "")),
+            )
+            raise RuntimeLeaseError(msg)
+
         report: dict[str, Any] | None = None
         if not skip_preflight:
             report = self._prepare_execution(spec)
@@ -1177,6 +1210,32 @@ class ExperimentOrchestrator:
         spec.error      = ""
         spec.progress   = {"seeds_done": 0, "seeds_total": len(spec.seeds),
                            "tasks_done": 0, "latest_accs": [], "forgetting_so_far": []}
+        lease = acquire_runtime_lease(
+            self.workspace,
+            component_id=f"orchestrator:{spec.id}",
+            component_kind="experiment",
+            experiment_id=spec.id,
+            manifest_id=str(getattr(self._active_manifest, "manifest_id", "") or ""),
+            manifest_path=str(getattr(self._active_manifest, "_path", "") or ""),
+            frontier_problem_id=spec.frontier_problem_id,
+            domain_id=str((spec.runtime_context or {}).get("domain_id", "") or ""),
+            owner_component="ExperimentOrchestrator",
+            source_script=Path(__file__).name,
+            conflict_keys=[f"experiment:{spec.id}"],
+            stale_timeout_s=max(600.0, float(spec.estimated_runtime_h or 1.0) * 3600.0 + 900.0),
+            extra={
+                "project_id": spec.project_id,
+                "hypothesis_name": spec.hypothesis_name,
+                "dataset": spec.dataset,
+                "method": spec.method,
+                "seeds": list(spec.seeds),
+            },
+        )
+        spec.runtime_context = {
+            **(spec.runtime_context or {}),
+            "runtime_lease_id": str(lease.get("lease_id", "") or ""),
+            "validation": validation,
+        }
         self._save()
         self._refresh_author_state()
         self._write_process_registry()
@@ -1197,6 +1256,13 @@ class ExperimentOrchestrator:
             self._save()
             self._refresh_author_state()
             self._write_process_registry()
+            release_runtime_lease(
+                self.workspace,
+                lease_id=str(lease.get("lease_id", "") or ""),
+                final_status="complete",
+                completion_reason="experiment completed successfully",
+                extra_patch={"result_path": spec.result_path, "verdict": result.verdict},
+            )
             self._log(f"[execute] DONE  {spec.id}  {result.verdict}"
                       f"  forgetting={result.mean_forgetting:.4f}  ({elapsed/3600:.1f}h)")
 
@@ -1221,6 +1287,13 @@ class ExperimentOrchestrator:
             self._save()
             self._refresh_author_state()
             self._write_process_registry()
+            release_runtime_lease(
+                self.workspace,
+                lease_id=str(lease.get("lease_id", "") or ""),
+                final_status="failed",
+                completion_reason=str(exc),
+                extra_patch={"elapsed_s": elapsed},
+            )
             self._log(f"[execute] FAILED  {spec.id}: {exc}")
             self._log(traceback.format_exc())
             self._archive_terminal_experiment(spec, reason="failed")
@@ -1245,6 +1318,9 @@ class ExperimentOrchestrator:
 
         manager = ExperimentPreflightManager(self.workspace, _REPO)
         env = manager.environment_for_subprocess(report)
+        manifest_path = str(getattr(getattr(self._active_manifest, "_path", None), "__str__", lambda: "")())
+        if manifest_path:
+            env["TAR_MANIFEST_PATH"] = manifest_path
         worker = _REPO / "tar_experiment_worker.py"
         python_executable = str(report.get("python_executable", sys.executable) or sys.executable)
         self._log(f"[execute] Launching prepared worker for {spec.id} via {python_executable}")
@@ -1797,6 +1873,7 @@ class ExperimentOrchestrator:
                 payload=result_payload,
                 env_payload=env_payload,
             )
+            build_validation_state(self.workspace, persist=True)
         except Exception:
             try:
                 spec_path.unlink()
@@ -1895,14 +1972,20 @@ if __name__ == "__main__":
     elif cmd == "run-all":
         orch.run_all()
     elif cmd == "run-daemon":
-        poll_interval = float(sys.argv[2]) if len(sys.argv) > 2 else 30.0
-        orch.run_forever(poll_interval_s=poll_interval)
+        print(
+            "REFUSED: 'run-daemon' is retired for execution use. "
+            "Use a committed manifest plus an explicit bounded launcher instead.",
+            flush=True,
+        )
+        sys.exit(1)
     elif cmd == "submit-autonomous":
-        specs = build_autonomous_research_queue(ws)
-        orch.submit_many(specs)
-        print(f"Submitted {len(specs)} autonomous research experiments.")
-        orch.print_status()
+        print(
+            "REFUSED: 'submit-autonomous' is retired. TAR may propose experiments, "
+            "but human review must approve them before manifest creation.",
+            flush=True,
+        )
+        sys.exit(1)
     else:
         print(f"Unknown command: {cmd}")
-        print("Commands: status | run-next | run-all | run-daemon [poll_s] | submit-autonomous")
+        print("Commands: status | run-next | run-all")
         sys.exit(1)
