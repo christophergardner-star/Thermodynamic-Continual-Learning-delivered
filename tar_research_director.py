@@ -1662,6 +1662,48 @@ class ResearchDirector:
                 "priority_bias": 17.0,
             }]
 
+        if frontier_id == "fp-class-incremental":
+            return [{
+                **base_common,
+                "experiment_id": "phase15_class_incremental_search",
+                "title": "Phase 15 - Class-Incremental Search",
+                "proposal_origin": "suite",
+                "proposal_kind": "frontier_probe",
+                "hypothesis_name": "class_incremental_search",
+                "dataset": "split_cifar10",
+                "method": "tcl",
+                "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                "seeds": [42, 0, 1],
+                "estimated_runtime_h": 8.0,
+                "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
+                "depends_on": [],
+                "backbone": "resnet18",
+                "epochs": 40,
+                "mechanism_focus": (
+                    "Evaluate whether the user's unpublished TAR/TCL/ASC methods survive the shift "
+                    "from task-ID-assisted to class-incremental learning without task boundaries."
+                ),
+                "experiment_goal": (
+                    f"Advance evidence on the real-world problem '{frontier_title}' by testing "
+                    "the internal TAR/TCL/ASC method family in the class-incremental setting "
+                    "against external baselines that do not rely on task labels."
+                ),
+                "description": (
+                    f"Class-incremental probe for {frontier_title}. Tests whether thermodynamic "
+                    "regime detection adds value when task identity is unavailable at inference time."
+                ),
+                "research_strategy": (
+                    "Use the lightest supported benchmark (Split-CIFAR-10) to ask one specific falsifiable "
+                    "question about class-incremental generalisation before escalating to harder settings."
+                ),
+                "config_overrides": {
+                    "setting": "class_incremental",
+                    "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                    "external_baselines": external_baselines or ["ewc", "si", "sgd_baseline", "experience_replay"],
+                },
+                "priority_bias": 15.0,
+            }]
+
         return []
 
     def _active_path_experiment_catalog(self, path: ActiveResearchPath) -> list[dict[str, Any]]:
