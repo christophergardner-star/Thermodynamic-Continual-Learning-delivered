@@ -1255,7 +1255,8 @@ function renderSummary(){
   const processes = (state.data.processes && state.data.processes.processes) || [];
   const runningVal = Number(experiments.running || 0);
   const pendingVal = Number(experiments.pending || 0);
-  const reviewVal = (review.proposals||[]).length + (review.claim_reviews||[]).length + (review.questions||[]).length;
+  const { proposals: _sp, questions: _sq, claims: _sc } = pendingReviewItems(review);
+  const reviewVal = _sp.length + _sq.length + _sc.length;
   const blockedVal = papers.filter((p) => String(p.status||"") === "blocked").length;
   const trustedVal = Number(validation.summary?.trusted_publication_allowed || 0);
   const limitedVal = Number(validation.summary?.limited_scope || 0);
