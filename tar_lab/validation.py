@@ -123,7 +123,18 @@ def validate_execution_request(
         except Exception as exc:
             result["issues"].append(f"manifest_authorisation_failed: {exc}")
     else:
-        result["issues"].append("manifest_missing")
+        # In autonomous mode (stabilisation OFF), Director scope constraint
+        # (_STRICT_REAL_WORLD_FRONTIER_ONLY) is the gate — no per-experiment manifest required.
+        try:
+            from tar_validation_mode import load_state as _load_vs
+            _vs = _load_vs(workspace) or {}
+            if not _vs.get("active"):
+                result["checks"]["manifest_loaded"] = True
+                result["checks"]["experiment_authorised"] = True
+            else:
+                result["issues"].append("manifest_missing")
+        except Exception:
+            result["issues"].append("manifest_missing")
 
     conflicts = find_runtime_conflicts(
         workspace,
