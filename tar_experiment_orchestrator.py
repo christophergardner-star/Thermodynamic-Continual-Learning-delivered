@@ -1143,38 +1143,48 @@ class ExperimentOrchestrator:
         force_in_process: bool = False,
     ) -> ExperimentResult | None:
         # RAIL 3 — manifest gate. Every training run requires a verified,
-        # user-committed manifest. Refuse and write an audit note if absent.
+        # user-committed manifest. In autonomous mode (stabilisation OFF) the
+        # Director's _STRICT_REAL_WORLD_FRONTIER_ONLY constraint is the gate instead.
         if self._active_manifest is None:
-            msg = (
-                f"Refusing to execute '{spec.id}': no execution manifest is loaded. "
-                f"Call orchestrator.set_manifest(path) with a committed manifest "
-                f"before running experiments. See tar_lab/manifest.py for schema."
-            )
-            self._log(f"[manifest_gate] {msg}")
-            write_refuse_note(
-                self.workspace,
-                component="ExperimentOrchestrator._execute",
-                reason=msg,
-                experiment_id=spec.id,
-            )
-            raise ManifestGateError(msg)
-
-        try:
-            entry = self._active_manifest.assert_experiment_authorised(spec.id)
-            self._log(
-                f"[manifest_gate] '{spec.id}' authorised by manifest "
-                f"'{self._active_manifest.manifest_id}'"
-            )
-        except ManifestGateError as exc:
-            self._log(f"[manifest_gate] {exc}")
-            write_refuse_note(
-                self.workspace,
-                component="ExperimentOrchestrator._execute",
-                reason=str(exc),
-                experiment_id=spec.id,
-                manifest_path=str(getattr(self._active_manifest, "_path", "")),
-            )
-            raise
+            _autonomous_ok = False
+            try:
+                from tar_validation_mode import load_state as _load_vs
+                _vs = _load_vs(self.workspace) or {}
+                _autonomous_ok = not _vs.get("active", False)
+            except Exception:
+                pass
+            if not _autonomous_ok:
+                msg = (
+                    f"Refusing to execute '{spec.id}': no execution manifest is loaded. "
+                    f"Call orchestrator.set_manifest(path) with a committed manifest "
+                    f"before running experiments. See tar_lab/manifest.py for schema."
+                )
+                self._log(f"[manifest_gate] {msg}")
+                write_refuse_note(
+                    self.workspace,
+                    component="ExperimentOrchestrator._execute",
+                    reason=msg,
+                    experiment_id=spec.id,
+                )
+                raise ManifestGateError(msg)
+            self._log(f"[manifest_gate] autonomous mode — '{spec.id}' cleared by Director scope constraint")
+        else:
+            try:
+                entry = self._active_manifest.assert_experiment_authorised(spec.id)
+                self._log(
+                    f"[manifest_gate] '{spec.id}' authorised by manifest "
+                    f"'{self._active_manifest.manifest_id}'"
+                )
+            except ManifestGateError as exc:
+                self._log(f"[manifest_gate] {exc}")
+                write_refuse_note(
+                    self.workspace,
+                    component="ExperimentOrchestrator._execute",
+                    reason=str(exc),
+                    experiment_id=spec.id,
+                    manifest_path=str(getattr(self._active_manifest, "_path", "")),
+                )
+                raise
 
         validation = validate_execution_request(
             self.workspace,
