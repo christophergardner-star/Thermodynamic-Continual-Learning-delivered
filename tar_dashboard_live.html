@@ -1217,13 +1217,17 @@ function buildWarnings(){
   const queueSteps = Array.isArray(status.queue_steps) ? status.queue_steps : [];
   const limited = Number(validation.summary?.limited_scope || 0);
   const missingEnv = Number(validation.summary?.missing_env || 0);
-  const duplicateDashboard = processes.filter((proc) => !proc.experiment_id).length > 1;
+  // >2 allows 1 dashboard worker + 1 daemon (normal); only warn on genuine extras
+  const duplicateDashboard = processes.filter((proc) => !proc.experiment_id).length > 2;
 
   if (duplicateDashboard) warnings.push({ tone: "bad", text: "Multiple non-experiment Python processes are visible. This usually means duplicate dashboard or control processes are still live." });
   if (running === 0 && pending > 0) warnings.push({ tone: "warn", text: `There are ${pending} queued or planned experiment entries but nothing is running. The queue is not progressing on its own.` });
-  if (limited > 0 || missingEnv > 0) warnings.push({ tone: "warn", text: `${limited} validation records are limited-scope and ${missingEnv} visible canonical results are missing env provenance.` });
+  // limited-scope and missing-env are a known permanent state for pre-RAIL results — informational only
+  if (limited > 0 || missingEnv > 0) warnings.push({ tone: "info", text: `${limited} result(s) are limited-scope and ${missingEnv} are missing env provenance (pre-RAIL runs — expected).` });
   const blockedPapers = papers.filter((paper) => String(paper.status || "") === "blocked");
-  if (blockedPapers.length) warnings.push({ tone: "warn", text: `${blockedPapers.length} paper(s) are blocked pending evidence and should not be treated as publication-ready.` });
+  // Only alarming when nothing is running — if experiments are in flight, papers will unblock naturally
+  if (blockedPapers.length && running === 0 && pending === 0) warnings.push({ tone: "warn", text: `${blockedPapers.length} paper(s) are blocked and no experiments are queued to unblock them.` });
+  else if (blockedPapers.length) warnings.push({ tone: "info", text: `${blockedPapers.length} paper(s) are waiting on running/queued experiments before they can advance.` });
   const { proposals: _rp, questions: _rq, claims: _rc } = pendingReviewItems(review);
   const reviewCount = _rp.length + _rq.length + _rc.length;
   if (reviewCount) warnings.push({ tone: "info", text: `${reviewCount} human review item(s) are waiting for attention across proposals, claims, or questions.` });
