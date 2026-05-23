@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tar_lab.human_review import (
     answer_human_question,
     approved_experiment_ids,
@@ -178,3 +180,45 @@ def test_validation_trust_tiers_distinguish_env_backed_vs_corrected(tmp_path: Pa
         result_payload={"aggregate": {"tcl": {"forgetting_mean": 0.11}}},
     )
     assert manual["publication_allowed"] is True
+
+
+def test_rail_3_orchestrator_refuses_execution_without_manifest(tmp_path: Path) -> None:
+    """RAIL 3: ExperimentOrchestrator must raise ManifestGateError when
+    _active_manifest is None, regardless of stabilisation-mode state.
+
+    Regression test for the autonomous-mode bypass closed 2026-05-23. The bypass
+    allowed manifested-free execution when stabilisation mode was inactive (autonomous
+    mode). That produced Phase 17 — an unmanifested TinyImageNet result — through the
+    window c72e293..HEAD. See manifests/provenance/bypass_window_audit_20260523.md.
+
+    If this test fails, the bypass has been reintroduced. Do not suppress it.
+    """
+    from tar_experiment_orchestrator import ExperimentOrchestrator, ExperimentSpec
+    from tar_lab.manifest import ManifestGateError
+
+    ws = _workspace(tmp_path)
+    orch = ExperimentOrchestrator(ws)
+    spec = ExperimentSpec(
+        name="test_gate_check",
+        project_id="test-project",
+        hypothesis_name="_default",
+        dataset="split_cifar10",
+        method="tcl",
+        seeds=[42],
+        config_overrides={},
+    )
+    orch.submit(spec)
+
+    # Autonomous mode (no stabilisation_mode.json) — the old bypass allowed this.
+    # This is the regression-critical assertion: the bypass is gone.
+    with pytest.raises(ManifestGateError):
+        orch.run_next()
+
+    # Stabilisation mode active: must also refuse (belt-and-braces).
+    stab_path = ws / "tar_state" / "stabilisation_mode.json"
+    stab_path.write_text(
+        json.dumps({"active": True, "mode_id": "test", "activated_at": "2026-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ManifestGateError):
+        orch.run_next()

@@ -935,6 +935,44 @@ class ExperimentOrchestrator:
                 spec.error = ""
                 changed = True
 
+        # Promote pending specs that have a live runtime lease — handles daemon-restart race
+        try:
+            ledger_path = self.workspace / "tar_state" / "runtime_ledger.json"
+            with open(ledger_path, encoding="utf-8-sig") as _lf:
+                _ledger = json.load(_lf)
+            for _lease in _ledger.get("leases", []):
+                if str(_lease.get("status", "")) != "running":
+                    continue
+                _exp_id = str(_lease.get("experiment_id", "") or "")
+                _pid = int(_lease.get("pid", 0) or 0)
+                if not _exp_id or _pid <= 0:
+                    continue
+                _spec = self._specs.get(_exp_id)
+                if _spec is None or _spec.status != EXP_PENDING:
+                    continue
+                try:
+                    _r = subprocess.run(
+                        ["powershell", "-Command",
+                         f"Get-Process -Id {_pid} -ErrorAction SilentlyContinue | Select-Object Id"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    _pid_alive = str(_pid) in _r.stdout
+                except Exception:
+                    _pid_alive = False
+                if _pid_alive:
+                    _spec.status = EXP_RUNNING
+                    _spec.stage = STAGE_RUNNING
+                    _spec.pid = _pid
+                    if _lease.get("started_at"):
+                        _spec.started_at = str(_lease["started_at"])
+                    _spec.runtime_context = {
+                        **(_spec.runtime_context or {}),
+                        "runtime_lease_id": str(_lease.get("lease_id", "") or ""),
+                    }
+                    changed = True
+        except Exception:
+            pass
+
         if changed:
             self._save()
             self._refresh_author_state()
@@ -1143,31 +1181,24 @@ class ExperimentOrchestrator:
         force_in_process: bool = False,
     ) -> ExperimentResult | None:
         # RAIL 3 — manifest gate. Every training run requires a verified,
-        # user-committed manifest. In autonomous mode (stabilisation OFF) the
-        # Director's _STRICT_REAL_WORLD_FRONTIER_ONLY constraint is the gate instead.
+        # user-committed manifest. No autonomous-mode bypass: the prior
+        # "Director scope constraint" exemption was removed 2026-05-23 after
+        # it produced an unmanifested Phase 17 result (see
+        # manifests/provenance/bypass_window_audit_20260523.md).
         if self._active_manifest is None:
-            _autonomous_ok = False
-            try:
-                from tar_validation_mode import load_state as _load_vs
-                _vs = _load_vs(self.workspace) or {}
-                _autonomous_ok = not _vs.get("active", False)
-            except Exception:
-                pass
-            if not _autonomous_ok:
-                msg = (
-                    f"Refusing to execute '{spec.id}': no execution manifest is loaded. "
-                    f"Call orchestrator.set_manifest(path) with a committed manifest "
-                    f"before running experiments. See tar_lab/manifest.py for schema."
-                )
-                self._log(f"[manifest_gate] {msg}")
-                write_refuse_note(
-                    self.workspace,
-                    component="ExperimentOrchestrator._execute",
-                    reason=msg,
-                    experiment_id=spec.id,
-                )
-                raise ManifestGateError(msg)
-            self._log(f"[manifest_gate] autonomous mode — '{spec.id}' cleared by Director scope constraint")
+            msg = (
+                f"Refusing to execute '{spec.id}': no execution manifest is loaded. "
+                f"Call orchestrator.set_manifest(path) with a committed manifest "
+                f"before running experiments. See tar_lab/manifest.py for schema."
+            )
+            self._log(f"[manifest_gate] {msg}")
+            write_refuse_note(
+                self.workspace,
+                component="ExperimentOrchestrator._execute",
+                reason=msg,
+                experiment_id=spec.id,
+            )
+            raise ManifestGateError(msg)
         else:
             try:
                 entry = self._active_manifest.assert_experiment_authorised(spec.id)
@@ -1930,6 +1961,23 @@ class ExperimentOrchestrator:
             except OSError:
                 pass
             raise
+        # Auto-register in canonical JSONL index for immediate publication eligibility.
+        # Non-fatal: _iter_queue_experiment_records in build_validation_state provides
+        # a fallback scan so papers are never permanently blocked if this call fails.
+        try:
+            from tar_lab.result_artifacts import write_canonical_comparison_result
+            from tar_lab.phase_catalog import phase_catalog_by_logical_name
+            _cat = phase_catalog_by_logical_name().get(spec.id)
+            write_canonical_comparison_result(
+                workspace=self.workspace,
+                logical_name=spec.id,
+                payload=result_payload,
+                env_payload=env_payload,
+                phase_number=_cat.phase_number if _cat else None,
+                source_script=Path(__file__).name,
+            )
+        except Exception:
+            pass
         return path
 
     # ── status report ─────────────────────────────────────────────────────────
