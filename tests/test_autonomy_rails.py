@@ -198,6 +198,10 @@ def test_rail_3_orchestrator_refuses_execution_without_manifest(tmp_path: Path) 
 
     ws = _workspace(tmp_path)
     orch = ExperimentOrchestrator(ws)
+    assert orch._autonomous is False, (
+        "Default _autonomous must be False — manual mode is the safe default; "
+        "only the daemon opts in via set_autonomous(True)"
+    )
     spec = ExperimentSpec(
         name="test_gate_check",
         project_id="test-project",

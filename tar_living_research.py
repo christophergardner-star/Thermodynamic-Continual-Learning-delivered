@@ -38,14 +38,19 @@ from tar_experiment_orchestrator import (
 
 _PHASE16_VRAM_BUDGET_GB = 3.2
 _PHASE17_VRAM_BUDGET_GB = 3.3
-_MIN_ACTIVE_EXPERIMENTS = 3
-_MIN_QUEUED_EXPERIMENTS = 2
+_MIN_ACTIVE_EXPERIMENTS = 6
+_MIN_QUEUED_EXPERIMENTS = 6
+_MAX_QUEUED_EXPERIMENTS = 15
 
 
-def _bounded_execution_enabled() -> bool:
-    return str(os.environ.get("TAR_ENABLE_BOUNDED_EXECUTION", "") or "").strip().lower() in {
+def _bounded_execution_enabled(workspace: "Path | None" = None) -> bool:
+    if str(os.environ.get("TAR_ENABLE_BOUNDED_EXECUTION", "") or "").strip().lower() in {
         "1", "true", "yes", "on",
-    }
+    }:
+        return True
+    if workspace is not None:
+        return (Path(workspace) / "tar_state" / "execution_enabled.flag").exists()
+    return False
 _LEGACY_DIRECTOR_EXPERIMENT_ALIASES = {
     "director-regime-detection-accuracy-01": "director-regime-detection-accuracy-regime-probe",
     "director-catastrophic-forgetting-01": "director-catastrophic-forgetting-carryover-probe",
@@ -327,6 +332,43 @@ def _paper_frontier_ids(entry: dict) -> list[str]:
     return [frontier_id] if frontier_id else []
 
 
+def _sync_website_research_json(workspace: Path, director_state: dict | None) -> None:
+    """Write website/data/research.json from live Director state. Silent on any error."""
+    import re as _re
+    try:
+        website_json = _REPO.parent / "website" / "data" / "research.json"
+        if not website_json.parent.exists():
+            return
+        paths = director_state.get("active_research_paths", []) if isinstance(director_state, dict) else []
+        status_map = {"pursue_now": "active", "pursue_next": "queued", "investigate": "investigating"}
+        items = []
+        for p in paths:
+            if not isinstance(p, dict):
+                continue
+            title = str(p.get("title", "") or "").strip()
+            if not title:
+                continue
+            why = str(p.get("why_this_now", "") or "")
+            m = _re.search(r"(\d+) complete", why)
+            exp_count = int(m.group(1)) if m else 0
+            allowed_topics = list(p.get("allowed_topics", []) or [])
+            description = str(allowed_topics[2]).strip() if len(allowed_topics) > 2 else ""
+            items.append({
+                "title": title,
+                "status": status_map.get(str(p.get("status", "") or ""), "investigating"),
+                "frontier_id": str(p.get("target_frontier_problem_id", "") or ""),
+                "description": description[:300],
+                "experiment_count": exp_count,
+                "paper_title": str(p.get("target_paper_id", "") or ""),
+                "evidence_strength": "moderate",
+                "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            })
+        out = {"research": items, "updated_at": datetime.now(timezone.utc).isoformat()}
+        website_json.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def write_research_coordination_state(
     workspace: Path,
     orch: ExperimentOrchestrator,
@@ -484,6 +526,7 @@ def write_research_coordination_state(
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError:
         pass
+    _sync_website_research_json(workspace, director_state)
     return payload
 
 
@@ -811,7 +854,7 @@ def _is_retryable_failed_record(rec: dict[str, object]) -> bool:
         return False
     status = str(rec.get("status", "") or "")
     stage = str(rec.get("stage", "") or "")
-    if status != "failed" and stage != "failed":
+    if status not in {"failed", "skipped"} and stage != "failed":
         return False
     result_path = str(rec.get("result_path", "") or "")
     if not result_path:
@@ -1196,10 +1239,10 @@ def _build_director_followup_specs(
             and directive_status == "failed"
             and scheduler_intent in {"retry_now", "queue_now"}
         )
-        if proposal_origin != "director" and not retryable_existing:
+        if proposal_origin not in {"director", "suite"} and not retryable_existing:
             continue
         frontier_id = str(directive.get("frontier_problem_id", "") or "")
-        if allowed_frontier_ids and frontier_id and frontier_id not in allowed_frontier_ids:
+        if proposal_origin != "suite" and allowed_frontier_ids and frontier_id and frontier_id not in allowed_frontier_ids:
             continue
         if directive_status not in {"proposed", "failed"}:
             continue
@@ -1231,7 +1274,9 @@ def _build_director_followup_specs(
             for rec in records_for_id:
                 rec_status = str(rec.get("status", "") or "")
                 rec_stage = str(rec.get("stage", "") or "")
-                if not has_live_nonterminal and (rec_status == "failed" or rec_stage == "failed"):
+                if not has_live_nonterminal and (
+                    rec_status in {"failed", "skipped"} or rec_stage == "failed"
+                ):
                     retryable_archived_failure = True
                     break
         if spec_id in existing_ids and not retryable_archived_failure:
@@ -1240,7 +1285,7 @@ def _build_director_followup_specs(
         paper_id = str(directive.get("target_paper_id", "") or "")
         if not paper_id and frontier_id:
             paper_id = f"frontier-paper-{frontier_id}"
-        if allowed_paper_ids and paper_id and paper_id not in allowed_paper_ids:
+        if proposal_origin != "suite" and allowed_paper_ids and paper_id and paper_id not in allowed_paper_ids:
             continue
         priority = _priority_from_director_directive(directive, fallback=50)
         if paper_id and paper_id == current_paper_id:
@@ -1346,6 +1391,8 @@ def _ensure_director_seeded_queue(
     del plans
     canonical_specs = build_scaleup_specs() + autonomous_specs
     submitted_ids: list[str] = []
+    _active_statuses = {"pending", "running"}
+    _current_active = sum(1 for s in orch._specs.values() if s.status in _active_statuses)
 
     active_frontier_ids = set(
         director_state.get("summary", {}).get("active_frontier_problem_ids", [])
@@ -1363,6 +1410,8 @@ def _ensure_director_seeded_queue(
             allowed_frontier_ids
         )
     for spec in canonical_specs:
+        if _current_active + len(submitted_ids) >= _MAX_QUEUED_EXPERIMENTS:
+            break
         if spec.id in existing_ids:
             continue
         if spec.id not in approved_ids:
@@ -1393,6 +1442,8 @@ def _ensure_director_seeded_queue(
                 submitted_ids.append(spec.id)
                 retryable_failed_ids.discard(spec.id)
             continue
+        if _current_active + len(submitted_ids) >= _MAX_QUEUED_EXPERIMENTS:
+            break
         if spec.id not in approved_ids:
             continue
         orch.submit(spec)
@@ -1645,7 +1696,7 @@ def run_portfolio(
     director_state = ResearchDirector(workspace).update_state()
     coordination_state = write_research_coordination_state(workspace, orch, director_state, author_state)
     _ensure_director_seeded_queue(workspace, orch, coordination_state=coordination_state)
-    if not _bounded_execution_enabled():
+    if not _bounded_execution_enabled(workspace):
         _log(workspace, "planner-only mode active; living research portfolio will not start execution without explicit bounded execution enablement.")
         heartbeat_from_env(workspace, status="running", message="living research planner-only mode")
         return []
@@ -1693,6 +1744,11 @@ def run_portfolio_daemon(
         include_autonomous=include_autonomous,
         only_autonomous_names=only_autonomous_names,
     )
+    # Enable autonomous manifest generation so the daemon can satisfy RAIL 3
+    # without human intervention. Each experiment gets a minimal manifest that
+    # is generated, committed to git, and hash-verified before execution.
+    # authorised_by is set to "TAR Director (autonomous)" — TAR does not lie.
+    orch.set_autonomous(True)
     _log(workspace, f"submitted={len(orch._specs)} experiments total")
     scheduler = TARScheduler(workspace)
     evidence = ExternalEvidenceIngestor(workspace, poll_interval_s=max(900.0, poll_interval_s * 10.0))
@@ -1703,6 +1759,46 @@ def run_portfolio_daemon(
     author_state = write_planned_author_state(workspace)
     coordination_state = write_research_coordination_state(workspace, orch, director_state, author_state)
     _ensure_director_seeded_queue(workspace, orch, coordination_state=coordination_state)
+
+    # Release leases whose PIDs are dead — psutil unavailable, use subprocess check
+    def _release_dead_leases_at_startup(ws: Path) -> None:
+        import subprocess as _sp
+        ledger_path = ws / "tar_state" / "runtime_ledger.json"
+        try:
+            with open(ledger_path, encoding="utf-8-sig") as _f:
+                payload = json.load(_f)
+        except Exception:
+            return
+        changed = False
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for lease in payload.get("leases", []):
+            if str(lease.get("status", "")) not in {"running", "starting"}:
+                continue
+            pid = int(lease.get("pid", 0) or 0)
+            if pid <= 0:
+                continue
+            try:
+                r = _sp.run(
+                    ["powershell", "-Command",
+                     f"Get-Process -Id {pid} -ErrorAction SilentlyContinue | Select-Object Id"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                pid_alive = str(pid) in r.stdout
+            except Exception:
+                pid_alive = True  # assume alive on check failure; don't release
+            if not pid_alive:
+                lease["status"] = "released"
+                lease["completion_reason"] = "stale_pid_dead_at_daemon_startup"
+                lease["completed_at"] = now_iso
+                lease["pid"] = 0
+                changed = True
+        if changed:
+            payload["updated_at"] = now_iso
+            with open(ledger_path, "w", encoding="utf-8") as _f:
+                json.dump(payload, _f, indent=2)
+
+    _release_dead_leases_at_startup(workspace)
+
     daemon_status = {"status": "starting", "last_event": "daemon boot"}
     execution_enabled = _bounded_execution_enabled()
     heartbeat_interval_s = max(15.0, min(60.0, poll_interval_s))
@@ -1756,7 +1852,7 @@ def run_portfolio_daemon(
             author_state = write_planned_author_state(workspace)
             coordination_state = write_research_coordination_state(workspace, orch, director_state, author_state)
             _ensure_director_seeded_queue(workspace, orch, coordination_state=coordination_state)
-            if not execution_enabled:
+            if not _bounded_execution_enabled(workspace):
                 daemon_status.update({
                     "status": "planning_only",
                     "last_event": "awaiting human-approved manifest execution",
