@@ -1610,6 +1610,14 @@ class ExperimentOrchestrator:
             if observer_cls is not None:
                 observer_factory = observer_cls
 
+        # Comparison methods run fresh alongside spec.method (same seeds, default
+        # hyperparameters) so results are directly comparable in the same environment.
+        # Overrides are intentionally stripped for comparison methods — those
+        # hyperparameters belong only to the primary method being probed.
+        _all_cmp = list(spec.config_overrides.get("comparison_methods") or ["ewc", "sgd_baseline"])
+        comparison_methods = [m for m in _all_cmp if m != spec.method]
+        method_forgetting: dict[str, list[float]] = {m: [] for m in comparison_methods}
+
         for i, seed in enumerate(spec.seeds):
             optimizer_backend, optimizer_backend_config, clean_overrides = split_optimizer_config(
                 spec.config_overrides,
@@ -1629,14 +1637,36 @@ class ExperimentOrchestrator:
             )
             forgetting_list.append(r.mean_forgetting)
             accuracy_list.append(r.final_mean_accuracy)
-            seed_results.append({
+            seed_entry: dict = {
                 "seed": seed,
                 "forgetting": r.mean_forgetting,
                 "accuracy": r.final_mean_accuracy,
-            })
-            self._log(f"  seed={seed}  forgetting={r.mean_forgetting:.4f}"
+                "comparisons": {},
+            }
+            # Fresh baseline runs — same seed, same epochs, same backbone, default HPs.
+            for cmp_method in comparison_methods:
+                try:
+                    cfg_cmp = ContinualLearningBenchmarkConfig(
+                        seed=seed,
+                        train_epochs_per_task=spec.epochs,
+                    )
+                    r_cmp = run_split_cifar10_benchmark(
+                        cfg_cmp, method=cmp_method, workspace=str(self.workspace),
+                        backbone=spec.backbone,
+                    )
+                    method_forgetting[cmp_method].append(r_cmp.mean_forgetting)
+                    seed_entry["comparisons"][cmp_method] = {
+                        "forgetting": r_cmp.mean_forgetting,
+                        "accuracy": r_cmp.final_mean_accuracy,
+                    }
+                    self._log(f"  seed={seed}  [{cmp_method}] forgetting={r_cmp.mean_forgetting:.4f}")
+                except Exception as exc:
+                    self._log(f"  [baseline] {cmp_method} seed={seed} failed: {exc}")
+                    method_forgetting[cmp_method].append(float("nan"))
+                    seed_entry["comparisons"][cmp_method] = {"forgetting": None, "accuracy": None}
+            seed_results.append(seed_entry)
+            self._log(f"  seed={seed}  [{spec.method}] forgetting={r.mean_forgetting:.4f}"
                       f"  accuracy={r.final_mean_accuracy:.4f}")
-            # Live progress update
             self.update_progress(spec.id, {
                 "seeds_done":       i + 1,
                 "seeds_total":      len(spec.seeds),
@@ -1645,7 +1675,35 @@ class ExperimentOrchestrator:
                 "forgetting_so_far": forgetting_list[:],
             })
 
-        return self._build_result(spec, seed_results, forgetting_list, accuracy_list)
+        result = self._build_result(spec, seed_results, forgetting_list, accuracy_list)
+
+        # Append fresh pairwise comparison stats to notes — honest, same-environment data.
+        cmp_parts: list[str] = []
+        for cmp_method, cmp_vals in method_forgetting.items():
+            valid_pairs = [(t, b) for t, b in zip(forgetting_list, cmp_vals)
+                           if not math.isnan(b)]
+            if not valid_pairs:
+                continue
+            tcl_clean, cmp_clean = zip(*valid_pairs)
+            deltas_cmp = [t - b for t, b in valid_pairs]
+            mean_delta_cmp = sum(deltas_cmp) / len(deltas_cmp)
+            n_better_cmp = sum(1 for d in deltas_cmp if d < 0)
+            p_cmp = 1.0
+            if len(deltas_cmp) >= 2:
+                try:
+                    from scipy import stats as sc
+                    p_cmp = float(sc.ttest_rel(list(tcl_clean), list(cmp_clean)).pvalue)
+                except Exception:
+                    pass
+            direction = "better" if mean_delta_cmp < 0 else "worse"
+            cmp_parts.append(
+                f"vs {cmp_method}: {spec.method} {abs(mean_delta_cmp):.4f} {direction}"
+                f" ({n_better_cmp}/{len(valid_pairs)} seeds, p={p_cmp:.4f})"
+            )
+        if cmp_parts:
+            result.notes += " | " + " | ".join(cmp_parts)
+
+        return result
 
     # ── CIFAR-100 runner (native standalone) ──────────────────────────────────
     def _run_cifar100(self, spec: ExperimentSpec) -> ExperimentResult:
