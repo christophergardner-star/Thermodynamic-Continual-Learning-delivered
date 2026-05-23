@@ -1,0 +1,30 @@
+{
+  "manifest_id": "manifest-phase17-tinyimagenet-rerun-20260523",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "authorised_by": "Christopher Gardner",
+  "purpose": "Rerun Phase 17 TinyImageNet scale-up under manifest gate. The original bypass-era result (phase17_tinyimagenet__20260523T144752Z) was quarantined after the RAIL 3 autonomous-mode bypass was closed. This manifest authorises the clean rerun.",
+  "global_time_limit_h": 80.0,
+  "experiments": [
+    {
+      "experiment_id": "phase17_tinyimagenet",
+      "name": "Phase 17 TinyImageNet scale-up rerun (TCL vs EWC vs SGD, 3 seeds)",
+      "allowed_datasets": [
+        "split_tinyimagenet"
+      ],
+      "allowed_methods": [
+        "tcl",
+        "ewc",
+        "sgd_baseline"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1
+      ],
+      "time_limit_h": 75.0,
+      "run_limit": 1,
+      "notes": "ResNet-18, Split-TinyImageNet task_incremental, 40 epochs/task, batch_size=64, 3 seeds. Replaces quarantined bypass-era result. See manifests/provenance/bypass_window_audit_20260523.md."
+    }
+  ],
+  "content_hash": "1c8f0301097ea60520239d6351e5296f4b1d62ef44fa05c42e726d9683377307"
+}
