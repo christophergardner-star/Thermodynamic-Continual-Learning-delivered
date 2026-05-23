@@ -1559,133 +1559,265 @@ class ResearchDirector:
             ]
 
         if frontier_id == "fp-regime-detection-accuracy":
-            return [{
-                **base_common,
-                "experiment_id": "director-regime-detection-accuracy-regime-probe",
-                "title": "Director Follow-up - Thermodynamic Regime Detection Accuracy",
-                "proposal_origin": "director",
-                "proposal_kind": "frontier_probe",
-                "hypothesis_name": "director_regime_probe",
-                "dataset": "split_cifar10",
-                "method": "tcl",
-                "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
-                "seeds": [42, 0, 1],
-                "estimated_runtime_h": 6.0,
-                "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
-                "depends_on": [],
-                "backbone": "resnet18",
-                "epochs": 40,
-                "mechanism_focus": (
-                    "Adjust the user's unpublished TAR/TCL/ASC regime controller so sigma-star calibration and resets become more reliable."
-                ),
-                "experiment_goal": (
-                    f"Use a fast, falsifiable probe to improve evidence on the real-world problem '{frontier_title}' "
-                    "before escalating to heavier datasets."
-                ),
-                "description": (
-                    f"Director-selected probe on {frontier_title}. This low-cost run checks whether the internal "
-                    "thermodynamic controller adds value relative to external baselines instead of assuming it does."
-                ),
-                "research_strategy": (
-                    "Use a smaller supported benchmark for quick diagnosis, but keep richer candidate datasets available for "
-                    "later validation if the signal holds."
-                ),
-                "config_overrides": {
-                    "tcl_governor_enabled": True,
-                    "tcl_penalty_lambda": 0.015,
-                    "tcl_alpha": 0.55,
-                    "tcl_reset_on_task_boundary": True,
+            return [
+                {
+                    **base_common,
+                    "experiment_id": "director-regime-detection-accuracy-regime-probe",
+                    "title": "Director Follow-up - Thermodynamic Regime Detection Accuracy",
+                    "proposal_origin": "director",
+                    "proposal_kind": "frontier_probe",
+                    "hypothesis_name": "director_regime_probe",
+                    "dataset": "split_cifar10",
+                    "method": "tcl",
                     "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
-                    "external_baselines": external_baselines or ["ewc", "si", "sgd_baseline"],
+                    "seeds": [42, 0, 1],
+                    "estimated_runtime_h": 6.0,
+                    "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
+                    "depends_on": [],
+                    "backbone": "resnet18",
+                    "epochs": 40,
+                    "mechanism_focus": (
+                        "Adjust the user's unpublished TAR/TCL/ASC regime controller so sigma-star calibration and resets become more reliable."
+                    ),
+                    "experiment_goal": (
+                        f"Use a fast, falsifiable probe to improve evidence on the real-world problem '{frontier_title}' "
+                        "before escalating to heavier datasets."
+                    ),
+                    "description": (
+                        f"Director-selected probe on {frontier_title}. This low-cost run checks whether the internal "
+                        "thermodynamic controller adds value relative to external baselines instead of assuming it does."
+                    ),
+                    "research_strategy": (
+                        "Use a smaller supported benchmark for quick diagnosis, but keep richer candidate datasets available for "
+                        "later validation if the signal holds."
+                    ),
+                    "config_overrides": {
+                        "tcl_governor_enabled": True,
+                        "tcl_penalty_lambda": 0.015,
+                        "tcl_alpha": 0.55,
+                        "tcl_reset_on_task_boundary": True,
+                        "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                        "external_baselines": external_baselines or ["ewc", "si", "sgd_baseline"],
+                    },
+                    "priority_bias": 18.0,
                 },
-                "priority_bias": 18.0,
-            }]
+                {
+                    **base_common,
+                    "experiment_id": "director-regime-detection-accuracy-sigma-calibration-probe",
+                    "title": "Director Follow-up - Sigma-Star Calibration Sensitivity",
+                    "proposal_origin": "director",
+                    "proposal_kind": "frontier_probe",
+                    "hypothesis_name": "director_sigma_probe",
+                    "dataset": "split_cifar10",
+                    "method": "tcl",
+                    "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                    "seeds": [42, 0, 1],
+                    "estimated_runtime_h": 6.0,
+                    "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
+                    "depends_on": [],
+                    "backbone": "resnet18",
+                    "epochs": 40,
+                    "mechanism_focus": (
+                        "Test whether sigma-star calibration in the user's unpublished TAR/TCL/ASC regime controller "
+                        "remains accurate when the penalty lambda is raised to sharpen the detection threshold."
+                    ),
+                    "experiment_goal": (
+                        f"Complement the regime-probe on '{frontier_title}' by testing a sharper calibration regime "
+                        "while keeping external baselines for honest comparison."
+                    ),
+                    "description": (
+                        f"Director-selected sigma calibration probe on {frontier_title}. "
+                        "Tests whether a higher penalty sharpens or destabilises regime detection."
+                    ),
+                    "research_strategy": (
+                        "Use the same cheap benchmark as the regime-probe but shift to a higher penalty to test "
+                        "whether the internal regime detector's calibration remains reliable under stronger regularisation."
+                    ),
+                    "config_overrides": {
+                        "tcl_governor_enabled": True,
+                        "tcl_penalty_lambda": 0.025,
+                        "tcl_alpha": 0.55,
+                        "tcl_reset_on_task_boundary": True,
+                        "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                        "external_baselines": external_baselines or ["ewc", "si", "sgd_baseline"],
+                    },
+                    "priority_bias": 15.0,
+                },
+            ]
 
         if frontier_id == "fp-hyperparameter-robustness":
-            return [{
-                **base_common,
-                "experiment_id": "director-hyperparameter-robustness-lambda-probe",
-                "title": "Director Follow-up - TCL Hyperparameter Robustness",
-                "proposal_origin": "director",
-                "proposal_kind": "frontier_probe",
-                "hypothesis_name": "director_lambda_probe",
-                "dataset": "split_cifar10",
-                "method": "tcl",
-                "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
-                "seeds": [42, 0, 1],
-                "estimated_runtime_h": 6.0,
-                "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
-                "depends_on": [],
-                "backbone": "resnet18",
-                "epochs": 40,
-                "mechanism_focus": (
-                    "Stress-test the user's unpublished TAR/TCL/ASC anchor strength to see whether the mechanism remains useful without narrow tuning."
-                ),
-                "experiment_goal": (
-                    f"Use a low-cost but falsifiable probe to strengthen evidence on '{frontier_title}' while still "
-                    "anchoring the claim against external baselines."
-                ),
-                "description": (
-                    f"Director-selected probe on {frontier_title}. This tests whether the internal method remains useful "
-                    "under tougher settings instead of only looking good near its home hyperparameters."
-                ),
-                "research_strategy": (
-                    "Probe sensitivity on a cheap supported benchmark first, but keep additional datasets and backbones in the "
-                    "design metadata so robustness work can expand beyond CIFAR-10."
-                ),
-                "config_overrides": {
-                    "tcl_governor_enabled": True,
-                    "tcl_penalty_lambda": 0.02,
-                    "tcl_alpha": 0.50,
-                    "tcl_reset_on_task_boundary": True,
+            return [
+                {
+                    **base_common,
+                    "experiment_id": "director-hyperparameter-robustness-lambda-probe",
+                    "title": "Director Follow-up - TCL Hyperparameter Robustness",
+                    "proposal_origin": "director",
+                    "proposal_kind": "frontier_probe",
+                    "hypothesis_name": "director_lambda_probe",
+                    "dataset": "split_cifar10",
+                    "method": "tcl",
                     "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
-                    "external_baselines": external_baselines or ["ewc", "si", "sgd_baseline"],
+                    "seeds": [42, 0, 1],
+                    "estimated_runtime_h": 6.0,
+                    "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
+                    "depends_on": [],
+                    "backbone": "resnet18",
+                    "epochs": 40,
+                    "mechanism_focus": (
+                        "Stress-test the user's unpublished TAR/TCL/ASC anchor strength to see whether the mechanism remains useful without narrow tuning."
+                    ),
+                    "experiment_goal": (
+                        f"Use a low-cost but falsifiable probe to strengthen evidence on '{frontier_title}' while still "
+                        "anchoring the claim against external baselines."
+                    ),
+                    "description": (
+                        f"Director-selected probe on {frontier_title}. This tests whether the internal method remains useful "
+                        "under tougher settings instead of only looking good near its home hyperparameters."
+                    ),
+                    "research_strategy": (
+                        "Probe sensitivity on a cheap supported benchmark first, but keep additional datasets and backbones in the "
+                        "design metadata so robustness work can expand beyond CIFAR-10."
+                    ),
+                    "config_overrides": {
+                        "tcl_governor_enabled": True,
+                        "tcl_penalty_lambda": 0.02,
+                        "tcl_alpha": 0.50,
+                        "tcl_reset_on_task_boundary": True,
+                        "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                        "external_baselines": external_baselines or ["ewc", "si", "sgd_baseline"],
+                    },
+                    "priority_bias": 16.0,
                 },
-                "priority_bias": 16.0,
-            }]
+                {
+                    **base_common,
+                    "experiment_id": "director-hyperparameter-robustness-alpha-probe",
+                    "title": "Director Follow-up - TCL Alpha Sensitivity",
+                    "proposal_origin": "director",
+                    "proposal_kind": "frontier_probe",
+                    "hypothesis_name": "director_alpha_probe",
+                    "dataset": "split_cifar10",
+                    "method": "tcl",
+                    "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                    "seeds": [42, 0, 1],
+                    "estimated_runtime_h": 6.0,
+                    "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
+                    "depends_on": [],
+                    "backbone": "resnet18",
+                    "epochs": 40,
+                    "mechanism_focus": (
+                        "Stress-test the thermal blending coefficient (alpha) in the user's unpublished TAR/TCL/ASC methods "
+                        "to see whether robustness holds across different mixing ratios — orthogonal to the lambda probe."
+                    ),
+                    "experiment_goal": (
+                        f"Complement the lambda sensitivity probe on '{frontier_title}' by varying the alpha "
+                        "blending term independently while keeping external baselines for honest comparison."
+                    ),
+                    "description": (
+                        f"Director-selected alpha sensitivity probe on {frontier_title}. "
+                        "Tests the orthogonal hyperparameter axis to the completed lambda probe."
+                    ),
+                    "research_strategy": (
+                        "Run an orthogonal hyperparameter probe on the same cheap benchmark used for the lambda probe, "
+                        "testing whether the mechanism degrades when the blending coefficient is raised."
+                    ),
+                    "config_overrides": {
+                        "tcl_governor_enabled": True,
+                        "tcl_penalty_lambda": 0.015,
+                        "tcl_alpha": 0.70,
+                        "tcl_reset_on_task_boundary": True,
+                        "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                        "external_baselines": external_baselines or ["ewc", "si", "sgd_baseline"],
+                    },
+                    "priority_bias": 14.0,
+                },
+            ]
 
         if frontier_id == "fp-catastrophic-forgetting":
-            return [{
-                **base_common,
-                "experiment_id": "director-catastrophic-forgetting-carryover-probe",
-                "title": "Director Follow-up - Catastrophic Forgetting in Sequential Task Learning",
-                "proposal_origin": "director",
-                "proposal_kind": "frontier_probe",
-                "hypothesis_name": "director_carryover_probe",
-                "dataset": "split_cifar10",
-                "method": "tcl",
-                "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
-                "seeds": [42, 0, 1],
-                "estimated_runtime_h": 6.0,
-                "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
-                "depends_on": [],
-                "backbone": "resnet18",
-                "epochs": 40,
-                "mechanism_focus": (
-                    "Carry thermal state across task boundaries so the user's unpublished TAR/TCL/ASC methods can be tested as one candidate attack on forgetting."
-                ),
-                "experiment_goal": (
-                    f"Advance evidence on the real-world problem '{frontier_title}' with a direct forgetting-reduction probe "
-                    "that still measures the internal method against real external baselines."
-                ),
-                "description": (
-                    f"Director-selected probe on {frontier_title}. This tests whether cross-task thermal carry-over improves "
-                    "retention without assuming the internal method is already the right answer."
-                ),
-                "research_strategy": (
-                    "Use a fast supported benchmark to ask one narrow forgetting question at a time, while retaining enough "
-                    "baseline structure to decide whether the internal method is genuinely useful."
-                ),
-                "config_overrides": {
-                    "tcl_governor_enabled": True,
-                    "tcl_penalty_lambda": 0.01,
-                    "tcl_alpha": 0.50,
-                    "tcl_reset_on_task_boundary": False,
+            return [
+                {
+                    **base_common,
+                    "experiment_id": "director-catastrophic-forgetting-carryover-probe",
+                    "title": "Director Follow-up - Catastrophic Forgetting in Sequential Task Learning",
+                    "proposal_origin": "director",
+                    "proposal_kind": "frontier_probe",
+                    "hypothesis_name": "director_carryover_probe",
+                    "dataset": "split_cifar10",
+                    "method": "tcl",
                     "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
-                    "external_baselines": external_baselines or ["ewc", "si", "sgd_baseline", "experience_replay"],
+                    "seeds": [42, 0, 1],
+                    "estimated_runtime_h": 6.0,
+                    "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
+                    "depends_on": [],
+                    "backbone": "resnet18",
+                    "epochs": 40,
+                    "mechanism_focus": (
+                        "Carry thermal state across task boundaries so the user's unpublished TAR/TCL/ASC methods can be tested as one candidate attack on forgetting."
+                    ),
+                    "experiment_goal": (
+                        f"Advance evidence on the real-world problem '{frontier_title}' with a direct forgetting-reduction probe "
+                        "that still measures the internal method against real external baselines."
+                    ),
+                    "description": (
+                        f"Director-selected probe on {frontier_title}. This tests whether cross-task thermal carry-over improves "
+                        "retention without assuming the internal method is already the right answer."
+                    ),
+                    "research_strategy": (
+                        "Use a fast supported benchmark to ask one narrow forgetting question at a time, while retaining enough "
+                        "baseline structure to decide whether the internal method is genuinely useful."
+                    ),
+                    "config_overrides": {
+                        "tcl_governor_enabled": True,
+                        "tcl_penalty_lambda": 0.01,
+                        "tcl_alpha": 0.50,
+                        "tcl_reset_on_task_boundary": False,
+                        "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                        "external_baselines": external_baselines or ["ewc", "si", "sgd_baseline", "experience_replay"],
+                    },
+                    "priority_bias": 17.0,
                 },
-                "priority_bias": 17.0,
-            }]
+                {
+                    **base_common,
+                    "experiment_id": "director-catastrophic-forgetting-boundary-reset-probe",
+                    "title": "Director Follow-up - Boundary-Reset Forgetting Test",
+                    "proposal_origin": "director",
+                    "proposal_kind": "frontier_probe",
+                    "hypothesis_name": "director_boundary_probe",
+                    "dataset": "split_cifar10",
+                    "method": "tcl",
+                    "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                    "seeds": [42, 0, 1],
+                    "estimated_runtime_h": 6.0,
+                    "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
+                    "depends_on": [],
+                    "backbone": "resnet18",
+                    "epochs": 40,
+                    "mechanism_focus": (
+                        "Test whether explicit boundary resets in the user's unpublished TAR/TCL/ASC thermal controller "
+                        "reduce forgetting compared to the thermal carry-over strategy."
+                    ),
+                    "experiment_goal": (
+                        f"Advance evidence on the real-world problem '{frontier_title}' by comparing boundary-reset "
+                        "against carry-over as orthogonal strategies for reducing catastrophic forgetting."
+                    ),
+                    "description": (
+                        f"Director-selected boundary-reset probe on {frontier_title}. "
+                        "Tests the complementary strategy to the carryover probe to triangulate the best forgetting defence."
+                    ),
+                    "research_strategy": (
+                        "Run the orthogonal boundary-reset configuration on the same cheap benchmark as the carryover probe "
+                        "so the two probes together answer whether to carry or reset thermal state across task boundaries."
+                    ),
+                    "config_overrides": {
+                        "tcl_governor_enabled": True,
+                        "tcl_penalty_lambda": 0.02,
+                        "tcl_alpha": 0.50,
+                        "tcl_reset_on_task_boundary": True,
+                        "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                        "external_baselines": external_baselines or ["ewc", "si", "sgd_baseline", "experience_replay"],
+                    },
+                    "priority_bias": 15.0,
+                },
+            ]
 
         if frontier_id == "fp-class-incremental":
             return [{
@@ -2028,6 +2160,90 @@ class ResearchDirector:
                 })
                 seen_ids.add(exp_id)
 
+            # LLM follow-up proposals — fires only when the static catalog is
+            # exhausted for this frontier and there are completed experiments to
+            # learn from. Capped at 2 new proposals per frontier per cycle.
+            n_pending_for_frontier = sum(
+                1 for d in directives
+                if str(d.get("frontier_problem_id", "") or "") == frontier_id
+                and str(d.get("status", "") or "") not in {"running", "complete", "failed"}
+            )
+            completed_for_frontier = [
+                exp for exp in experiments
+                if str(exp.get("frontier_problem_id", "") or "") == frontier_id
+                and (
+                    str(exp.get("status", "") or "") == "complete"
+                    or str(exp.get("stage", "") or "") == "complete"
+                )
+            ]
+            frontier_title = str(frontier.get("title", frontier_id) or frontier_id)
+            if n_pending_for_frontier == 0 and completed_for_frontier:
+                try:
+                    llm_proposals = self._llm_propose_followup_experiments(
+                        frontier, completed_for_frontier, seen_ids
+                    )
+                except Exception as exc:
+                    print(f"[Director] LLM follow-up proposals failed for {frontier_id}: {exc}", flush=True)
+                    llm_proposals = []
+                for proposal in llm_proposals:
+                    exp_id = str(proposal.get("experiment_id", "") or "")
+                    if not exp_id or exp_id in seen_ids:
+                        continue
+                    status = "proposed"
+                    unmet: list[str] = []
+                    intent = "propose_now"
+                    priority_score = _priority_for(exp_id, status, unmet, 0.0)
+                    directives.append({
+                        "experiment_id": exp_id,
+                        "title": str(proposal.get("title", "") or f"LLM Follow-up - {frontier_title}"),
+                        "dataset": str(proposal.get("dataset", "") or "split_cifar10"),
+                        "backbone": str(proposal.get("backbone", "resnet18") or "resnet18"),
+                        "method": "tcl",
+                        "seeds": [42, 0, 1],
+                        "config_overrides": dict(proposal.get("config_overrides") or {}),
+                        "estimated_runtime_h": float(proposal.get("estimated_runtime_h", 6.0) or 6.0),
+                        "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
+                        "epochs": 40,
+                        "depends_on": [],
+                        "description": str(proposal.get("why", "") or "LLM-proposed follow-up experiment."),
+                        "experiment_goal": str(proposal.get("why", "") or ""),
+                        "mechanism_focus": str(proposal.get("hypothesis", "") or ""),
+                        "status": status,
+                        "scheduler_intent": intent,
+                        "priority_score": priority_score,
+                        "frontier_problem_id": frontier_id,
+                        "frontier_problem_title": frontier_title,
+                        "global_problem_statement": str(frontier.get("global_problem_statement", "") or ""),
+                        "solution_family": str(frontier.get("solution_family", "TAR/TCL/ASC") or "TAR/TCL/ASC"),
+                        "solution_novelty_note": str(frontier.get("solution_novelty_note", "") or ""),
+                        "target_paper_id": str(
+                            paper.get("paper_id", "")
+                            or frontier.get("suggested_paper_id", "")
+                            or f"frontier-paper-{frontier_id}"
+                        ),
+                        "active_path_id": path.path_id if path else str(frontier.get("active_path_id", "") or ""),
+                        "path_kind": path.path_kind if path else str(frontier.get("path_kind", "") or ""),
+                        "path_status": str(frontier.get("path_status", "") or ""),
+                        "candidate_datasets": [str(d) for d in frontier.get("candidate_datasets", []) if str(d).strip()],
+                        "candidate_backbones": [str(b) for b in frontier.get("candidate_backbones", []) if str(b).strip()],
+                        "external_baselines": [str(b) for b in frontier.get("external_baselines", []) if str(b).strip()],
+                        "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                        "research_strategy": str(frontier.get("research_guidance", "") or ""),
+                        "internal_method_role": (
+                            "TAR/TCL/ASC are the user's unpublished internal methods under evaluation. "
+                            "They are not assumed solutions and must be tested against real external baselines."
+                        ),
+                        "proposal_origin": "director",
+                        "proposal_kind": "llm_follow_up",
+                        "blocked_by_experiment_ids": [],
+                        "why_now": (
+                            f"LLM-proposed follow-up for '{frontier_title}'. "
+                            "Static catalog exhausted; all prior experiments complete or queued."
+                        ),
+                        "target_venues": [str(item) for item in frontier.get("target_venues", []) if str(item).strip()],
+                    })
+                    seen_ids.add(exp_id)
+
         for path in active_research_paths:
             if path.path_kind not in {"novel_problem", "domain_frontier_scan"}:
                 continue
@@ -2222,6 +2438,42 @@ class ResearchDirector:
             )
         )
         return directives
+
+    def _llm_propose_followup_experiments(
+        self,
+        frontier: dict[str, Any],
+        completed_exps: list[dict],
+        seen_ids: set[str],
+    ) -> list[dict[str, Any]]:
+        """Ask Claude for follow-up experiments when the static catalog is exhausted."""
+        from tar_lab.llm_bridge import propose_followup_experiments
+        frontier_id = str(frontier.get("problem_id", "") or "")
+        frontier_title = str(frontier.get("title", frontier_id) or frontier_id)
+        summaries: list[str] = []
+        for exp in completed_exps:
+            exp_id = str(exp.get("id", "") or "")
+            dataset = str(exp.get("dataset", "") or "")
+            backbone = str(exp.get("backbone", "resnet18") or "resnet18")
+            result = self._load_experiment_result(exp)
+            forgetting = ""
+            if result:
+                for key in ("tcl_forgetting", "forgetting", "mean_forgetting"):
+                    if result.get(key) is not None:
+                        forgetting = f"forgetting={result[key]:.4f}"
+                        break
+            summaries.append(f"{exp_id}: {dataset}, {backbone}{(', ' + forgetting) if forgetting else ''}")
+        return propose_followup_experiments(
+            self.workspace,
+            frontier_id=frontier_id,
+            frontier_title=frontier_title,
+            global_problem_statement=str(frontier.get("global_problem_statement", "") or ""),
+            candidate_datasets=[str(d) for d in frontier.get("candidate_datasets", []) if str(d).strip()],
+            candidate_backbones=[str(b) for b in frontier.get("candidate_backbones", []) if str(b).strip()],
+            external_baselines=[str(b) for b in frontier.get("external_baselines", []) if str(b).strip()],
+            completed_summaries=summaries,
+            exclude_ids=seen_ids,
+            max_proposals=2,
+        )
 
     def _infer_domain_id(self, text: str) -> str:
         hay = text.lower()
