@@ -40,6 +40,8 @@ from tar_suite_checkpoint import (
     save_suite_state,
 )
 from tar_suite_logging import tee_console
+from tar_lab.manifest import load_and_verify_manifest, ManifestGateError, write_refuse_note
+from tar_lab.result_artifacts import collect_environment_snapshot, write_canonical_comparison_result
 
 SEEDS = [42, 0, 1]
 BACKBONE = "resnet18"
@@ -62,6 +64,66 @@ EXPERIMENT_ID = "phase17_tinyimagenet"
 
 TINYIMAGENET_MEAN = (0.4802, 0.4481, 0.3975)
 TINYIMAGENET_STD = (0.2302, 0.2265, 0.2262)
+
+
+def _require_manifest() -> None:
+    manifest_path_str = str(os.environ.get("TAR_MANIFEST_PATH", "") or "").strip()
+    if not manifest_path_str:
+        print("REFUSED: TAR_MANIFEST_PATH not set. Set it to the path of the signed manifest and re-run.", flush=True)
+        raise SystemExit(1)
+    manifest_path = Path(manifest_path_str)
+    if not manifest_path.is_absolute():
+        manifest_path = Path(_repo) / manifest_path
+    try:
+        manifest = load_and_verify_manifest(manifest_path, Path(_repo))
+        for experiment_id in (EXPERIMENT_ID, "phase17-tinyimagenet-rerun"):
+            try:
+                manifest.assert_experiment_authorised(experiment_id)
+                print(f"[RAIL 3] Manifest gate: OK ({manifest.manifest_id})", flush=True)
+                return
+            except ManifestGateError:
+                continue
+        raise ManifestGateError(
+            "Manifest does not authorise any accepted Phase 17 execution id "
+            "('phase17_tinyimagenet', 'phase17-tinyimagenet-rerun')."
+        )
+    except ManifestGateError as exc:
+        write_refuse_note(
+            Path(workspace),
+            component="phase17_tinyimagenet",
+            reason=str(exc),
+            experiment_id=EXPERIMENT_ID,
+            manifest_path=str(manifest_path),
+        )
+        print(f"REFUSED: {exc}", flush=True)
+        raise SystemExit(1)
+
+
+def _suite_config_payload(
+    *,
+    optimizer_backend: str,
+    optimizer_backend_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "suite": "phase17_tinyimagenet",
+        "dataset": DATASET_ID,
+        "hf_dataset_name": HF_DATASET_NAME,
+        "backbone": BACKBONE,
+        "epochs": EPOCHS,
+        "seeds": SEEDS,
+        "methods": METHODS,
+        "n_tasks": N_TASKS,
+        "classes_per_task": CLASSES_PER_TASK,
+        "batch_size": BATCH_SIZE,
+        "base_lr": BASE_LR,
+        "ewc_lambda": EWC_LAMBDA,
+        "tcl_alpha": TCL_ALPHA,
+        "tcl_penalty_lambda": TCL_PENALTY_LAMBDA,
+        "tcl_ordered_lr": TCL_ORDERED_LR,
+        "tcl_disordered_lr": TCL_DISORDERED_LR,
+        "optimizer_backend": optimizer_backend,
+        "optimizer_backend_config": optimizer_backend_config or {},
+    }
 
 
 def _mean(values: list[float]) -> float:
@@ -366,7 +428,7 @@ def _run_phase17_suite_impl(
     optimizer_backend: str = "sgd",
     optimizer_backend_config: dict[str, Any] | None = None,
 ) -> dict:
-    out_path = Path(workspace) / "tar_state" / "comparisons" / "phase17_tinyimagenet.json"
+    run_started_at = datetime.now(timezone.utc).isoformat()
     resume_state = _load_resume_state(workspace, restart=restart)
     completed_seeds = list(resume_state.get("completed_seeds", []))
     per_seed = list(resume_state.get("per_seed", []))
@@ -389,7 +451,7 @@ def _run_phase17_suite_impl(
         print("restart=True  — ignoring prior checkpoint and restarting suite from seed 1", flush=True)
     elif completed_seeds:
         print(f"resume=True   — recovered completed seeds: {completed_seeds}", flush=True)
-    print(f"{datetime.now(timezone.utc).isoformat()}")
+    print(f"{run_started_at}")
     print(f"{'='*70}", flush=True)
 
     if progress_callback is not None:
@@ -468,6 +530,7 @@ def _run_phase17_suite_impl(
         traceback.print_exc()
         resume_state["status"] = "stalled"
         save_suite_state(_resume_checkpoint_path(workspace), resume_state)
+        completed_at = datetime.now(timezone.utc).isoformat()
         payload = {
             "status": "ERROR",
             "dataset": DATASET_ID,
@@ -475,10 +538,29 @@ def _run_phase17_suite_impl(
             "verdict": f"ERROR - {err_msg}",
             "error": err_msg,
             "exception": str(exc),
-            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": completed_at,
         }
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(payload, indent=2))
+        env_payload = collect_environment_snapshot(
+            repo_root=Path(_repo),
+            workspace=Path(workspace),
+            config=_suite_config_payload(
+                optimizer_backend=optimizer_backend,
+                optimizer_backend_config=optimizer_backend_config,
+            ),
+            trigger="manual_script",
+            source_script=Path(__file__).name,
+            run_started_at=run_started_at,
+            run_ended_at=completed_at,
+            extra={"logical_name": "phase17_tinyimagenet", "status": "ERROR"},
+        )
+        write_canonical_comparison_result(
+            workspace=Path(workspace),
+            logical_name="phase17_tinyimagenet",
+            payload=payload,
+            env_payload=env_payload,
+            phase_number=17,
+            source_script=Path(__file__).name,
+        )
         _notify("TAR Phase 17 FAILED", str(exc)[:120])
         raise
 
@@ -532,6 +614,7 @@ def _run_phase17_suite_impl(
         verdict_key = "OUTCOME_C"
         verdict = "OUTCOME C - No significant improvement on TinyImageNet at current hyperparameters."
 
+    completed_at = datetime.now(timezone.utc).isoformat()
     payload = {
         "backbone": BACKBONE,
         "epochs": EPOCHS,
@@ -545,10 +628,29 @@ def _run_phase17_suite_impl(
         "pairwise": pairwise,
         "verdict_key": verdict_key,
         "verdict": verdict,
-        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": completed_at,
     }
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, indent=2, default=str))
+    env_payload = collect_environment_snapshot(
+        repo_root=Path(_repo),
+        workspace=Path(workspace),
+        config=_suite_config_payload(
+            optimizer_backend=optimizer_backend,
+            optimizer_backend_config=optimizer_backend_config,
+        ),
+        trigger="manual_script",
+        source_script=Path(__file__).name,
+        run_started_at=run_started_at,
+        run_ended_at=completed_at,
+        extra={"logical_name": "phase17_tinyimagenet", "status": "COMPLETE"},
+    )
+    artifacts = write_canonical_comparison_result(
+        workspace=Path(workspace),
+        logical_name="phase17_tinyimagenet",
+        payload=payload,
+        env_payload=env_payload,
+        phase_number=17,
+        source_script=Path(__file__).name,
+    )
     resume_state = build_suite_state(
         EXPERIMENT_ID,
         SEEDS,
@@ -559,8 +661,10 @@ def _run_phase17_suite_impl(
     )
     save_suite_state(_resume_checkpoint_path(workspace), resume_state)
     _notify("TAR Phase 17 COMPLETE", f"{verdict_key} - {verdict[:80]}")
-    print(f"\nResult written: {out_path}")
-    print(f"[{datetime.now(timezone.utc).isoformat()}] Phase 17 complete")
+    print(f"\nResult written: {artifacts['result_path']}")
+    print(f"Env snapshot: {artifacts['env_path']}")
+    print(f"Index updated: {artifacts['index_path']}")
+    print(f"[{completed_at}] Phase 17 complete")
     return payload
 
 
@@ -583,6 +687,7 @@ def run_phase17_suite(
 
 def main() -> None:
     try:
+        _require_manifest()
         restart = "--restart" in set(sys.argv[1:])
         run_phase17_suite(workspace, restart=restart)
     except Exception:
