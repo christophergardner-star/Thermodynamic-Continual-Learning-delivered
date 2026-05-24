@@ -51,7 +51,7 @@ PORT  = int(os.environ.get("TAR_DASHBOARD_PORT", 7860))
 # ── helpers ───────────────────────────────────────────────────────────────────
 def _jload(path: Path) -> dict | list | None:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return None
 
@@ -445,7 +445,14 @@ def _director_state(force_refresh: bool = False) -> dict:
 
 
 def _human_review_payload() -> dict[str, Any]:
-    return load_human_review_state(_WS)
+    state = load_human_review_state(_WS)
+    try:
+        from tar_validation_mode import load_state as _load_vs
+        vs = _load_vs(_WS) or {}
+        state["stabilisation_active"] = bool(vs.get("active"))
+    except Exception:
+        state["stabilisation_active"] = False
+    return state
 
 
 def _validation_payload() -> dict[str, Any]:
@@ -1102,6 +1109,10 @@ def _synthetic_phase_experiments() -> list[dict[str, Any]]:
             prior_status = queue_steps.get(meta["step"] - 1, {}).get("status", "")
             status = "pending"
             stage = "queued" if prior_status in {"running", "stale", "pending"} else "planned"
+        elif step_status == "complete":
+            status, stage = "complete", "complete"
+        elif step_status == "failed":
+            status, stage = "failed", "failed"
         elif result.get("status") == "ERROR" or "ERROR" in str(result.get("verdict", "")):
             status, stage = "failed", "failed"
         elif result_path.exists():
@@ -2203,6 +2214,75 @@ def api_human_review_decision(review_id: str):
     return jsonify({"ok": True, "updated": updated, "state": _human_review_payload()})
 
 
+@app.route("/api/human_review/question/<path:question_id>/recommend", methods=["POST"])
+def api_human_review_recommend(question_id: str):
+    """Ask Claude to explain TAR's recommended answer for a human review question."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return jsonify({"reasoning": None, "error": "ANTHROPIC_API_KEY not configured"}), 503
+
+    # Find the question in human review state
+    review_state = load_human_review_state(_WS)
+    questions = review_state.get("questions", []) if isinstance(review_state, dict) else []
+    question = next((q for q in questions if q.get("question_id") == question_id), None)
+    if not question:
+        return jsonify({"reasoning": None, "error": f"Question not found: {question_id}"}), 404
+
+    recommended = str(question.get("recommended_default", "") or "")
+    question_text = str(question.get("question_text", "") or "")
+    question_type = str(question.get("question_type", "") or "")
+    options = list(question.get("options", []) or [])
+    frontier_id = str(question.get("frontier_problem_id", "") or "")
+    why_blocks = str(question.get("why_this_blocks_progress", "") or "")
+
+    # Pull relevant context: experiment queue state for the linked paper/frontier
+    eq = _jload(_WS / "tar_state" / "experiment_queue.json") or {}
+    experiments = eq.get("experiments", []) if isinstance(eq, dict) else []
+    pending_count = sum(1 for e in experiments if e.get("status") == "pending")
+    running = next((e for e in experiments if e.get("status") == "running"), None)
+    running_desc = f"{running.get('id', '?')} (est. {running.get('estimated_runtime_h', '?')}h)" if running else "none"
+
+    author_state = _jload(_WS / "tar_state" / "author_state.json") or {}
+    paper_queue = list(author_state.get("paper_queue", []) or [])
+    paper_id_hint = question_id.split(":")[-2] if ":" in question_id else ""
+    paper = next((p for p in paper_queue if p.get("project_id", "") == paper_id_hint), None)
+    paper_status = paper.get("status", "unknown") if paper else "unknown"
+
+    system = (
+        "You are TAR (Thermodynamic Active Research), an autonomous ML research system. "
+        "Explain your recommended answer to the human question below. "
+        "RULES: (1) Only cite facts from the context provided — no speculation. "
+        "(2) State the recommended option clearly. "
+        "(3) Explain the specific factual reason for it in 2-3 sentences. "
+        "(4) Do not suggest actions beyond the listed options. "
+        "Plain English, no markdown headers."
+    )
+    prompt = (
+        f"Question type: {question_type}\n"
+        f"Question: {question_text}\n"
+        f"Options: {', '.join(options)}\n"
+        f"My recommended answer: {recommended or '(none set)'}\n"
+        f"Why this blocks progress: {why_blocks}\n"
+        f"Frontier: {frontier_id}\n"
+        f"Paper status: {paper_status}\n"
+        f"Currently running: {running_desc}\n"
+        f"Experiments pending in queue: {pending_count}\n\n"
+        "Explain concisely why you recommend your answer, grounded only in the facts above."
+    )
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return jsonify({"reasoning": msg.content[0].text.strip(), "recommended": recommended, "error": None})
+    except Exception as exc:
+        return jsonify({"reasoning": None, "recommended": recommended, "error": str(exc)}), 500
+
+
 @app.route("/api/human_review/question/<path:question_id>/answer", methods=["POST"])
 def api_human_review_answer(question_id: str):
     payload = request.get_json(silent=True) or {}
@@ -2220,6 +2300,16 @@ def api_human_review_answer(question_id: str):
 @app.route("/api/validation")
 def api_validation():
     return jsonify(_validation_payload())
+
+
+@app.route("/api/alerts")
+def api_alerts():
+    try:
+        from tar_lab.alerts import load_alerts
+        limit = min(int(request.args.get("limit", 100) or 100), 500)
+        return jsonify({"alerts": load_alerts(_WS, limit=limit)})
+    except Exception as exc:
+        return jsonify({"alerts": [], "error": str(exc)})
 
 
 @app.route("/api/coordination")
@@ -2241,17 +2331,32 @@ def api_literature():
 
 # ── scheduler ─────────────────────────────────────────────────────────────────
 @app.route("/api/scheduler")
+def _live_gpu_fields() -> dict:
+    """Read GPU stats directly from hardware_state.json — always current."""
+    hw = _jload(_WS / "tar_state" / "hardware_state.json") or {}
+    gpu = hw.get("gpu", {}) if isinstance(hw, dict) else {}
+    return {
+        "gpu_name":     str(gpu.get("name", "") or ""),
+        "gpu_util_pct": int(gpu.get("utilization_pct", 0) or 0),
+        "vram_used_gb": float(gpu.get("vram_used_gb", 0.0) or 0.0),
+        "vram_total_gb": float(gpu.get("vram_total_gb", 0.0) or 0.0),
+        "gpu_temp_c":   int(gpu.get("temperature_c", 0) or 0),
+    }
+
+
 def api_scheduler():
     queue = _runtime_experiment_records()
     state_path = _WS / "tar_state" / "scheduler_state.json"
     state = _jload(state_path) or {}
+    # Always patch live GPU fields regardless of cache path taken
+    gpu_fields = _live_gpu_fields()
     needs_refresh = (
         not state
         or any(rec.get("status") == "running" for rec in queue)
         or _age_s(state_path) > 30
     )
     if state and not needs_refresh:
-        return jsonify(state)
+        return jsonify({**state, **gpu_fields})
     try:
         from tar_scheduler import TARScheduler
 
@@ -2259,6 +2364,7 @@ def api_scheduler():
         running = [SimpleNamespace(**rec) for rec in queue if rec.get("status") == "running"]
         sch = TARScheduler(_WS)
         decision = sch.decide(pending_specs=pending, running_specs=running)
+        hw = decision.hardware_used
         state = {
             "timestamp": decision.timestamp,
             "rationale": decision.rationale,
@@ -2274,10 +2380,16 @@ def api_scheduler():
                 }
                 for reason in decision.hold_reasons
             ],
+            # flat GPU fields the dashboard JS expects
+            "gpu_name":     getattr(hw, "gpu_name", ""),
+            "gpu_util_pct": getattr(hw, "gpu_util_pct", 0),
+            "vram_used_gb": getattr(hw, "vram_used_gb", 0.0),
+            "vram_total_gb": getattr(hw, "vram_total_gb", 0.0),
+            "gpu_temp_c":   getattr(hw, "gpu_temp_c", 0),
         }
     except Exception:
         state = {}
-    return jsonify(state)
+    return jsonify({**state, **gpu_fields})
 
 
 # ── author ────────────────────────────────────────────────────────────────────
@@ -2664,9 +2776,10 @@ def api_return_paper_to_author(project_id: str):
 
 
 # ── website publication ───────────────────────────────────────────────────────
-_PUBLISH_ROOT = _REPO.parent
-_STAGED_JSON  = _PUBLISH_ROOT / "staged_papers.json"
-_WEBSITE_JSON = _PUBLISH_ROOT / "website" / "data" / "papers.json"
+_PUBLISH_ROOT        = _REPO.parent
+_STAGED_JSON         = _PUBLISH_ROOT / "staged_papers.json"
+_WEBSITE_JSON        = _PUBLISH_ROOT / "website" / "data" / "papers.json"
+_WEBSITE_RESEARCH_JSON = _PUBLISH_ROOT / "website" / "data" / "research.json"
 
 
 @app.route("/api/website_papers")
@@ -2686,6 +2799,53 @@ def api_website_papers():
         except Exception:
             pass
     return jsonify({"staged": staged, "live": live})
+
+
+@app.route("/api/website/sync_research", methods=["POST", "GET"])
+def api_website_sync_research():
+    """Regenerate website/data/research.json from live Director state."""
+    import re as _re
+    try:
+        director_state = _jload(_WS / "tar_state" / "research_director_state.json") or {}
+        paths = director_state.get("active_research_paths", [])
+        if not isinstance(paths, list):
+            paths = []
+
+        status_map = {"pursue_now": "active", "pursue_next": "queued", "investigate": "investigating"}
+        evidence_map = {"strong": "strong", "moderate": "moderate", "weak": "weak"}
+
+        items = []
+        for path in paths:
+            if not isinstance(path, dict):
+                continue
+            title = str(path.get("title", "") or "").strip()
+            if not title:
+                continue
+            why = str(path.get("why_this_now", "") or "")
+            m = _re.search(r"(\d+) complete", why)
+            exp_count = int(m.group(1)) if m else 0
+            allowed_topics = list(path.get("allowed_topics", []) or [])
+            description = str(allowed_topics[2]).strip() if len(allowed_topics) > 2 else ""
+            items.append({
+                "title": title,
+                "status": status_map.get(str(path.get("status", "") or ""), "investigating"),
+                "frontier_id": str(path.get("target_frontier_problem_id", "") or ""),
+                "description": description[:300],
+                "experiment_count": exp_count,
+                "paper_title": str(path.get("target_paper_id", "") or ""),
+                "evidence_strength": evidence_map.get(
+                    str(path.get("evidence_strength", "") or ""), "moderate"
+                ),
+                "updated": datetime.utcnow().strftime("%Y-%m-%d"),
+            })
+
+        out = {"research": items, "updated_at": datetime.utcnow().isoformat() + "Z"}
+        _WEBSITE_RESEARCH_JSON.write_text(
+            json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return jsonify({"ok": True, "count": len(items)})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.route("/api/website/approve/<paper_id>", methods=["POST"])
@@ -2869,50 +3029,166 @@ def _build_narration_context() -> dict:
             "confidence": 0, "focus": "idle",
             "seed_trail": [], "seeds_total": 0, "threshold": 0.1161,
         }
-    prog = running.get("progress", {})
-    ctx = running.get("context", {})
-    cfg = running.get("config_overrides", {})
-    forgetting_so_far = prog.get("forgetting_so_far", [])
-    threshold = 0.1161
-    seeds_passing = sum(1 for f in forgetting_so_far if f < threshold)
-    confidence = int(100 * seeds_passing / len(forgetting_so_far)) if forgetting_so_far else 0
-    hpc_agg: dict = {}; tcl_agg: dict = {}; hpc_n = 0; tcl_n = 0
-    obs = _find_replication_obs_root()
-    if obs:
-        hd = _jload(obs / "high_penalty_conservative.json") or {}
-        td = _jload(obs / "tcl_baseline.json") or {}
-        hpc_agg = hd.get("aggregate_so_far", {}); hpc_n = hd.get("completed_seed_count", 0)
-        tcl_agg = td.get("aggregate_so_far", {}); tcl_n = td.get("completed_seed_count", 0)
-    hf = hpc_agg.get("forgetting_mean"); ha = hpc_agg.get("acc_mean"); tf = tcl_agg.get("forgetting_mean")
-    claim = (cfg.get("target_claim") or ctx.get("hypothesis") or running.get("description", ""))[:130]
-    cur_method = (prog.get("current_method") or "").replace("_", " ")
-    cur_seed = prog.get("current_seed", "?")
-    sd = prog.get("seeds_done", 0); st = len(running.get("seeds", [])) or 10
-    md = prog.get("methods_done", 0); mt = prog.get("methods_total", 60)
-    trail_fmt = ", ".join(f"{f:.4f}" for f in forgetting_so_far)
+
+    exp_id = str(running.get("id", "") or "")
+    is_validation_suite = running.get("method", "") == "validation_suite" or "claim_validation" in exp_id
+
+    if is_validation_suite:
+        # ── HPC replication suite narration ───────────────────────────────────
+        prog = running.get("progress", {})
+        ctx = running.get("context", {})
+        cfg = running.get("config_overrides", {})
+        forgetting_so_far = prog.get("forgetting_so_far", [])
+        threshold = 0.1175
+        seeds_passing = sum(1 for f in forgetting_so_far if f < threshold)
+        confidence = int(100 * seeds_passing / len(forgetting_so_far)) if forgetting_so_far else 0
+        hpc_agg: dict = {}; tcl_agg: dict = {}; hpc_n = 0; tcl_n = 0
+        obs = _find_replication_obs_root()
+        if obs:
+            hd = _jload(obs / "high_penalty_conservative.json") or {}
+            td = _jload(obs / "tcl_baseline.json") or {}
+            hpc_agg = hd.get("aggregate_so_far", {}); hpc_n = hd.get("completed_seed_count", 0)
+            tcl_agg = td.get("aggregate_so_far", {}); tcl_n = td.get("completed_seed_count", 0)
+        hf = hpc_agg.get("forgetting_mean"); ha = hpc_agg.get("acc_mean"); tf = tcl_agg.get("forgetting_mean")
+        claim = (cfg.get("target_claim") or ctx.get("hypothesis") or running.get("description", ""))[:130]
+        cur_method = (prog.get("current_method") or "").replace("_", " ")
+        cur_seed = prog.get("current_seed", "unknown")
+        sd = prog.get("seeds_done", 0); st = len(running.get("seeds", [])) or 10
+        md = prog.get("methods_done", 0); mt = prog.get("methods_total", 60)
+        trail_fmt = ", ".join(f"{f:.4f}" for f in forgetting_so_far)
+        prompt = (
+            "You are TAR (Thermodynamic Active Research), an autonomous ML research system. "
+            "You are running a multi-method replication suite on Split-CIFAR-10 with ResNet-18 comparing "
+            "HPC, TCL, EWC, SI, and SGD. Speak in first person as a thoughtful researcher. "
+            "Be specific with numbers. 2-3 sentences, plain conversational English, no markdown.\n\n"
+            f"State:\n"
+            f"- Seeds complete: {sd}/{st} · Method-runs complete: {md}/{mt}\n"
+            f"- Now running: method={cur_method or 'unknown'}, seed={cur_seed}\n"
+            f"- Claim: \"{claim}\"\n"
+            f"- Pre-registered threshold: HPC forgetting must be < {threshold}\n"
+            f"- HPC so far (n={hpc_n}): "
+            f"forgetting={round(hf, 4) if hf is not None else 'N/A'}, "
+            f"acc={round(ha * 100, 1) if ha is not None else 'N/A'}%\n"
+            f"- TCL baseline (n={tcl_n}): forgetting={round(tf, 4) if tf is not None else 'N/A'}\n"
+            f"- Per-seed HPC forgetting trail: [{trail_fmt or 'none yet'}]\n"
+            f"- Seeds passing threshold: {seeds_passing}/{len(forgetting_so_far)}\n"
+        )
+        return {
+            "prompt": prompt, "confidence": confidence,
+            "focus": f"method={cur_method or '?'} · seed={cur_seed}",
+            "seed_trail": forgetting_so_far, "seeds_total": st,
+            "threshold": threshold, "seeds_done": sd,
+        }
+
+    # ── Scale-up suite narration ───────────────────────────────────────────────
+    is_scale_up_suite = (
+        running.get("runner_key") in {"phase16_scale_up_suite", "phase17_tinyimagenet_suite"}
+        or running.get("hypothesis_name") == "scale_up_validation"
+        or "scale_up" in (running.get("tags") or [])
+    )
+
+    if is_scale_up_suite:
+        import datetime as _dt
+        prog = running.get("progress", {})
+        seeds_done = int(prog.get("seeds_done", 0) or 0)
+        seeds_total = int(prog.get("seeds_total", 3) or 3)
+        forgetting_so_far = list(prog.get("forgetting_so_far") or [])
+        dataset = str(running.get("dataset", "Tiny-ImageNet") or "Tiny-ImageNet")
+        description = str(running.get("description", "") or "")[:200]
+        started_str = str(running.get("started_at", "") or "")
+        elapsed_h = 0.0
+        est_h = float(running.get("estimated_runtime_h", 36.0) or 36.0)
+        if started_str:
+            try:
+                started_dt = _dt.datetime.fromisoformat(started_str.replace("Z", "+00:00"))
+                elapsed_h = (_dt.datetime.now(_dt.timezone.utc) - started_dt).total_seconds() / 3600
+            except Exception:
+                pass
+        remaining_h = max(0.0, est_h - elapsed_h)
+        mean_f = (sum(forgetting_so_far) / len(forgetting_so_far)) if forgetting_so_far else None
+        trail_fmt = ", ".join(f"{f:.4f}" for f in forgetting_so_far)
+        confidence = round(100 * seeds_done / seeds_total) if seeds_total else 0
+        prompt = (
+            "You are TAR (Thermodynamic Active Research), an autonomous ML research system. "
+            "Speak in first person as a thoughtful researcher. "
+            "2-3 sentences, plain conversational English, no markdown, no bullet points.\n\n"
+            f"You are running a large-scale validation suite ({exp_id}) on {dataset} "
+            f"to test whether your thermodynamic continual learning approach scales beyond Split-CIFAR-10.\n"
+            f"Seeds complete: {seeds_done}/{seeds_total}\n"
+            f"Per-seed forgetting so far: [{trail_fmt or 'none yet'}]\n"
+            f"Mean forgetting so far: {round(mean_f, 4) if mean_f is not None else 'N/A'}\n"
+            f"Experiment: {description}\n"
+            f"Estimated time remaining: ~{remaining_h:.0f}h\n"
+            "Narrate what you are observing about scale-up performance and why this matters."
+        )
+        return {
+            "prompt": prompt,
+            "confidence": confidence,
+            "focus": f"scale-up · {dataset} · {seeds_done}/{seeds_total} seeds",
+            "seed_trail": forgetting_so_far,
+            "seeds_total": seeds_total,
+            "threshold": 0.0,
+            "seeds_done": seeds_done,
+        }
+
+    # ── Director / probe experiment narration ─────────────────────────────────
+    sched = _jload(_WS / "tar_state" / "scheduler_state.json") or {}
+    gpu_name  = str(sched.get("gpu_name", "GPU") or "GPU")
+    gpu_util  = sched.get("gpu_util_pct", 0) or 0
+    vram_used = sched.get("vram_used_gb", 0) or 0
+    vram_tot  = sched.get("vram_total_gb", 0) or 0
+    gpu_temp  = sched.get("gpu_temp_c", 0) or 0
+    rationale = str(sched.get("rationale", "") or "")[:300]
+
+    frontier_id    = str(running.get("frontier_problem_id", "") or running.get("director_active_path_id", ""))
+    frontier_title = str(running.get("director_focus", "") or running.get("name", "") or exp_id)
+    hypothesis     = str(running.get("hypothesis_name", "") or running.get("director_intent", "") or "")
+    dataset        = str(running.get("dataset", "") or "")
+    method         = str(running.get("method", "") or "")
+    seeds          = running.get("seeds", []) or []
+    seeds_total    = len(seeds)
+    epochs         = running.get("epochs", 0) or 0
+    queued_count   = sum(1 for e in experiments if e.get("status") == "pending")
+
+    # Pick up live seed progress from any experiment that tracks it
+    prog           = running.get("progress", {}) or {}
+    seeds_done     = int(prog.get("seeds_done", 0) or 0)
+    forgetting_so_far = list(prog.get("forgetting_so_far") or [])
+    if not seeds_total and prog.get("seeds_total"):
+        seeds_total = int(prog.get("seeds_total", 0))
+    confidence = round(100 * seeds_done / seeds_total) if seeds_total else 0
+
+    trail_note = ""
+    if forgetting_so_far:
+        mean_f = sum(forgetting_so_far) / len(forgetting_so_far)
+        trail_note = (
+            f"Seeds complete: {seeds_done}/{seeds_total} · "
+            f"Forgetting per seed: {[round(f, 4) for f in forgetting_so_far]} · "
+            f"Mean forgetting: {mean_f:.4f}\n"
+        )
+
     prompt = (
         "You are TAR (Thermodynamic Active Research), an autonomous ML research system. "
-        "You are running a 10-seed replication study on Split-CIFAR-10 with ResNet-18 to verify "
-        "your 'high_penalty_conservative' hypothesis. Speak in first person as a thoughtful researcher. "
-        "Be specific with numbers. 2-3 sentences, plain conversational English, no markdown.\n\n"
-        f"State:\n"
-        f"- Seeds complete: {sd}/{st} · Method-runs: {md}/{mt}\n"
-        f"- Now running: {cur_method} · seed {cur_seed}\n"
-        f"- Claim: \"{claim}\"\n"
-        f"- Pre-registered threshold: HPC forgetting must be < {threshold}\n"
-        f"- HPC so far (n={hpc_n}): "
-        f"forgetting={round(hf, 4) if hf is not None else 'N/A'}, "
-        f"acc={round(ha * 100, 1) if ha is not None else 'N/A'}%\n"
-        f"- TCL baseline (n={tcl_n}): forgetting={round(tf, 4) if tf is not None else 'N/A'}\n"
-        f"- Per-seed HPC forgetting: [{trail_fmt}]\n"
-        f"- Seeds passing pre-registered threshold: {seeds_passing}/{len(forgetting_so_far)}\n"
-        f"- Null prediction (accuracy collapse): NOT observed in any seed\n"
+        "Speak in first person as a thoughtful researcher. "
+        "2-3 sentences, plain conversational English, no markdown, no bullet points.\n\n"
+        f"You are currently running an experiment to advance the frontier: '{frontier_title}'.\n"
+        f"Experiment: {exp_id}\n"
+        f"Hypothesis: {hypothesis or 'director-generated probe'}\n"
+        f"Dataset: {dataset or 'unknown'} · Method: {method or 'unknown'} · "
+        f"Seeds: {seeds_total} · Epochs per seed: {epochs}\n"
+        f"{trail_note}"
+        f"GPU: {gpu_name} at {gpu_util}% utilisation, "
+        f"{vram_used:.1f}/{vram_tot:.1f} GB VRAM, {gpu_temp}°C\n"
+        f"{queued_count} experiment(s) queued behind this one.\n"
+        f"Scheduler note: {rationale[:200] if rationale else 'n/a'}\n"
+        "Narrate what you are doing right now and why it matters to your research programme."
     )
+    focus_label = f"{method or exp_id} · {dataset}" if dataset else exp_id
     return {
         "prompt": prompt, "confidence": confidence,
-        "focus": f"seed {cur_seed} · {cur_method}",
-        "seed_trail": forgetting_so_far, "seeds_total": st,
-        "threshold": threshold, "seeds_done": sd,
+        "focus": focus_label,
+        "seed_trail": forgetting_so_far, "seeds_total": seeds_total,
+        "threshold": 0.0, "seeds_done": seeds_done,
     }
 
 
@@ -2927,7 +3203,8 @@ def api_narrate():
     base: dict = {
         "confidence": ctx["confidence"], "focus": ctx["focus"],
         "seed_trail": ctx["seed_trail"], "seeds_total": ctx["seeds_total"],
-        "threshold": ctx["threshold"], "ts": now, "cached": False,
+        "threshold": ctx["threshold"], "seeds_done": ctx.get("seeds_done", 0),
+        "ts": now, "cached": False,
     }
     if ctx.get("prompt") is None:
         _NARRATION_CACHE = {**base, "text": ctx["fallback"], "error": False}
@@ -2968,37 +3245,67 @@ def _llm_narrate(prompt: str, ctx: dict) -> str:
         except Exception:
             pass
     # ── Template fallback ──────────────────────────────────────────────────────
-    trail = ctx.get("seed_trail", [])
-    sd = len(trail)
-    st = ctx.get("seeds_total", 10)
-    focus = ctx.get("focus", "unknown step")
-    threshold = ctx.get("threshold", 0.1161)
-    passing = sum(1 for f in trail if f < threshold)
-    mean_f = sum(trail) / len(trail) if trail else None
-    mean_str = f"{mean_f:.4f}" if mean_f is not None else "N/A"
-    reduction = ""
-    if mean_f is not None:
-        pct = round((1 - mean_f / threshold) * 100)
-        reduction = f" — {pct}% below the pre-registered ceiling"
-    lines = [
-        f"I'm {sd}/{st} seeds into the replication study, currently running {focus}.",
-        f"So far, {passing}/{sd} seeds pass the pre-registered forgetting threshold of {threshold} "
-        f"(mean HPC forgetting = {mean_str}{reduction}).",
-        "No accuracy collapse has been observed in any seed — the null prediction isn't holding.",
-    ]
-    return " ".join(lines)
+    trail     = ctx.get("seed_trail", [])
+    threshold = ctx.get("threshold", 0.0)
+    focus     = ctx.get("focus", "current experiment")
+    st        = ctx.get("seeds_total", 0)
+
+    if trail and threshold:
+        # Validation suite template
+        sd      = len(trail)
+        passing = sum(1 for f in trail if f < threshold)
+        mean_f  = sum(trail) / sd
+        pct     = round((1 - mean_f / threshold) * 100)
+        lines = [
+            f"I'm {sd}/{st} seeds into the multi-method replication study, currently running {focus}.",
+            f"So far, {passing}/{sd} seeds pass the pre-registered forgetting threshold of {threshold} "
+            f"(mean HPC forgetting = {mean_f:.4f} — {pct}% below the ceiling).",
+        ]
+    elif trail:
+        # Scale-up suite template (no threshold gate)
+        sd     = len(trail)
+        mean_f = sum(trail) / sd
+        lines = [
+            f"I'm {sd}/{st} seeds into the scale-up validation on {focus}.",
+            f"Mean forgetting so far: {mean_f:.4f} across {sd} completed seed{'s' if sd != 1 else ''}.",
+        ]
+    else:
+        # Director probe template
+        lines = [
+            f"I'm currently running {focus}.",
+            f"This is a director-generated probe advancing one of my active research frontiers.",
+            f"{st} seeds queued for this experiment." if st else "",
+        ]
+    return " ".join(l for l in lines if l)
 
 
 @app.route("/api/replication")
 def api_replication():
     obs = _find_replication_obs_root()
     if not obs:
-        return jsonify({"available": False, "methods": {}})
+        return jsonify({"available": False, "methods": {}, "is_live": False})
+
+    # Check if a validation suite is currently running (data is live) or historical
+    eq = _jload(_WS / "tar_state" / "experiment_queue.json") or {}
+    experiments = eq.get("experiments", []) if isinstance(eq, dict) else []
+    running = next((e for e in experiments if e.get("status") == "running"), None)
+    is_live = bool(
+        running and (
+            running.get("method") == "validation_suite"
+            or "claim_validation" in str(running.get("id", ""))
+        )
+    )
+    running_exp_id = str(running.get("id", "")) if running else ""
+
     method_keys = [
         "sgd_baseline", "ewc_lambda_100", "ewc_lambda_1000",
         "si_c_0_01", "tcl_baseline", "high_penalty_conservative",
     ]
-    out: dict[str, Any] = {"available": True, "methods": {}}
+    out: dict[str, Any] = {
+        "available": True, "methods": {},
+        "is_live": is_live,
+        "current_experiment": running_exp_id,
+    }
     for m in method_keys:
         d = _jload(obs / f"{m}.json")
         if not d:
@@ -3080,6 +3387,199 @@ def api_llm_insights():
         "claim_verifications": llm_insights.get("claim_verifications", []),
         "scheduler_rationale": scheduler_rationale,
         "available": bool(llm_insights or scheduler_rationale),
+    })
+
+
+def _build_tar_intelligence_context() -> str:
+    """Build a rich plain-text summary of TAR state for Claude Q&A."""
+    eq = _jload(_WS / "tar_state" / "experiment_queue.json") or {}
+    experiments = eq.get("experiments", []) if isinstance(eq, dict) else []
+    running = next((e for e in experiments if e.get("status") == "running"), None)
+    pending = [e for e in experiments if e.get("status") == "pending"]
+
+    hw = _jload(_WS / "tar_state" / "hardware_state.json") or {}
+    gpu = hw.get("gpu", {})
+
+    frontier_data = _jload(_WS / "tar_state" / "frontier_problems.json") or {}
+    frontiers = frontier_data.get("problems", []) or []
+
+    author_state = _jload(_WS / "tar_state" / "author_state.json") or {}
+    papers = list(author_state.get("paper_queue", []) or [])
+
+    lines: list[str] = ["# TAR System State\n"]
+
+    if running:
+        exp_id = running.get("id", "unknown")
+        prog = running.get("progress", {}) or {}
+        seeds_done = prog.get("seeds_done", 0)
+        seeds_total = prog.get("seeds_total", 0)
+        forgetting = list(prog.get("forgetting_so_far") or [])
+        started = running.get("started_at", "")
+        est_h = float(running.get("estimated_runtime_h", 0) or 0)
+        elapsed_h = 0.0
+        if started:
+            try:
+                import datetime as _dt
+                started_dt = _dt.datetime.fromisoformat(started.replace("Z", "+00:00"))
+                elapsed_h = (_dt.datetime.now(_dt.timezone.utc) - started_dt).total_seconds() / 3600
+            except Exception:
+                pass
+        remaining_h = max(0.0, est_h - elapsed_h)
+        lines.append(f"## Currently Running: {exp_id}")
+        lines.append(f"Dataset: {running.get('dataset', 'unknown')}  Method: {running.get('method', 'unknown')}")
+        if seeds_total:
+            lines.append(f"Seeds: {seeds_done}/{seeds_total} done")
+        if forgetting:
+            mean_f = sum(forgetting) / len(forgetting)
+            lines.append(f"Forgetting per seed: {[round(f, 4) for f in forgetting]}")
+            lines.append(f"Mean forgetting: {mean_f:.4f}")
+        if est_h:
+            lines.append(f"Elapsed: {elapsed_h:.1f}h  Remaining: ~{remaining_h:.0f}h")
+        lines.append(f"GPU: {gpu.get('utilization_pct', 0)}% util, "
+                     f"{gpu.get('vram_used_gb', 0):.1f}/{gpu.get('vram_total_gb', 0):.1f} GB VRAM, "
+                     f"{gpu.get('temperature_c', 0)}°C")
+        ctx_why = (running.get("context", {}) or {}).get("why", "")
+        if ctx_why:
+            lines.append(f"Why: {str(ctx_why)[:200]}")
+        lines.append("")
+    else:
+        lines.append("## Currently Running: idle\n")
+
+    if pending:
+        lines.append(f"## Queue ({len(pending)} pending)")
+        for e in pending[:8]:
+            lines.append(f"  - {e.get('id', '?')} ({e.get('dataset', '?')})")
+        lines.append("")
+
+    cache_dir = _WS / "tar_state" / "llm_cache"
+    if cache_dir.exists():
+        recent = sorted(cache_dir.glob("findings_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:3]
+        if recent:
+            lines.append("## Recent Completed Experiments")
+            for p in recent:
+                d = _jload(p) or {}
+                lines.append(f"  - {d.get('experiment_id', p.stem)}: {str(d.get('content', ''))[:180]}")
+            lines.append("")
+
+    if papers:
+        lines.append("## Paper Pipeline")
+        for paper in papers[:5]:
+            pid = paper.get("project_id") or paper.get("paper_id", "?")
+            lines.append(f"  - {pid}: {paper.get('status', '?')}")
+        lines.append("")
+
+    active_frontiers = [f for f in frontiers if f.get("status") not in {"done", "closed"}]
+    if active_frontiers:
+        lines.append("## Active Research Frontiers")
+        for f in active_frontiers[:5]:
+            lines.append(f"  - {f.get('id', '?')}: {f.get('title', '')[:80]}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@app.route("/api/tar_intelligence/ask", methods=["POST"])
+def api_tar_intelligence_ask():
+    body = request.get_json(silent=True) or {}
+    question = str(body.get("question", "") or "").strip()
+    if not question:
+        return jsonify({"answer": None, "error": "No question provided"}), 400
+    if len(question) > 600:
+        return jsonify({"answer": None, "error": "Question too long (max 600 chars)"}), 400
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return jsonify({"answer": None, "error": "ANTHROPIC_API_KEY not configured — Claude Q&A unavailable"}), 503
+
+    context = _build_tar_intelligence_context()
+    system = (
+        "You are TAR (Thermodynamic Active Research), an autonomous ML research system. "
+        "Answer the user's question strictly using the system state provided. "
+        "RULES: (1) Only cite numbers and facts that appear in the context above — never invent, estimate, "
+        "or extrapolate beyond what the data shows. (2) If a fact is not in the context, say so explicitly "
+        "(e.g. 'that data isn't available yet'). (3) Do not speculate about future results. "
+        "(4) Do not make claims about experiment outcomes that haven't been measured. "
+        "Speak in first person as a researcher. 3-5 sentences, plain English, no markdown headers."
+    )
+    prompt = f"{context}\n---\n\nUser question: {question}"
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=400,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return jsonify({"answer": msg.content[0].text.strip(), "error": None})
+    except Exception as exc:
+        return jsonify({"answer": None, "error": str(exc)}), 500
+
+
+@app.route("/api/experiment_history")
+def api_experiment_history():
+    """Complete experiment history with per-seed results, grouped by paper."""
+    archive = _jload(_WS / "tar_state" / "experiment_archive.json") or {}
+    arc_exps = list(archive.get("experiments", []) or [])
+
+    queue = _jload(_WS / "tar_state" / "experiment_queue.json") or {}
+    q_exps = list(queue.get("experiments", []) or [])
+
+    seen: set[str] = set()
+    all_exps: list[dict] = []
+    for exp in arc_exps + q_exps:
+        eid = str(exp.get("id") or exp.get("experiment_id") or exp.get("project_id") or "")
+        if eid and eid not in seen:
+            seen.add(eid)
+            all_exps.append(exp)
+
+    exp_results_dir = _WS / "tar_state" / "experiments"
+    for exp in all_exps:
+        eid = str(exp.get("id") or exp.get("experiment_id") or exp.get("project_id") or "")
+        if eid:
+            result_path = exp_results_dir / eid / "result.json"
+            if result_path.exists():
+                exp["result"] = _jload(result_path) or {}
+
+    cache_dir = _WS / "tar_state" / "llm_cache"
+    findings_by_id: dict[str, str] = {}
+    if cache_dir.exists():
+        for path in cache_dir.glob("findings_*.json"):
+            data = _jload(path) or {}
+            eid = str(data.get("experiment_id") or path.stem.removeprefix("findings_"))
+            if eid:
+                findings_by_id[eid] = str(data.get("content", "") or "")
+
+    for exp in all_exps:
+        eid = str(exp.get("id") or exp.get("experiment_id") or exp.get("project_id") or "")
+        if eid in findings_by_id:
+            exp["findings_memo"] = findings_by_id[eid]
+
+    all_exps.sort(
+        key=lambda e: str(e.get("completed_at") or e.get("started_at") or e.get("submitted_at") or ""),
+        reverse=True,
+    )
+
+    groups: dict[str, list] = {}
+    for exp in all_exps:
+        paper = str(exp.get("author_paper_id") or exp.get("paper_id") or "unassigned")
+        groups.setdefault(paper, []).append(exp)
+
+    verdicts: dict[str, int] = {"CONFIRMED": 0, "DIRECTIONAL": 0, "NULL": 0, "ADVERSE": 0}
+    for exp in all_exps:
+        v = str((exp.get("result") or {}).get("verdict") or "")
+        if v in verdicts:
+            verdicts[v] += 1
+
+    return jsonify({
+        "experiments": all_exps,
+        "groups": [{"paper_id": k, "experiments": v} for k, v in groups.items()],
+        "total": len(all_exps),
+        "complete": sum(1 for e in all_exps if str(e.get("status") or "") == "complete"),
+        "running": sum(1 for e in all_exps if str(e.get("status") or "") == "running"),
+        "pending": sum(1 for e in all_exps if str(e.get("status") or "") == "pending"),
+        "verdicts": verdicts,
     })
 
 

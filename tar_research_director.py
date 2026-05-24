@@ -252,8 +252,8 @@ class ResearchDirector:
             self._annotate_directives_with_llm(
                 frontier_directives, experiment_directives, evidence_directives, knowledge_domains
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[TAR-Director] WARNING: LLM annotation failed (non-fatal): {exc}", flush=True)
 
         validated_claims = sum(1 for rec in frontier_directives if rec["truth_status"] == "validated")
         weak_claims = sum(1 for rec in frontier_directives if rec["truth_status"] == "weak")
@@ -350,8 +350,8 @@ class ResearchDirector:
             return payload
         try:
             build_validation_state(self.workspace, persist=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[TAR-Director] WARNING: build_validation_state failed: {exc}", flush=True)
         try:
             human_review = sync_human_review_from_director_state(self.workspace, payload)
             payload["human_review_summary"] = {
@@ -362,8 +362,8 @@ class ResearchDirector:
             self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except OSError:
             return payload
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[TAR-Director] WARNING: human_review sync failed: {exc}", flush=True)
         try:
             from tar_project_registry import rebuild_registry_from_director_state
 

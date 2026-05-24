@@ -27,7 +27,8 @@ def load_queue_state(workspace: Path) -> dict[str, Any]:
         return {}
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as exc:
+        print(f"[TAR-QueueBridge] WARNING: load_queue_state failed ({path}): {exc}", flush=True)
         return {}
 
 
@@ -38,8 +39,8 @@ def write_queue_state(workspace: Path, payload: Mapping[str, Any]) -> dict[str, 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except OSError:
-        pass
+    except OSError as exc:
+        print(f"[TAR-QueueBridge] WARNING: write_queue_state failed ({path}): {exc}", flush=True)
     return data
 
 

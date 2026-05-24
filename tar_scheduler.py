@@ -282,8 +282,11 @@ class TARScheduler:
             for s in running_specs
             if s.dataset != "cpu_only"
         )
-        reserve_headroom = _vram_headroom_gb(hw.vram_total_gb or 24.0)
-        vram_headroom = (hw.vram_total_gb or 24.0) - reserve_headroom
+        # Default to 0.0 (hold all GPU) when VRAM detection fails — safe fallback.
+        # 24.0 GB was the former default, which incorrectly granted unlimited budget.
+        _vram_detected = hw.vram_total_gb if hw.vram_total_gb and hw.vram_total_gb > 0 else 0.0
+        reserve_headroom = _vram_headroom_gb(_vram_detected)
+        vram_headroom = _vram_detected - reserve_headroom
 
         # Thermal gate
         gpu_too_hot = hw.gpu_temp_c > 85
