@@ -1,0 +1,29 @@
+{
+  "authorised_by": "TAR Director (autonomous)",
+  "content_hash": "8b799a5db73817a084424be119cbe9669f570ac78eb5a626107761653087c140",
+  "created_at": "2026-05-24T13:04:27.403789+00:00",
+  "experiments": [
+    {
+      "allowed_datasets": [
+        "split_tinyimagenet"
+      ],
+      "allowed_methods": [
+        "tcl"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1
+      ],
+      "experiment_id": "scale_backbone_capacity_vit_tinyimagenet",
+      "name": "Backbone capacity scaling on realistic dataset with ViT",
+      "notes": "Auto-generated manifest for autonomous run. Spec description: Phase17 showed strong results on tinyimagenet with ResNet18 (0.0221 forgetting). Testing ViT explores whether modern architectures with different inductive biases (self-attention vs. convolution) improve continual adaptation on realistic streams. This directly tests architectural robustness at production scale without requiring larger datasets.",
+      "run_limit": 1,
+      "time_limit_h": 18.0
+    }
+  ],
+  "global_time_limit_h": 24.0,
+  "manifest_id": "manifest-auto-scale_backbone_capacity_vit_tinyimagenet-20260524T130427Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "purpose": "Autonomously generated manifest for experiment 'scale_backbone_capacity_vit_tinyimagenet' (Backbone capacity scaling on realistic dataset with ViT). Project: scale_backbone_capacity_vit_tinyimagenet-tinyimagenet-v1. Dataset: split_tinyimagenet, method: tcl, seeds: [42, 0, 1]."
+}
