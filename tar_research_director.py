@@ -1861,6 +1861,91 @@ class ResearchDirector:
                 "priority_bias": 15.0,
             }]
 
+        # Domain-aware fallback: any frontier problem with a recognised domain gets
+        # routed to the appropriate runner rather than being silently dropped.
+        domain = str(frontier.get("domain", "") or "")
+        domain_runner_configs: dict[str, dict] = {
+            "nlp_continual_learning": {
+                "dataset": "split_agnews",
+                "runner_key": "nlp_continual",
+                "method": "sgd_baseline",
+                "comparison_methods": ["sgd_baseline", "ewc_nlp", "replay_nlp"],
+                "backbone": "tfidf_mlp",
+                "epochs": 5,
+                "estimated_runtime_h": 2.0,
+                "hardware_budget": {"vram_gb": 1.0, "cpu_cores": 4},
+                "priority_bias": 13.0,
+            },
+            "generalization": {
+                "dataset": "cifar10_corrupted",
+                "runner_key": "ood_eval",
+                "method": "standard",
+                "comparison_methods": ["standard", "augmentation"],
+                "backbone": "resnet18",
+                "epochs": 20,
+                "estimated_runtime_h": 4.0,
+                "hardware_budget": {"vram_gb": 3.0, "cpu_cores": 4},
+                "priority_bias": 12.0,
+            },
+            "ai_safety": {
+                "dataset": "cifar10_corrupted",
+                "runner_key": "ood_eval",
+                "method": "augmentation",
+                "comparison_methods": ["standard", "augmentation"],
+                "backbone": "resnet18",
+                "epochs": 20,
+                "estimated_runtime_h": 4.0,
+                "hardware_budget": {"vram_gb": 3.0, "cpu_cores": 4},
+                "priority_bias": 12.0,
+            },
+            "evaluation_methodology": {
+                "dataset": "split_cifar10",
+                "runner_key": "",
+                "method": "tcl",
+                "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                "backbone": "resnet18",
+                "epochs": 40,
+                "estimated_runtime_h": 6.0,
+                "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
+                "priority_bias": 11.0,
+            },
+        }
+        if domain in domain_runner_configs:
+            cfg = domain_runner_configs[domain]
+            exp_id = f"director-{_slug(frontier_id)}-domain-probe"
+            new_entry: dict[str, Any] = {
+                **base_common,
+                "experiment_id": exp_id,
+                "title": f"Director Probe - {frontier_title}",
+                "proposal_origin": "director",
+                "proposal_kind": "frontier_probe",
+                "hypothesis_name": f"director_{domain}_probe",
+                "dataset": cfg["dataset"],
+                "method": cfg["method"],
+                "comparison_methods": cfg["comparison_methods"],
+                "backbone": cfg["backbone"],
+                "epochs": cfg["epochs"],
+                "seeds": [42, 0, 1, 2, 3],
+                "estimated_runtime_h": cfg["estimated_runtime_h"],
+                "hardware_budget": cfg["hardware_budget"],
+                "depends_on": [],
+                "mechanism_focus": f"Probe the frontier problem '{frontier_title}' in the {domain} domain.",
+                "experiment_goal": str(frontier.get("global_problem_statement", "") or frontier_title),
+                "description": (
+                    f"Director-selected probe for {frontier_title} (domain: {domain}). "
+                    "Routes to the appropriate runner for this scientific domain."
+                ),
+                "research_strategy": (
+                    "Use the lightest supported benchmark for this domain to obtain initial signal "
+                    "before escalating to larger or more expensive settings."
+                ),
+                "config_overrides": {"comparison_methods": cfg["comparison_methods"]},
+                "priority_bias": cfg["priority_bias"],
+            }
+            if cfg.get("runner_key"):
+                new_entry["runner_key"] = cfg["runner_key"]
+            return [new_entry]
+
         return []
 
     def _active_path_experiment_catalog(self, path: ActiveResearchPath) -> list[dict[str, Any]]:
@@ -1874,21 +1959,77 @@ class ResearchDirector:
         supported_profiles = {
             "continual_learning": {
                 "dataset": "split_cifar10",
+                "runner_key": "",
+                "method": "tcl",
+                "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
                 "backbone": "resnet18",
+                "epochs": 40,
                 "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
                 "external_baselines": ["ewc", "si", "sgd_baseline", "experience_replay"],
                 "target_venues": ["NeurIPS", "ICML", "AISTATS"],
             },
             "thermodynamics_ml": {
                 "dataset": "split_cifar10",
+                "runner_key": "",
+                "method": "tcl",
+                "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
                 "backbone": "resnet18",
+                "epochs": 40,
                 "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
                 "external_baselines": ["ewc", "si", "sgd_baseline"],
                 "target_venues": ["NeurIPS", "ICML"],
             },
+            "nlp_continual_learning": {
+                "dataset": "split_agnews",
+                "runner_key": "nlp_continual",
+                "method": "sgd_baseline",
+                "comparison_methods": ["sgd_baseline", "ewc_nlp", "replay_nlp"],
+                "backbone": "tfidf_mlp",
+                "epochs": 5,
+                "hardware_budget": {"vram_gb": 1.0, "cpu_cores": 4},
+                "external_baselines": ["ewc_nlp", "replay_nlp"],
+                "target_venues": ["NeurIPS", "EMNLP", "ACL"],
+            },
+            "generalization": {
+                "dataset": "cifar10_corrupted",
+                "runner_key": "ood_eval",
+                "method": "standard",
+                "comparison_methods": ["standard", "augmentation"],
+                "backbone": "resnet18",
+                "epochs": 20,
+                "hardware_budget": {"vram_gb": 3.0, "cpu_cores": 4},
+                "external_baselines": ["augmentation"],
+                "target_venues": ["NeurIPS", "ICML", "ICLR"],
+            },
+            "ai_safety": {
+                "dataset": "cifar10_corrupted",
+                "runner_key": "ood_eval",
+                "method": "augmentation",
+                "comparison_methods": ["standard", "augmentation"],
+                "backbone": "resnet18",
+                "epochs": 20,
+                "hardware_budget": {"vram_gb": 3.0, "cpu_cores": 4},
+                "external_baselines": ["standard"],
+                "target_venues": ["NeurIPS", "ICLR", "IEEE S&P"],
+            },
+            "evaluation_methodology": {
+                "dataset": "split_cifar10",
+                "runner_key": "",
+                "method": "tcl",
+                "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                "backbone": "resnet18",
+                "epochs": 40,
+                "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
+                "external_baselines": ["ewc", "sgd_baseline"],
+                "target_venues": ["NeurIPS", "ICML"],
+            },
             "general_ai": {
                 "dataset": "split_cifar10",
+                "runner_key": "",
+                "method": "tcl",
+                "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
                 "backbone": "resnet18",
+                "epochs": 40,
                 "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
                 "external_baselines": ["ewc", "sgd_baseline", "experience_replay"],
                 "target_venues": ["NeurIPS", "ICML"],
@@ -1901,21 +2042,21 @@ class ResearchDirector:
         problem_slug = _slug(path.title)[:28] or _slug(path.domain_label)[:28] or "path"
         kind_slug = "novel" if path.path_kind == "novel_problem" else "scan"
         exp_id = f"director-{_slug(path.domain_id)}-{kind_slug}-{problem_slug}-probe"
-        return [{
+        exp_entry: dict = {
             "experiment_id": exp_id,
             "title": f"Director Path Probe - {path.title}",
             "proposal_origin": "director",
             "proposal_kind": "active_path_probe",
             "hypothesis_name": "director_frontier_probe",
             "dataset": str(profile["dataset"]),
-            "method": "tcl",
-            "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+            "method": str(profile.get("method", "tcl")),
+            "comparison_methods": list(profile.get("comparison_methods", ["tcl", "ewc", "sgd_baseline"])),
             "seeds": [42, 0, 1, 2, 3],
             "estimated_runtime_h": 6.0,
             "hardware_budget": dict(profile["hardware_budget"]),
             "depends_on": [],
             "backbone": str(profile["backbone"]),
-            "epochs": 40,
+            "epochs": int(profile.get("epochs", 40)),
             "frontier_problem_id": path.target_frontier_problem_id,
             "global_problem_statement": path.problem_statement,
             "solution_family": "TAR/TCL/ASC",
@@ -1947,11 +2088,14 @@ class ResearchDirector:
                 "Escalate only if the probe yields credible evidence."
             ),
             "config_overrides": {
-                "comparison_methods": ["tcl", "ewc", "sgd_baseline"],
+                "comparison_methods": list(profile.get("comparison_methods", ["tcl", "ewc", "sgd_baseline"])),
                 "external_baselines": list(profile["external_baselines"]),
             },
             "priority_bias": 14.0 if path.path_kind == "novel_problem" else 10.0,
-        }]
+        }
+        if profile.get("runner_key"):
+            exp_entry["runner_key"] = str(profile["runner_key"])
+        return [exp_entry]
 
     def _build_experiment_directives(
         self,

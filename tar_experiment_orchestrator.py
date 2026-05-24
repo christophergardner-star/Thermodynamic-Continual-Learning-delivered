@@ -85,6 +85,9 @@ STAGE_FAILED       = "failed"
 DATASET_CIFAR10      = "split_cifar10"
 DATASET_CIFAR100     = "split_cifar100"
 DATASET_TINYIMAGENET = "split_tinyimagenet"
+DATASET_AGNEWS       = "split_agnews"
+DATASET_DBPEDIA      = "split_dbpedia"
+DATASET_CIFAR10C     = "cifar10_corrupted"
 
 # ── human-language context templates per hypothesis ───────────────────────────
 _CONTEXT_TEMPLATES: dict[str, dict[str, str]] = {
@@ -1588,12 +1591,20 @@ class ExperimentOrchestrator:
             return self._run_phase17_suite(spec)
         if spec.runner_key == "hpc_claim_validation_suite":
             return self._run_hpc_validation_suite(spec)
+        if spec.runner_key == "nlp_continual":
+            return self._run_nlp_continual(spec)
+        if spec.runner_key == "ood_eval":
+            return self._run_ood_eval(spec)
         if spec.dataset == DATASET_CIFAR10:
             return self._run_cifar10(spec)
         elif spec.dataset == DATASET_CIFAR100:
             return self._run_cifar100(spec)
         elif spec.dataset == DATASET_TINYIMAGENET:
             return self._run_tinyimagenet(spec)
+        elif spec.dataset in (DATASET_AGNEWS, DATASET_DBPEDIA):
+            return self._run_nlp_continual(spec)
+        elif spec.dataset == DATASET_CIFAR10C:
+            return self._run_ood_eval(spec)
         else:
             raise ValueError(f"Unknown dataset: {spec.dataset}")
 
@@ -1703,6 +1714,161 @@ class ExperimentOrchestrator:
         if cmp_parts:
             result.notes += " | " + " | ".join(cmp_parts)
 
+        return result
+
+    # ── NLP continual-learning runner ─────────────────────────────────────────
+    def _run_nlp_continual(self, spec: ExperimentSpec) -> ExperimentResult:
+        from tar_lab.nlp_continual import run_nlp_continual_benchmark
+
+        comparison_methods = [m for m in (spec.config_overrides.get("comparison_methods") or
+                                          ["sgd_baseline", "ewc_nlp", "replay_nlp"])
+                              if m != spec.method]
+        method_forgetting: dict[str, list[float]] = {m: [] for m in comparison_methods}
+        seed_results, forgetting_list, accuracy_list = [], [], []
+
+        for i, seed in enumerate(spec.seeds):
+            r = run_nlp_continual_benchmark(
+                dataset=spec.dataset,
+                method=spec.method,
+                seed=seed,
+                epochs_per_task=max(1, spec.epochs),
+            )
+            forgetting_list.append(r.mean_forgetting)
+            accuracy_list.append(r.final_mean_accuracy)
+            seed_entry: dict = {
+                "seed": seed,
+                "forgetting": r.mean_forgetting,
+                "accuracy": r.final_mean_accuracy,
+                "per_task_forgetting": r.per_task_forgetting,
+                "comparisons": {},
+            }
+            for cmp_method in comparison_methods:
+                try:
+                    r_cmp = run_nlp_continual_benchmark(
+                        dataset=spec.dataset,
+                        method=cmp_method,
+                        seed=seed,
+                        epochs_per_task=max(1, spec.epochs),
+                    )
+                    method_forgetting[cmp_method].append(r_cmp.mean_forgetting)
+                    seed_entry["comparisons"][cmp_method] = {
+                        "forgetting": r_cmp.mean_forgetting,
+                        "accuracy": r_cmp.final_mean_accuracy,
+                    }
+                except Exception as exc:
+                    self._log(f"  [nlp_baseline] {cmp_method} seed={seed} failed: {exc}")
+                    method_forgetting[cmp_method].append(float("nan"))
+                    seed_entry["comparisons"][cmp_method] = {"forgetting": None, "accuracy": None}
+            seed_results.append(seed_entry)
+            self._log(f"  seed={seed}  [{spec.method}] forgetting={r.mean_forgetting:.4f}"
+                      f"  accuracy={r.final_mean_accuracy:.4f}")
+            self.update_progress(spec.id, {
+                "seeds_done": i + 1, "seeds_total": len(spec.seeds),
+                "tasks_done": 0, "latest_accs": [],
+                "forgetting_so_far": forgetting_list[:],
+            })
+
+        result = self._build_result(spec, seed_results, forgetting_list, accuracy_list)
+        cmp_parts: list[str] = []
+        for cmp_method, cmp_vals in method_forgetting.items():
+            valid = [(t, b) for t, b in zip(forgetting_list, cmp_vals) if not math.isnan(b)]
+            if not valid:
+                continue
+            tcl_c, cmp_c = zip(*valid)
+            deltas_c = [t - b for t, b in valid]
+            mean_d = sum(deltas_c) / len(deltas_c)
+            n_better = sum(1 for d in deltas_c if d < 0)
+            p_c = 1.0
+            if len(deltas_c) >= 2:
+                try:
+                    from scipy import stats as sc
+                    p_c = float(sc.ttest_rel(list(tcl_c), list(cmp_c)).pvalue)
+                except Exception:
+                    pass
+            direction = "better" if mean_d < 0 else "worse"
+            cmp_parts.append(f"vs {cmp_method}: {spec.method} {abs(mean_d):.4f} {direction}"
+                             f" ({n_better}/{len(valid)} seeds, p={p_c:.4f})")
+        if cmp_parts:
+            result.notes += " | " + " | ".join(cmp_parts)
+        return result
+
+    # ── OOD robustness runner ──────────────────────────────────────────────────
+    def _run_ood_eval(self, spec: ExperimentSpec) -> ExperimentResult:
+        from tar_lab.ood_robustness import run_ood_robustness_benchmark
+
+        comparison_methods = [m for m in (spec.config_overrides.get("comparison_methods") or
+                                          ["standard", "augmentation"])
+                              if m != spec.method]
+        method_drop: dict[str, list[float]] = {m: [] for m in comparison_methods}
+        seed_results, forgetting_list, accuracy_list = [], [], []
+
+        for i, seed in enumerate(spec.seeds):
+            r = run_ood_robustness_benchmark(
+                dataset=spec.dataset,
+                method=spec.method,
+                seed=seed,
+                backbone=spec.backbone,
+                workspace=str(self.workspace),
+                epochs=spec.epochs,
+            )
+            forgetting_list.append(r.mean_forgetting)
+            accuracy_list.append(r.final_mean_accuracy)
+            seed_entry: dict = {
+                "seed": seed,
+                "forgetting": r.mean_forgetting,
+                "accuracy": r.final_mean_accuracy,
+                "clean_accuracy": r.clean_accuracy,
+                "shift_accuracies": r.shift_accuracies,
+                "comparisons": {},
+            }
+            for cmp_method in comparison_methods:
+                try:
+                    r_cmp = run_ood_robustness_benchmark(
+                        dataset=spec.dataset, method=cmp_method, seed=seed,
+                        backbone=spec.backbone, workspace=str(self.workspace),
+                        epochs=spec.epochs,
+                    )
+                    method_drop[cmp_method].append(r_cmp.mean_forgetting)
+                    seed_entry["comparisons"][cmp_method] = {
+                        "forgetting": r_cmp.mean_forgetting,
+                        "accuracy": r_cmp.final_mean_accuracy,
+                        "clean_accuracy": r_cmp.clean_accuracy,
+                    }
+                except Exception as exc:
+                    self._log(f"  [ood_baseline] {cmp_method} seed={seed} failed: {exc}")
+                    method_drop[cmp_method].append(float("nan"))
+                    seed_entry["comparisons"][cmp_method] = {"forgetting": None, "accuracy": None}
+            seed_results.append(seed_entry)
+            self._log(f"  seed={seed}  [{spec.method}] clean={r.clean_accuracy:.4f}"
+                      f"  drop={r.mean_forgetting:.4f}")
+            self.update_progress(spec.id, {
+                "seeds_done": i + 1, "seeds_total": len(spec.seeds),
+                "tasks_done": 0, "latest_accs": [],
+                "forgetting_so_far": forgetting_list[:],
+            })
+
+        result = self._build_result(spec, seed_results, forgetting_list, accuracy_list)
+        cmp_parts = []
+        for cmp_method, cmp_vals in method_drop.items():
+            valid = [(t, b) for t, b in zip(forgetting_list, cmp_vals) if not math.isnan(b)]
+            if not valid:
+                continue
+            m_c, b_c = zip(*valid)
+            deltas = [t - b for t, b in valid]
+            mean_d = sum(deltas) / len(deltas)
+            n_better = sum(1 for d in deltas if d < 0)
+            p_c = 1.0
+            if len(deltas) >= 2:
+                try:
+                    from scipy import stats as sc
+                    p_c = float(sc.ttest_rel(list(m_c), list(b_c)).pvalue)
+                except Exception:
+                    pass
+            direction = "lower_drop" if mean_d < 0 else "higher_drop"
+            cmp_parts.append(f"vs {cmp_method}: {abs(mean_d):.4f} {direction}"
+                             f" ({n_better}/{len(valid)} seeds, p={p_c:.4f})")
+        if cmp_parts:
+            result.notes += " | " + " | ".join(cmp_parts)
         return result
 
     # ── CIFAR-100 runner (native standalone) ──────────────────────────────────
