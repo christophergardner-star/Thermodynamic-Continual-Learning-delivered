@@ -120,6 +120,40 @@ def _log(workspace: Path, msg: str) -> None:
         fh.write(line + "\n")
 
 
+_HEARTBEAT_STALL_MINUTES = 10
+
+
+def _check_worker_heartbeats(workspace: Path) -> None:
+    """Warn if any running worker has missed heartbeats for >10 minutes."""
+    lock_dir = workspace / "tar_state" / "run_locks"
+    if not lock_dir.exists():
+        return
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    for lock_file in lock_dir.glob("*.pid"):
+        try:
+            payload = json.loads(lock_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(payload.get("status", "")) != "running":
+            continue
+        hb = str(payload.get("last_heartbeat", "") or "")
+        if not hb:
+            continue
+        try:
+            hb_dt = datetime.fromisoformat(hb.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        stale_min = (now - hb_dt).total_seconds() / 60.0
+        if stale_min > _HEARTBEAT_STALL_MINUTES:
+            exp_id = str(payload.get("experiment_id", lock_file.stem))
+            _log(
+                workspace,
+                f"WARN worker_stall={exp_id} last_heartbeat={hb} "
+                f"age_min={stale_min:.1f}",
+            )
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1760,33 +1794,37 @@ def run_portfolio_daemon(
     coordination_state = write_research_coordination_state(workspace, orch, director_state, author_state)
     _ensure_director_seeded_queue(workspace, orch, coordination_state=coordination_state)
 
-    # Release leases whose PIDs are dead — psutil unavailable, use subprocess check
+    # Release leases whose PIDs are dead — uses psutil (now installed), atomic write
     def _release_dead_leases_at_startup(ws: Path) -> None:
-        import subprocess as _sp
-        ledger_path = ws / "tar_state" / "runtime_ledger.json"
         try:
-            with open(ledger_path, encoding="utf-8-sig") as _f:
-                payload = json.load(_f)
+            import psutil as _ps
+        except ImportError:
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "psutil not available — skipping startup dead-lease cleanup. "
+                "Install psutil to enable duplicate daemon detection and lease cleanup."
+            )
+            return
+        from tar_lab.runtime_ledger import load_runtime_ledger, save_runtime_ledger, ACTIVE_STATES
+        try:
+            payload = load_runtime_ledger(ws, refresh=False)
         except Exception:
             return
         changed = False
         now_iso = datetime.now(timezone.utc).isoformat()
         for lease in payload.get("leases", []):
-            if str(lease.get("status", "")) not in {"running", "starting"}:
+            if not isinstance(lease, dict):
+                continue
+            if str(lease.get("status", "")) not in ACTIVE_STATES:
                 continue
             pid = int(lease.get("pid", 0) or 0)
             if pid <= 0:
                 continue
             try:
-                r = _sp.run(
-                    ["powershell", "-Command",
-                     f"Get-Process -Id {pid} -ErrorAction SilentlyContinue | Select-Object Id"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                pid_alive = str(pid) in r.stdout
+                alive = _ps.pid_exists(pid)
             except Exception:
-                pid_alive = True  # assume alive on check failure; don't release
-            if not pid_alive:
+                alive = True  # conservative: assume alive on error
+            if not alive:
                 lease["status"] = "released"
                 lease["completion_reason"] = "stale_pid_dead_at_daemon_startup"
                 lease["completed_at"] = now_iso
@@ -1794,8 +1832,7 @@ def run_portfolio_daemon(
                 changed = True
         if changed:
             payload["updated_at"] = now_iso
-            with open(ledger_path, "w", encoding="utf-8") as _f:
-                json.dump(payload, _f, indent=2)
+            save_runtime_ledger(ws, payload)
 
     _release_dead_leases_at_startup(workspace)
 
@@ -1849,7 +1886,12 @@ def run_portfolio_daemon(
             _emit_daemon_state(refresh_scheduler=True)
             heartbeat_from_env(workspace, status="running", message="living research daemon polling")
             director_state = ResearchDirector(workspace).update_state()
-            author_state = write_planned_author_state(workspace)
+            _check_worker_heartbeats(workspace)
+            try:
+                author_state = write_planned_author_state(workspace)
+            except Exception as _auth_exc:
+                _log(workspace, f"author_warn={_auth_exc}")
+                author_state = {}
             coordination_state = write_research_coordination_state(workspace, orch, director_state, author_state)
             _ensure_director_seeded_queue(workspace, orch, coordination_state=coordination_state)
             if not _bounded_execution_enabled(workspace):
@@ -1864,11 +1906,15 @@ def run_portfolio_daemon(
             result = orch.run_scheduled_once(scheduler=scheduler)
             finalized = finalize_autonomous_results(workspace, plans) if include_autonomous else []
             director_state = ResearchDirector(workspace).update_state()
-            _maybe_write_breakthrough_papers(workspace, finalized, written_hypotheses)
-            author_state = write_planned_author_state(workspace)
-            write_research_coordination_state(workspace, orch, director_state, author_state)
-            paper_start = _maybe_start_ready_author_paper(workspace, started_papers)
-            _maybe_compile_completed_author_papers(workspace)
+            try:
+                _maybe_write_breakthrough_papers(workspace, finalized, written_hypotheses)
+                author_state = write_planned_author_state(workspace)
+                write_research_coordination_state(workspace, orch, director_state, author_state)
+                paper_start = _maybe_start_ready_author_paper(workspace, started_papers)
+                _maybe_compile_completed_author_papers(workspace)
+            except Exception as _auth_exc:
+                _log(workspace, f"author_warn={_auth_exc}")
+                paper_start = None
             if paper_start is not None:
                 _log(
                     workspace,

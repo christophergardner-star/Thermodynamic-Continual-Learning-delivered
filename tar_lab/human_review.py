@@ -55,9 +55,12 @@ def save_human_review_state(workspace: Path, payload: dict[str, Any]) -> dict[st
     path = human_review_state_path(workspace)
     payload = dict(payload or {})
     payload["schema"] = "tar_human_review_v1"
+    payload["schema_version"] = "v1"
     payload["updated_at"] = _now_iso()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
     return payload
 
 
@@ -89,7 +92,11 @@ def _build_manifest_for_proposal(proposal: dict[str, Any]) -> tuple[str, str]:
         "manifest_id": manifest_id,
         "manifest_schema": "tar_execution_manifest_v1",
         "created_at": _now_iso(),
-        "authorised_by": os.environ.get("USERNAME", "human-review"),
+        "authorised_by": (
+            str(proposal.get("reviewer_name", "") or "")
+            or os.environ.get("USERNAME", "")
+            or "human-review"
+        ),
         "purpose": (
             f"Human-approved bounded experiment for {experiment_id}. "
             "Prepared from TAR human review state; execution still requires committed manifest verification."
@@ -187,11 +194,19 @@ def sync_human_review_from_director_state(workspace: Path, director_state: dict[
             continue
         review_id = f"claim:{paper_id}"
         existing = existing_claims.get(review_id, {})
+        _existing_status = str(existing.get("status", "") or "awaiting_human_review")
+        _new_readiness = str(directive.get("readiness", "planned") or "planned")
+        # Re-surface a held claim when the Director upgrades readiness to actionable
+        _resolved_status = (
+            "awaiting_human_review"
+            if _existing_status == "held" and _new_readiness in ("outline_now", "write_now")
+            else _existing_status
+        )
         claim_reviews.append({
             "review_id": review_id,
             "paper_id": paper_id,
             "title": str(directive.get("title", "") or paper_id),
-            "status": str(existing.get("status", "") or "awaiting_human_review"),
+            "status": _resolved_status,
             "decision": str(existing.get("decision", "") or ""),
             "created_at": str(existing.get("created_at", "") or _now_iso()),
             "updated_at": str(existing.get("updated_at", "") or _now_iso()),
@@ -280,6 +295,53 @@ def sync_human_review_from_director_state(workspace: Path, director_state: dict[
             "updated_at": str(existing.get("updated_at", "") or _now_iso()),
         })
 
+    # Build the set of archived experiment IDs (complete and out of queue).
+    # Proposals are only removed when their experiment is confirmed done —
+    # never because the director's directive list oscillated between ticks
+    # (which happens under multiple concurrent daemon instances or director
+    # re-prioritisation).
+    _archived_exp_ids: set[str] = set()
+    _queued_exp_ids: set[str] = set()
+    try:
+        import json as _hjson
+        _q_path = workspace / "tar_state" / "experiment_queue.json"
+        if _q_path.exists():
+            _q_data = _hjson.loads(_q_path.read_text(encoding="utf-8"))
+            _queued_exp_ids = {
+                str(_e.get("id", "") or "")
+                for _e in _q_data.get("experiments", [])
+                if isinstance(_e, dict) and str(_e.get("id", "") or "")
+            }
+        _arch_path = workspace / "tar_state" / "experiment_archive.json"
+        if _arch_path.exists():
+            _arch_data = _hjson.loads(_arch_path.read_text(encoding="utf-8"))
+            _archived_exp_ids = {
+                str(_e.get("id", "") or "")
+                for _e in _arch_data.get("experiments", [])
+                if isinstance(_e, dict) and str(_e.get("id", "") or "")
+            }
+    except Exception:
+        pass
+
+    # Preserve any existing proposal unless its experiment is confirmed archived
+    # (present in archive AND absent from queue).  This keeps proposals stable
+    # across director re-prioritisation and multi-daemon write races.
+    _new_proposal_ids = {p["review_id"] for p in proposals}
+    for _r_id, _kept in existing_proposals.items():
+        if _r_id not in _new_proposal_ids:
+            _exp_id = _r_id[len("proposal:"):] if _r_id.startswith("proposal:") else ""
+            _confirmed_done = _exp_id in _archived_exp_ids and _exp_id not in _queued_exp_ids
+            if not _confirmed_done:
+                proposals.append(_kept)
+
+    # Same treatment for claim reviews: keep unless the paper is fully done.
+    _new_claim_ids = {c["review_id"] for c in claim_reviews}
+    for _r_id, _kept in existing_claims.items():
+        if _r_id not in _new_claim_ids:
+            _s = str(_kept.get("status", "") or "")
+            if _s and _s != "awaiting_human_review":
+                claim_reviews.append(_kept)
+
     state["proposals"] = proposals
     state["questions"] = questions
     state["claim_reviews"] = claim_reviews
@@ -293,9 +355,15 @@ def record_review_decision(
     decision: str,
     human_notes: str = "",
     build_manifest_authorised: bool = False,
+    reviewer_name: str = "",
 ) -> dict[str, Any] | None:
     state = load_human_review_state(workspace)
     updated = None
+    _reviewer = (
+        reviewer_name.strip()
+        or os.environ.get("USERNAME", "")
+        or "human-review"
+    )
     for bucket_name in ("proposals", "claim_reviews"):
         bucket = state.get(bucket_name, [])
         if not isinstance(bucket, list):
@@ -306,6 +374,7 @@ def record_review_decision(
             item["decision"] = decision
             item["human_notes"] = human_notes
             item["build_manifest_authorised"] = bool(build_manifest_authorised)
+            item["reviewer_name"] = _reviewer
             item["status"] = {
                 "approve": "approved",
                 "approve_and_build_manifest": "approved_manifest_ready",
@@ -335,7 +404,35 @@ def record_review_decision(
     if updated is None:
         return None
     save_human_review_state(workspace, state)
+    manifest_path_str = str(updated.get("manifest_path", "") or "")
+    if manifest_path_str and build_manifest_authorised:
+        _commit_manifest_after_approval(workspace, manifest_path_str, review_id, _reviewer)
     return updated
+
+
+def _commit_manifest_after_approval(
+    workspace: Path, manifest_path: str, review_id: str, reviewer: str
+) -> None:
+    """Commit the manifest file to git immediately after human approval."""
+    import subprocess
+    try:
+        repo_root = _repo_root()
+        manifest_rel = Path(manifest_path).relative_to(repo_root)
+        subprocess.run(
+            ["git", "add", str(manifest_rel)],
+            cwd=str(repo_root), capture_output=True, timeout=10,
+        )
+        msg = (
+            f"manifest: commit human-approved manifest for {review_id}\n\n"
+            f"Reviewer: {reviewer}\n"
+            f"Manifest: {manifest_rel}"
+        )
+        subprocess.run(
+            ["git", "commit", "-m", msg],
+            cwd=str(repo_root), capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass  # non-fatal — manifest is on disk regardless
 
 
 def answer_human_question(

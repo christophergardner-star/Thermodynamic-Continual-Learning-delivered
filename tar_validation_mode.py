@@ -84,15 +84,20 @@ def load_state(workspace: Path) -> dict[str, Any]:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as exc:
+        print(f"[TAR-Validation] WARNING: load_state failed ({path}): {exc}", flush=True)
         return {}
     return data if isinstance(data, dict) else {}
 
 
 def save_state(workspace: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    import os
     path = state_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    payload_out = {"schema_version": "v1", **payload}
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload_out, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
     return payload
 
 
@@ -719,15 +724,30 @@ def create_validation_bundle(
 
 
 def _prune_old_validation_bundles(workspace: Path, keep: int = 5) -> None:
-    """Delete oldest hpc_claim_validation_* bundles, retaining the most recent `keep`."""
+    """Delete oldest hpc_claim_validation_* bundles, retaining the most recent `keep`.
+    Uses a .deleting marker so concurrent readers can skip bundles mid-removal.
+    """
     import shutil
     val_root = validation_root(workspace)
     bundles = sorted(
-        [d for d in val_root.iterdir() if d.is_dir() and d.name.startswith("hpc_claim_validation_")],
+        [
+            d for d in val_root.iterdir()
+            if d.is_dir()
+            and d.name.startswith("hpc_claim_validation_")
+            and not d.name.endswith(".deleting")
+        ],
         key=lambda d: d.name,
     )
     for old in bundles[:-keep]:
-        shutil.rmtree(old, ignore_errors=True)
+        marker = old.with_suffix(".deleting")
+        try:
+            marker.touch()
+            shutil.rmtree(old, ignore_errors=True)
+        finally:
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def build_validation_suite_spec(

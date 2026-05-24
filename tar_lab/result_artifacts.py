@@ -5,6 +5,7 @@ import os
 import platform
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -58,9 +59,31 @@ def _write_new_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    """Lockfile-protected append — prevents interleaved bytes from concurrent writers."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, default=_json_default) + "\n")
+    lock_path = path.with_suffix(".lock")
+    deadline = time.monotonic() + 10.0
+    lock_h = None
+    while True:
+        try:
+            lock_h = open(lock_path, "x", encoding="utf-8")
+            lock_h.write(json.dumps({"pid": os.getpid()}))
+            lock_h.flush()
+            break
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"JSONL append lock timeout: {lock_path}")
+            time.sleep(0.05)
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, default=_json_default) + "\n")
+    finally:
+        if lock_h is not None:
+            lock_h.close()
+        try:
+            os.unlink(lock_path)
+        except FileNotFoundError:
+            pass
 
 
 def _run_command(command: list[str], cwd: Optional[Path] = None) -> dict[str, Any]:
@@ -285,6 +308,59 @@ def iter_canonical_comparison_records(workspace: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _iter_queue_experiment_records(workspace: Path) -> list[dict[str, Any]]:
+    """Return pseudo-canonical records for completed queue experiments.
+
+    Queue experiments write to tar_state/experiments/<id>/result.json with
+    spec.json as provenance, but are never written to canonical_results_index.jsonl.
+    This surfaces them so build_validation_state can include them as trusted results.
+
+    env_path prefers result_env.json (full env snapshot) and falls back to
+    spec.json (runtime_context, timestamps, dependency manifest).
+    """
+    experiments_dir = workspace / "tar_state" / "experiments"
+    if not experiments_dir.is_dir():
+        return []
+    records: list[dict[str, Any]] = []
+    for exp_dir in experiments_dir.iterdir():
+        if not exp_dir.is_dir():
+            continue
+        result_path = exp_dir / "result.json"
+        spec_path = exp_dir / "spec.json"
+        if not result_path.exists() or not spec_path.exists():
+            continue
+        try:
+            spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        stage = str(spec.get("stage") or spec.get("status") or "")
+        if stage != "complete":
+            continue
+        experiment_id = str(spec.get("id") or exp_dir.name)
+        completed_at = str(spec.get("completed_at") or "")
+        # Prefer result_env.json (full env snapshot); fall back to spec.json
+        env_path = result_path.with_name("result_env.json")
+        env_is_real = env_path.exists()
+        if not env_is_real:
+            env_path = spec_path
+        records.append({
+            "logical_name": experiment_id,
+            "phase_number": None,
+            "created_at": completed_at,
+            "source_script": "queue_runner",
+            "result_path": str(result_path),
+            "env_path": str(env_path),
+            "artifact_schema": "tar_queue_experiment_record_v1",
+            "trust_tier": "trusted_rerun_with_env" if env_is_real else "corrected_recomputation_no_env",
+            "provenance_status": "env_snapshot_present" if env_is_real else "missing_env_snapshot",
+            "basis": "queue_experiment_with_env" if env_is_real else "queue_experiment_spec_only",
+            "publication_allowed": env_is_real,
+            "supersedes": [],
+            "superseded_by": "",
+        })
+    return records
+
+
 def latest_canonical_record(workspace: Path, logical_name: str) -> Optional[dict[str, Any]]:
     matches = [
         record for record in iter_canonical_comparison_records(workspace)
@@ -319,6 +395,11 @@ def load_canonical_comparison(
     legacy_filename: Optional[str] = None,
 ) -> tuple[Optional[Path], Optional[dict[str, Any]]]:
     path = resolve_canonical_comparison_path(workspace, logical_name, legacy_filename=legacy_filename)
+    if path is None:
+        # Fallback: queue experiments directory for completed results not in the JSONL index
+        queue_path = workspace / "tar_state" / "experiments" / logical_name / "result.json"
+        if queue_path.exists():
+            path = queue_path
     if path is None:
         return None, None
     try:

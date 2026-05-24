@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import IO, Any, Iterable
 
 try:
     import psutil as _psutil
@@ -58,8 +59,54 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Atomic write via temp file + os.replace — crash-safe on NTFS."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+# ── Ledger write lock ──────────────────────────────────────────────────────────
+
+def _ledger_lock_path(workspace: Path) -> Path:
+    return runtime_ledger_path(workspace).with_suffix(".lock")
+
+
+def _acquire_ledger_lock(workspace: Path, timeout_s: float = 8.0) -> IO:
+    """Exclusive lock via atomic file create. Returns open handle; caller must release."""
+    lock_path = _ledger_lock_path(workspace)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            h = open(lock_path, "x", encoding="utf-8")
+            h.write(json.dumps({"pid": os.getpid(), "acquired_at": time.time()}))
+            h.flush()
+            return h
+        except FileExistsError:
+            if time.monotonic() > deadline:
+                # Check if lock file is stale (>30s old)
+                try:
+                    age = time.time() - os.stat(lock_path).st_mtime
+                    if age > 30.0:
+                        try:
+                            os.unlink(lock_path)
+                        except FileNotFoundError:
+                            pass
+                        continue
+                except FileNotFoundError:
+                    continue
+                raise RuntimeLeaseError(
+                    f"Ledger lock held by another process for >{timeout_s}s: {lock_path}"
+                )
+            time.sleep(0.05)
+
+
+def _release_ledger_lock(lock_handle: IO, workspace: Path) -> None:
+    lock_handle.close()
+    try:
+        os.unlink(_ledger_lock_path(workspace))
+    except FileNotFoundError:
+        pass
 
 
 def _process_exists(pid: int) -> bool | None:
@@ -134,6 +181,7 @@ def load_runtime_ledger(workspace: Path, *, refresh: bool = True) -> dict[str, A
 def save_runtime_ledger(workspace: Path, payload: dict[str, Any]) -> dict[str, Any]:
     payload = dict(payload or {})
     payload["schema"] = "tar_runtime_ledger_v1"
+    payload["schema_version"] = "v1"
     payload["updated_at"] = _now_iso()
     if not isinstance(payload.get("leases"), list):
         payload["leases"] = []
@@ -187,58 +235,69 @@ def acquire_runtime_lease(
     stale_timeout_s: float = 300.0,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    payload = load_runtime_ledger(workspace)
-    conflict_keys_list = _conflict_keyset(conflict_keys)
-    conflicts = find_runtime_conflicts(
-        workspace,
-        conflict_keys=conflict_keys_list,
-        component_id=component_id,
-        experiment_id=experiment_id,
-    )
-    if conflicts:
-        conflict_summary = [
-            {
-                "lease_id": str(item.get("lease_id", "") or ""),
-                "component_id": str(item.get("component_id", "") or ""),
-                "experiment_id": str(item.get("experiment_id", "") or ""),
-                "conflict_keys": list(item.get("conflict_keys", []) or []),
-                "status": str(item.get("status", "") or ""),
-            }
-            for item in conflicts
-        ]
-        raise RuntimeLeaseError(
-            f"Refusing duplicate runtime lease for component='{component_id}' experiment='{experiment_id}'. "
-            f"Conflicts: {conflict_summary}"
-        )
+    lh = _acquire_ledger_lock(workspace)
+    try:
+        payload = load_runtime_ledger(workspace, refresh=False)
+        conflict_keys_list = _conflict_keyset(conflict_keys)
+        # Conflict check inside the lock — atomic read-check-write
+        target_keys = set(conflict_keys_list)
+        conflicts: list[dict[str, Any]] = []
+        for lease in payload.get("leases", []):
+            if not isinstance(lease, dict):
+                continue
+            if str(lease.get("status", "") or "") not in ACTIVE_STATES:
+                continue
+            lease_keys = set(_conflict_keyset(lease.get("conflict_keys", [])))
+            same_component = component_id and str(lease.get("component_id", "") or "") == component_id
+            same_experiment = experiment_id and str(lease.get("experiment_id", "") or "") == experiment_id
+            if same_component or same_experiment or (target_keys and lease_keys.intersection(target_keys)):
+                conflicts.append(lease)
+        if conflicts:
+            conflict_summary = [
+                {
+                    "lease_id": str(item.get("lease_id", "") or ""),
+                    "component_id": str(item.get("component_id", "") or ""),
+                    "experiment_id": str(item.get("experiment_id", "") or ""),
+                    "conflict_keys": list(item.get("conflict_keys", []) or []),
+                    "status": str(item.get("status", "") or ""),
+                }
+                for item in conflicts
+            ]
+            raise RuntimeLeaseError(
+                f"Refusing duplicate runtime lease for component='{component_id}' experiment='{experiment_id}'. "
+                f"Conflicts: {conflict_summary}"
+            )
 
-    lease_id = f"{component_kind}:{component_id}:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-    lease = {
-        "lease_id": lease_id,
-        "component_id": component_id,
-        "component_kind": component_kind,
-        "owner_component": owner_component or component_kind,
-        "status": status,
-        "pid": int(pid or os.getpid()),
-        "manifest_id": manifest_id,
-        "manifest_path": manifest_path,
-        "experiment_id": experiment_id,
-        "paper_id": paper_id,
-        "frontier_problem_id": frontier_problem_id,
-        "domain_id": domain_id,
-        "source_script": source_script,
-        "started_at": _now_iso(),
-        "heartbeat_at": _now_iso(),
-        "stale_timeout_s": float(stale_timeout_s or 300.0),
-        "conflict_keys": conflict_keys_list,
-        "completion_reason": "",
-        "completed_at": "",
-        "extra": extra or {},
-    }
-    leases = payload.get("leases", [])
-    leases.append(lease)
-    payload["leases"] = leases
-    save_runtime_ledger(workspace, payload)
-    return lease
+        lease_id = f"{component_kind}:{component_id}:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        lease = {
+            "lease_id": lease_id,
+            "component_id": component_id,
+            "component_kind": component_kind,
+            "owner_component": owner_component or component_kind,
+            "status": status,
+            "pid": int(pid or os.getpid()),
+            "manifest_id": manifest_id,
+            "manifest_path": manifest_path,
+            "experiment_id": experiment_id,
+            "paper_id": paper_id,
+            "frontier_problem_id": frontier_problem_id,
+            "domain_id": domain_id,
+            "source_script": source_script,
+            "started_at": _now_iso(),
+            "heartbeat_at": _now_iso(),
+            "stale_timeout_s": float(stale_timeout_s or 300.0),
+            "conflict_keys": conflict_keys_list,
+            "completion_reason": "",
+            "completed_at": "",
+            "extra": extra or {},
+        }
+        leases = payload.get("leases", [])
+        leases.append(lease)
+        payload["leases"] = leases
+        save_runtime_ledger(workspace, payload)
+        return lease
+    finally:
+        _release_ledger_lock(lh, workspace)
 
 
 def heartbeat_runtime_lease(
@@ -248,20 +307,24 @@ def heartbeat_runtime_lease(
     status: str | None = None,
     extra_patch: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    payload = load_runtime_ledger(workspace)
-    for lease in payload.get("leases", []):
-        if not isinstance(lease, dict) or str(lease.get("lease_id", "") or "") != lease_id:
-            continue
-        lease["heartbeat_at"] = _now_iso()
-        if status:
-            lease["status"] = status
-        if extra_patch:
-            extra = dict(lease.get("extra", {}) or {})
-            extra.update(extra_patch)
-            lease["extra"] = extra
-        save_runtime_ledger(workspace, payload)
-        return lease
-    return None
+    lh = _acquire_ledger_lock(workspace)
+    try:
+        payload = load_runtime_ledger(workspace, refresh=False)
+        for lease in payload.get("leases", []):
+            if not isinstance(lease, dict) or str(lease.get("lease_id", "") or "") != lease_id:
+                continue
+            lease["heartbeat_at"] = _now_iso()
+            if status:
+                lease["status"] = status
+            if extra_patch:
+                extra = dict(lease.get("extra", {}) or {})
+                extra.update(extra_patch)
+                lease["extra"] = extra
+            save_runtime_ledger(workspace, payload)
+            return lease
+        return None
+    finally:
+        _release_ledger_lock(lh, workspace)
 
 
 def release_runtime_lease(
@@ -272,21 +335,25 @@ def release_runtime_lease(
     completion_reason: str = "",
     extra_patch: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    payload = load_runtime_ledger(workspace)
-    for lease in payload.get("leases", []):
-        if not isinstance(lease, dict) or str(lease.get("lease_id", "") or "") != lease_id:
-            continue
-        lease["status"] = final_status
-        lease["completed_at"] = _now_iso()
-        lease["heartbeat_at"] = lease["completed_at"]
-        lease["completion_reason"] = completion_reason
-        if extra_patch:
-            extra = dict(lease.get("extra", {}) or {})
-            extra.update(extra_patch)
-            lease["extra"] = extra
-        save_runtime_ledger(workspace, payload)
-        return lease
-    return None
+    lh = _acquire_ledger_lock(workspace)
+    try:
+        payload = load_runtime_ledger(workspace, refresh=False)
+        for lease in payload.get("leases", []):
+            if not isinstance(lease, dict) or str(lease.get("lease_id", "") or "") != lease_id:
+                continue
+            lease["status"] = final_status
+            lease["completed_at"] = _now_iso()
+            lease["heartbeat_at"] = lease["completed_at"]
+            lease["completion_reason"] = completion_reason
+            if extra_patch:
+                extra = dict(lease.get("extra", {}) or {})
+                extra.update(extra_patch)
+                lease["extra"] = extra
+            save_runtime_ledger(workspace, payload)
+            return lease
+        return None
+    finally:
+        _release_ledger_lock(lh, workspace)
 
 
 def _write_runtime_view(workspace: Path, payload: dict[str, Any]) -> None:
