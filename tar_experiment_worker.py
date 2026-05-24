@@ -11,6 +11,8 @@ import argparse
 import json
 import os
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,9 +22,26 @@ sys.path.insert(0, str(_REPO))
 from tar_experiment_orchestrator import ExperimentOrchestrator
 from tar_storage import ensure_workspace_layout, resolve_workspace
 
+_HEARTBEAT_INTERVAL_S = 60  # write heartbeat every 60 seconds
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _start_heartbeat(lock_path: Path, stop_event: threading.Event) -> threading.Thread:
+    """Background thread: refresh last_heartbeat in the PID lock file every 60 s."""
+    def _beat():
+        while not stop_event.wait(_HEARTBEAT_INTERVAL_S):
+            try:
+                payload = json.loads(lock_path.read_text(encoding="utf-8"))
+                payload["last_heartbeat"] = _now_iso()
+                lock_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+    t = threading.Thread(target=_beat, daemon=True, name="worker-heartbeat")
+    t.start()
+    return t
 
 
 def _write_pid_lock(workspace: Path, experiment_id: str, status: str = "running", **extra: object) -> Path:
@@ -67,6 +86,8 @@ def main() -> int:
     lock_path = _write_pid_lock(workspace, args.experiment_id, started_at_utc=started_at)
     print(f"[worker] PID lock written: {lock_path}  (PID={os.getpid()})", flush=True)
 
+    _stop_heartbeat = threading.Event()
+    _heartbeat_thread = _start_heartbeat(lock_path, _stop_heartbeat)
     try:
         orch = ExperimentOrchestrator(workspace)
         result = orch.execute_by_id(
@@ -74,12 +95,14 @@ def main() -> int:
             skip_preflight=args.skip_preflight,
             force_in_process=True,
         )
+        _stop_heartbeat.set()
         _write_pid_lock(
             workspace, args.experiment_id, "completed",
             started_at_utc=started_at, completed_at_utc=_now_iso(),
         )
         return 0 if result is not None else 1
     except Exception:
+        _stop_heartbeat.set()
         _write_pid_lock(
             workspace, args.experiment_id, "failed",
             started_at_utc=started_at, failed_at_utc=_now_iso(),

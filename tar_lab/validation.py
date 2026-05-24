@@ -9,6 +9,7 @@ from typing import Any
 
 from tar_lab.phase_catalog import phase_catalog_by_logical_name
 from tar_lab.result_artifacts import (
+    _iter_queue_experiment_records,
     iter_canonical_comparison_records,
     load_canonical_comparison,
     read_statistics,
@@ -27,6 +28,40 @@ TRUST_PUBLICATION_ALLOWED = {
     TRUST_TRUSTED_RERUN,
     TRUST_TRUSTED_MANUAL,
 }
+
+# Days after which a result is flagged as potentially stale (trust_expiry_warning=True).
+_TRUST_EXPIRY_DAYS: dict[str, int] = {
+    TRUST_TRUSTED_RERUN: 90,
+    TRUST_TRUSTED_MANUAL: 180,
+    TRUST_CORRECTED_INTERNAL: 30,
+    TRUST_LEGACY: 0,          # immediately warn
+    TRUST_QUARANTINED: 0,     # never expires — already invalid
+    TRUST_BLOCKED: 0,
+}
+
+
+def _check_trust_expiry(record: dict[str, Any]) -> dict[str, Any]:
+    """Return expiry metadata for a result record.
+    Does NOT change trust_tier — RAIL 1 prohibits that.
+    Returns: {trust_expiry_warning, trust_expiry_days_old, trust_expiry_threshold_days}"""
+    tier = str(record.get("trust_tier", "") or TRUST_LEGACY)
+    created_at = str(record.get("created_at", "") or "")
+    threshold = _TRUST_EXPIRY_DAYS.get(tier)
+    if threshold is None or tier == TRUST_QUARANTINED:
+        return {"trust_expiry_warning": False, "trust_expiry_days_old": None, "trust_expiry_threshold_days": None}
+    days_old: float | None = None
+    if created_at:
+        try:
+            dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            days_old = (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
+        except Exception:
+            pass
+    warning = (days_old is not None and days_old >= threshold) or (threshold == 0 and tier in {TRUST_LEGACY, TRUST_CORRECTED_INTERNAL})
+    return {
+        "trust_expiry_warning": warning,
+        "trust_expiry_days_old": round(days_old, 1) if days_old is not None else None,
+        "trust_expiry_threshold_days": threshold,
+    }
 
 
 def _now_iso() -> str:
@@ -204,6 +239,7 @@ def classify_trust_tier(
         "superseded_by": record.get("superseded_by", ""),
         "validation_state": "validated" if publication_allowed else "limited_scope",
         "result_present": bool(result_payload),
+        **_check_trust_expiry({**record, "trust_tier": trust_tier}),
     }
 
 
@@ -251,6 +287,31 @@ def _trusted_experiment_ids(workspace: Path) -> set[str]:
     return trusted
 
 
+def _superseded_experiment_ids(workspace: Path) -> set[str]:
+    """Return IDs of experiments archived as 'skipped' (intentionally superseded).
+
+    The director retires early probes by archiving them with status='skipped' and an
+    archive_reason of 'superseded_by_<new_id>'. These must not count as unsupported
+    evidence — the paper's linked list may lag behind the director's supersession
+    decisions, and blocking publication on a deliberately retired probe is wrong.
+    """
+    archive_path = workspace / "tar_state" / "experiment_archive.json"
+    if not archive_path.exists():
+        return set()
+    try:
+        raw = json.loads(archive_path.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    experiments = raw.get("experiments", []) if isinstance(raw, dict) else []
+    return {
+        str(rec.get("id", ""))
+        for rec in experiments
+        if isinstance(rec, dict)
+        and str(rec.get("status", "")).lower() == "skipped"
+        and str(rec.get("id", ""))
+    }
+
+
 def validate_paper_evidence(
     workspace: Path,
     *,
@@ -259,9 +320,14 @@ def validate_paper_evidence(
     waiting_for_experiment_ids: list[str],
 ) -> dict[str, Any]:
     trusted_ids = _trusted_experiment_ids(workspace)
+    superseded_ids = _superseded_experiment_ids(workspace)
     waiting = [str(item) for item in waiting_for_experiment_ids if str(item).strip()]
     linked = [str(item) for item in linked_experiment_ids if str(item).strip()]
-    unsupported = [item for item in linked if item not in trusted_ids]
+    # Superseded experiments are intentionally retired — exclude from unsupported list.
+    unsupported = [
+        item for item in linked
+        if item not in trusted_ids and item not in superseded_ids
+    ]
     issues: list[str] = []
     if waiting:
         issues.append(f"waiting_for_experiments: {waiting}")
@@ -278,6 +344,16 @@ def validate_paper_evidence(
 
 def build_validation_state(workspace: Path, *, persist: bool = True) -> dict[str, Any]:
     records = iter_canonical_comparison_records(workspace)
+
+    # Supplement with completed queue experiments not yet in the canonical JSONL index.
+    # These write to experiments/<id>/result.json with spec.json as provenance but are
+    # never registered via write_canonical_comparison_result. Deduplicate by logical_name
+    # so canonical JSONL entries (with full env snapshots) always take precedence.
+    canonical_names: set[str] = {str(r.get("logical_name", "")) for r in records if r.get("logical_name")}
+    for queue_rec in _iter_queue_experiment_records(workspace):
+        if queue_rec.get("logical_name") not in canonical_names:
+            records.append(queue_rec)
+
     results: list[dict[str, Any]] = []
     for record in records:
         logical_name = str(record.get("logical_name", "") or "")

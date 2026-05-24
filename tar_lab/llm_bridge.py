@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,21 @@ _SONNET = "claude-sonnet-4-6"
 _HAIKU  = "claude-haiku-4-5-20251001"
 _TTL_LONG_S  = 4 * 3600   # synthesis, eval, verify
 _TTL_SCHED_S = 10 * 60    # scheduler rationale
+
+# Module-level 529 backoff — protected by _overload_lock for Flask thread safety
+_overloaded_until: float = 0.0
+_overload_lock = threading.Lock()
+
+
+def _is_overloaded() -> bool:
+    with _overload_lock:
+        return time.time() < _overloaded_until
+
+
+def _set_overloaded(backoff_s: float = 300.0) -> None:
+    with _overload_lock:
+        global _overloaded_until
+        _overloaded_until = time.time() + backoff_s
 
 
 # ── API key resolution ─────────────────────────────────────────────────────────
@@ -63,6 +80,8 @@ def call_claude(
     api_key = _api_key()
     if not api_key:
         return ""
+    if _is_overloaded():
+        return ""  # API overloaded backoff active — skip silently
     try:
         client = anthropic.Anthropic(api_key=api_key)
         kwargs: dict[str, Any] = {
@@ -75,6 +94,9 @@ def call_claude(
         resp = client.messages.create(**kwargs)
         return resp.content[0].text.strip()
     except Exception as exc:
+        msg = str(exc)
+        if "529" in msg or "overloaded" in msg.lower():
+            _set_overloaded(300.0)  # 5-minute backoff on 529
         print(f"[{tag}] Claude call failed: {exc}", flush=True)
         return ""
 
@@ -439,7 +461,6 @@ def narrate_scheduler_decision(
     """
     cache_dir = _cache_dir(workspace)
     content_key = _content_hash(
-        str(gpu_util_pct), f"{vram_used_gb:.1f}",
         ",".join(sorted(running_names or [])),
         ",".join(sorted(can_start or [])),
         str(len(hold_reasons or [])),
@@ -468,3 +489,127 @@ def narrate_scheduler_decision(
         _cache_write(cache_dir, f"scheduler_{content_key}", narration)
         return narration
     return template_fallback
+
+
+_TTL_PROPOSAL_S = 2 * 3600
+
+
+def propose_followup_experiments(
+    workspace: Path,
+    frontier_id: str,
+    frontier_title: str,
+    global_problem_statement: str,
+    candidate_datasets: list[str],
+    candidate_backbones: list[str],
+    external_baselines: list[str],
+    completed_summaries: list[str],
+    exclude_ids: set[str],
+    max_proposals: int = 2,
+) -> list[dict]:
+    """Ask Claude to propose follow-up experiments when the static catalog is exhausted.
+
+    Returns [] if the API is unavailable or proposals don't validate.
+    Cache TTL: 2 h, keyed on frontier + completed experiment set.
+    """
+    if not candidate_datasets or not candidate_backbones:
+        return []
+
+    cache_dir = _cache_dir(workspace)
+    content_key = _content_hash(
+        frontier_id,
+        ",".join(sorted(completed_summaries)),
+        ",".join(sorted(exclude_ids)),
+    )
+    cached = _cache_read(cache_dir, f"proposals_{content_key}", ttl_s=_TTL_PROPOSAL_S)
+    if cached is not None:
+        try:
+            result = json.loads(cached)
+            if isinstance(result, list):
+                return result
+        except Exception:
+            pass
+
+    summaries_str = "\n".join(f"- {s}" for s in completed_summaries) or "None yet"
+    exclude_str = ", ".join(sorted(str(x) for x in exclude_ids)[:20]) or "none"
+
+    prompt = f"""You are the TAR Research Director generating follow-up experiments for a machine learning research frontier.
+
+Frontier: {frontier_title}
+Problem: {global_problem_statement}
+
+Completed experiments so far:
+{summaries_str}
+
+Available datasets: {', '.join(candidate_datasets)}
+Available backbones: {', '.join(candidate_backbones)}
+External baselines to compare against: {', '.join(external_baselines) or 'ewc, sgd_baseline'}
+
+Already queued or done (do NOT propose these): {exclude_str}
+
+RULES:
+1. Only propose experiments using the listed available datasets and backbones
+2. Always compare TCL against real external baselines — never test TCL alone
+3. Each proposal must explore a meaningfully different axis than what is already done
+4. TAR/TCL/ASC are unpublished internal candidate methods under evaluation — not assumed solutions
+5. Prefer the cheapest dataset/backbone combination that still produces useful evidence
+
+Return a JSON array of up to {max_proposals} experiments with these exact keys:
+[
+  {{
+    "experiment_id": "unique-lowercase-slug-no-spaces",
+    "title": "Short descriptive title",
+    "dataset": "<one of the available datasets>",
+    "backbone": "<one of the available backbones>",
+    "estimated_runtime_h": 6.0,
+    "config_overrides": {{}},
+    "hypothesis": "One falsifiable sentence this experiment tests",
+    "why": "Why this is the most valuable next step given results so far"
+  }}
+]
+
+Return ONLY the JSON array, no other text."""
+
+    system = (
+        "You are the TAR Research Director. Propose follow-up ML experiments that are "
+        "concrete, falsifiable, and grounded in completed results. "
+        "Return only a valid JSON array."
+    )
+    raw = call_claude(prompt, system=system, model=_HAIKU, max_tokens=800, tag="followup_proposals")
+    if not raw:
+        return []
+
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[^\n]*\n?", "", raw)
+        raw = re.sub(r"```$", "", raw).strip()
+
+    try:
+        proposals = json.loads(raw)
+        if not isinstance(proposals, list):
+            return []
+        valid: list[dict] = []
+        for p in proposals[:max_proposals]:
+            if not isinstance(p, dict):
+                continue
+            exp_id = str(p.get("experiment_id", "") or "").strip().lower().replace(" ", "-")
+            if not exp_id or exp_id in exclude_ids:
+                continue
+            dataset = str(p.get("dataset", "") or "")
+            backbone = str(p.get("backbone", "") or "")
+            if dataset not in candidate_datasets or backbone not in candidate_backbones:
+                continue
+            valid.append({
+                "experiment_id": exp_id,
+                "title": str(p.get("title", exp_id) or exp_id)[:80],
+                "dataset": dataset,
+                "backbone": backbone,
+                "estimated_runtime_h": float(p.get("estimated_runtime_h", 6.0) or 6.0),
+                "config_overrides": dict(p.get("config_overrides") or {}),
+                "hypothesis": str(p.get("hypothesis", "") or ""),
+                "why": str(p.get("why", "") or ""),
+            })
+        if valid:
+            _cache_write(cache_dir, f"proposals_{content_key}", json.dumps(valid))
+        return valid
+    except Exception:
+        return []
