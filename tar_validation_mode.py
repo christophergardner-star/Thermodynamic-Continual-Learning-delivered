@@ -705,6 +705,9 @@ def create_validation_bundle(
     for src, rel_dst in _archive_targets(workspace, repo_root):
         _copy_path(src, bundle_root / rel_dst)
 
+    # Keep only the 5 most recent bundles to prevent unbounded disk growth.
+    _prune_old_validation_bundles(workspace, keep=5)
+
     return {
         "bundle_id": bundle_id,
         "bundle_root": str(bundle_root),
@@ -713,6 +716,18 @@ def create_validation_bundle(
         "validation_suite_lock_path": str(bundle_root / "freeze" / "validation_suite_lock.json"),
         "validation_suite_lock": suite_lock,
     }
+
+
+def _prune_old_validation_bundles(workspace: Path, keep: int = 5) -> None:
+    """Delete oldest hpc_claim_validation_* bundles, retaining the most recent `keep`."""
+    import shutil
+    val_root = validation_root(workspace)
+    bundles = sorted(
+        [d for d in val_root.iterdir() if d.is_dir() and d.name.startswith("hpc_claim_validation_")],
+        key=lambda d: d.name,
+    )
+    for old in bundles[:-keep]:
+        shutil.rmtree(old, ignore_errors=True)
 
 
 def build_validation_suite_spec(
