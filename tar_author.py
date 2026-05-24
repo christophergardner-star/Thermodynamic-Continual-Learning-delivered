@@ -950,6 +950,78 @@ def _call_llm(prompt: str, system: str = "", model: str = "claude-sonnet-4-6") -
     return ""
 
 
+def _run_originality_audit(sections: dict[str, str], out_dir: Path, project_id: str) -> None:
+    """Write originality_audit.json alongside the paper. Never raises."""
+    import re as _re
+
+    PROSE_KEYS = {"abstract", "s1_introduction", "s2_background",
+                  "s3_method", "s5_discussion", "s6_conclusion"}
+
+    def _strip_latex(tex: str) -> str:
+        tex = _re.sub(r"\\begin\{[^}]+\}.*?\\end\{[^}]+\}", " ", tex, flags=_re.DOTALL)
+        tex = _re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", tex)
+        tex = _re.sub(r"\\[a-zA-Z]+", " ", tex)
+        tex = _re.sub(r"[{}]", "", tex)
+        return _re.sub(r"\s+", " ", tex).strip()
+
+    blocks: list[str] = []
+    for key in PROSE_KEYS:
+        text = _strip_latex(sections.get(key, ""))
+        if text:
+            blocks.append(f"=== {key} ===\n{text[:3000]}")
+    if not blocks:
+        return
+
+    prompt = textwrap.dedent(f"""\
+        You are an academic originality reviewer for a machine learning paper.
+
+        Scan the prose below for sentences or phrases that are verbatim or near-verbatim
+        copies of specific published papers, or that use another author's distinctly coined
+        terminology without attribution.
+
+        DO NOT flag: standard ML vocabulary, generic descriptions of well-known methods
+        (EWC, SI, iCaRL), or common academic phrasing ("we evaluate on", "results show").
+
+        DO flag: sentences that closely match specific published papers; coined phrases
+        from other papers used without quotes or citation; definitions distinctly credited
+        to another specific paper.
+
+        For each flag: exact phrase, which paper it mirrors, why.
+        If nothing specific is found, say exactly: "No specific originality concerns found."
+
+        Project: {project_id}
+
+        PAPER PROSE:
+        {chr(10).join(blocks)[:8000]}
+    """)
+    system = (
+        "You are an academic integrity reviewer. Be specific and conservative — "
+        "only flag concrete, identifiable instances. Do not flag general field knowledge."
+    )
+    try:
+        result = _call_anthropic(prompt, system=system, model="claude-haiku-4-5-20251001")
+        if not result:
+            result = _call_openai_compatible(prompt, system=system)
+        result = result or "Audit could not be completed — LLM unavailable."
+        no_concerns = "no specific originality concerns found" in result.lower()
+        audit = {
+            "project_id": project_id,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "sections_checked": sorted(PROSE_KEYS),
+            "concerns_found": not no_concerns,
+            "result": result,
+        }
+        (out_dir / "originality_audit.json").write_text(
+            json.dumps(audit, indent=2), encoding="utf-8"
+        )
+        if no_concerns:
+            print("[TAR-Author]   originality_audit.json: no concerns flagged", flush=True)
+        else:
+            print("[TAR-Author]   originality_audit.json: REVIEW RECOMMENDED — see file", flush=True)
+    except Exception as exc:
+        print(f"[TAR-Author]   originality audit skipped ({exc})", flush=True)
+
+
 _AUTHOR_SYSTEM = textwrap.dedent("""\
     You are TAR-Author, the autonomous paper-writing component of the Thermodynamic Autonomous
     Researcher (TAR) system. You write sections of academic machine learning papers in LaTeX.
@@ -1175,15 +1247,15 @@ def _generate_abstract(evidence: dict) -> str:
     governor_only = phase11_agg.get("governor_only", {}) if isinstance(phase11_agg.get("governor_only", {}), dict) else {}
     phase11_vs_penalty = phase11_pw.get("penalty_only", {}) if isinstance(phase11_pw.get("penalty_only", {}), dict) else {}
 
-    tcl_f = tcl.get("forgetting_mean", 0.1161)
-    tcl_fs = tcl.get("forgetting_std", 0.029)
-    tcl_a = tcl.get("acc_mean", 0.760)
-    ewc_f = ewc.get("forgetting_mean", 0.1909)
-    ewc_fs = ewc.get("forgetting_std", 0.023)
-    sgd_f = sgd.get("forgetting_mean", 0.2331)
-    sgd_fs = sgd.get("forgetting_std", 0.003)
-    si_f = si.get("forgetting_mean", 0.0920)
-    si_a = si.get("acc_mean", 0.500)
+    tcl_f = _require_aggregate(tcl, "forgetting_mean", "aggregate_results.tcl")
+    tcl_fs = _require_aggregate(tcl, "forgetting_std", "aggregate_results.tcl")
+    tcl_a = _require_aggregate(tcl, "acc_mean", "aggregate_results.tcl")
+    ewc_f = _require_aggregate(ewc, "forgetting_mean", "aggregate_results.ewc")
+    ewc_fs = _require_aggregate(ewc, "forgetting_std", "aggregate_results.ewc")
+    sgd_f = _require_aggregate(sgd, "forgetting_mean", "aggregate_results.sgd_baseline")
+    sgd_fs = _require_aggregate(sgd, "forgetting_std", "aggregate_results.sgd_baseline")
+    si_f = _require_aggregate(si, "forgetting_mean", "aggregate_results.si")
+    si_a = _require_aggregate(si, "acc_mean", "aggregate_results.si")
     delta = vs_ewc.get("mean_delta", -0.0748)
     p_val = vs_ewc.get("p_val", 0.0190)
     d_val = vs_ewc.get("cohens_d", 1.70)
@@ -1486,7 +1558,7 @@ def _generate_discussion(evidence: dict) -> str:
     if llm_out:
         return llm_out
 
-    tcl_f = tcl.get("forgetting_mean", 0.1275)
+    tcl_f = _require_aggregate(tcl, "forgetting_mean", "aggregate_results.tcl (discussion)")
 
     return textwrap.dedent(rf"""
 \section{{Discussion}}
@@ -1555,10 +1627,10 @@ def _generate_conclusion(evidence: dict) -> str:
     p_val = vs_ewc.get("p_val", 0.0190)
     d_val = vs_ewc.get("cohens_d", 1.70)
     delta = vs_ewc.get("mean_delta", -0.0748)
-    tcl_f = tcl.get("forgetting_mean", 0.1161)
-    tcl_fs = tcl.get("forgetting_std", 0.029)
-    ewc_f = ewc.get("forgetting_mean", 0.1909)
-    ewc_fs = ewc.get("forgetting_std", 0.023)
+    tcl_f = _require_aggregate(tcl, "forgetting_mean", "aggregate_results.tcl (conclusion)")
+    tcl_fs = _require_aggregate(tcl, "forgetting_std", "aggregate_results.tcl (conclusion)")
+    ewc_f = _require_aggregate(ewc, "forgetting_mean", "aggregate_results.ewc (conclusion)")
+    ewc_fs = _require_aggregate(ewc, "forgetting_std", "aggregate_results.ewc (conclusion)")
 
     llm_out = _call_llm(_author_prompt_with_citations(textwrap.dedent(f"""\
         Write a 200-word Conclusion section in LaTeX for the TCL paper.
@@ -2278,6 +2350,44 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _require_aggregate(d: dict, key: str, context: str = "") -> float:
+    """Raise rather than silently embed a stale hardcoded number in the paper."""
+    val = d.get(key)
+    if val is None:
+        where = f" in {context!r}" if context else ""
+        raise ValueError(
+            f"Missing required aggregate value {key!r}{where}. "
+            "Cannot author paper with absent data — run the missing experiment first."
+        )
+    return float(val)
+
+
+def _verify_numbers_in_latex(tex: str, evidence: dict) -> list[str]:
+    """Check that canonical aggregate numbers appear verbatim in the assembled LaTeX.
+    Returns a list of warning strings (empty = all clear). Never raises."""
+    warnings: list[str] = []
+    agg = evidence.get("aggregate_results", {})
+    if not agg:
+        return warnings
+    checks: list[tuple[str, str, float]] = []
+    for method, rec in agg.items():
+        if not isinstance(rec, dict):
+            continue
+        f = _safe_float(rec.get("forgetting_mean"))
+        if f is not None:
+            checks.append((method, "forgetting_mean", f))
+        a = _safe_float(rec.get("acc_mean"))
+        if a is not None:
+            checks.append((method, "acc_mean", a))
+    for method, key, val in checks:
+        formatted = f"{val:.4f}"
+        if formatted not in tex:
+            warnings.append(
+                f"[number-verify] {method}.{key}={formatted} not found in assembled LaTeX"
+            )
+    return warnings
 
 
 def _validated_result_payload(data: dict[str, Any]) -> bool:
@@ -5382,6 +5492,9 @@ class TARAuthor:
         tex_path = out_dir / "main.tex"
         tex_path.write_text(main_tex, encoding="utf-8")
         print(f"[TAR-Author]   main.tex: written ({len(main_tex):,} chars)", flush=True)
+        for warn in _verify_numbers_in_latex(main_tex, evidence):
+            print(f"[TAR-Author] WARNING: {warn}", flush=True)
+        _run_originality_audit(sections, out_dir, spec.project_id)
         plan = _load_paper_plan(plan_path)
         completion_status = "blocked" if blocked_by else "done"
         plan.update({

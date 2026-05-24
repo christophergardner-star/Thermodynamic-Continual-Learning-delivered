@@ -272,6 +272,7 @@ class ExperimentResult:
     optimizer_backend: str = "sgd"
     optimizer_backend_config: dict[str, Any] = field(default_factory=dict)
     completed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    confidence_score: float = 0.0     # 0–1: composite of effect size, p-value, n_seeds
 
 
 # ── orchestrator ──────────────────────────────────────────────────────────────
@@ -441,22 +442,43 @@ class ExperimentOrchestrator:
 
     # ── persistence ───────────────────────────────────────────────────────────
     def _load(self) -> None:
-        if self._queue_path.exists():
+        if not self._queue_path.exists():
+            return
+        try:
+            raw = json.loads(self._queue_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            import logging as _log
+            # Back up the corrupt file before starting with an empty queue
+            corrupt_path = self._queue_path.with_suffix(
+                f".corrupt.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+            )
             try:
-                raw = json.loads(self._queue_path.read_text(encoding="utf-8"))
-                for rec in raw.get("experiments", []):
-                    spec = ExperimentSpec(**rec)
-                    self._specs[spec.id] = spec
+                self._queue_path.rename(corrupt_path)
             except Exception:
                 pass
+            _log.getLogger(__name__).error(
+                "experiment_queue.json is corrupt (%s) — backed up to %s, starting with empty queue.",
+                exc, corrupt_path,
+            )
+            return
+        for rec in raw.get("experiments", []):
+            try:
+                spec = ExperimentSpec(**rec)
+                self._specs[spec.id] = spec
+            except Exception as exc:
+                import logging as _log
+                _log.getLogger(__name__).warning("Skipping malformed queue record: %s", exc)
 
     def _save(self) -> None:
         self._queue_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
+            "schema_version": "v1",
             "saved_at": datetime.now(timezone.utc).isoformat(),
             "experiments": [asdict(s) for s in self._order()],
         }
-        self._queue_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp = self._queue_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, self._queue_path)
         self._refresh_experiment_library()
 
     def _reload_from_disk(self) -> None:
@@ -500,10 +522,13 @@ class ExperimentOrchestrator:
     def _save_archive_records(self, records: list[dict[str, Any]]) -> None:
         self._archive_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
+            "schema_version": "v1",
             "saved_at": datetime.now(timezone.utc).isoformat(),
             "experiments": records,
         }
-        self._archive_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp = self._archive_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp, self._archive_path)
 
     def _get_archived_spec(self, experiment_id: str) -> ExperimentSpec | None:
         if not experiment_id:
@@ -858,8 +883,8 @@ class ExperimentOrchestrator:
             from tar_frontier import FrontierRegistry
             fid = spec.frontier_problem_id or "fp-catastrophic-forgetting"
             FrontierRegistry(self.workspace).link_experiment(fid, spec.id)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._log(f"[frontier] WARNING: _link_frontier failed for {spec.id}: {exc}")
 
     def _write_process_registry(self) -> None:
         """Write {pid: {experiment_id, stage}} for running experiments and preserve legacy entries."""
@@ -954,15 +979,15 @@ class ExperimentOrchestrator:
         try:
             from tar_author import write_planned_author_state
             write_planned_author_state(self.workspace)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._log(f"[author] WARNING: _refresh_author_state failed: {exc}")
 
     def _refresh_experiment_library(self) -> None:
         try:
             from tar_experiment_library import save_experiment_library
             save_experiment_library(self.workspace)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._log(f"[library] WARNING: _refresh_experiment_library failed: {exc}")
 
     def _suite_log_path(self, spec: ExperimentSpec) -> Path | None:
         log_name = {
@@ -1042,6 +1067,10 @@ class ExperimentOrchestrator:
                 elif spec.pid and not self._pid_exists(spec.pid):
                     if self._mark_stalled(spec, "stale_running_pid_missing"):
                         changed = True
+                elif spec.error:
+                    # Experiment is confirmed running — clear any residual error field
+                    spec.error = ""
+                    changed = True
 
             if self._sync_suite_progress(spec):
                 changed = True
@@ -1086,6 +1115,7 @@ class ExperimentOrchestrator:
                     _spec.status = EXP_RUNNING
                     _spec.stage = STAGE_RUNNING
                     _spec.pid = _pid
+                    _spec.error = ""  # clear any stale error — experiment is confirmed alive
                     if _lease.get("started_at"):
                         _spec.started_at = str(_lease["started_at"])
                     _spec.runtime_context = {
@@ -1093,8 +1123,8 @@ class ExperimentOrchestrator:
                         "runtime_lease_id": str(_lease.get("lease_id", "") or ""),
                     }
                     changed = True
-        except Exception:
-            pass
+        except Exception as exc:
+            self._log(f"[reconcile] WARNING: reconcile_runtime_state inner loop failed: {exc}")
 
         if changed:
             self._save()
@@ -2071,14 +2101,30 @@ class ExperimentOrchestrator:
         n_better = sum(1 for d in deltas if d < 0)
         n = len(forgetting_list)
 
-        is_breakthrough = mean_delta < -0.01 and p_val < 0.05 and cohens_d > 0.5
+        # Bonferroni correction: count all archive experiments on the same frontier
+        fid = str(spec.frontier_problem_id or "")
+        n_prior = sum(
+            1 for r in self._load_archive_records()
+            if str(r.get("frontier_problem_id", "") or "") == fid
+        ) if fid else 0
+        n_comparisons = max(1, n_prior + 1)
+        alpha_bonf = 0.05 / n_comparisons
+
+        is_breakthrough = mean_delta < -0.01 and p_val < alpha_bonf and cohens_d > 0.5
         is_directional  = mean_delta < 0 and n_better >= n // 2 + 1
         is_adverse      = mean_delta > 0.02
         verdict = ("BREAKTHROUGH" if is_breakthrough else
                    "DIRECTIONAL"  if is_directional  else
                    "ADVERSE"      if is_adverse       else "NULL")
         notes = (f"mean_delta={mean_delta:+.4f}  p={p_val:.4f}  d={cohens_d:.3f}"
-                 f"  {n_better}/{n} seeds better")
+                 f"  {n_better}/{n} seeds better"
+                 f"  bonferroni_n={n_comparisons}  alpha_bonf={alpha_bonf:.4f}")
+
+        # Composite confidence: blend of p-value evidence, effect size, and seed coverage
+        _p_score = max(0.0, 1.0 - p_val / alpha_bonf) if p_val < alpha_bonf else 0.0
+        _d_score = min(1.0, cohens_d / 2.0)
+        _n_score = n_better / max(n, 1)
+        confidence_score = round((_p_score * 0.5 + _d_score * 0.3 + _n_score * 0.2), 3)
 
         return ExperimentResult(
             experiment_id=spec.id,
@@ -2104,6 +2150,7 @@ class ExperimentOrchestrator:
             notes=notes,
             optimizer_backend=spec.optimizer_backend,
             optimizer_backend_config=spec.optimizer_backend_config,
+            confidence_score=confidence_score,
         )
 
     def _build_suite_result(self, spec: ExperimentSpec, raw: dict[str, Any]) -> ExperimentResult:
