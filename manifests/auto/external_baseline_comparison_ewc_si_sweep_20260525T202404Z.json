@@ -1,0 +1,31 @@
+{
+  "authorised_by": "TAR Director (autonomous)",
+  "content_hash": "ee2d4774740f00deb9947b9b024a016a24b095c47534aea2d81f954235b216be",
+  "created_at": "2026-05-25T20:24:04.277551+00:00",
+  "experiments": [
+    {
+      "allowed_datasets": [
+        "split_cifar10"
+      ],
+      "allowed_methods": [
+        "tcl"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1,
+        2,
+        3
+      ],
+      "experiment_id": "external_baseline_comparison_ewc_si_sweep",
+      "name": "Systematic comparison of EWC and SI baselines against best TCL config from robus",
+      "notes": "Auto-generated manifest for autonomous run. Spec description: Completed sweeps (phase12_ewc_sweep, phase13_si_sweep) exist but lack direct head-to-head comparison with candidate TCL method using identical evaluation protocol. This comparison is essential to validate whether the low-tuning approach actually outperforms established baselines, not just shows stability within itself.",
+      "run_limit": 1,
+      "time_limit_h": 12.0
+    }
+  ],
+  "global_time_limit_h": 16.0,
+  "manifest_id": "manifest-auto-external_baseline_comparison_ewc_si_sweep-20260525T202404Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "purpose": "Autonomously generated manifest for experiment 'external_baseline_comparison_ewc_si_sweep' (Systematic comparison of EWC and SI baselines against best TCL config from robus). Project: external_baseline_comparison_ewc_si_sweep-cifar10-v1. Dataset: split_cifar10, method: tcl, seeds: [42, 0, 1, 2, 3]."
+}
