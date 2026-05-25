@@ -568,11 +568,20 @@ def _other_role_pids(flag: str) -> list[int]:
     if _psutil is None:
         return []
     current_pid = os.getpid()
+    # On Windows, subprocess.Popen creates a parent python.exe launcher that
+    # shares the same cmdline as the child script process. Excluding only
+    # current_pid causes the child to detect its own parent as a "duplicate".
+    # Exclude the parent PID too so same-launch pairs don't block each other.
+    _excluded: set[int] = {current_pid}
+    try:
+        _excluded.add(_psutil.Process(current_pid).ppid())
+    except Exception:
+        pass
     matches: list[int] = []
     for proc in _psutil.process_iter(["pid", "name", "cmdline"]):
         try:
             pid = int(proc.info.get("pid", 0) or 0)
-            if pid <= 0 or pid == current_pid:
+            if pid <= 0 or pid in _excluded:
                 continue
             proc_name = str(proc.info.get("name", "") or "").lower()
             if "python" not in proc_name:

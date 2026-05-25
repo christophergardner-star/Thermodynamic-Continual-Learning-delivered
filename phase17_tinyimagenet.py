@@ -216,19 +216,35 @@ def _load_hf_tinyimagenet(workspace: str):
     return train_items, val_items
 
 
-def _build_tinyimagenet_tasks(seed: int, train_items: list, val_items: list):
+def _build_tinyimagenet_tasks(seed: int, train_items: list, val_items: list, backbone: str = "resnet18"):
     import torchvision.transforms as T
 
-    train_tf = T.Compose([
-        T.RandomHorizontalFlip(),
-        T.RandomCrop(64, padding=8),
-        T.ToTensor(),
-        T.Normalize(TINYIMAGENET_MEAN, TINYIMAGENET_STD),
-    ])
-    test_tf = T.Compose([
-        T.ToTensor(),
-        T.Normalize(TINYIMAGENET_MEAN, TINYIMAGENET_STD),
-    ])
+    if backbone == "vit_tiny":
+        # ViT-Tiny/16 requires 224×224 inputs; upscale from 64×64 via bicubic
+        train_tf = T.Compose([
+            T.Resize(256, interpolation=T.InterpolationMode.BICUBIC),
+            T.RandomCrop(224),
+            T.RandomHorizontalFlip(),
+            T.ToTensor(),
+            T.Normalize(TINYIMAGENET_MEAN, TINYIMAGENET_STD),
+        ])
+        test_tf = T.Compose([
+            T.Resize(256, interpolation=T.InterpolationMode.BICUBIC),
+            T.CenterCrop(224),
+            T.ToTensor(),
+            T.Normalize(TINYIMAGENET_MEAN, TINYIMAGENET_STD),
+        ])
+    else:
+        train_tf = T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomCrop(64, padding=8),
+            T.ToTensor(),
+            T.Normalize(TINYIMAGENET_MEAN, TINYIMAGENET_STD),
+        ])
+        test_tf = T.Compose([
+            T.ToTensor(),
+            T.Normalize(TINYIMAGENET_MEAN, TINYIMAGENET_STD),
+        ])
 
     rng = random.Random(seed)
     all_classes = list(range(200))
@@ -265,6 +281,19 @@ class _ResNet18Trunk(nn.Module):
         return self.features(x).flatten(1)
 
 
+class _ViTTinyTrunk(nn.Module):
+    """ViT-Tiny/16 backbone via timm. Input must be 224×224."""
+
+    def __init__(self):
+        super().__init__()
+        import timm
+        self._vit = timm.create_model("vit_tiny_patch16_224", pretrained=False, num_classes=0)
+        self.feat_dim = self._vit.num_features  # 192
+
+    def forward(self, x):
+        return self._vit(x)
+
+
 def run_one_seed(
     seed: int,
     method: str,
@@ -273,13 +302,14 @@ def run_one_seed(
     progress_callback: Callable[[dict], None] | None = None,
     optimizer_backend: str = "sgd",
     optimizer_backend_config: dict[str, Any] | None = None,
+    backbone: str = "resnet18",
 ) -> dict:
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    trunk = _ResNet18Trunk().to(device)
+    trunk = (_ViTTinyTrunk() if backbone == "vit_tiny" else _ResNet18Trunk()).to(device)
     heads = nn.ModuleList([nn.Linear(trunk.feat_dim, CLASSES_PER_TASK) for _ in range(N_TASKS)]).to(device)
     all_params = list(trunk.parameters()) + list(heads.parameters())
 
@@ -412,13 +442,20 @@ def run_one_seed(
         final = accuracy_matrix[N_TASKS - 1][task_idx]
         forgetting_per_task.append(peak - final)
     final_accs = [accuracy_matrix[N_TASKS - 1][task_idx] for task_idx in range(N_TASKS)]
-    return {
+    result = {
         "mean_forgetting": _mean(forgetting_per_task),
         "mean_accuracy": _mean(final_accs),
         "forgetting_per_task": forgetting_per_task,
         "final_accs_per_task": final_accs,
         "accuracy_matrix": {str(k): v for k, v in accuracy_matrix.items()},
     }
+    # Explicitly close observer hooks and release GPU references before returning
+    # so the caller's torch.cuda.empty_cache() can fully reclaim VRAM.
+    if observer is not None:
+        observer.close()
+        observer = None
+    del trunk, heads, ewc_fisher, ewc_params, tcl_anchor_params
+    return result
 
 
 def _run_phase17_suite_impl(

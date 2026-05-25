@@ -1715,6 +1715,11 @@ class ExperimentOrchestrator:
                 "latest_accs":      [],
                 "forgetting_so_far": forgetting_list[:],
             })
+            import gc as _gc
+            import torch as _torch
+            _gc.collect()
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
 
         result = self._build_result(spec, seed_results, forgetting_list, accuracy_list)
 
@@ -1942,6 +1947,12 @@ class ExperimentOrchestrator:
                 "latest_accs": [f"{v:.3f}" for v in res.get("final_accs_per_task", [])],
                 "forgetting_so_far": forgetting_list[:],
             })
+            import gc as _gc
+            import torch as _torch
+            del res
+            _gc.collect()
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
         return self._build_result(spec, seed_results, forgetting_list, accuracy_list)
 
     # ── TinyImageNet runner (native standalone) ───────────────────────────────
@@ -1954,8 +1965,11 @@ class ExperimentOrchestrator:
             explicit_backend=spec.optimizer_backend,
             explicit_config=spec.optimizer_backend_config,
         )
+        backbone = spec.backbone or "resnet18"
         for i, seed in enumerate(spec.seeds):
-            train_subsets, test_subsets = p17._build_tinyimagenet_tasks(seed, train_items, val_items)
+            train_subsets, test_subsets = p17._build_tinyimagenet_tasks(
+                seed, train_items, val_items, backbone=backbone
+            )
             res = p17.run_one_seed(
                 seed,
                 spec.method,
@@ -1970,6 +1984,7 @@ class ExperimentOrchestrator:
                 }),
                 optimizer_backend=optimizer_backend,
                 optimizer_backend_config=optimizer_backend_config,
+                backbone=backbone,
             )
             forgetting_list.append(res["mean_forgetting"])
             accuracy_list.append(res["mean_accuracy"])
@@ -1985,6 +2000,15 @@ class ExperimentOrchestrator:
                 "latest_accs": [f"{v:.3f}" for v in res.get("final_accs_per_task", [])],
                 "forgetting_so_far": forgetting_list[:],
             })
+            # Release cached CUDA memory between seeds so the allocator starts
+            # each seed with a clean pool rather than carrying fragmented blocks
+            # from the previous seed's residual activations.
+            import gc as _gc
+            import torch as _torch
+            del res
+            _gc.collect()
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
         return self._build_result(spec, seed_results, forgetting_list, accuracy_list)
 
     def _run_phase16_suite(self, spec: ExperimentSpec) -> ExperimentResult:

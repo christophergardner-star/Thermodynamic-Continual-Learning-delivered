@@ -61,7 +61,10 @@ CREATE TABLE IF NOT EXISTS papers (
     embedding               TEXT,   -- JSON array of floats, NULL until fetched
     source                  TEXT DEFAULT 'semantic_scholar',
     fetched_at              TEXT NOT NULL,
-    updated_at              TEXT NOT NULL
+    updated_at              TEXT NOT NULL,
+    citation_velocity       REAL DEFAULT 0.0,
+    citation_count_prev     INTEGER DEFAULT 0,
+    velocity_updated_at     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS authors (
@@ -119,6 +122,7 @@ CREATE TABLE IF NOT EXISTS sota_entries (
     code_available          INTEGER DEFAULT 0,
     code_url                TEXT,
     fetched_at              TEXT NOT NULL,
+    source                  TEXT DEFAULT 'external',
     FOREIGN KEY (benchmark_id) REFERENCES benchmarks(benchmark_id) ON DELETE CASCADE
 );
 
@@ -180,6 +184,26 @@ class LiteratureKnowledgeGraph:
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA_SQL)
+        self._migrate()
+        self.conn.commit()
+
+    def _migrate(self) -> None:
+        existing = {row[1] for row in self.conn.execute("PRAGMA table_info(papers)").fetchall()}
+        for col, defn in [
+            ("citation_velocity",   "REAL DEFAULT 0.0"),
+            ("citation_count_prev", "INTEGER DEFAULT 0"),
+            ("velocity_updated_at", "TEXT"),
+        ]:
+            if col not in existing:
+                self.conn.execute(f"ALTER TABLE papers ADD COLUMN {col} {defn}")
+        sota_existing = {row[1] for row in self.conn.execute("PRAGMA table_info(sota_entries)").fetchall()}
+        if "source" not in sota_existing:
+            self.conn.execute("ALTER TABLE sota_entries ADD COLUMN source TEXT DEFAULT 'external'")
+            # Create the index after the column exists (index is excluded from
+            # _SCHEMA_SQL to avoid OperationalError on older databases).
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sota_source ON sota_entries(source)"
+            )
         self.conn.commit()
 
     # -----------------------------------------------------------------------
@@ -188,6 +212,8 @@ class LiteratureKnowledgeGraph:
 
     def upsert_paper(self, paper: Paper) -> None:
         now = _utc_now()
+        _cur_year = datetime.now(timezone.utc).year
+        _year = paper.year if (paper.year and 1950 <= paper.year <= _cur_year + 1) else None
         self.conn.execute(
             """
             INSERT INTO papers (
@@ -210,7 +236,7 @@ class LiteratureKnowledgeGraph:
                 paper.paper_id,
                 paper.title,
                 paper.abstract,
-                paper.year,
+                _year,
                 paper.venue,
                 paper.venue_type,
                 paper.venue_tier,
@@ -279,6 +305,47 @@ class LiteratureKnowledgeGraph:
 
     def paper_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+
+    def purge_off_topic_papers(
+        self,
+        cs_tokens: "frozenset[str]",
+        venue_fragments: "frozenset[str]",
+    ) -> int:
+        """Delete papers that have declared non-CS fields or off-topic venues.
+
+        Safe to call repeatedly — idempotent. ArXiv papers are never purged
+        because they are fetched from CS-scoped categories at source.
+        Returns the number of papers removed.
+        """
+        rows = self.conn.execute(
+            "SELECT paper_id, fields_of_study, venue, source FROM papers"
+        ).fetchall()
+        to_delete: list[str] = []
+        for row in rows:
+            if str(row["source"] or "") == "arxiv":
+                continue
+            fields_raw = json.loads(row["fields_of_study"] or "[]")
+            fields_lower = [str(f).lower() for f in fields_raw if f]
+            if fields_lower:
+                fields_text = " ".join(fields_lower)
+                if not any(tok in fields_text for tok in cs_tokens):
+                    to_delete.append(row["paper_id"])
+            elif row["venue"]:
+                venue_lower = str(row["venue"]).lower()
+                if any(frag in venue_lower for frag in venue_fragments):
+                    to_delete.append(row["paper_id"])
+        if to_delete:
+            placeholders = ",".join("?" * len(to_delete))
+            self.conn.execute(
+                f"DELETE FROM paper_authors WHERE paper_id IN ({placeholders})",
+                to_delete,
+            )
+            self.conn.execute(
+                f"DELETE FROM papers WHERE paper_id IN ({placeholders})",
+                to_delete,
+            )
+            self.conn.commit()
+        return len(to_delete)
 
     # -----------------------------------------------------------------------
     # Authors
@@ -471,14 +538,22 @@ class LiteratureKnowledgeGraph:
         benchmark_id: str,
         metric_name: str,
         higher_is_better: bool = True,
+        exclude_source: Optional[str] = None,
     ) -> Optional[SoTAEntry]:
         """Return the single best entry for a benchmark/metric combination."""
         order = "DESC" if higher_is_better else "ASC"
-        row = self.conn.execute(
-            f"SELECT * FROM sota_entries WHERE benchmark_id = ? AND metric_name = ? "
-            f"ORDER BY metric_value {order} LIMIT 1",
-            (benchmark_id, metric_name),
-        ).fetchone()
+        if exclude_source is not None:
+            row = self.conn.execute(
+                f"SELECT * FROM sota_entries WHERE benchmark_id = ? AND metric_name = ? "
+                f"AND source != ? ORDER BY metric_value {order} LIMIT 1",
+                (benchmark_id, metric_name, exclude_source),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                f"SELECT * FROM sota_entries WHERE benchmark_id = ? AND metric_name = ? "
+                f"ORDER BY metric_value {order} LIMIT 1",
+                (benchmark_id, metric_name),
+            ).fetchone()
         return self._row_to_sota_entry(row) if row else None
 
     def methods_on_benchmark(self, benchmark_id: str) -> List[str]:
@@ -663,6 +738,41 @@ class LiteratureKnowledgeGraph:
             detected_at=row["detected_at"],
             updated_at=row["updated_at"],
         )
+
+    def update_citation_velocity(self, paper_id: str, current_count: int, days_elapsed: float) -> float:
+        """Compute and persist citation velocity (citations/day) for a paper.
+
+        Velocity = (current_count - prev_count) / days_elapsed, clamped >= 0.
+        Returns the new velocity value.
+        """
+        if days_elapsed <= 0:
+            return 0.0
+        row = self.conn.execute(
+            "SELECT citation_count_prev FROM papers WHERE paper_id = ?", (paper_id,)
+        ).fetchone()
+        if row is None:
+            return 0.0
+        prev = int(row["citation_count_prev"] or 0)
+        velocity = max(0.0, (current_count - prev) / days_elapsed)
+        self.conn.execute(
+            """UPDATE papers SET
+                citation_velocity = ?,
+                citation_count_prev = ?,
+                velocity_updated_at = ?
+               WHERE paper_id = ?""",
+            (round(velocity, 4), current_count, _utc_now(), paper_id),
+        )
+        self.conn.commit()
+        return velocity
+
+    def get_high_velocity_paper_ids(self, min_velocity: float = 1.0, limit: int = 50) -> List[str]:
+        """Return paper_ids whose citation_velocity exceeds the threshold."""
+        rows = self.conn.execute(
+            "SELECT paper_id FROM papers WHERE citation_velocity >= ? "
+            "ORDER BY citation_velocity DESC LIMIT ?",
+            (min_velocity, limit),
+        ).fetchall()
+        return [r["paper_id"] for r in rows]
 
     def close(self) -> None:
         self.conn.close()
