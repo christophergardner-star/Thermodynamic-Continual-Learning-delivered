@@ -1,0 +1,31 @@
+{
+  "authorised_by": "TAR Director (autonomous)",
+  "content_hash": "c4067d1f19cd2a45f253d4cb7505135c5f3917f24c7029de922838c6f8353c34",
+  "created_at": "2026-05-25T16:16:47.244858+00:00",
+  "experiments": [
+    {
+      "allowed_datasets": [
+        "split_cifar100"
+      ],
+      "allowed_methods": [
+        "tcl"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1,
+        2,
+        3
+      ],
+      "experiment_id": "cross_dataset_generalization_cifar100",
+      "name": "Evaluate hyperparameter robustness on split_cifar100 to test domain generalizati",
+      "notes": "Auto-generated manifest for autonomous run. Spec description: All completed experiments are on split_cifar10. Testing on split_cifar100 (10x more classes) validates whether the low-tuning approach generalizes to harder domains. This directly tests the production deployment claim that hyperparameters should work across domains without expensive retuning.",
+      "run_limit": 1,
+      "time_limit_h": 18.0
+    }
+  ],
+  "global_time_limit_h": 24.0,
+  "manifest_id": "manifest-auto-cross_dataset_generalization_cifar100-20260525T161647Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "purpose": "Autonomously generated manifest for experiment 'cross_dataset_generalization_cifar100' (Evaluate hyperparameter robustness on split_cifar100 to test domain generalizati). Project: cross_dataset_generalization_cifar100-cifar100-v1. Dataset: split_cifar100, method: tcl, seeds: [42, 0, 1, 2, 3]."
+}
