@@ -1,0 +1,28 @@
+{
+  "authorised_by": "TAR Director (autonomous)",
+  "content_hash": "a52aa69bd6faa64904005a6b3e3b040cf2854378d933340dbcbbe11c1292924d",
+  "created_at": "2026-05-26T17:01:31.741180+00:00",
+  "experiments": [
+    {
+      "allowed_datasets": [
+        "split_cifar10"
+      ],
+      "allowed_methods": [
+        "si"
+      ],
+      "allowed_seeds": [
+        42,
+        0
+      ],
+      "experiment_id": "comptest-n-si",
+      "name": "CompTest N: si",
+      "notes": "Auto-generated manifest for autonomous run. Spec description: (none)",
+      "run_limit": 1,
+      "time_limit_h": 12.0
+    }
+  ],
+  "global_time_limit_h": 16.0,
+  "manifest_id": "manifest-auto-comptest-n-si-20260526T170131Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "purpose": "Autonomously generated manifest for experiment 'comptest-n-si' (CompTest N: si). Project: comptest. Dataset: split_cifar10, method: si, seeds: [42, 0]."
+}
