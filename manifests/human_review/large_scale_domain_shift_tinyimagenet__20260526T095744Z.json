@@ -1,0 +1,34 @@
+{
+  "manifest_id": "human-review-large_scale_domain_shift_tinyimagenet-20260526T095744Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "created_at": "2026-05-26T09:57:44.440068+00:00",
+  "authorised_by": "cgard",
+  "purpose": "Human-approved bounded experiment for large_scale_domain_shift_tinyimagenet. Prepared from TAR human review state; execution still requires committed manifest verification.",
+  "frontier_problem_id": "fp-hyperparameter-robustness",
+  "target_paper_id": "tcl-hpc-validation-paper",
+  "human_review_review_id": "proposal:large_scale_domain_shift_tinyimagenet",
+  "global_time_limit_h": 48.0,
+  "experiments": [
+    {
+      "experiment_id": "large_scale_domain_shift_tinyimagenet",
+      "name": "Continual learning under larger domain shift: CIFAR10\u2192TinyImageNet transfer",
+      "allowed_datasets": [
+        "split_tinyimagenet"
+      ],
+      "allowed_methods": [
+        "tcl"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1,
+        2,
+        3
+      ],
+      "time_limit_h": 48.0,
+      "run_limit": 1,
+      "notes": "queue now for the real-world problem 'Low-Tuning Continual Learning for Production ML'. TAR is evaluating the unpublished internal TAR/TCL/ASC work against real external baselines."
+    }
+  ],
+  "content_hash": "11b20e73b1e3ee74de6f429839d59efb3c92a34a37c108ce321760ce654cda68"
+}
