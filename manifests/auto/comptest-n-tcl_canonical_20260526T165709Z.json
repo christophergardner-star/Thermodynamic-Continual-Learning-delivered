@@ -1,0 +1,28 @@
+{
+  "authorised_by": "TAR Director (autonomous)",
+  "content_hash": "8c68678319256282e47aaccf9cc607e05ae674f719bdff64a8b737df633c30a4",
+  "created_at": "2026-05-26T16:57:09.907212+00:00",
+  "experiments": [
+    {
+      "allowed_datasets": [
+        "split_cifar10"
+      ],
+      "allowed_methods": [
+        "tcl_canonical"
+      ],
+      "allowed_seeds": [
+        42,
+        0
+      ],
+      "experiment_id": "comptest-n-tcl_canonical",
+      "name": "CompTest N: tcl_canonical",
+      "notes": "Auto-generated manifest for autonomous run. Spec description: (none)",
+      "run_limit": 1,
+      "time_limit_h": 12.0
+    }
+  ],
+  "global_time_limit_h": 16.0,
+  "manifest_id": "manifest-auto-comptest-n-tcl_canonical-20260526T165709Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "purpose": "Autonomously generated manifest for experiment 'comptest-n-tcl_canonical' (CompTest N: tcl_canonical). Project: comptest. Dataset: split_cifar10, method: tcl_canonical, seeds: [42, 0]."
+}
