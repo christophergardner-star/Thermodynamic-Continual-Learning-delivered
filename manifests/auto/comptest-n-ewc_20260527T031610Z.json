@@ -1,0 +1,28 @@
+{
+  "authorised_by": "TAR Director (autonomous)",
+  "content_hash": "3bc452dcaf08e3babc86e237ee1e1885f19a0eeb49874952c0dc9147b08e2782",
+  "created_at": "2026-05-27T03:16:10.940186+00:00",
+  "experiments": [
+    {
+      "allowed_datasets": [
+        "split_cifar10"
+      ],
+      "allowed_methods": [
+        "ewc"
+      ],
+      "allowed_seeds": [
+        42,
+        0
+      ],
+      "experiment_id": "comptest-n-ewc",
+      "name": "CompTest N: ewc",
+      "notes": "Auto-generated manifest for autonomous run. Spec description: (none)",
+      "run_limit": 1,
+      "time_limit_h": 12.0
+    }
+  ],
+  "global_time_limit_h": 16.0,
+  "manifest_id": "manifest-auto-comptest-n-ewc-20260527T031610Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "purpose": "Autonomously generated manifest for experiment 'comptest-n-ewc' (CompTest N: ewc). Project: comptest. Dataset: split_cifar10, method: ewc, seeds: [42, 0]."
+}
