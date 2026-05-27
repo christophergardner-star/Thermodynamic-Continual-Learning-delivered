@@ -1,0 +1,28 @@
+{
+  "authorised_by": "TAR Director (autonomous)",
+  "content_hash": "7b77eb97cf9446c84acd8e1573ce1116eedeb66e47d4d470bdbf785ef7b453c2",
+  "created_at": "2026-05-27T11:43:02.016807+00:00",
+  "experiments": [
+    {
+      "allowed_datasets": [
+        "split_cifar10"
+      ],
+      "allowed_methods": [
+        "der_plus_plus"
+      ],
+      "allowed_seeds": [
+        42,
+        0
+      ],
+      "experiment_id": "comptest-n-der_plus_plus",
+      "name": "CompTest N: der_plus_plus",
+      "notes": "Auto-generated manifest for autonomous run. Spec description: (none)",
+      "run_limit": 1,
+      "time_limit_h": 12.0
+    }
+  ],
+  "global_time_limit_h": 16.0,
+  "manifest_id": "manifest-auto-comptest-n-der_plus_plus-20260527T114302Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "purpose": "Autonomously generated manifest for experiment 'comptest-n-der_plus_plus' (CompTest N: der_plus_plus). Project: comptest. Dataset: split_cifar10, method: der_plus_plus, seeds: [42, 0]."
+}
