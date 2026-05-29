@@ -144,10 +144,11 @@ class GapDetector:
         all_gaps.extend(self.detect_cross_domain_gaps())
         all_gaps.extend(self.detect_replication_gaps(domain=domain))
 
-        # Deduplicate by gap_id
+        # Deduplicate by gap_id; apply velocity bonus before scoring
         seen: set[str] = set()
         unique: List[ResearchGap] = []
         for gap in all_gaps:
+            self._apply_velocity_bonus(gap)
             gap.recompute_composite()
             if gap.gap_id not in seen:
                 seen.add(gap.gap_id)
@@ -530,6 +531,27 @@ class GapDetector:
                 target_domain=getattr(gap, "target_domain", None),
             ))
         return problems
+
+    def _apply_velocity_bonus(self, gap: ResearchGap) -> None:
+        """Boost impact_score by up to +0.10 if related papers have high citation velocity."""
+        if not gap.related_paper_ids:
+            return
+        try:
+            placeholders = ",".join("?" * len(gap.related_paper_ids))
+            rows = self._g.conn.execute(
+                f"SELECT citation_velocity FROM papers "
+                f"WHERE paper_id IN ({placeholders}) AND citation_velocity IS NOT NULL",
+                gap.related_paper_ids,
+            ).fetchall()
+            if not rows:
+                return
+            max_velocity = max(float(r["citation_velocity"] or 0.0) for r in rows)
+            # 5 cit/day → full +0.10 bonus; scales linearly below that
+            bonus = min(0.10, max_velocity / 5.0 * 0.10)
+            if bonus > 0.0:
+                gap.impact_score = min(1.0, round(gap.impact_score + bonus, 4))
+        except Exception:
+            pass
 
     def _gap_to_experiment(
         self, gap: ResearchGap

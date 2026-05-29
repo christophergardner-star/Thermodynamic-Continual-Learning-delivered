@@ -1,0 +1,4 @@
+{
+  "manifest_path": "manifests/auto/scale_backbone_capacity_vit_tinyimagenet_20260524T130427Z.json",
+  "note": "Restarted 2026-05-25 after hard reset. Queue is empty - no experiments will execute until new manifests are proposed and approved."
+}

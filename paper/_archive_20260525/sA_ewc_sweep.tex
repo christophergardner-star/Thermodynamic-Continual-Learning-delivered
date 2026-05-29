@@ -1,0 +1,32 @@
+\section{EWC $\lambda$ Sensitivity (Phase 12)}
+\label{app:ewc-sweep}
+
+We swept EWC penalty scale $\lambda \in \{10, 1000, 10000\}$ using
+the same benchmark and seeds as Phase~10. TCL (from Phase~10) serves as a fixed reference.
+
+\begin{table}[h]
+\centering
+\caption{EWC $\lambda$ sweep vs.\ TCL reference (Phase~10). Forgetting and accuracy are
+mean $\pm$ std over 5 seeds. $p$ and $d$ are for TCL vs.\ each EWC variant
+(paired $t$-test, two-tailed).}
+\label{tab:ewc-sweep}
+\begin{tabular}{lccccc}
+\toprule
+Method & Forgetting $\downarrow$ & Accuracy $\uparrow$ & $p$ & $d$ & Better \\
+\midrule
+TCL (reference) & $0.1161 \pm 0.029$ & --- & --- & --- & --- \\
+EWC ($\lambda=10$) & $0.2460 \pm 0.061$ & $0.675$ & $0.0047$ & $2.55$ & $5$/5 \\
+EWC ($\lambda=1000$) & $0.1602 \pm 0.089$ & $0.725$ & $0.3180$ & $0.51$ & $4$/5 \\
+EWC ($\lambda=10000$) & $0.1585 \pm 0.047$ & $0.500$ \textbf{[collapse]} & $0.1465$ & $0.80$ & $4$/5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+TCL significantly outperforms EWC at $\lambda = 10$ ($p = 0.0047$, $d = 2.55$).
+At $\lambda = 1000$ the difference is not significant ($p = 0.3180$, $d = 0.51$,
+4/5 seeds), indicating that appropriately regularised EWC approaches TCL performance
+on this benchmark. At $\lambda = 10000$, EWC collapses to $0.500$ accuracy on all
+five seeds, replicating the same failure mode observed for SI in Phase~10 and
+confirming that over-constrained importance weighting is a general hazard rather than
+an SI-specific artefact. TCL, which uses no importance weights, is immune to this
+collapse by design.

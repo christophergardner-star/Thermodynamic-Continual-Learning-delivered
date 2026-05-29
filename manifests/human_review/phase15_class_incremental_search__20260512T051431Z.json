@@ -1,0 +1,32 @@
+{
+  "manifest_id": "human-review-phase15_class_incremental_search-20260512T051431Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "created_at": "2026-05-12T05:14:31.387505+00:00",
+  "authorised_by": "cgard",
+  "purpose": "Human-approved bounded experiment for phase15_class_incremental_search. Prepared from TAR human review state; execution still requires committed manifest verification.",
+  "frontier_problem_id": "fp-class-incremental",
+  "target_paper_id": "",
+  "human_review_review_id": "proposal:phase15_class_incremental_search",
+  "global_time_limit_h": 48.0,
+  "experiments": [
+    {
+      "experiment_id": "phase15_class_incremental_search",
+      "name": "Phase 15 - Class Incremental Search",
+      "allowed_datasets": [
+        "split_cifar10"
+      ],
+      "allowed_methods": [
+        "tcl"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1
+      ],
+      "time_limit_h": 48.0,
+      "run_limit": 1,
+      "notes": "bounded run only"
+    }
+  ],
+  "content_hash": "7b0902bdfa6d5e75afa2bf1d1a3bd58d9b5f36490319068472300bded529a693"
+}

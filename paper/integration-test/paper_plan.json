@@ -1,0 +1,42 @@
+{
+  "updated_at": "2026-05-27T15:04:23.052776+00:00",
+  "project_id": "integration-test",
+  "title": "Integration Test",
+  "readiness": "hold",
+  "status": "awaiting_validation",
+  "truth_status": "falsified",
+  "director_recommendation": "This topic is inside an active ML field, but TAR has not chosen it as a current problem to solve. Hold writing.",
+  "frontier_problem_ids": [
+    "fp-catastrophic-forgetting"
+  ],
+  "experiment_ids": [
+    "integration-test-der_plus_plus",
+    "integration-test-ewc",
+    "integration-test-lwf",
+    "integration-test-si",
+    "integration-test-tcl_canonical"
+  ],
+  "waiting_for_experiments": [],
+  "sections_planned": [
+    "abstract",
+    "s1_introduction",
+    "s2_background",
+    "s3_method",
+    "s4_experiments",
+    "s5_discussion",
+    "s6_conclusion"
+  ],
+  "tex_path": "C:\\Users\\cgard\\TAR\\Thermodynamic-Continual-Learning-delivered\\paper\\integration-test\\main.tex",
+  "pdf_path": "",
+  "compile_status": "awaiting_validation",
+  "progress": {
+    "stage": "awaiting_validation",
+    "pct": 15,
+    "label": "Draft waiting on validation gate",
+    "sections_complete_count": 0,
+    "sections_total": 7,
+    "experiments_complete_count": 5,
+    "experiments_total": 5,
+    "compile_status": "awaiting_validation"
+  }
+}

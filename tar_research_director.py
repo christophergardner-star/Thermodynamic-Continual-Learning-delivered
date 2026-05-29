@@ -208,6 +208,7 @@ class ResearchDirector:
             knowledge_domains,
             paper_directives,
             external_evidence,
+            experiments=experiments,
         )
         frontier_directives = self._apply_active_paths_to_frontiers(frontier_directives, active_research_paths)
         paper_directives = self._apply_active_paths_to_papers(
@@ -486,8 +487,135 @@ class ResearchDirector:
         except Exception:
             return data
 
+    # ── Priority overlay (LLM feedback persistence) ───────────────────────────
+
+    def _read_priority_overlay(self) -> dict[str, dict]:
+        """Load director_priority_overlay.json, dropping entries older than 48h."""
+        overlay_path = self.workspace / "tar_state" / "director_priority_overlay.json"
+        try:
+            raw = json.loads(overlay_path.read_text(encoding="utf-8")) if overlay_path.exists() else {}
+        except Exception as exc:
+            print(f"[director] _read_priority_overlay failed: {exc}", flush=True)
+            return {}
+        import time as _time
+        now_ts = _time.time()
+        _48H = 48 * 3600
+        filtered: dict[str, dict] = {}
+        for fid, entry in (raw if isinstance(raw, dict) else {}).items():
+            try:
+                written_ts = float(entry.get("written_ts", 0))
+                if now_ts - written_ts <= _48H:
+                    filtered[fid] = entry
+            except Exception:
+                pass
+        return filtered
+
+    def _write_priority_overlay(self, frontier_id: str, delta: float, gap_signals: list[str]) -> None:
+        """Upsert one frontier's LLM opinion into the overlay (replace, never accumulate)."""
+        import time as _time
+        overlay_path = self.workspace / "tar_state" / "director_priority_overlay.json"
+        try:
+            raw = json.loads(overlay_path.read_text(encoding="utf-8")) if overlay_path.exists() else {}
+        except Exception as exc:
+            print(f"[director] _write_priority_overlay read failed: {exc}", flush=True)
+            raw = {}
+        raw[frontier_id] = {
+            "priority_delta": round(float(delta), 2),
+            "gap_signals":    [str(s) for s in gap_signals[:5]],
+            "updated_at":     _now_iso(),
+            "written_ts":     _time.time(),
+        }
+        try:
+            overlay_path.parent.mkdir(parents=True, exist_ok=True)
+            overlay_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+        except Exception as exc:
+            print(f"[director] _write_priority_overlay write failed: {exc}", flush=True)
+
+    # ── Diversity adjustments (anti-tunnel-vision) ────────────────────────────
+
+    def _compute_diversity_adjustments(
+        self,
+        problems: list[dict],
+        experiments: list[dict],
+    ) -> dict[str, float]:
+        """
+        Return per-frontier priority adjustments that enforce domain diversity:
+          +20  starvation boost  — frontier has no linked experiments at all
+          -30  saturation penalty — validated frontier with ≥ 3 complete experiments
+          -15  domain recency    — ≥ 2 experiments completed in this domain within 14 days
+        """
+        import time as _time
+        from datetime import datetime, timezone, timedelta
+        now_utc = datetime.now(timezone.utc)
+        fourteen_days_ago = now_utc - timedelta(days=14)
+
+        # Build domain → frontier_id map using _infer_domain_id for consistency
+        # with _annotate_directives_with_llm() which also uses inferred domains.
+        frontier_domain: dict[str, str] = {}
+        for prob in problems:
+            fid = str(prob.get("id", ""))
+            if fid:
+                frontier_domain[fid] = self._infer_domain_id(" ".join([
+                    str(prob.get("title", "") or ""),
+                    str(prob.get("description", "") or ""),
+                ]))
+
+        # Count recent completions per domain
+        recent_by_domain: dict[str, int] = {}
+        for exp in experiments:
+            if str(exp.get("status", "")) != "complete":
+                continue
+            completed_str = str(exp.get("completed_at", "") or "")
+            if not completed_str:
+                continue
+            try:
+                completed_dt = datetime.fromisoformat(completed_str.rstrip("Z").split("+")[0]).replace(tzinfo=timezone.utc)
+                if completed_dt < fourteen_days_ago:
+                    continue
+            except ValueError:
+                continue
+            fp_id = str(exp.get("frontier_problem_id", "") or "")
+            domain = frontier_domain.get(fp_id, "")
+            if domain:
+                recent_by_domain[domain] = recent_by_domain.get(domain, 0) + 1
+
+        # Per-frontier linked experiment counts
+        linked_by_frontier: dict[str, int] = {}
+        complete_by_frontier: dict[str, int] = {}
+        for exp in experiments:
+            fp_id = str(exp.get("frontier_problem_id", "") or "")
+            if not fp_id:
+                continue
+            linked_by_frontier[fp_id] = linked_by_frontier.get(fp_id, 0) + 1
+            if str(exp.get("status", "")) == "complete":
+                complete_by_frontier[fp_id] = complete_by_frontier.get(fp_id, 0) + 1
+
+        adjustments: dict[str, float] = {}
+        for prob in problems:
+            fid = str(prob.get("id", ""))
+            if not fid:
+                continue
+            delta = 0.0
+            linked   = linked_by_frontier.get(fid, 0)
+            complete = complete_by_frontier.get(fid, 0)
+            domain   = frontier_domain.get(fid, "")  # inferred, consistent with LLM annotation
+
+            if linked == 0:
+                delta += 20.0  # starvation boost — never been tried
+            if complete >= 3:  # saturation penalty applied after truth_status check in caller
+                delta -= 30.0
+            if domain and recent_by_domain.get(domain, 0) >= 2:
+                delta -= 15.0  # domain recency penalty
+
+            if delta:
+                adjustments[fid] = delta
+        return adjustments
+
     def _build_frontier_directives(self, problems: list[dict], experiments: list[dict]) -> list[dict]:
+        overlay = self._read_priority_overlay()
+        diversity_adj = self._compute_diversity_adjustments(problems, experiments)
         directives: list[dict] = []
+        _truth_status_updates: dict[str, str] = {}   # batch: pid → truth_status
         for problem in problems:
             pid = str(problem.get("id", ""))
             problem_title = str(problem.get("industry_problem_title", "") or problem.get("title", pid))
@@ -592,8 +720,27 @@ class ResearchDirector:
             evidence_score = complete * 14.0 + running * 5.0 + significant_hits * 18.0 + directional_hits * 8.0
             truth_score = breakthrough_count * 20.0 + significant_hits * 18.0 + complete * 8.0 + len(linked_papers) * 6.0
             priority_score = round(impact_score + evidence_score + truth_score, 1)
+            # Apply LLM feedback overlay (upserted each 4h cycle, decays after 48h)
+            priority_score += float(overlay.get(pid, {}).get("priority_delta", 0.0))
+            # Apply diversity adjustments (saturation, starvation, domain recency)
+            priority_score += diversity_adj.get(pid, 0.0)
+            priority_score = round(priority_score, 1)
 
-            if breakthrough_count > 0 and not waiting_on:
+            # Read accumulated ADVERSE/NULL counts written by FrontierRegistry
+            persistent_adverse = int(problem.get("adverse_count", 0) or 0)
+            persistent_null    = int(problem.get("null_count",    0) or 0)
+            negative_evidence  = persistent_adverse + persistent_null
+            positive_evidence  = breakthrough_count + significant_hits
+
+            _falsified = (
+                negative_evidence >= 3
+                and negative_evidence > positive_evidence
+            )
+
+            if _falsified:
+                truth_status    = "falsified"
+                evidence_strength = "falsified"
+            elif breakthrough_count > 0 and not waiting_on:
                 truth_status = "validated"
                 evidence_strength = "strong"
             elif significant_hits > 0 or complete > 0:
@@ -606,9 +753,19 @@ class ResearchDirector:
                 truth_status = "weak"
                 evidence_strength = "weak"
 
+            # Queue truth_status update; persisted in one batch after the loop.
+            _truth_status_updates[pid] = truth_status
+
             suggested_paper_id = paper_ids[0] if paper_ids else f"frontier-paper-{pid}"
             suggested_paper_title = problem_title.strip() + " - Frontier Paper"
-            if breakthrough_count > 0 and not waiting_on:
+            if truth_status == "falsified":
+                next_action = (
+                    f"Hypothesis appears falsified: {negative_evidence} adverse/null results "
+                    f"outweigh {positive_evidence} positive. Reassess experimental design or pivot."
+                )
+                readiness = "landscape_scan"
+                publication_lane = "problem_scoping"
+            elif breakthrough_count > 0 and not waiting_on:
                 next_action = "Prioritize a frontier paper now; TAR already has a breakthrough-grade result here."
                 readiness = "write_now"
                 publication_lane = "conference_candidate"
@@ -631,8 +788,8 @@ class ResearchDirector:
 
             if waiting_on:
                 live_status = "active"
-            elif truth_status == "validated":
-                live_status = "publishing"
+            elif truth_status in {"validated", "falsified"}:
+                live_status = "publishing" if truth_status == "validated" else "exploring"
             elif complete > 0 or running > 0:
                 live_status = "active"
             else:
@@ -640,7 +797,8 @@ class ResearchDirector:
 
             why_now = (
                 f"{complete} complete, {running} running, {pending} pending experiments; "
-                f"{breakthrough_count} breakthroughs and {len(linked_papers)} linked papers so far."
+                f"{breakthrough_count} breakthroughs, {persistent_adverse} adverse, "
+                f"{persistent_null} null, and {len(linked_papers)} linked papers so far."
             )
             directives.append({
                 "problem_id": pid,
@@ -673,7 +831,24 @@ class ResearchDirector:
                 "suggested_paper_id": suggested_paper_id,
                 "suggested_paper_title": suggested_paper_title,
                 "evidence_notes": evidence_notes[:4],
+                "adverse_count": persistent_adverse,
+                "null_count": persistent_null,
             })
+
+        # Batch-persist truth_status: single JSON load+save instead of N saves.
+        if _truth_status_updates:
+            try:
+                from tar_frontier import FrontierRegistry
+                _reg = FrontierRegistry(self.workspace)
+                for _pid, _ts in _truth_status_updates.items():
+                    _p = _reg.get(_pid)
+                    if _p and _p.truth_status != _ts:
+                        _p.truth_status = _ts
+                        from datetime import datetime, timezone
+                        _p.updated_at = datetime.now(timezone.utc).isoformat()
+                _reg._save()  # single write for all updates
+            except Exception:
+                pass
 
         directives.sort(
             key=lambda rec: (
@@ -880,6 +1055,7 @@ class ResearchDirector:
         knowledge_domains: list[KnowledgeDomain],
         paper_directives: list[dict],
         external_evidence_state: dict[str, Any] | None = None,
+        experiments: list[dict] | None = None,
     ) -> list[ActiveResearchPath]:
         domain_by_id = {domain.id: domain for domain in knowledge_domains}
         paper_by_frontier = {
@@ -914,7 +1090,24 @@ class ResearchDirector:
             solution_novelty_note = str(frontier.get("solution_novelty_note", "") or "")
             readiness = str(frontier.get("readiness", "") or "")
             status = "pursue_now" if readiness in {"write_now", "outline_now", "experiment_first"} else "incubate"
-            novelty_score = 85.0 if frontier.get("truth_status") == "validated" else 62.0 if frontier.get("truth_status") == "supported" else 48.0
+            _frontier_truth_status = str(frontier.get("truth_status", "weak") or "weak")
+            # Best forgetting from complete linked experiments — used by NoveltyGate.
+            _best_forgetting: float | None = None
+            for _linked_id in frontier.get("linked_experiment_ids", []):
+                for _exp in (experiments or []):
+                    if str(_exp.get("id", "")) != str(_linked_id):
+                        continue
+                    _res = self._load_experiment_result(_exp)
+                    if not _res:
+                        continue
+                    _st = read_statistics(_res)
+                    _mf = _st.get("mean_forgetting", _res.get("mean_forgetting"))
+                    if isinstance(_mf, (int, float)):
+                        if _best_forgetting is None or float(_mf) < _best_forgetting:
+                            _best_forgetting = float(_mf)
+            novelty_score = self._gate_novelty_score(
+                frontier, _frontier_truth_status, _best_forgetting
+            )
             writing_policy = (
                 f"Anchor every manuscript in the external problem '{frontier_title}'. "
                 f"Present {solution_family} as TAR's unpublished internal work under evaluation, never as established literature or an already-proven solution. "
@@ -1090,6 +1283,77 @@ class ResearchDirector:
             if len(selected) >= 12:
                 break
         return selected
+
+    # Map NoveltyGate verdict → numeric novelty_score.
+    # Values match the existing heuristic range (30–95) so the rest of the
+    # scoring system doesn't need adjustment.
+    _NOVELTY_VERDICT_SCORES: dict[str, float] = {
+        "novel":               85.0,
+        "marginal_improvement": 62.0,
+        "replication":          50.0,
+        "known_result":         40.0,
+        "contradicts_sota":     30.0,
+    }
+
+    def _gate_novelty_score(
+        self,
+        frontier: dict[str, Any],
+        truth_status: str,
+        best_forgetting: float | None,
+    ) -> float:
+        """
+        Compute novelty_score via NoveltyGate when the literature DB is available.
+        Falls back to the truth_status heuristic if the gate is unavailable or
+        the DB has no SoTA entries for this benchmark.
+        """
+        fallback = (
+            85.0 if truth_status == "validated"
+            else 62.0 if truth_status == "supported"
+            else 48.0
+        )
+        if not self.literature_db_path.exists():
+            return fallback
+        if best_forgetting is None:
+            return fallback
+        # Choose primary benchmark ID: use the first candidate dataset, or fall back
+        # to the frontier's id as a proxy benchmark key.
+        datasets: list[str] = [
+            str(d) for d in frontier.get("candidate_datasets", []) if str(d).strip()
+        ]
+        benchmark_id = datasets[0] if datasets else str(frontier.get("problem_id", "") or "")
+        if not benchmark_id:
+            return fallback
+        method_desc = (
+            str(frontier.get("global_problem_statement", "") or "")
+            + " "
+            + str(frontier.get("solution_family", "TAR/TCL/ASC") or "")
+        ).strip()
+        method_name = str(frontier.get("solution_family", "TAR/TCL/ASC") or "TAR/TCL/ASC")
+        try:
+            from literature.knowledge_graph import LiteratureKnowledgeGraph
+            from literature.novelty_gate import NoveltyGate
+            graph = LiteratureKnowledgeGraph(str(self.literature_db_path))
+            try:
+                gate = NoveltyGate(graph, load_embedding_model=False)
+                report = gate.evaluate(
+                    method_name=method_name,
+                    method_description=method_desc,
+                    benchmark_id=benchmark_id,
+                    metric_name="mean_forgetting",
+                    metric_value=best_forgetting,
+                    higher_is_better=False,
+                )
+                base = self._NOVELTY_VERDICT_SCORES.get(str(report.verdict), fallback)
+                # Blend: 60 % gate score, 40 % confidence-weighted gate score,
+                # capped by the truth_status ceiling so an unverified claim never
+                # reaches 85 just by beating a weak SoTA entry.
+                ceiling = fallback  # don't exceed what truth_status deserves
+                blended = round(min(base * float(report.confidence), ceiling), 1)
+                return max(30.0, blended)
+            finally:
+                graph.close()
+        except Exception:
+            return fallback
 
     def _pick_novel_problem_for_domain(self, domain_id: str) -> dict[str, Any] | None:
         if _STRICT_REAL_WORLD_FRONTIER_ONLY:
@@ -2488,6 +2752,12 @@ class ResearchDirector:
             if waiting:
                 status = "collect_now"
                 next_action = "Finish the queued/running experiments before upgrading the claim."
+            elif truth_status == "falsified":
+                status = "reassess_now"
+                next_action = (
+                    "Adverse/null evidence outweighs positive results. "
+                    "Reassess experimental design, revisit hypothesis, or pivot to a different approach."
+                )
             elif truth_status == "validated":
                 status = "archive_now"
                 next_action = "Lock the verified evidence into the paper and registry."
@@ -2499,7 +2769,12 @@ class ResearchDirector:
                 "Require negative delta against the relevant baseline plus statistical support where available. "
                 "Reject any claim that depends only on a single weak directional run."
             )
-            if truth_status == "validated":
+            if truth_status == "falsified":
+                verification_standard = (
+                    "The hypothesis has accumulated enough adverse/null evidence to be considered falsified under current experimental conditions. "
+                    "Do not write positive claims. Investigate root cause and propose a refined hypothesis."
+                )
+            elif truth_status == "validated":
                 verification_standard = (
                     "Preserve only the statistically supported or breakthrough-grade claims and attach the exact result files."
                 )
@@ -2696,7 +2971,7 @@ class ResearchDirector:
                 return "", []
             return dom.learned_summary, dom.top_verified_titles[:]
 
-        # 3 a. Frontier literature synthesis
+        # 3 a. Frontier literature synthesis → write priority deltas back to overlay
         for rec in frontier_directives[:3]:
             frontier_id = str(rec.get("problem_id", "") or "")
             if not frontier_id:
@@ -2715,7 +2990,15 @@ class ResearchDirector:
                 top_verified_titles=top_titles,
                 truth_status=str(rec.get("truth_status", "weak") or "weak"),
             )
-            rec["llm_synthesis"] = synthesis
+            # synthesis is now a dict; extract narrative for display
+            narrative = synthesis.get("narrative", str(synthesis)) if isinstance(synthesis, dict) else str(synthesis)
+            rec["llm_synthesis"] = narrative
+            # Write LLM delta + gap signals to overlay for next scoring cycle
+            if isinstance(synthesis, dict):
+                delta = float(synthesis.get("priority_delta", 0.0))
+                gaps  = list(synthesis.get("gap_signals", []))
+                if delta or gaps:
+                    self._write_priority_overlay(frontier_id, delta, gaps)
 
         # 3 b. Experiment proposal evaluation (skip running/complete)
         evaluated = 0
@@ -2744,7 +3027,8 @@ class ResearchDirector:
                 status=status,
                 evidence_notes=list(frontier_rec.get("evidence_notes", []) or []),
             )
-            rec["llm_evaluation"] = evaluation
+            narrative = evaluation.get("narrative", str(evaluation)) if isinstance(evaluation, dict) else str(evaluation)
+            rec["llm_evaluation"] = narrative
             evaluated += 1
 
         # 3 c. Claim verification for evidence directives
@@ -2768,7 +3052,8 @@ class ResearchDirector:
                 truth_status=str(rec.get("truth_status", "weak") or "weak"),
                 domain_learned_summary=learned_summary,
             )
-            rec["llm_claim_check"] = verification
+            narrative = verification.get("narrative", str(verification)) if isinstance(verification, dict) else str(verification)
+            rec["llm_claim_check"] = narrative
 
 
 def main() -> None:

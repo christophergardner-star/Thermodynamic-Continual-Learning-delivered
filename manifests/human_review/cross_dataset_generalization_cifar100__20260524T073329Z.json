@@ -1,0 +1,32 @@
+{
+  "manifest_id": "human-review-cross_dataset_generalization_cifar100-20260524T073329Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "created_at": "2026-05-24T07:33:29.335400+00:00",
+  "authorised_by": "cgard",
+  "purpose": "Human-approved bounded experiment for cross_dataset_generalization_cifar100. Prepared from TAR human review state; execution still requires committed manifest verification.",
+  "frontier_problem_id": "fp-hyperparameter-robustness",
+  "target_paper_id": "tcl-hpc-validation-paper",
+  "human_review_review_id": "proposal:cross_dataset_generalization_cifar100",
+  "global_time_limit_h": 48.0,
+  "experiments": [
+    {
+      "experiment_id": "cross_dataset_generalization_cifar100",
+      "name": "Low-tuning robustness on split_cifar100 vs split_cifar10",
+      "allowed_datasets": [
+        "split_cifar100"
+      ],
+      "allowed_methods": [
+        "tcl"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1
+      ],
+      "time_limit_h": 48.0,
+      "run_limit": 1,
+      "notes": "queue now for the real-world problem 'Low-Tuning Continual Learning for Production ML'. TAR is evaluating the unpublished internal TAR/TCL/ASC work against real external baselines."
+    }
+  ],
+  "content_hash": "372db9109322a17db0e95ca25fe8781831e6cac7b2fb85b1c76a747db4e8d52a"
+}

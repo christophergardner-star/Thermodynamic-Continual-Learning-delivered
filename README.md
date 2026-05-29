@@ -1,6 +1,6 @@
 # TAR — Thermodynamic Autonomous Researcher
 
-TAR is an autonomous research system that governs its own training runs using thermodynamic principles. Rather than running experiments by hand or relying on fixed schedules, TAR monitors its own activation statistics during training, classifies its thermal state, and adjusts learning behaviour accordingly — then plans the next experiment based on what it finds.
+TAR is a rail-constrained research system for thermodynamic continual learning. It can plan experiments, track evidence, revise papers, and execute overnight runs, but only from explicit human-authorised manifests. The post-audit rebuild makes canonical result writes append-only, couples every result to an environment snapshot, and prevents cross-domain evidence mixing between unrelated research tracks.
 
 **Author:** Christopher Gardner
 
@@ -12,7 +12,7 @@ TAR wraps any training payload with three things:
 
 1. **A thermodynamic governor** — monitors the network's activation standard deviation (`sigma`) in real time, classifies the training regime (disordered / critical / ordered), and modulates learning rate based on thermal state.
 
-2. **An autonomous research loop** — a tri-role planning hierarchy (Director, Strategist, Scout) that generates hypotheses, runs experiments, evaluates results against pre-registered criteria, and decides what to investigate next.
+2. **A manifest-gated research loop** — a tri-role planning hierarchy (Director, Strategist, Scout) that generates hypotheses, queues experiments for review, evaluates results against pre-registered criteria, and executes only the runs explicitly authorised by the user.
 
 3. **Atomic state and reproducibility** — every run is backed by locked manifests, typed schemas, Docker-sandboxed execution, and a persistent knowledge graph so results are traceable and reproducible.
 
@@ -105,7 +105,7 @@ python tar_cli.py --direct --dry-run --json
 python tar_cli.py --direct --check-regime
 
 # Dashboard
-streamlit run tar_dashboard.py
+python tar_dashboard.py
 ```
 
 ```bash
@@ -153,7 +153,7 @@ tar_lab/
 
 tar_cli.py                # Main TAR command-line interface
 TCL_Orchestrator.py       # Orchestration wrapper
-dashboard.py / tar_dashboard.py  # Streamlit operator interface
+dashboard.py / tar_dashboard.py  # Flask operator interface
 
 asc_model.py              # ASCForCausalLM
 asc_train_full.py         # Canonical ASC training
@@ -190,7 +190,7 @@ tar_state/
 
 **Reproducibility:**
 - Locked dependency manifests under `tar_state/manifests/`
-- Docker-only autonomous execution (no host-Python fallback)
+- Manifest-gated execution with explicit user authorisation
 - Atomic recovery state — runs can resume after interruption
 - Claim-verdict policy (accepted / provisional / rejected / insufficient evidence)
 
@@ -236,7 +236,7 @@ python tar_cli.py --direct --list-endpoints --json
 python tar_cli.py --direct --pivot --force --json
 python tar_cli.py --direct --panic --json
 python tar_cli.py --serve
-streamlit run tar_dashboard.py
+python tar_dashboard.py
 ```
 
 Environment overrides:

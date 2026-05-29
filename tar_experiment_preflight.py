@@ -165,6 +165,24 @@ class ExperimentPreflightManager:
         if resume_preserved:
             notes.append("Suite checkpoint state was preserved so resume-safe runs do not lose progress.")
 
+        # Check git cleanliness — warn if working tree is dirty but do not block.
+        clean_state_ready = True
+        try:
+            git_proc = subprocess.run(
+                ["git", "-C", str(self.repo_root), "status", "--porcelain"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if git_proc.returncode == 0:
+                dirty_lines = [l for l in git_proc.stdout.splitlines() if l.strip()]
+                if dirty_lines:
+                    clean_state_ready = False
+                    notes.append(
+                        f"WARNING: git working tree has {len(dirty_lines)} uncommitted change(s). "
+                        "Experiment will run but reproducibility snapshot may differ from HEAD."
+                    )
+        except Exception:
+            pass  # git unavailable — leave clean_state_ready=True, no warning
+
         report = PreflightReport(
             experiment_id=str(spec.id),
             prepared_at=_now_iso(),
@@ -174,7 +192,7 @@ class ExperimentPreflightManager:
             python_executable=str(python_executable),
             bootstrap_venv=str(bootstrap_venv),
             execution_mode=execution_mode,
-            clean_state_ready=True,
+            clean_state_ready=clean_state_ready,
             resume_preserved=resume_preserved,
             archive_actions=archive_actions,
             dependency_actions=dependency_actions,

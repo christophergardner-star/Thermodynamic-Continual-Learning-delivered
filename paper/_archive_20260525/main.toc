@@ -1,0 +1,35 @@
+\contentsline {section}{\numberline {1}Introduction}{3}{section.1}%
+\contentsline {section}{\numberline {2}Background and Related Work}{4}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Catastrophic Forgetting and Continual Learning Scenarios}{4}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Regularisation-Based Continual Learning}{4}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Replay-Based Methods}{4}{subsection.2.3}%
+\contentsline {subsection}{\numberline {2.4}Parameter Isolation and Architecture-Expanding Methods}{4}{subsection.2.4}%
+\contentsline {subsection}{\numberline {2.5}Thermodynamic Perspectives and Activation Statistics}{5}{subsection.2.5}%
+\contentsline {section}{\numberline {3}Method: The Thermodynamic Continual Learning Governor}{5}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Notation and Thermal Ratio}{5}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Warmup Guard}{5}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}Regime Classification and Learning Rate Modulation}{5}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}Dimensionality-Weighted L2 Anchor Penalty}{6}{subsection.3.4}%
+\contentsline {subsection}{\numberline {3.5}Full Governor Pipeline}{6}{subsection.3.5}%
+\contentsline {subsection}{\numberline {3.6}Implementation}{6}{subsection.3.6}%
+\contentsline {subsection}{\numberline {3.7}Joint Accuracy-Forgetting (JAF) Metric}{6}{subsection.3.7}%
+\contentsline {section}{\numberline {4}Experiments}{6}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Setup}{6}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Four-Way Baseline Comparison}{7}{subsection.4.2}%
+\contentsline {subsection}{\numberline {4.3}Methodological Observation: SI Collapse}{7}{subsection.4.3}%
+\contentsline {subsection}{\numberline {4.4}Component Ablation}{7}{subsection.4.4}%
+\contentsline {subsection}{\numberline {4.5}SI Hyperparameter Robustness}{8}{subsection.4.5}%
+\contentsline {subsection}{\numberline {4.6}Scale-Up to TinyImageNet}{8}{subsection.4.6}%
+\contentsline {section}{\numberline {5}Discussion}{9}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Limitations}{9}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}The SI Collapse as a Methodological Finding}{10}{subsection.5.2}%
+\contentsline {subsection}{\numberline {5.3}Future Directions}{10}{subsection.5.3}%
+\contentsline {section}{\numberline {6}Conclusion}{10}{section.6}%
+\contentsline {section}{\numberline {A}EWC $\lambda $ Sensitivity}{12}{appendix.A}%
+\contentsline {section}{\numberline {B}Reproducibility Details}{12}{appendix.B}%
+\contentsline {subsection}{\numberline {B.1}Hyperparameters}{12}{subsection.B.1}%
+\contentsline {subsection}{\numberline {B.2}Baseline Hyperparameters}{12}{subsection.B.2}%
+\contentsline {subsection}{\numberline {B.3}Training Configuration}{13}{subsection.B.3}%
+\contentsline {subsection}{\numberline {B.4}Dataset Details}{13}{subsection.B.4}%
+\contentsline {subsection}{\numberline {B.5}Hardware and Compute}{13}{subsection.B.5}%
+\contentsline {subsection}{\numberline {B.6}Code}{13}{subsection.B.6}%

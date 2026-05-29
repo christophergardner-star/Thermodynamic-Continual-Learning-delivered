@@ -1,0 +1,44 @@
+{
+  "status": "blocked",
+  "compile_status": "blocked",
+  "updated_at": "2026-05-27T15:04:23.051430+00:00",
+  "progress": {
+    "stage": "blocked",
+    "pct": 50,
+    "label": "2/4 experiments complete - draft waiting on evidence",
+    "sections_complete_count": 0,
+    "sections_total": 7,
+    "experiments_complete_count": 2,
+    "experiments_total": 4,
+    "compile_status": "blocked"
+  },
+  "project_id": "main_tcl_scaleup_paper",
+  "title": "Main Tcl Scaleup Paper",
+  "readiness": "outline_now",
+  "truth_status": "supported",
+  "director_recommendation": "Anchor every manuscript in the external problem 'Scalable Continual Adaptation on Realistic Visual Streams'. Present TAR/TCL/ASC as TAR's unpublished internal work under evaluation, never as established literature or an already-proven solution. Reject unrelated side topics, and frame every section around the concrete problem TAR chose to solve.",
+  "frontier_problem_ids": [
+    "fp-scale-up"
+  ],
+  "experiment_ids": [
+    "backbone_scaling_vit_tiny_cifar100",
+    "phase16_scale_up",
+    "phase17_tinyimagenet",
+    "stream_difficulty_progression_tinyimagenet_resnet34"
+  ],
+  "waiting_for_experiments": [
+    "backbone_scaling_vit_tiny_cifar100",
+    "stream_difficulty_progression_tinyimagenet_resnet34"
+  ],
+  "sections_planned": [
+    "abstract",
+    "s1_introduction",
+    "s2_background",
+    "s3_method",
+    "s4_experiments",
+    "s5_discussion",
+    "s6_conclusion"
+  ],
+  "tex_path": "C:\\Users\\cgard\\TAR\\Thermodynamic-Continual-Learning-delivered\\paper\\main_tcl_scaleup_paper\\main.tex",
+  "pdf_path": ""
+}

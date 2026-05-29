@@ -42,6 +42,7 @@ sympy
 tensorboard
 torch
 torchmetrics
+torchvision
 tqdm
 transformers
 uvicorn

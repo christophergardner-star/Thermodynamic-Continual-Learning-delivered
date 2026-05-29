@@ -1,0 +1,125 @@
+\begin{thebibliography}{17}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Aljundi et~al.(2018)Aljundi, Babiloni, Elhoseiny, Rohrbach, and
+  Tuytelaars]{Aljundi2018}
+Rahaf Aljundi, Francesca Babiloni, Mohamed Elhoseiny, Marcus Rohrbach, and
+  Tinne Tuytelaars.
+\newblock Memory aware synapses: Learning what (not) to forget.
+\newblock \emph{Proceedings of the European Conference on Computer Vision},
+  pages 139--154, 2018.
+
+\bibitem[Buzzega et~al.(2020)Buzzega, Boschini, Porrello, Abati, and
+  Calderara]{Buzzega2020}
+Pietro Buzzega, Matteo Boschini, Angelo Porrello, Davide Abati, and Simone
+  Calderara.
+\newblock Dark experience for general continual learning: a strong, simple
+  baseline.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~33, pages 15920--15930, 2020.
+
+\bibitem[Chaudhry et~al.(2019)Chaudhry, Ranzato, Rohrbach, and
+  Elhoseiny]{Chaudhry2018}
+Arslan Chaudhry, Marc'Aurelio Ranzato, Marcus Rohrbach, and Mohamed Elhoseiny.
+\newblock Efficient lifelong learning with {A-GEM}.
+\newblock In \emph{International Conference on Learning Representations}, ICLR,
+  2019.
+
+\bibitem[He et~al.(2016)He, Zhang, Ren, and Sun]{He2016}
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+\newblock Deep residual learning for image recognition.
+\newblock In \emph{Proceedings of the IEEE Conference on Computer Vision and
+  Pattern Recognition}, CVPR, pages 770--778, 2016.
+
+\bibitem[Hopfield(1982)]{Hopfield1982}
+John~J. Hopfield.
+\newblock Neural networks and physical systems with emergent collective
+  computational abilities.
+\newblock \emph{Proceedings of the National Academy of Sciences}, 79\penalty0
+  (8):\penalty0 2554--2558, 1982.
+
+\bibitem[Kirkpatrick et~al.(2017)Kirkpatrick, Pascanu, Rabinowitz, Veness,
+  Desjardins, Rusu, Milan, Quan, Ramalho, Grabska-Barwinska, Hassabis, and
+  Hadsell]{Kirkpatrick2017}
+James Kirkpatrick, Razvan Pascanu, Neil Rabinowitz, Joel Veness, Guillaume
+  Desjardins, Andrei~A. Rusu, Kieran Milan, John Quan, Tiago Ramalho, Agnieszka
+  Grabska-Barwinska, Demis Hassabis, and Raia Hadsell.
+\newblock Overcoming catastrophic forgetting in neural networks.
+\newblock \emph{Proceedings of the National Academy of Sciences}, 114\penalty0
+  (13):\penalty0 3521--3526, 2017.
+\newblock \doi{10.1073/pnas.1611835114}.
+
+\bibitem[Krizhevsky and Hinton(2009)]{Krizhevsky2009}
+Alex Krizhevsky and Geoffrey Hinton.
+\newblock Learning multiple layers of features from tiny images.
+\newblock Technical report, University of Toronto, 2009.
+
+\bibitem[Le and Yang(2015)]{Le2015}
+Ya~Le and Xuan Yang.
+\newblock Tiny {ImageNet} visual recognition challenge.
+\newblock \emph{CS 231N Course Report, Stanford University}, 2015.
+
+\bibitem[Lopez-Paz and Ranzato(2017)]{LopezPaz2017}
+David Lopez-Paz and Marc'Aurelio Ranzato.
+\newblock Gradient episodic memory for continual learning.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~30, 2017.
+
+\bibitem[Mallya and Lazebnik(2018)]{Mallya2018}
+Arun Mallya and Svetlana Lazebnik.
+\newblock {PackNet}: Adding multiple tasks to a single network by iterative
+  pruning.
+\newblock In \emph{Proceedings of the IEEE Conference on Computer Vision and
+  Pattern Recognition}, CVPR, pages 7765--7773, 2018.
+
+\bibitem[McCloskey and Cohen(1989)]{McCloskey1989}
+Michael McCloskey and Neal~J. Cohen.
+\newblock Catastrophic interference in connectionist networks: The sequential
+  learning problem.
+\newblock \emph{Psychology of Learning and Motivation}, 24:\penalty0 109--165,
+  1989.
+
+\bibitem[Papyan et~al.(2020)Papyan, Han, and Donoho]{Papyan2020}
+Vardan Papyan, X.~Y. Han, and David~L. Donoho.
+\newblock Prevalence of neural collapse during the terminal phase of deep
+  learning training.
+\newblock \emph{Proceedings of the National Academy of Sciences}, 117\penalty0
+  (40):\penalty0 24652--24663, 2020.
+
+\bibitem[Rebuffi et~al.(2017)Rebuffi, Kolesnikov, Sperl, and
+  Lampert]{Rebuffi2017}
+Sylvestre-Alvise Rebuffi, Alexander Kolesnikov, Georg Sperl, and Christoph~H.
+  Lampert.
+\newblock i{C}a{RL}: Incremental classifier and representation learning.
+\newblock In \emph{Proceedings of the IEEE Conference on Computer Vision and
+  Pattern Recognition}, CVPR, pages 2001--2010, 2017.
+
+\bibitem[Rusu et~al.(2016)Rusu, Rabinowitz, Desjardins, Soyer, Kirkpatrick,
+  Kavukcuoglu, Pascanu, and Hadsell]{Rusu2016}
+Andrei~A. Rusu, Neil~C. Rabinowitz, Guillaume Desjardins, Hubert Soyer, James
+  Kirkpatrick, Koray Kavukcuoglu, Razvan Pascanu, and Raia Hadsell.
+\newblock Progressive neural networks.
+\newblock In \emph{arXiv preprint arXiv:1606.04671}, 2016.
+
+\bibitem[Shin et~al.(2017)Shin, Lee, Kim, and Kim]{Shin2017}
+Hanul Shin, Jung~Kwon Lee, Jaehong Kim, and Jiwon Kim.
+\newblock Continual learning with deep generative replay.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~30, 2017.
+
+\bibitem[van~de Ven and Tolias(2019)]{vandeVen2019}
+Gido~M. van~de Ven and Andreas~S. Tolias.
+\newblock Three scenarios for continual learning.
+\newblock \emph{arXiv preprint arXiv:1904.07734}, 2019.
+
+\bibitem[Zenke et~al.(2017)Zenke, Poole, and Ganguli]{Zenke2017}
+Friedemann Zenke, Ben Poole, and Surya Ganguli.
+\newblock Continual learning through synaptic intelligence.
+\newblock In \emph{Proceedings of the 34th International Conference on Machine
+  Learning}, ICML, pages 3987--3995, 2017.
+
+\end{thebibliography}

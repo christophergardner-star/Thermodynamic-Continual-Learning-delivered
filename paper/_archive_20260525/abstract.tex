@@ -1,0 +1,29 @@
+Continual learning methods are commonly evaluated on a single scalar: catastrophic
+forgetting. We show this metric has a systematic failure mode --- importance-weighted
+regularisation methods can achieve low forgetting scores while producing networks that
+have learned nothing, by collapsing to chance-level predictions on every task.
+
+We introduce Thermodynamic Continual Learning (TCL), a method that uses per-task
+activation entropy as a consolidation signal to govern weight regularisation during
+sequential learning. TCL anchors a reference entropy $\sigma^\star$ from the first
+task batches and detects the ordered regime (consolidation) when the running entropy
+falls below this reference, triggering a dimensionality-weighted L2 anchor penalty.
+
+On Split-CIFAR-10 with a ResNet-18 backbone across five random seeds, TCL achieves
+mean forgetting $0.1161 \pm 0.029$ against SGD's $0.2331 \pm 0.003$
+($\Delta = -0.1170$, $p = 0.0012$, Cohen's $d = 3.68$, 5/5 seeds TCL
+better) and EWC's ($\lambda = 100$) $0.1909 \pm 0.023$
+($\Delta = -0.0748$, $p = 0.0190$, Cohen's $d = 1.70$, 5/5 seeds TCL
+better). Synaptic Intelligence at published default hyperparameters collapses to
+$0.500$ accuracy on all five seeds, demonstrating the failure mode of
+forgetting-only evaluation. A pre-registered ablation shows the L2 anchor penalty is
+the primary mechanistic component: governor-only tracks SGD, while penalty-only
+captures most of the forgetting reduction (full TCL $0.1272 \pm 0.022$
+vs.~penalty-only $0.1429 \pm 0.018$; full-vs.-penalty gap not yet resolved at $n=5$,
+$p = 0.3154$, $d = 0.51$). We propose the joint accuracy-forgetting (JAF) metric as
+a minimal two-dimensional reporting standard that exposes degenerate solutions
+invisible to forgetting-only evaluation. A scale-up to Split-TinyImageNet
+(10 tasks, 3 seeds) confirms the SGD reduction transfers to a harder benchmark:
+TCL achieves mean forgetting $0.0221 \pm 0.006$ vs.\ SGD's $0.5183 \pm 0.011$
+($\Delta = -0.4962$, $p = 0.0001$, $d = 75.1$, 3/3 seeds); the TCL vs.\ EWC
+comparison is not resolved at $n = 3$ ($p = 0.359$).

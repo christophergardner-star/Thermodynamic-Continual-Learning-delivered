@@ -1,0 +1,34 @@
+{
+  "manifest_id": "human-review-director-fp-nlp-continual-forgetting-domain-probe-20260524T125426Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "created_at": "2026-05-24T12:54:26.600381+00:00",
+  "authorised_by": "cgard",
+  "purpose": "Human-approved bounded experiment for director-fp-nlp-continual-forgetting-domain-probe. Prepared from TAR human review state; execution still requires committed manifest verification.",
+  "frontier_problem_id": "fp-nlp-continual-forgetting",
+  "target_paper_id": "frontier-paper-fp-nlp-continual-forgetting",
+  "human_review_review_id": "proposal:director-fp-nlp-continual-forgetting-domain-probe",
+  "global_time_limit_h": 48.0,
+  "experiments": [
+    {
+      "experiment_id": "director-fp-nlp-continual-forgetting-domain-probe",
+      "name": "Director Probe - Continual Text Classification Without Catastrophic Forgetting",
+      "allowed_datasets": [
+        "split_agnews"
+      ],
+      "allowed_methods": [
+        "sgd_baseline"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1,
+        2,
+        3
+      ],
+      "time_limit_h": 48.0,
+      "run_limit": 1,
+      "notes": "propose now for the global problem 'Continual Text Classification Without Catastrophic Forgetting'. This is a TAR-directed test of the unpublished internal EWC-NLP / Replay-NLP (under evaluation) work against real external baselines."
+    }
+  ],
+  "content_hash": "34a09cf4efdb804da1dd225b8a2880b85a7a583ede451f19411bb23a0bf2da9c"
+}

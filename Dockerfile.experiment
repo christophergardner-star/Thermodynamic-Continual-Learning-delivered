@@ -1,0 +1,59 @@
+# Reproducibility container for TAR experiments.
+# Pins the exact Python, CUDA, and library versions from the host venv so any
+# reviewer can reproduce results without matching the host OS or driver version.
+#
+# Build:  docker build -t tar-experiment:latest -f Dockerfile.experiment .
+# Run:    (managed by ExperimentOrchestrator._run_in_docker — do not invoke manually)
+#
+# Host venv versions this image was validated against:
+#   Python    3.13.3
+#   torch     2.6.0+cu124
+#   CUDA      12.4 (driver 591.86, runtime 13.1)
+
+# Pin to a digest for true immutability:
+#   docker pull python:3.13.3-slim
+#   docker inspect python:3.13.3-slim --format '{{index .RepoDigests 0}}'
+#   Replace the line below with: FROM python:3.13.3-slim@sha256:<digest>
+FROM python:3.13.3-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Minimal system libraries required by Pillow, psutil, scipy, and OpenMP
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libglib2.0-0 \
+        libgomp1 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# PyTorch + torchvision: CUDA 12.4 wheel, matches host venv exactly.
+# The NVIDIA Container Runtime (--gpus device=0) exposes the host driver so
+# CUDA is available even though this is not an nvidia/cuda base image.
+RUN pip install --no-cache-dir \
+        "torch==2.6.0+cu124" \
+        "torchvision==0.21.0+cu124" \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# All remaining packages pinned to host venv versions
+RUN pip install --no-cache-dir \
+        "timm==1.0.27" \
+        "psutil==7.2.2" \
+        "scikit-learn==1.8.0" \
+        "scipy==1.17.1" \
+        "numpy==2.4.3" \
+        "tqdm==4.67.3" \
+        "datasets==4.8.4" \
+        "Pillow==12.1.1" \
+        "sentence-transformers==5.5.1" \
+        "transformers==5.5.0" \
+        "huggingface-hub==1.9.1" \
+        "pydantic==2.12.5"
+
+WORKDIR /repo
+
+# /repo is mounted read-only from the host repository at runtime
+ENV PYTHONPATH=/repo
+ENV PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python"]

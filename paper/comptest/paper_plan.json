@@ -1,0 +1,27 @@
+{
+  "updated_at": "2026-05-27T11:47:19.468009+00:00",
+  "project_id": "comptest",
+  "title": "Comptest",
+  "readiness": "blocked",
+  "status": "blocked",
+  "truth_status": "weak",
+  "director_recommendation": "",
+  "frontier_problem_ids": [],
+  "experiment_ids": [
+    "comptest-recon-stale-99999"
+  ],
+  "waiting_for_experiments": [
+    "comptest-recon-stale-99999"
+  ],
+  "sections_planned": [
+    "abstract",
+    "s1_introduction",
+    "s2_background",
+    "s3_method",
+    "s4_experiments",
+    "s5_discussion",
+    "s6_conclusion"
+  ],
+  "tex_path": "C:\\Users\\cgard\\TAR\\Thermodynamic-Continual-Learning-delivered\\paper\\comptest\\main.tex",
+  "pdf_path": ""
+}

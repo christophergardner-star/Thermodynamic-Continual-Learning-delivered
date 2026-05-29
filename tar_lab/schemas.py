@@ -245,6 +245,7 @@ class ContinualLearningBenchmarkResult(StrictModel):
     final_mean_accuracy: float
     last_task_accuracy: float
     thermodynamic_trace_path: str = ""
+    regime_detection_metrics: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ContinualLearningBenchmarkConfig(StrictModel):
@@ -258,8 +259,8 @@ class ContinualLearningBenchmarkConfig(StrictModel):
     train_epochs_per_task: int = 5
     batch_size: int = 64
     seed: int = 42
-    ewc_lambda: float = 100.0
-    si_c: float = 0.1
+    ewc_lambda: float = 1000.0   # Phase 12 sweep best; 100.0 is significantly worse (p=0.019)
+    si_c: float = 0.01           # Phase 13 sweep best; 0.1 causes universal collapse on CIFAR-10
     si_xi: float = 0.001
     tcl_governor_enabled: bool = True
     # Dimensionality-weighted L2 penalty: after each task TCL anchors the
@@ -271,6 +272,13 @@ class ContinualLearningBenchmarkConfig(StrictModel):
     tcl_ordered_lr_scale: float = 0.5
     tcl_disordered_lr_scale: float = 1.2
     tcl_reset_on_task_boundary: bool = True
+    # DER++ (Buzzega et al. 2020) — reservoir replay with logit distillation.
+    # Use method="der_plus_plus" to activate; ignored by all other methods.
+    der_mem_size: int = 200    # reservoir capacity (examples)
+    der_alpha: float = 0.2     # MSE logit-distillation loss weight
+    der_beta: float = 0.5      # cross-entropy replay loss weight
+    lwf_lambda: float = 1.0    # distillation loss weight (Li & Hoiem 2018)
+    lwf_temperature: float = 2.0  # softmax temperature for soft targets
     augmentation: str = "flip_normalize"
     optimizer_backend: str = "sgd"
     optimizer_backend_config: Dict[str, Any] = Field(default_factory=dict)
@@ -1337,6 +1345,7 @@ class ProblemScheduleEntry(StrictModel):
     recovery_required: bool = False
     recovery_confirmed_at: Optional[str] = None
     alert_ids: List[str] = Field(default_factory=list)
+    estimated_runtime_h: Optional[float] = None
 
 
 class ProblemScheduleState(StrictModel):
@@ -1459,6 +1468,7 @@ class HypothesisRecord(StrictModel):
     contradiction_review_id: Optional[str] = None
     proposed_benchmark_ids: List[str] = Field(default_factory=list)
     unresolved_assumptions: List[str] = Field(default_factory=list)
+    revision_history: List[str] = Field(default_factory=list)
 
 
 class ResearchDecisionRecord(StrictModel):

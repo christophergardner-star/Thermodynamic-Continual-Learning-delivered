@@ -185,13 +185,27 @@ class ProblemStudyScheduler:
                 else:
                     failed_ids.append(updated.schedule_id)
             except Exception as exc:
-                updated, entry_alerts = self._finalize_after_exception(running, str(exc), now_dt)
-                alert_ids.extend(entry_alerts)
-                if updated.status == "retry_wait":
-                    rescheduled_ids.append(updated.schedule_id)
-                    retry_wait_count += 1
-                else:
-                    failed_ids.append(updated.schedule_id)
+                try:
+                    updated, entry_alerts = self._finalize_after_exception(running, str(exc), now_dt)
+                    alert_ids.extend(entry_alerts)
+                    if updated.status == "retry_wait":
+                        rescheduled_ids.append(updated.schedule_id)
+                        retry_wait_count += 1
+                    else:
+                        failed_ids.append(updated.schedule_id)
+                except Exception as fin_exc:
+                    # Last resort: store update failed inside the exception handler too.
+                    # Mark recoverable_crash directly; never let this propagate and kill the daemon.
+                    _fallback = self.store.update_problem_schedule(
+                        running.schedule_id,
+                        status="recoverable_crash",
+                        lease=None,
+                        last_error=f"finalisation_failed: {fin_exc}",
+                        recovery_required=True,
+                    )
+                    updated = _fallback or running
+                    entry_alerts = []
+                    failed_ids.append(running.schedule_id)
             finally:
                 heartbeat_stop.set()
                 if heartbeat_thread is not None:
@@ -276,14 +290,63 @@ class ProblemStudyScheduler:
             expires = _parse_iso8601(entry.lease.expires_at)
             if expires is None or expires > now_dt:
                 continue
+            # Re-read to guard against TOCTOU: job may have completed between snapshot and now.
+            current = self.store.get_problem_schedule(entry.schedule_id)
+            if current is None or current.status not in {"leased", "running"} or current.lease is None:
+                continue
+            current_expires = _parse_iso8601(current.lease.expires_at)
+            if current_expires is None or current_expires > now_dt:
+                continue
             updated, _ = self._promote_retry_or_terminal(
-                entry,
+                current,
                 error="stale_runtime_cleanup",
                 now_dt=now_dt,
                 severity="warning",
             )
             recovered.append(updated)
+        self.check_overrun_experiments(now=now_dt)
         return recovered
+
+    def check_overrun_experiments(self, *, now: Optional[datetime] = None) -> list[str]:
+        """
+        Flag experiments that have exceeded 2× their estimated_runtime_h.
+        Emits an alert but does NOT kill the running experiment.
+        Returns list of flagged schedule_ids.
+        """
+        now_dt = (now or _utc_now()).astimezone(timezone.utc)
+        flagged: list[str] = []
+        for entry in self.store.iter_problem_schedules():
+            if entry.status != "running" or entry.lease is None:
+                continue
+            if not entry.estimated_runtime_h:
+                continue
+            started_at = _parse_iso8601(entry.lease.acquired_at)
+            if started_at is None:
+                continue
+            elapsed_h = (now_dt - started_at).total_seconds() / 3600
+            if elapsed_h <= entry.estimated_runtime_h * 2.0:
+                continue
+            alert = AlertRecord(
+                alert_id=_alert_id(f"overrun-{entry.schedule_id}"),
+                severity="warning",
+                source="scheduler",
+                message=(
+                    f"Experiment {entry.schedule_id} has been running {elapsed_h:.1f}h "
+                    f"vs {entry.estimated_runtime_h:.1f}h estimate "
+                    f"({elapsed_h / entry.estimated_runtime_h:.1f}× overrun). "
+                    "Queue is blocked. Review manually."
+                ),
+                related_schedule_id=entry.schedule_id,
+                metadata={
+                    "alert_type": "experiment_overrun",
+                    "elapsed_h": round(elapsed_h, 2),
+                    "estimated_h": entry.estimated_runtime_h,
+                    "ratio": round(elapsed_h / entry.estimated_runtime_h, 2),
+                },
+            )
+            self.store.append_alert(alert)
+            flagged.append(entry.schedule_id)
+        return flagged
 
     def _is_due(self, entry: ProblemScheduleEntry, now_dt: datetime) -> bool:
         if entry.status == "scheduled":

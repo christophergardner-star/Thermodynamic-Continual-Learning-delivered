@@ -20,6 +20,7 @@ Log:     {workspace}/tar_state/experiment_orchestrator.log
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -170,6 +171,47 @@ _CONTEXT_TEMPLATES: dict[str, dict[str, str]] = {
     },
 }
 
+
+class _TeeStream:
+    """Write to a file and the original stream simultaneously."""
+
+    def __init__(self, file_path: Path, original_stream: Any) -> None:
+        self._fh = open(file_path, "a", encoding="utf-8", buffering=1)  # line-buffered
+        self._orig = original_stream
+
+    def write(self, data: str) -> int:
+        self._fh.write(data)
+        return self._orig.write(data)
+
+    def flush(self) -> None:
+        self._fh.flush()
+        self._orig.flush()
+
+    def close(self) -> None:
+        self._fh.close()
+
+    # Proxy all other attributes to the original stream so libraries that check
+    # for .fileno(), .isatty(), etc. don't break.
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._orig, name)
+
+
+@contextlib.contextmanager
+def _tee_stdout_stderr(log_path: Path):
+    """Context manager: tee sys.stdout and sys.stderr to log_path during execution."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    tee_out = _TeeStream(log_path, sys.stdout)
+    tee_err = _TeeStream(log_path, sys.stderr)
+    old_out, old_err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = tee_out, tee_err  # type: ignore[assignment]
+    try:
+        yield log_path
+    finally:
+        sys.stdout, sys.stderr = old_out, old_err
+        tee_out.close()
+        tee_err.close()
+
+
 # ── experiment spec ───────────────────────────────────────────────────────────
 @dataclass
 class ExperimentSpec:
@@ -273,6 +315,56 @@ class ExperimentResult:
     optimizer_backend_config: dict[str, Any] = field(default_factory=dict)
     completed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     confidence_score: float = 0.0     # 0–1: composite of effect size, p-value, n_seeds
+    power_analysis: dict[str, Any] = field(default_factory=dict)
+
+
+def _compute_power_analysis(
+    cohens_d: float,
+    n_seeds: int,
+    alpha: float = 0.05,
+) -> dict[str, Any]:
+    """
+    Retrospective power + minimum N for a one-sample t-test (H0: mean delta = 0).
+    Uses normal approximation — valid for n >= 3 guidance; exact for n >= 10.
+    """
+    import math
+
+    base: dict[str, Any] = {
+        "method": "one_sample_t_approx",
+        "alpha": alpha,
+        "cohens_d": round(float(cohens_d), 4),
+        "n_seeds": int(n_seeds),
+    }
+    if cohens_d < 1e-9 or n_seeds < 2:
+        base.update({
+            "observed_power": 0.0,
+            "min_n_for_80pct": None,
+            "underpowered": True,
+            "note": "Cannot compute: zero effect size or insufficient seeds.",
+        })
+        return base
+    try:
+        from scipy import stats as sc
+        z_alpha = sc.norm.ppf(1.0 - alpha / 2.0)   # two-tailed critical value
+        ncp = float(cohens_d) * math.sqrt(float(n_seeds))
+        observed_power = float(
+            1.0 - sc.norm.cdf(z_alpha - ncp) + sc.norm.cdf(-z_alpha - ncp)
+        )
+        z_beta = sc.norm.ppf(0.80)                  # target: 80 % power
+        min_n = int(math.ceil(((z_alpha + z_beta) / float(cohens_d)) ** 2))
+        base.update({
+            "observed_power": round(observed_power, 4),
+            "min_n_for_80pct": min_n,
+            "underpowered": int(n_seeds) < min_n,
+        })
+    except Exception as exc:
+        base.update({
+            "observed_power": None,
+            "min_n_for_80pct": None,
+            "underpowered": True,
+            "note": f"Power computation failed: {exc}",
+        })
+    return base
 
 
 # ── orchestrator ──────────────────────────────────────────────────────────────
@@ -304,6 +396,9 @@ class ExperimentOrchestrator:
         # fully satisfied (git-committed, hash-verified), not bypassed.
         self._active_manifest: ExecutionManifest | None = None
         self._autonomous: bool = False
+        # Hang detection: consecutive idle-tick counter per experiment_id.
+        # Resets to 0 when GPU or CPU activity is detected.
+        self._hang_idle_ticks: dict[str, int] = {}
         self._load()
         env_manifest = str(os.environ.get("TAR_MANIFEST_PATH", "") or "").strip()
         if env_manifest:
@@ -612,6 +707,27 @@ class ExperimentOrchestrator:
     def _order(self) -> list[ExperimentSpec]:
         return sorted(self._specs.values(), key=lambda s: (s.priority, s.submitted_at))
 
+    def _heartbeat_is_fresh(self, experiment_id: str, threshold_s: float = 120.0) -> bool:
+        """Return True if the experiment's heartbeat file was updated within threshold_s seconds.
+
+        The worker writes run_locks/{experiment_id}.pid every 60 s. A fresh heartbeat
+        means the subprocess is alive even if the OS PID check returns a stale handle
+        (Windows zombie PID problem).
+        """
+        lock_path = self.workspace / "tar_state" / "run_locks" / f"{experiment_id}.pid"
+        if not lock_path.exists():
+            return False
+        try:
+            data = json.loads(lock_path.read_text(encoding="utf-8"))
+            last_hb = str(data.get("last_heartbeat") or data.get("started_at_utc") or "").strip()
+            if not last_hb:
+                return False
+            dt = datetime.fromisoformat(last_hb.replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - dt).total_seconds()
+            return age < threshold_s
+        except Exception:
+            return False
+
     def _pid_exists(self, pid: int) -> bool:
         if pid <= 0:
             return False
@@ -847,17 +963,45 @@ class ExperimentOrchestrator:
 
         return changed
 
+    @staticmethod
+    def _config_fingerprint(spec: ExperimentSpec) -> str:
+        """SHA1 of (dataset, method, config_overrides, seeds, optimizer) — excludes name.
+
+        Used to detect Director duplicate-config bugs where identical experiments
+        are submitted with different IDs because their name strings differ.
+        """
+        key = (
+            str(spec.dataset or ""),
+            str(spec.method or ""),
+            json.dumps(spec.config_overrides or {}, sort_keys=True),
+            json.dumps(sorted(spec.seeds or [])),
+            str(spec.optimizer_backend or ""),
+        )
+        return hashlib.sha1(repr(key).encode()).hexdigest()[:12]
+
     def submit(self, spec: ExperimentSpec) -> ExperimentSpec:
-        """Add an experiment to the queue. Idempotent — duplicate IDs are ignored."""
+        """Add an experiment to the queue. Idempotent — duplicate IDs and configs are ignored."""
         if spec.id in self._specs:
             existing = self._specs[spec.id]
-            if existing.status in (EXP_COMPLETE, EXP_RUNNING):
+            if existing.status in (EXP_COMPLETE, EXP_RUNNING, EXP_PENDING, STAGE_QUEUED):
                 self._log(f"[submit] {spec.id} already {existing.status} — skipping")
                 return existing
         archived = self._get_archived_spec(spec.id)
         if archived is not None and archived.status in {EXP_COMPLETE, EXP_FAILED, EXP_SKIPPED}:
             self._log(f"[submit] {spec.id} already archived as {archived.status} — skipping")
             return archived
+        # Config-hash dedup: reject a spec whose (dataset, method, config, seeds) fingerprint
+        # matches an already-pending spec, even when the IDs differ.  Catches the Director
+        # duplicate-config bug where different name strings produce different IDs.
+        new_fp = self._config_fingerprint(spec)
+        for existing_id, existing_spec in self._specs.items():
+            if existing_spec.status in (EXP_PENDING, STAGE_QUEUED) and existing_id != spec.id:
+                if self._config_fingerprint(existing_spec) == new_fp:
+                    self._log(
+                        f"[submit] {spec.id} has identical config fingerprint to pending "
+                        f"{existing_id} — skipping duplicate"
+                    )
+                    return existing_spec
         # Auto-generate context and hardware budget if not set
         if not spec.context:
             self.generate_context(spec)
@@ -929,7 +1073,9 @@ class ExperimentOrchestrator:
                     "dataset": s.dataset,
                 }
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(reg, indent=2), encoding="utf-8")
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(reg, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
 
     def submit_many(self, specs: list[ExperimentSpec]) -> list[ExperimentSpec]:
         return [self.submit(s) for s in specs]
@@ -1065,7 +1211,14 @@ class ExperimentOrchestrator:
                     if self._mark_stalled(spec, "stale_running_pid_mismatch"):
                         changed = True
                 elif spec.pid and not self._pid_exists(spec.pid):
-                    if self._mark_stalled(spec, "stale_running_pid_missing"):
+                    if self._heartbeat_is_fresh(spec.id):
+                        # PID gone per OS but heartbeat file updated recently — likely a Windows
+                        # zombie handle. Log and monitor; do not mark stalled yet.
+                        self._log(
+                            f"[reconcile] {spec.id}: PID {spec.pid} not found by OS but heartbeat "
+                            f"is fresh (<120s) — possible zombie handle; monitoring"
+                        )
+                    elif self._mark_stalled(spec, "stale_running_pid_missing"):
                         changed = True
                 elif spec.error:
                     # Experiment is confirmed running — clear any residual error field
@@ -1151,9 +1304,23 @@ class ExperimentOrchestrator:
         if not s:
             return
         s.progress = progress
-        # Update projected outcome from live data
+        # Live ETA — informational only, never used as a kill condition
         seeds_done  = progress.get("seeds_done", 0)
         seeds_total = progress.get("seeds_total", len(s.seeds))
+        if seeds_done > 0 and s.started_at:
+            try:
+                started_dt = datetime.fromisoformat(s.started_at)
+                elapsed_h = (datetime.now(timezone.utc) - started_dt).total_seconds() / 3600
+                avg_per_seed_h = elapsed_h / seeds_done
+                seeds_remaining = max(seeds_total - seeds_done, 0)
+                eta_remaining_h = avg_per_seed_h * seeds_remaining
+                progress["eta_remaining_h"]  = round(eta_remaining_h, 2)
+                progress["avg_per_seed_h"]   = round(avg_per_seed_h, 2)
+                # Update spec's estimated runtime to live projection so dashboard shows accurate total
+                s.estimated_runtime_h = round(elapsed_h + eta_remaining_h, 2)
+            except Exception:
+                pass
+        # Update projected outcome from live data
         forg_list   = progress.get("forgetting_so_far", [])
         if forg_list and s.runner_key in {"phase16_scale_up_suite", "phase17_tinyimagenet_suite"}:
             mean_f = sum(forg_list) / len(forg_list)
@@ -1277,6 +1444,61 @@ class ExperimentOrchestrator:
             return None
         return self._execute(spec)
 
+    def _check_for_hangs(self) -> None:
+        """
+        Detect genuinely hung experiments by watching GPU + CPU across consecutive
+        poll ticks. A hang is flagged when BOTH are near-zero for HANG_THRESHOLD
+        consecutive ticks — this is activity-based, not time-based, so a legitimate
+        slow experiment (CIFAR-100, 12h) is never falsely flagged as long as the GPU
+        stays busy.
+        """
+        HANG_THRESHOLD = 5       # consecutive idle ticks before alerting (~2.5 min at 30s poll)
+        GPU_IDLE_PCT   = 5.0     # GPU % below which we consider it idle
+        CPU_IDLE_PCT   = 3.0     # process CPU % below which we consider it idle
+
+        running = [s for s in self._specs.values() if s.status == EXP_RUNNING]
+        if not running:
+            self._hang_idle_ticks.clear()
+            return
+
+        # Read GPU utilisation once for all experiments (shared GPU)
+        gpu_pct = 100.0
+        try:
+            import subprocess as _sp
+            res = _sp.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            )
+            gpu_pct = float(res.stdout.strip().split("\n")[0])
+        except Exception:
+            pass  # can't read nvidia-smi → assume active
+
+        # Read daemon process CPU (training runs in-process)
+        import os as _os
+        own_cpu = 100.0
+        try:
+            import psutil as _psutil
+            own_cpu = _psutil.Process(_os.getpid()).cpu_percent(interval=0.2)
+        except Exception:
+            pass
+
+        for spec in running:
+            is_idle = gpu_pct < GPU_IDLE_PCT and own_cpu < CPU_IDLE_PCT
+            if is_idle:
+                self._hang_idle_ticks[spec.id] = self._hang_idle_ticks.get(spec.id, 0) + 1
+            else:
+                self._hang_idle_ticks.pop(spec.id, None)
+
+            idle = self._hang_idle_ticks.get(spec.id, 0)
+            # Alert exactly once when threshold is crossed (not every tick after)
+            if idle == HANG_THRESHOLD:
+                idle_min = round(idle * 30 / 60, 1)
+                self._log(
+                    f"[hang_alert] {spec.id} — GPU {gpu_pct:.1f}% and CPU {own_cpu:.1f}% "
+                    f"both near-zero for {idle_min} min. Experiment may be hung. "
+                    f"No automatic kill — check manually or restart daemon."
+                )
+
     def run_parallel(self, continuous: bool = False, poll_interval_s: float = 30.0) -> None:
         """
         Hardware-aware parallel runner. Uses TARScheduler to decide which
@@ -1305,6 +1527,7 @@ class ExperimentOrchestrator:
             if not pending:
                 time.sleep(min(10.0, poll_interval_s))
                 continue
+            self._check_for_hangs()
             result = self.run_scheduled_once(scheduler=sch)
             if result is None:
                 time.sleep(poll_interval_s)
@@ -1463,9 +1686,18 @@ class ExperimentOrchestrator:
         self._refresh_author_state()
         self._write_process_registry()
 
+        # Route in-process stdout/stderr to logs/run.log so the dashboard can read it.
+        _run_log: Path | None = None
+        if report:
+            _rtd = Path(str(report.get("current_runtime_dir", "") or ""))
+            if _rtd.parts:
+                _run_log = _rtd / "logs" / "run.log"
+        _tee_ctx = _tee_stdout_stderr(_run_log) if _run_log else contextlib.nullcontext()
+
         t0 = time.time()
         try:
-            result = self._dispatch(spec)
+            with _tee_ctx:
+                result = self._dispatch(spec)
             elapsed = time.time() - t0
 
             spec.stage        = STAGE_ANALYZING
@@ -1489,12 +1721,18 @@ class ExperimentOrchestrator:
             self._log(f"[execute] DONE  {spec.id}  {result.verdict}"
                       f"  forgetting={result.mean_forgetting:.4f}  ({elapsed/3600:.1f}h)")
 
-            # Update frontier breakthrough count
-            if result.verdict == "BREAKTHROUGH":
+            # Update frontier verdict counts
+            if result.verdict in {"BREAKTHROUGH", "ADVERSE", "NULL"}:
                 try:
                     from tar_frontier import FrontierRegistry
                     fid = spec.frontier_problem_id or "fp-catastrophic-forgetting"
-                    FrontierRegistry(self.workspace).record_breakthrough(fid)
+                    reg = FrontierRegistry(self.workspace)
+                    if result.verdict == "BREAKTHROUGH":
+                        reg.record_breakthrough(fid)
+                    elif result.verdict == "ADVERSE":
+                        reg.record_adverse(fid)
+                    elif result.verdict == "NULL":
+                        reg.record_null(fid)
                 except Exception:
                     pass
             self._archive_terminal_experiment(spec, reason="completed")
@@ -1551,6 +1789,17 @@ class ExperimentOrchestrator:
             except Exception:
                 pass
             return None
+        finally:
+            # Clear GPU memory between experiments so residual allocations
+            # from one run don't fragment VRAM for the next.
+            try:
+                import gc as _gc
+                import torch as _torch
+                _gc.collect()
+                if _torch.cuda.is_available():
+                    _torch.cuda.empty_cache()
+            except Exception:
+                pass
 
     def _prepare_execution(self, spec: ExperimentSpec) -> dict[str, Any]:
         from tar_experiment_preflight import ExperimentPreflightManager
@@ -1613,8 +1862,95 @@ class ExperimentOrchestrator:
         except Exception:
             return None
 
+    def _run_in_docker(self, spec: ExperimentSpec) -> ExperimentResult:
+        """Execute an experiment inside the pinned tar-experiment Docker container.
+
+        The container mounts the repo read-only at /repo and the workspace
+        read-write at /workspace. docker_runner.py inside the container calls
+        _dispatch() directly, writes result JSON, then exits. No timeout is
+        applied — experiments run to completion regardless of duration.
+
+        Set spec.runner_key = "docker" and optionally populate
+        spec.runtime_context["docker_image"] and ["gpu_index"] to customise.
+        """
+        runtime = spec.runtime_context or {}
+        image = str(runtime.get("docker_image") or "tar-experiment:latest")
+        gpu_index = int(runtime.get("gpu_index") or 0)
+
+        repo_root = Path(__file__).parent.resolve()
+        workspace = self.workspace.resolve()
+
+        # Run directory inside the workspace — Docker writes here at /workspace/...
+        run_dir = workspace / "tar_state" / "docker_runs" / spec.id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        spec_file = run_dir / "spec.json"
+        result_file = run_dir / "result.json"
+        spec_file.write_text(json.dumps(asdict(spec)), encoding="utf-8")
+
+        # Forward active manifest path for audit trail (gate already passed)
+        manifest_path_str = ""
+        if self._active_manifest is not None:
+            _mp = getattr(self._active_manifest, "_path", None)
+            if _mp is not None:
+                manifest_path_str = str(_mp)
+
+        container_run_dir = f"/workspace/tar_state/docker_runs/{spec.id}"
+        cmd = [
+            "docker", "run", "--rm",
+            f"--gpus=device={gpu_index}",
+            "-v", f"{repo_root}:/repo:ro",
+            "-v", f"{workspace}:/workspace",
+            "-e", "PYTHONUNBUFFERED=1",
+            "-e", f"TAR_MANIFEST_PATH={manifest_path_str}",
+            "-w", "/repo",
+            image,
+            "/repo/docker_runner.py",
+            "--workspace", "/workspace",
+            "--spec-file", f"{container_run_dir}/spec.json",
+            "--result-file", f"{container_run_dir}/result.json",
+        ]
+
+        self._log(f"[docker] Starting container for {spec.id}: image={image} gpu={gpu_index}")
+        self._log(f"[docker] cmd: {' '.join(cmd)}")
+
+        docker_log = run_dir / "docker_run.log"
+        try:
+            # stdout passes through live (training output visible in terminal).
+            # stderr is captured to file so failures are diagnosable after the fact.
+            with open(docker_log, "w", encoding="utf-8") as _dlf:
+                proc = subprocess.run(
+                    cmd, cwd=str(repo_root), timeout=None,
+                    stderr=subprocess.PIPE,
+                )
+                stderr_text = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
+                if stderr_text:
+                    _dlf.write(stderr_text)
+                    self._log(f"[docker] stderr for {spec.id}:\n{stderr_text[-4000:]}")
+        except Exception as exc:
+            self._log(f"[docker] Container launch failed for {spec.id}: {exc}")
+            raise
+
+        if proc.returncode != 0:
+            self._log(f"[docker] Container exited {proc.returncode} for {spec.id}")
+            raise RuntimeError(
+                f"Docker container exited {proc.returncode} for '{spec.id}'"
+            )
+
+        if not result_file.exists():
+            raise RuntimeError(
+                f"Docker container completed (rc=0) but no result file at {result_file}"
+            )
+
+        raw = json.loads(result_file.read_text(encoding="utf-8"))
+        self._log(f"[docker] Result loaded for {spec.id}: verdict={raw.get('verdict')}")
+        return ExperimentResult(**raw)
+
     def _dispatch(self, spec: ExperimentSpec) -> ExperimentResult:
         """Route the experiment to the right runner based on dataset."""
+        if spec.runner_key == "docker":
+            return self._run_in_docker(spec)
+        if spec.runner_key == "generic_cl":
+            return self._run_generic_cl(spec)
         if spec.runner_key == "phase16_scale_up_suite":
             return self._run_phase16_suite(spec)
         if spec.runner_key == "phase17_tinyimagenet_suite":
@@ -1655,7 +1991,8 @@ class ExperimentOrchestrator:
         # hyperparameters) so results are directly comparable in the same environment.
         # Overrides are intentionally stripped for comparison methods — those
         # hyperparameters belong only to the primary method being probed.
-        _all_cmp = list(spec.config_overrides.get("comparison_methods") or ["ewc", "sgd_baseline"])
+        _cmp_raw = spec.config_overrides.get("comparison_methods")
+        _all_cmp = list(_cmp_raw) if _cmp_raw is not None else ["ewc", "sgd_baseline"]
         comparison_methods = [m for m in _all_cmp if m != spec.method]
         method_forgetting: dict[str, list[float]] = {m: [] for m in comparison_methods}
 
@@ -1665,9 +2002,14 @@ class ExperimentOrchestrator:
                 explicit_backend=spec.optimizer_backend,
                 explicit_config=spec.optimizer_backend_config,
             )
+            # config_overrides may supply train_epochs_per_task; honour it if present,
+            # otherwise fall back to spec.epochs. Pop before **expansion to avoid TypeError.
+            _epochs_per_task = int(clean_overrides.pop("train_epochs_per_task", spec.epochs))
+            for _k in ("seed", "optimizer_backend", "optimizer_backend_config"):
+                clean_overrides.pop(_k, None)
             cfg = ContinualLearningBenchmarkConfig(
                 seed=seed,
-                train_epochs_per_task=spec.epochs,
+                train_epochs_per_task=_epochs_per_task,
                 optimizer_backend=optimizer_backend,
                 optimizer_backend_config=optimizer_backend_config,
                 **clean_overrides,
@@ -1689,7 +2031,7 @@ class ExperimentOrchestrator:
                 try:
                     cfg_cmp = ContinualLearningBenchmarkConfig(
                         seed=seed,
-                        train_epochs_per_task=spec.epochs,
+                        train_epochs_per_task=_epochs_per_task,
                     )
                     r_cmp = run_split_cifar10_benchmark(
                         cfg_cmp, method=cmp_method, workspace=str(self.workspace),
@@ -1916,6 +2258,8 @@ class ExperimentOrchestrator:
             explicit_backend=spec.optimizer_backend,
             explicit_config=spec.optimizer_backend_config,
         )
+        _p16_n_tasks   = int(_clean_overrides.get("n_tasks",         p16.N_TASKS))
+        _p16_cls_task  = int(_clean_overrides.get("classes_per_task", p16.CLASSES_PER_TASK))
         for i, seed in enumerate(spec.seeds):
             res = p16.run_one_seed(
                 seed,
@@ -1932,6 +2276,8 @@ class ExperimentOrchestrator:
                 }),
                 optimizer_backend=optimizer_backend,
                 optimizer_backend_config=optimizer_backend_config,
+                n_tasks=_p16_n_tasks,
+                classes_per_task=_p16_cls_task,
             )
             forgetting_list.append(res["mean_forgetting"])
             accuracy_list.append(res["mean_accuracy"])
@@ -1943,7 +2289,7 @@ class ExperimentOrchestrator:
             self.update_progress(spec.id, {
                 "seeds_done": i + 1,
                 "seeds_total": len(spec.seeds),
-                "tasks_done": p16.N_TASKS,
+                "tasks_done": _p16_n_tasks,
                 "latest_accs": [f"{v:.3f}" for v in res.get("final_accs_per_task", [])],
                 "forgetting_so_far": forgetting_list[:],
             })
@@ -2009,6 +2355,98 @@ class ExperimentOrchestrator:
             _gc.collect()
             if _torch.cuda.is_available():
                 _torch.cuda.empty_cache()
+        return self._build_result(spec, seed_results, forgetting_list, accuracy_list)
+
+    # ── Generic CL runner (plugin registry + LLM synthesis) ──────────────────
+    def _run_generic_cl(self, spec: ExperimentSpec) -> ExperimentResult:
+        """
+        Run any method registered in METHOD_REGISTRY via the generic_cl_runner.
+        If spec.method is unknown, attempt LLM synthesis via method_synthesizer.
+        """
+        from tar_lab.method_registry import METHOD_REGISTRY, load_generated_methods
+        from tar_lab.generic_cl_runner import run_generic_benchmark
+
+        synth_dir = self.workspace / "tar_state" / "synthesized_methods"
+        load_generated_methods(synth_dir)
+
+        if spec.method not in METHOD_REGISTRY:
+            self._log(
+                f"[generic_cl] method '{spec.method}' not registered — "
+                "attempting LLM synthesis..."
+            )
+            try:
+                from tar_lab.method_synthesizer import maybe_synthesize_for_spec
+                found = maybe_synthesize_for_spec(
+                    spec.method, str(self.workspace), log_fn=self._log
+                )
+            except Exception as exc:
+                self._log(f"[generic_cl] synthesis error: {exc}")
+                found = False
+            if not found:
+                raise ValueError(
+                    f"Method '{spec.method}' not in METHOD_REGISTRY and synthesis failed. "
+                    f"Available: {sorted(METHOD_REGISTRY)}"
+                )
+
+        backbone = spec.backbone or "tiny_cnn"
+        dataset  = spec.dataset or "split_cifar10"
+
+        # For TinyImageNet: load data via the phase17 helper, pass as prebuilt loaders
+        prebuilt_train = prebuilt_test = None
+        if dataset == DATASET_TINYIMAGENET:
+            try:
+                import phase17_tinyimagenet as p17
+                from torch.utils.data import DataLoader
+                train_items, val_items = p17._load_hf_tinyimagenet(str(self.workspace))
+            except Exception as exc:
+                raise ValueError(
+                    f"TinyImageNet data load failed for generic_cl: {exc}"
+                ) from exc
+
+        seed_results, forgetting_list, accuracy_list = [], [], []
+
+        for i, seed in enumerate(spec.seeds):
+            if dataset == DATASET_TINYIMAGENET:
+                train_subsets, test_subsets = p17._build_tinyimagenet_tasks(
+                    seed, train_items, val_items, backbone=backbone
+                )
+                prebuilt_train = train_subsets
+                prebuilt_test  = test_subsets
+
+            def _progress(seed_idx: int, payload: dict) -> None:
+                self.update_progress(spec.id, {
+                    "seeds_done":        seed_idx,
+                    "seeds_total":       len(spec.seeds),
+                    "tasks_done":        payload.get("tasks_done", 0),
+                    "latest_accs":       payload.get("latest_accs", []),
+                    "forgetting_so_far": forgetting_list[:],
+                })
+
+            sr, fl, al = run_generic_benchmark(
+                dataset_name     = dataset,
+                backbone_name    = backbone,
+                method_name      = spec.method,
+                seeds            = [seed],
+                epochs           = spec.epochs,
+                config_overrides = dict(spec.config_overrides or {}),
+                data_root        = str(self.workspace / "data"),
+                log_fn           = self._log,
+                prebuilt_task_train = prebuilt_train,
+                prebuilt_task_test  = prebuilt_test,
+                progress_callback   = _progress,
+            )
+            forgetting_list.extend(fl)
+            accuracy_list.extend(al)
+            seed_results.extend(sr)
+
+            self.update_progress(spec.id, {
+                "seeds_done":        i + 1,
+                "seeds_total":       len(spec.seeds),
+                "tasks_done":        0,
+                "latest_accs":       [],
+                "forgetting_so_far": forgetting_list[:],
+            })
+
         return self._build_result(spec, seed_results, forgetting_list, accuracy_list)
 
     def _run_phase16_suite(self, spec: ExperimentSpec) -> ExperimentResult:
@@ -2135,7 +2573,8 @@ class ExperimentOrchestrator:
         alpha_bonf = 0.05 / n_comparisons
 
         is_breakthrough = mean_delta < -0.01 and p_val < alpha_bonf and cohens_d > 0.5
-        is_directional  = mean_delta < 0 and n_better >= n // 2 + 1
+        is_directional  = (mean_delta < 0 and n_better >= n // 2 + 1
+                           and p_val < 0.10)   # loose gate; prevents null results labelled positive
         is_adverse      = mean_delta > 0.02
         verdict = ("BREAKTHROUGH" if is_breakthrough else
                    "DIRECTIONAL"  if is_directional  else
@@ -2149,6 +2588,13 @@ class ExperimentOrchestrator:
         _d_score = min(1.0, cohens_d / 2.0)
         _n_score = n_better / max(n, 1)
         confidence_score = round((_p_score * 0.5 + _d_score * 0.3 + _n_score * 0.2), 3)
+
+        power_analysis = _compute_power_analysis(cohens_d, n, alpha=alpha_bonf)
+        if power_analysis.get("underpowered"):
+            self._log(
+                f"[power] {spec.id}: underpowered — observed power={power_analysis.get('observed_power')}, "
+                f"n_seeds={n}, min_n_for_80pct={power_analysis.get('min_n_for_80pct')}"
+            )
 
         return ExperimentResult(
             experiment_id=spec.id,
@@ -2175,6 +2621,7 @@ class ExperimentOrchestrator:
             optimizer_backend=spec.optimizer_backend,
             optimizer_backend_config=spec.optimizer_backend_config,
             confidence_score=confidence_score,
+            power_analysis=power_analysis,
         )
 
     def _build_suite_result(self, spec: ExperimentSpec, raw: dict[str, Any]) -> ExperimentResult:
@@ -2213,11 +2660,14 @@ class ExperimentOrchestrator:
             verdict = "BREAKTHROUGH"
         elif "ERROR" in str(raw.get("status", "")) or "ERROR" in str(raw.get("verdict", "")):
             verdict = "ERROR"
-        elif primary.get("mean_delta", 0.0) < 0:
+        elif (primary.get("mean_delta", 0.0) < 0
+              and primary.get("p_val", 1.0) < 0.10):   # p-value gate on DIRECTIONAL
             verdict = "DIRECTIONAL"
         else:
             verdict = "NULL"
 
+        _suite_cohens_d = float(primary.get("cohens_d", 0.0) or 0.0)
+        _suite_n        = len(seed_results) or len(spec.seeds)
         return ExperimentResult(
             experiment_id=spec.id,
             experiment_name=spec.name,
@@ -2236,12 +2686,13 @@ class ExperimentOrchestrator:
             mean_delta=primary.get("mean_delta", 0.0),
             t_stat=primary.get("t_stat", 0.0),
             p_val=primary.get("p_val", 1.0),
-            cohens_d=primary.get("cohens_d", 0.0),
+            cohens_d=_suite_cohens_d,
             n_better=primary.get("n_tcl_better", 0),
             verdict=verdict,
             notes=notes,
             optimizer_backend=spec.optimizer_backend,
             optimizer_backend_config=spec.optimizer_backend_config,
+            power_analysis=_compute_power_analysis(_suite_cohens_d, _suite_n),
         )
 
     def _build_validation_suite_result(self, spec: ExperimentSpec, raw: dict[str, Any]) -> ExperimentResult:
@@ -2320,6 +2771,10 @@ class ExperimentOrchestrator:
             notes=notes,
             optimizer_backend=spec.optimizer_backend,
             optimizer_backend_config=spec.optimizer_backend_config,
+            power_analysis=_compute_power_analysis(
+                float(tcl.get("cohens_d_forgetting", 0.0) or 0.0),
+                len(seed_results) or len(spec.seeds),
+            ),
         )
 
     def _load_baseline(self) -> list[float]:

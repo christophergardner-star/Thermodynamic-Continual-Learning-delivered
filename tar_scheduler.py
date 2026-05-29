@@ -28,6 +28,7 @@ _VRAM_BUDGET: dict[str, float] = {
     "split_cifar10":      2.5,   # ResNet-18 + 5-task CIFAR-10 on 4 GB-class GPUs
     "split_cifar100":     3.2,   # calibrated from the empirical local Phase 16 partial run
     "split_tinyimagenet": 3.3,   # conservative 4 GB-class target for serialized scale-up runs
+    "permuted_mnist":     1.5,   # MLP on 28x28 grayscale — minimal VRAM
 }
 
 # GPU headroom to reserve (never fill VRAM completely — leave room for temp spikes)
@@ -42,13 +43,19 @@ def _vram_headroom_gb(total_vram_gb: float) -> float:
 
 
 def _spec_vram_budget(spec: Any) -> float:
+    # Dataset-specific calibrated estimates take precedence — they are empirically
+    # validated and more accurate than the generic hardware_budget default (3.5 GB).
+    dataset = getattr(spec, "dataset", "")
+    if dataset in _VRAM_BUDGET:
+        return _VRAM_BUDGET[dataset]
+    # Fall back to explicit hardware_budget if set to something non-default
     budget = getattr(spec, "hardware_budget", {}) or {}
     if isinstance(budget, dict) and budget.get("vram_gb"):
         try:
             return float(budget["vram_gb"])
         except Exception:
             pass
-    return _VRAM_BUDGET.get(getattr(spec, "dataset", ""), 4.0)
+    return 4.0
 
 # ── data model ────────────────────────────────────────────────────────────────
 @dataclass

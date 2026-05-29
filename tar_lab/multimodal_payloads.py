@@ -902,6 +902,40 @@ def run_split_cifar10_benchmark(
     tcl_anchor_params: dict[str, torch.Tensor] = {}
     tcl_anchor_dpr: float = 0.0
 
+    # DER++ replay memory (Buzzega et al. 2020).
+    # Reservoir buffer: stores (x, y, logits) on CPU to bound memory.
+    # Replay is active from task 1 onward once the buffer has samples.
+    _der_mem_x:      list[torch.Tensor] = []
+    _der_mem_y:      list[torch.Tensor] = []
+    _der_mem_logits: list[torch.Tensor] = []
+    _der_n_seen = 0
+    _der_mem_size = int(config.der_mem_size)
+    _der_alpha    = float(config.der_alpha)
+    _der_beta     = float(config.der_beta)
+
+    # Canonical TCL state — uses tcl.py (ThermalImportance + ThermalMemory) directly.
+    # ThermalImportance is recreated per task; ThermalMemory persists across tasks.
+    # This runs the actual published TCL algorithm, unlike method="tcl" which is a
+    # D_PR-scaled uniform L2 anchor (see ALGORITHM NOTE above).
+    _tcl_canon_memory = None
+    _tcl_canon_importance = None
+    _tcl_canon_lambda = float(getattr(config, "tcl_penalty_lambda", 0.01))
+    if method == "tcl_canonical":
+        from tcl import ThermalMemory as _ThermalMemory
+        _tcl_canon_memory = _ThermalMemory()
+
+    # LwF state (Li & Hoiem 2018): knowledge distillation without replay.
+    # Before each new task, deep-copy trunk + completed task heads to CPU.
+    # During training, minimise KL-divergence between current model's old-task
+    # predictions and the frozen old model's predictions on the same batch.
+    # No replay buffer — distillation is applied to the current task's batches only.
+    import copy as _copy
+    _lwf_lambda      = float(getattr(config, "lwf_lambda",      1.0))
+    _lwf_temperature = float(getattr(config, "lwf_temperature", 2.0))
+    _lwf_old_trunk:       Optional[nn.Module]      = None   # frozen CPU copy of trunk
+    _lwf_old_heads:       list[nn.Module]          = []     # frozen CPU copies of old task heads
+    _lwf_old_shared_head: Optional[nn.Module]      = None   # frozen CPU copy of shared head
+
     for train_task_idx in range(config.n_tasks):
         # Reset per-task calibration state.  sigma_star_anchor will be
         # re-established from the first 20 batches of this task and frozen.
@@ -912,6 +946,30 @@ def run_split_cifar10_benchmark(
             and train_task_idx > 0
         ):
             observer.reset_for_new_task()
+
+        # Canonical TCL: fresh importance accumulator each task.
+        if method == "tcl_canonical":
+            from tcl import ThermalImportance as _ThermalImportance
+            _tcl_canon_importance = _ThermalImportance(trunk)
+
+        # LwF: snapshot old model BEFORE training this task.
+        # Snapshot at train_task_idx > 0 only — task 0 has no prior knowledge to distil.
+        if method == "lwf" and train_task_idx > 0:
+            _lwf_old_trunk = _copy.deepcopy(trunk).cpu().eval()
+            for p in _lwf_old_trunk.parameters():
+                p.requires_grad_(False)
+            if heads is not None:
+                _lwf_old_heads = [
+                    _copy.deepcopy(heads[k]).cpu().eval()
+                    for k in range(train_task_idx)
+                ]
+                for _oh in _lwf_old_heads:
+                    for p in _oh.parameters():
+                        p.requires_grad_(False)
+            elif shared_head is not None:
+                _lwf_old_shared_head = _copy.deepcopy(shared_head).cpu().eval()
+                for p in _lwf_old_shared_head.parameters():
+                    p.requires_grad_(False)
 
         optimizer = build_optimizer(
             all_params,
@@ -940,6 +998,10 @@ def run_split_cifar10_benchmark(
             _epoch_sigmas: list[float] = []
             _epoch_sigma_stars: list[float] = []
             _epoch_rhos: list[float] = []
+            _epoch_loss = 0.0
+            _epoch_n_batches = 0
+            _epoch_correct = 0
+            _epoch_total = 0
 
             for batch_x, batch_y in train_loader:
                 batch_x = batch_x.to(device)
@@ -951,6 +1013,13 @@ def run_split_cifar10_benchmark(
                     assert heads is not None
                     logits = heads[train_task_idx](reps)
                 loss = F.cross_entropy(logits, batch_y)
+                # DER++: snapshot current-batch logits BEFORE replay augmentation
+                # so the reservoir stores clean task predictions, not distillation targets.
+                _der_cur_logits = logits.detach().cpu() if method == "der_plus_plus" else None
+                _epoch_n_batches += 1
+                _epoch_loss += loss.item()
+                _epoch_correct += int((logits.detach().argmax(1) == batch_y).sum())
+                _epoch_total += int(batch_y.size(0))
 
                 if method == "ewc" and ewc_fisher:
                     ewc_loss = torch.zeros((), device=device)
@@ -968,9 +1037,14 @@ def run_split_cifar10_benchmark(
                         si_reg = si_reg + (si_omega[name].to(device) * (param - si_prev_params[name].to(device)).pow(2)).sum()
                     loss = loss + config.si_c * si_reg
 
-                # Dimensionality-weighted L2 penalty: penalise drift from the
-                # previous task's weights, scaled by that task's anchor D_PR.
-                # tcl_anchor_dpr is 0.0 on task 0 so the penalty is inactive.
+                # ALGORITHM NOTE — divergence from tcl.py:
+                # This is a D_PR-scaled *uniform* L2 anchor, not the canonical TCL algorithm.
+                # tcl.py (the EPTO SDK) uses per-element gradient-energy importance weights
+                # (ThermalImportance) and a ring-buffer over all past tasks (ThermalMemory).
+                # This implementation uses a single scalar D_PR to weight a uniform L2 penalty
+                # anchored only to the most recent task. All published results for method="tcl"
+                # reflect this implementation, not tcl.py. Use method="tcl_canonical" to run
+                # the true tcl.py algorithm for direct comparison.
                 if method in ("tcl", "tcl_penalty_only") and tcl_anchor_params and tcl_anchor_dpr > 0.0 and config.tcl_penalty_lambda > 0.0:
                     tcl_reg = torch.zeros((), device=device)
                     for name, param in trunk.named_parameters():
@@ -978,6 +1052,57 @@ def run_split_cifar10_benchmark(
                         if ref is not None:
                             tcl_reg = tcl_reg + (param.float() - ref.to(device).float()).pow(2).sum()
                     loss = loss + config.tcl_penalty_lambda * tcl_anchor_dpr * tcl_reg
+
+                # Canonical TCL penalty (tcl.py ThermalMemory): per-element importance
+                # weighted L2 over all past tasks, with recency decay. Active from task 1.
+                if method == "tcl_canonical" and _tcl_canon_memory and _tcl_canon_memory._tasks:
+                    loss = loss + _tcl_canon_lambda * _tcl_canon_memory.penalty(trunk, device=device)
+
+                # DER++: replay from reservoir buffer.
+                # alpha * MSE(new_logits, stored_logits)  — logit distillation
+                # beta  * CE(new_logits, stored_labels)   — classification replay
+                # Buffer is empty on task 0; replay starts automatically from task 1.
+                if method == "der_plus_plus" and _der_mem_x:
+                    _s = min(len(_der_mem_x), batch_x.size(0))
+                    _ridx = random.sample(range(len(_der_mem_x)), _s)
+                    _mx = torch.stack([_der_mem_x[i]      for i in _ridx]).to(device)
+                    _my = torch.stack([_der_mem_y[i]      for i in _ridx]).to(device)
+                    _ml = torch.stack([_der_mem_logits[i] for i in _ridx]).to(device)
+                    _rr = trunk(_mx)
+                    _rl = shared_head(_rr) if shared_head is not None else heads[train_task_idx](_rr)
+                    loss = loss + _der_alpha * F.mse_loss(_rl, _ml)
+                    loss = loss + _der_beta  * F.cross_entropy(_rl, _my)
+
+                # LwF distillation (Li & Hoiem 2018): frozen old model provides soft
+                # targets for old tasks. KL(old_soft || new_soft) with temperature T.
+                # Deepcopy models on CPU; moved to device per batch for inference only.
+                if method == "lwf" and _lwf_old_trunk is not None and train_task_idx > 0:
+                    T = _lwf_temperature
+                    with torch.no_grad():
+                        _old_reps = _lwf_old_trunk.to(device)(batch_x)
+
+                    lwf_loss = torch.zeros((), device=device)
+                    if heads is not None and _lwf_old_heads:
+                        for _k, _oh in enumerate(_lwf_old_heads):
+                            with torch.no_grad():
+                                _old_logits_k = _oh.to(device)(_old_reps)
+                            _new_logits_k = heads[_k](reps)
+                            lwf_loss = lwf_loss + F.kl_div(
+                                F.log_softmax(_new_logits_k / T, dim=1),
+                                F.softmax(_old_logits_k / T, dim=1),
+                                reduction="batchmean",
+                            ) * (T * T)
+                        lwf_loss = lwf_loss / max(len(_lwf_old_heads), 1)
+                    elif shared_head is not None and _lwf_old_shared_head is not None:
+                        with torch.no_grad():
+                            _old_logits_sh = _lwf_old_shared_head.to(device)(_old_reps)
+                        _new_logits_sh = shared_head(reps)
+                        lwf_loss = F.kl_div(
+                            F.log_softmax(_new_logits_sh / T, dim=1),
+                            F.softmax(_old_logits_sh / T, dim=1),
+                            reduction="batchmean",
+                        ) * (T * T)
+                    loss = loss + _lwf_lambda * lwf_loss
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -988,6 +1113,10 @@ def run_split_cifar10_benchmark(
                             si_path_integral[name] = si_path_integral[name] + (
                                 -param.grad.detach() * (param.detach() - si_prev_params[name].to(device))
                             ).abs().cpu()
+
+                # Canonical TCL: accumulate per-element gradient energy for importance.
+                if method == "tcl_canonical" and _tcl_canon_importance is not None:
+                    _tcl_canon_importance.accumulate(trunk)
 
                 # observer.step() reads gradients computed by backward() above.
                 # Must fire BEFORE optimizer.step() so gradients are fresh and
@@ -1017,6 +1146,21 @@ def run_split_cifar10_benchmark(
                 maybe_apply_optimizer_safety(optimizer, all_params)
                 optimizer.step()
 
+                # DER++: reservoir update — add current batch items to memory.
+                if method == "der_plus_plus" and _der_cur_logits is not None:
+                    for _i in range(batch_x.size(0)):
+                        _der_n_seen += 1
+                        if len(_der_mem_x) < _der_mem_size:
+                            _der_mem_x.append(batch_x[_i].detach().cpu())
+                            _der_mem_y.append(batch_y[_i].detach().cpu())
+                            _der_mem_logits.append(_der_cur_logits[_i])
+                        else:
+                            _j = random.randint(0, _der_n_seen - 1)
+                            if _j < _der_mem_size:
+                                _der_mem_x[_j]      = batch_x[_i].detach().cpu()
+                                _der_mem_y[_j]      = batch_y[_i].detach().cpu()
+                                _der_mem_logits[_j] = _der_cur_logits[_i]
+
             # record per-epoch regime summary for diagnostic trace
             if observer is not None and method == "tcl" and _epoch_regimes:
                 from collections import Counter
@@ -1044,6 +1188,15 @@ def run_split_cifar10_benchmark(
                         sum(_epoch_rhos) / len(_epoch_rhos) - 0.9, 4
                     )
                 tcl_trace.append(entry)
+
+            print(
+                f"\n  seed={config.seed}"
+                f"  task {train_task_idx + 1}/{config.n_tasks}"
+                f"  epoch {_epoch + 1}/{config.train_epochs_per_task}"
+                f"  loss {_epoch_loss / max(_epoch_n_batches, 1):.4f}"
+                f"  acc {100.0 * _epoch_correct / max(_epoch_total, 1):.1f}%",
+                flush=True,
+            )
 
         if method == "ewc":
             trunk.eval()
@@ -1091,6 +1244,10 @@ def run_split_cifar10_benchmark(
                 si_omega[name] = (si_omega[name].cpu() + si_path_integral[name].cpu() / denom).clamp(min=0)
                 si_path_integral[name].zero_()
             si_prev_params = {name: param.detach().cpu().clone() for name, param in trunk.named_parameters()}
+
+        # Canonical TCL: commit completed task checkpoint into memory.
+        if method == "tcl_canonical" and _tcl_canon_memory is not None and _tcl_canon_importance is not None:
+            _tcl_canon_memory.commit(trunk, _tcl_canon_importance, train_task_idx)
 
         # After task 0 training: set the dimensionality anchor so that
         # dimensionality_ratio is meaningful for all subsequent tasks.
@@ -1162,6 +1319,7 @@ def run_split_cifar10_benchmark(
     mean_forgetting = sum(metric.forgetting_measure for metric in per_task_metrics) / len(per_task_metrics)
     final_mean_accuracy = sum(metric.task_accuracy for metric in per_task_metrics) / len(per_task_metrics)
 
+    task_summaries: list[dict] = []
     trace_path = ""
     if observer is not None and workspace:
         trace_dir = Path(workspace) / "tar_state" / "cl_traces"
@@ -1203,6 +1361,45 @@ def run_split_cifar10_benchmark(
         trace_file.write_text(json.dumps(trace_data, indent=2), encoding="utf-8")
         trace_path = str(trace_file)
 
+    # Regime detection metrics: P/R/F1 of "disordered" regime predicting forgetting events.
+    # Ground truth: forgetting_measure > 0.05 per task (tasks 1+, task 0 has no prior tasks).
+    # Prediction: dominant regime for that task was "disordered".
+    # Unknown regime = no prediction (neither TP nor FP; contributes to FN if event present).
+    _regime_metrics: dict = {}
+    if task_summaries:
+        _FORGETTING_THRESHOLD = 0.05
+        _tp, _fp, _fn = 0, 0, 0
+        for t_idx, t_summary in enumerate(task_summaries):
+            if t_idx == 0:
+                continue  # task 0 has no prior — forgetting undefined
+            _gt_event = per_task_metrics[t_idx].forgetting_measure > _FORGETTING_THRESHOLD
+            _predicted = t_summary.get("dominant_regime") == "disordered"
+            if _gt_event and _predicted:
+                _tp += 1
+            elif not _gt_event and _predicted:
+                _fp += 1
+            elif _gt_event and not _predicted:
+                _fn += 1
+        _precision = _tp / max(_tp + _fp, 1)
+        _recall    = _tp / max(_tp + _fn, 1)
+        _f1 = 2 * _precision * _recall / max(_precision + _recall, 1e-12)
+        _forgetting_events = sum(
+            1 for m in per_task_metrics[1:] if m.forgetting_measure > _FORGETTING_THRESHOLD
+        )
+        _unknown_tasks = sum(
+            1 for s in task_summaries[1:] if s.get("dominant_regime") == "unknown"
+        )
+        _regime_metrics = {
+            "forgetting_threshold": _FORGETTING_THRESHOLD,
+            "forgetting_events":    _forgetting_events,
+            "tp": _tp, "fp": _fp, "fn": _fn,
+            "precision": round(_precision, 4),
+            "recall":    round(_recall, 4),
+            "f1":        round(_f1, 4),
+            "unknown_task_count": _unknown_tasks,
+            "regime_active": _unknown_tasks < (config.n_tasks - 1),
+        }
+
     return ContinualLearningBenchmarkResult(
         benchmark_id=uuid4().hex,
         method=method,
@@ -1214,6 +1411,7 @@ def run_split_cifar10_benchmark(
         final_mean_accuracy=final_mean_accuracy,
         last_task_accuracy=per_task_metrics[-1].task_accuracy,
         thermodynamic_trace_path=trace_path,
+        regime_detection_metrics=_regime_metrics,
     )
 
 

@@ -108,26 +108,32 @@ class StatAccumulator:
 
     @property
     def sample_count(self) -> int:
-        return len(self.covariances)
+        # Count sigma/rho samples, not covariance matrices.
+        # This allows the lightweight gradient-only path (compute_dpr=False, no activations)
+        # to reach statistically_ready without needing activation covariances.
+        return len(self.sigma_samples)
 
     def push(self, covariance: Optional[torch.Tensor], *, sigma: float, rho: float) -> None:
-        if covariance is None:
-            return
-        self.covariances.append(covariance.detach().float().cpu())
+        # Always record sigma/rho for regime classification (lightweight path).
         self.sigma_samples.append(float(sigma))
         self.rho_samples.append(float(rho))
-        trace = float(torch.trace(covariance).item())
-        trace_sq = float((covariance * covariance).sum().item())
-        d_pr = 0.0 if trace_sq <= 1e-12 else (trace * trace / trace_sq)
-        self.dpr_samples.append(d_pr)
-        if len(self.covariances) > self.window_size:
-            self.covariances.pop(0)
+        # Covariance (for D_PR) is optional — only from full path with compute_dpr=True.
+        if covariance is not None:
+            self.covariances.append(covariance.detach().float().cpu())
+            trace = float(torch.trace(covariance).item())
+            trace_sq = float((covariance * covariance).sum().item())
+            d_pr = 0.0 if trace_sq <= 1e-12 else (trace * trace / trace_sq)
+            self.dpr_samples.append(d_pr)
+        # Trim all rolling windows to window_size.
+        if len(self.sigma_samples) > self.window_size:
             self.sigma_samples.pop(0)
             self.rho_samples.pop(0)
+        if len(self.covariances) > self.window_size:
+            self.covariances.pop(0)
             self.dpr_samples.pop(0)
 
     def get_smoothed_metrics(self, *, anchor_effective_dimensionality: float = 0.0) -> SmoothedStatMetrics:
-        if not self.covariances:
+        if not self.sigma_samples:
             return SmoothedStatMetrics(
                 sample_count=0,
                 window_size=self.window_size,
@@ -140,15 +146,20 @@ class StatAccumulator:
                 statistically_ready=False,
                 dimensionality_ratio=0.0,
             )
-        mean_covariance = torch.stack(self.covariances, dim=0).mean(dim=0)
-        trace = float(torch.trace(mean_covariance).item())
-        trace_sq = float((mean_covariance * mean_covariance).sum().item())
-        smoothed_d_pr = 0.0 if trace_sq <= 1e-12 else (trace * trace / trace_sq)
-        d_pr_std_err = self._std_err(self.dpr_samples)
-        sigma_mean = self._mean(self.sigma_samples)
-        rho_mean = self._mean(self.rho_samples)
+        sigma_mean    = self._mean(self.sigma_samples)
+        rho_mean      = self._mean(self.rho_samples)
         sigma_std_err = self._std_err(self.sigma_samples)
-        rho_std_err = self._std_err(self.rho_samples)
+        rho_std_err   = self._std_err(self.rho_samples)
+        # D_PR only available when covariances were recorded (full path).
+        if self.covariances:
+            mean_covariance = torch.stack(self.covariances, dim=0).mean(dim=0)
+            trace = float(torch.trace(mean_covariance).item())
+            trace_sq = float((mean_covariance * mean_covariance).sum().item())
+            smoothed_d_pr = 0.0 if trace_sq <= 1e-12 else (trace * trace / trace_sq)
+            d_pr_std_err  = self._std_err(self.dpr_samples)
+        else:
+            smoothed_d_pr = 0.0
+            d_pr_std_err  = 0.0
         dimensionality_ratio = 0.0
         if anchor_effective_dimensionality > 0.0 and smoothed_d_pr > 0.0:
             dimensionality_ratio = smoothed_d_pr / anchor_effective_dimensionality

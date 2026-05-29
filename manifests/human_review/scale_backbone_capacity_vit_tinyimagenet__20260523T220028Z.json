@@ -1,0 +1,32 @@
+{
+  "manifest_id": "human-review-scale_backbone_capacity_vit_tinyimagenet-20260523T220028Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "created_at": "2026-05-23T22:00:28.361167+00:00",
+  "authorised_by": "cgard",
+  "purpose": "Human-approved bounded experiment for scale_backbone_capacity_vit_tinyimagenet. Prepared from TAR human review state; execution still requires committed manifest verification.",
+  "frontier_problem_id": "fp-scale-up",
+  "target_paper_id": "main_tcl_scaleup_paper",
+  "human_review_review_id": "proposal:scale_backbone_capacity_vit_tinyimagenet",
+  "global_time_limit_h": 48.0,
+  "experiments": [
+    {
+      "experiment_id": "scale_backbone_capacity_vit_tinyimagenet",
+      "name": "Backbone capacity scaling on realistic dataset with ViT",
+      "allowed_datasets": [
+        "split_tinyimagenet"
+      ],
+      "allowed_methods": [
+        "tcl"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1
+      ],
+      "time_limit_h": 48.0,
+      "run_limit": 1,
+      "notes": "queue now for the real-world problem 'Scalable Continual Adaptation on Realistic Visual Streams'. TAR is evaluating the unpublished internal TAR/TCL/ASC work against real external baselines."
+    }
+  ],
+  "content_hash": "b22e39ca99282309ec4af4f259324c0cc3f3ad1895eea2c4c483603e39a44799"
+}

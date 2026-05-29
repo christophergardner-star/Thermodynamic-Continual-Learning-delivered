@@ -55,6 +55,9 @@ class FrontierProblem:
     experiments_linked: list[str] = field(default_factory=list)
     papers_linked: list[str] = field(default_factory=list)
     breakthroughs_found: int = 0
+    adverse_count: int = 0       # experiments that returned ADVERSE verdict
+    null_count: int = 0          # experiments that returned NULL verdict
+    truth_status: str = "weak"   # weak | provisional | supported | validated | falsified
     priority: int = 50
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -356,6 +359,9 @@ class FrontierRegistry:
                 payload["experiments_linked"] = preserved.experiments_linked[:]
                 payload["papers_linked"] = preserved.papers_linked[:]
                 payload["breakthroughs_found"] = int(preserved.breakthroughs_found)
+                payload["adverse_count"]        = int(preserved.adverse_count)
+                payload["null_count"]           = int(preserved.null_count)
+                payload["truth_status"]         = str(preserved.truth_status or "weak")
                 payload["status"] = str(preserved.status or payload.get("status", FP_ACTIVE))
                 payload["created_at"] = preserved.created_at
             rebuilt[problem_id] = FrontierProblem(**payload)
@@ -417,6 +423,27 @@ class FrontierRegistry:
         if p:
             p.breakthroughs_found += 1
             p.status = FP_PUBLISHING
+            p.updated_at = datetime.now(timezone.utc).isoformat()
+            self._save()
+
+    def record_adverse(self, problem_id: str) -> None:
+        p = self._problems.get(problem_id)
+        if p:
+            p.adverse_count += 1
+            p.updated_at = datetime.now(timezone.utc).isoformat()
+            self._save()
+
+    def record_null(self, problem_id: str) -> None:
+        p = self._problems.get(problem_id)
+        if p:
+            p.null_count += 1
+            p.updated_at = datetime.now(timezone.utc).isoformat()
+            self._save()
+
+    def update_truth_status(self, problem_id: str, truth_status: str) -> None:
+        p = self._problems.get(problem_id)
+        if p and p.truth_status != truth_status:
+            p.truth_status = truth_status
             p.updated_at = datetime.now(timezone.utc).isoformat()
             self._save()
 

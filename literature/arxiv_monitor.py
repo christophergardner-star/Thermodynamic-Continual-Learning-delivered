@@ -388,6 +388,8 @@ class ArXivMonitor:
             with urlopen(req, timeout=30) as resp:
                 xml_bytes = resp.read()
         except HTTPError as exc:
+            if exc.code == 429:
+                return FetchResult(ok=False, source="arxiv", error=f"http_{exc.code}: {exc.reason}", rate_limited=True)
             return FetchResult(ok=False, source="arxiv", error=f"http_{exc.code}: {exc.reason}")
         except URLError as exc:
             return FetchResult(ok=False, source="arxiv", error=f"url_error: {exc.reason}")

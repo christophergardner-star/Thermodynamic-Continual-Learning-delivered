@@ -349,11 +349,19 @@ def run_one_seed(
         for _epoch in range(EPOCHS):
             trunk.train()
             heads[train_t].train()
+            _epoch_loss = 0.0
+            _epoch_n_batches = 0
+            _epoch_correct = 0
+            _epoch_total = 0
             for bx, by in loader:
                 bx, by = bx.to(device), by.to(device)
                 reps = trunk(bx)
                 logits = heads[train_t](reps)
                 loss = F.cross_entropy(logits, by)
+                _epoch_n_batches += 1
+                _epoch_loss += loss.item()
+                _epoch_correct += int((logits.detach().argmax(1) == by).sum())
+                _epoch_total += int(by.size(0))
 
                 if method == "ewc" and ewc_fisher:
                     ewc_pen = torch.zeros((), device=device)
@@ -381,6 +389,14 @@ def run_one_seed(
                         group["lr"] = adj_lr
                 maybe_apply_optimizer_safety(optimizer, all_params)
                 optimizer.step()
+
+            print(
+                f"\n  seed={seed}  task {train_t + 1}/{N_TASKS}"
+                f"  epoch {_epoch + 1}/{EPOCHS}"
+                f"  loss {_epoch_loss / max(_epoch_n_batches, 1):.4f}"
+                f"  acc {100.0 * _epoch_correct / max(_epoch_total, 1):.1f}%",
+                flush=True,
+            )
 
         if method == "ewc":
             trunk.eval()

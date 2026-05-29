@@ -9,16 +9,46 @@ import os
 import subprocess
 import sys
 import time
+import datetime
 from pathlib import Path
 
 _repo = str(Path(__file__).resolve().parent)
 sys.path.insert(0, _repo)
 from tar_storage import ensure_workspace_layout, resolve_workspace
+from tar_lab.runtime_ledger import acquire_runtime_lease, release_runtime_lease, RuntimeLeaseError
+from tar_lab.validation import build_validation_state
 
 _ws = ensure_workspace_layout(resolve_workspace(Path(_repo)), repo_root=Path(_repo))
 _INDEX = _ws / "tar_state" / "comparisons" / "canonical_results_index.jsonl"
 
 POLL_INTERVAL_S = 60
+_CHAIN_STATE = _ws / "tar_state" / "rerun_chain_state.json"
+
+
+def _write_chain_state(statuses: dict[str, str]) -> None:
+    """Write all chain steps with their current status for the dashboard to read."""
+    import datetime
+    steps = []
+    for step in CHAIN:
+        steps.append({
+            "phase":        step["phase"],
+            "logical_name": step["logical_name"],
+            "script":       step["script"],
+            "manifest_id":  Path(step["manifest"]).stem,
+            "log":          step["log"],
+            "wait_for":     step["wait_for"],
+            "status":       statuses.get(step["logical_name"], "pending"),
+        })
+    _CHAIN_STATE.parent.mkdir(parents=True, exist_ok=True)
+    _CHAIN_STATE.write_text(
+        json.dumps({"steps": steps, "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _clear_chain_state() -> None:
+    if _CHAIN_STATE.exists():
+        _CHAIN_STATE.unlink()
 
 
 def _indexed_logical_names() -> set[str]:
@@ -51,7 +81,7 @@ def _write_active_rerun(phase: int, logical_name: str, script: str, manifest: st
         "script": script,
         "manifest_id": manifest,
         "log": log,
-        "started_at": json.dumps(None),
+        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "status": "running",
     }
     out = _ws / "tar_state" / "active_rerun.json"
@@ -71,6 +101,23 @@ def _run_step(script: str, manifest: str, log: str, phase: int, logical_name: st
     env["PYTHONIOENCODING"] = "utf-8"
     log_path = Path(log)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        lease = acquire_runtime_lease(
+            _ws,
+            component_id=f"rerun_chain:{logical_name}",
+            component_kind="rerun_phase",
+            experiment_id=logical_name,
+            manifest_id=Path(manifest).stem,
+            manifest_path=str((Path(_repo) / manifest) if not Path(manifest).is_absolute() else Path(manifest)),
+            owner_component="run_rerun_chain",
+            source_script=Path(__file__).name,
+            conflict_keys=[f"experiment:{logical_name}", f"rerun_chain:{phase}"],
+            stale_timeout_s=12 * 3600.0,
+            extra={"phase": phase, "log": str(log_path)},
+        )
+    except RuntimeLeaseError as exc:
+        print(f"[chain] REFUSED: {exc}", flush=True)
+        sys.exit(1)
     _write_active_rerun(phase, logical_name, script, manifest, log)
     with open(log_path, "w", encoding="utf-8") as logf:
         proc = subprocess.run(
@@ -82,8 +129,21 @@ def _run_step(script: str, manifest: str, log: str, phase: int, logical_name: st
         )
     _clear_active_rerun()
     if proc.returncode != 0:
+        release_runtime_lease(
+            _ws,
+            lease_id=str(lease.get("lease_id", "") or ""),
+            final_status="failed",
+            completion_reason=f"{script} exited {proc.returncode}",
+        )
         print(f"[chain] ERROR: {script} exited {proc.returncode}. Chain halted.", flush=True)
         sys.exit(proc.returncode)
+    build_validation_state(_ws, persist=True)
+    release_runtime_lease(
+        _ws,
+        lease_id=str(lease.get("lease_id", "") or ""),
+        final_status="complete",
+        completion_reason=f"{script} completed successfully",
+    )
     print(f"[chain] {script} complete.", flush=True)
 
 
@@ -107,9 +167,17 @@ CHAIN = [
 ]
 
 print("[chain] Rerun chain started: Phase 11 -> Phase 12 -> Phase 13", flush=True)
+_statuses: dict[str, str] = {step["logical_name"]: "pending" for step in CHAIN}
+_write_chain_state(_statuses)
+
 for step in CHAIN:
     _wait_for(step["wait_for"])
+    _statuses[step["logical_name"]] = "running"
+    _write_chain_state(_statuses)
     _run_step(step["script"], step["manifest"], step["log"],
               phase=step["phase"], logical_name=step["logical_name"])
+    _statuses[step["logical_name"]] = "complete"
+    _write_chain_state(_statuses)
 
 print("\n[chain] All reruns complete: Phase 11, 12, 13.", flush=True)
+_clear_chain_state()

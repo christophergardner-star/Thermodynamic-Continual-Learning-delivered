@@ -1,0 +1,104 @@
+\section{Introduction}
+\label{sec:introduction}
+
+Neural networks trained sequentially on multiple tasks suffer from catastrophic
+forgetting: gradient updates that adapt the network to a new task systematically
+overwrite the weight configurations that encoded prior tasks, leading to abrupt
+performance collapse on earlier data~\cite{McCloskey1989}.
+This phenomenon is not a mere implementation detail but a structural consequence
+of shared parameter spaces and unconstrained gradient descent; a network that
+achieves near-perfect performance on Task~$T$ after learning Task~$T{+}1$ will
+frequently revert to chance-level accuracy on~$T$, as though the earlier training
+had never occurred~\cite{Kirkpatrick2017}.
+The severity of the problem scales with task dissimilarity and network depth,
+making it a fundamental obstacle to deploying neural networks in settings where
+the data distribution shifts over time.
+
+Existing regularisation-based approaches address catastrophic forgetting by
+penalising changes to parameters judged important for previous tasks.
+Elastic Weight Consolidation (EWC) computes a Fisher information matrix after
+each task and uses its diagonal as a per-parameter importance weight in a
+quadratic penalty term~\cite{Kirkpatrick2017}.
+Synaptic Intelligence (SI) accumulates an online surrogate importance measure
+by tracking the contribution of each parameter to the loss reduction throughout
+training~\cite{Zenke2017}.
+Both methods share the requirement of maintaining and updating a full set of
+per-parameter importance weights, which adds memory and computation overhead
+proportional to the number of learnable parameters.
+A more subtle and empirically consequential failure mode, however, lies in the
+interaction between importance weighting and network calibration: when importance
+weights are over-constraining, the network can be driven into a degenerate
+solution in which it outputs a constant prediction for all inputs, collapsing
+to chance-level accuracy on every task while still satisfying the forgetting
+penalty.
+Under forgetting-only evaluation this collapse is invisible, because a network
+that has never moved from its initial prediction incurs zero measurable forgetting.
+This asymmetry between forgetting metrics and accuracy motivates a two-dimensional
+evaluation standard.
+
+We propose Thermodynamic Continual Learning (TCL), a method that replaces
+per-parameter importance estimation with a coarser, thermodynamically motivated
+consolidation signal derived from the activation distribution of the network
+during task training.
+TCL monitors the \emph{thermal ratio} $\rho = \sigma / \sigma^\star$, where
+$\sigma$ is the current standard deviation of task-specific activations and
+$\sigma^\star$ is a reference value estimated at the beginning of training.
+When $\rho < 0.9$---indicating that the activation distribution has contracted
+into an ordered, low-entropy regime---TCL applies a $D_\text{PR}$-weighted
+$\ell_2$ anchor penalty that constrains the network weights to remain close to
+their values at the consolidation moment.
+When $\rho \geq 0.9$, the network is in a disordered regime and the penalty is
+not applied.
+Crucially, TCL requires no Fisher matrix computation and no per-parameter
+importance bookkeeping: the consolidation decision is made thermodynamically,
+from aggregate activation statistics, rather than from gradient statistics.
+
+The contributions of this paper are threefold.
+\begin{enumerate}
+  \item \textbf{The TCL method.}
+        We introduce an activation-entropy-driven thermodynamic governor
+        that detects the consolidation moment via the thermal ratio $\rho$
+        and applies a $D_\text{PR}$-weighted $\ell_2$ anchor penalty when the
+        ordered regime is entered.
+        The method is parameter-light, requires a single scalar threshold,
+        and adds no per-parameter storage.
+
+  \item \textbf{Empirical results on Split-CIFAR-10.}
+        On Split-CIFAR-10 with a ResNet-18 backbone, TCL reduces catastrophic
+        forgetting by $0.1170$ relative to vanilla SGD ($p = 0.0012$,
+        Cohen's $d = 3.68$, 5/5 seeds), and also outperforms EWC
+        ($\Delta = -0.0748$, $p = 0.0190$, $d = 1.70$, 5/5).
+        Ablation experiments (Phase~11) reveal that the anchor penalty is
+        the primary load-bearing component: a governor-only variant (no penalty)
+        tracks SGD, while the penalty-only variant closes most of the gap and
+        the full TCL loop remains best on mean forgetting, though the
+        full-vs.-penalty comparison is not yet resolved at $n=5$.
+
+  \item \textbf{The JAF (joint accuracy-forgetting) metric.}
+        We propose JAF as a minimal two-dimensional evaluation standard that
+        jointly reports task accuracy and forgetting, making degenerate
+        solutions immediately visible.
+        Applying JAF to SI at published default hyperparameters ($c = 0.1$)
+        reveals that SI collapses to $0.500$ accuracy (chance level) on all
+        five seeds, achieving competitive forgetting scores solely because a
+        network that never updates its predictions cannot forget.
+        Phase~13 shows that this failure is specific to part of the default
+        hyperparameter neighbourhood: $c=0.01$ recovers non-trivial accuracy,
+        whereas $c \in \{0.1, 0.5\}$ remains collapsed.
+\end{enumerate}
+
+The remainder of this paper is organised as follows.
+Section~\ref{sec:background} reviews the continual learning literature,
+the thermodynamic analogy, and the evaluation protocols that motivate JAF.
+Section~\ref{sec:method} presents the TCL algorithm, the $\rho$ governor,
+and the $D_\text{PR}$-weighted anchor penalty in detail.
+Section~\ref{sec:experiments} reports experimental results across Phases~10
+through~15, including the primary comparison (Phase~10), ablation analysis
+(Phase~11), SI robustness sweep (Phase~13), and class-incremental mechanism
+search (Phase~15).
+Section~\ref{sec:discussion} interprets the results, discusses limitations,
+and situates TCL within the broader regularisation-based continual learning
+landscape.
+Section~\ref{sec:conclusion} summarises the contributions and outlines
+directions for future work.
+An appendix reports EWC $\lambda$ sensitivity experiments (Phase~12).

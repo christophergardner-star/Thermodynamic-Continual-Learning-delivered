@@ -1,0 +1,175 @@
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+\label{sec:setup}
+
+We evaluate on Split-CIFAR-10 in the task-incremental setting: CIFAR-10 is split into
+five sequential tasks of two classes each, with task identity available at test time.
+All methods use a ResNet-18 backbone~\cite{He2016} trained for 40 epochs per task.
+We report results across five fixed random seeds $\{42, 0, 1, 2, 3\}$.
+The primary metric is mean forgetting (average accuracy drop on previously learned tasks)
+with standard deviation across seeds. We also report final task accuracy and the joint
+accuracy-forgetting (JAF) metric ($= \text{accuracy} - \text{forgetting}$) to guard
+against degenerate low-forgetting solutions.
+
+\subsection{Phase 10: Four-Way Baseline Comparison}
+\label{sec:baseline}
+
+We compare TCL against EWC~\cite{Kirkpatrick2017} ($\lambda=100$),
+SI~\cite{Zenke2017} (default hyperparameters), and SGD (no regularisation).
+
+\begin{table}[h]
+\centering
+\caption{Phase 10 baseline comparison. Forgetting and accuracy are mean $\pm$ std over 5 seeds.}
+\label{tab:baseline}
+\begin{tabular}{lcc}
+\toprule
+Method & Forgetting $\downarrow$ & Accuracy $\uparrow$ \\
+\midrule
+TCL (ours)          & $\mathbf{0.1161 \pm 0.029}$ & $0.760$ \\
+EWC ($\lambda=100$) & $0.1909 \pm 0.023$ & $0.730$ \\
+SI (default)        & $0.0920$ & $0.500$ \\
+SGD (no reg.)       & $0.2331 \pm 0.003$ & $0.697$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{TCL vs.\ SGD.} TCL reduces mean forgetting by $0.1170$
+($p = 0.0012$, $d = 3.68$, 5/5 seeds), a statistically significant result.
+
+\textbf{TCL vs.\ EWC.} TCL reduces mean forgetting by $0.0748$ relative to EWC
+($p = 0.0190$, $d = 1.70$, 5/5 seeds), reproducing the Outcome~A family under
+controlled rerun conditions. TCL therefore outperforms the $\lambda=100$ EWC
+baseline on this benchmark without Fisher-matrix computation.
+
+\subsection{Methodological Observation: SI Collapse}
+\label{sec:si-collapse}
+
+At published default hyperparameters, SI produces $0.500$ accuracy on all five seeds
+--- chance-level performance. Despite this, SI's forgetting score ($0.0920$) is
+competitive with EWC on forgetting-only metrics, because a network predicting one class
+never ``forgets'' in the measured sense. This demonstrates the failure mode of
+forgetting-only evaluation. The JAF metric we propose is a minimal corrective: a method
+must achieve non-trivial accuracy before its forgetting score is meaningful.
+
+\subsection{Phase 11: Component Ablation}
+\label{sec:ablation}
+
+\begin{table}[h]
+\centering
+\caption{Phase 11 ablation. Forgetting = mean $\pm$ std over 5 seeds.}
+\label{tab:ablation}
+\begin{tabular}{lcc}
+\toprule
+Condition & Forgetting $\downarrow$ & vs.\ Full TCL \\
+\midrule
+SGD (no regularisation) & $0.2191 \pm 0.061$ & $p=0.0198$, $d=1.68$ \\
+Governor-only           & $0.2500 \pm 0.069$ & $p=0.0232$, $d=1.60$ \\
+Penalty-only            & $0.1429 \pm 0.018$ & $p=0.3154$, $d=0.51$ \\
+Full TCL (ours)         & $\mathbf{0.1272 \pm 0.022}$ & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Governor-only tracks SGD closely, confirming that LR modulation alone does not
+deliver the forgetting reduction. Penalty-only carries most of the gain, and
+full TCL remains best on mean forgetting, but the full-vs.-penalty comparison
+is not yet resolved at $n=5$ ($p = 0.3154$, $d = 0.51$).
+
+\subsection{Phase 13: SI Hyperparameter Robustness}
+\label{sec:si-robustness}
+
+To determine whether the SI collapse observed in Phase~10 is an artefact of the published
+default hyperparameter $c = 0.1$, we swept $c \in \{0.01, 0.1, 0.5\}$
+with $\xi = 0.001$ fixed, using three seeds $\{42, 0, 1\}$ on the same benchmark.
+Accuracy $\leq 0.55$ (chance) is marked as collapsed.
+
+\begin{table}[h]
+\centering
+\caption{Phase 13: SI hyperparameter sweep (3 seeds $\{42, 0, 1\}$). TCL reference from Phase~10.
+Accuracy $\leq 0.55$ = collapsed to chance.}
+\label{tab:si-sweep}
+\begin{tabular}{lcc}
+\toprule
+Method & Forgetting $\downarrow$ & Accuracy $\uparrow$ \\
+\midrule
+TCL (Phase~10 ref.) & $0.1161 \pm 0.029$ & --- \\
+SI ($c=0.01$) & $0.0488 \pm 0.009$ & $0.797$  \\
+SI ($c=0.1$) & $0.1362 \pm 0.005$ & $0.500$ \textbf{[collapse]} \\
+SI ($c=0.5$) & $0.0915 \pm 0.001$ & $0.500$ \textbf{[collapse]} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+SI recovers non-trivial accuracy only for $c=0.01$, while $c \in \{0.1, 0.5\}$
+remains collapsed. The failure mode is therefore specific to part of the
+published default neighbourhood rather than the entire SI family.
+
+\subsection{Phase 15: Class-Incremental Mechanism Search}
+\label{sec:class-incremental}
+
+The class-incremental setting removes task identity at test time, requiring the network
+to identify which task a test sample belongs to as well as classify within that task.
+This is substantially harder than the task-incremental setting and closer to real-world
+continual learning requirements. We ran a mechanism search on Split-CIFAR-10 in the
+class-incremental setting using backbone \texttt{resnet18}, seeds $\{42, 0, 1\}$.
+
+\begin{table}[h]
+\centering
+\caption{Phase 15: Class-incremental mechanism search candidates, sorted by mean forgetting.
+Bold = best candidate. $\Delta_\text{SGD}$ = forgetting delta vs.\ SGD baseline.}
+\label{tab:class-inc}
+\begin{tabular}{lccccc}
+\toprule
+Mechanism & Forgetting $\downarrow$ & Accuracy $\uparrow$ & JAF $\uparrow$ & $\Delta_\text{SGD}$ & Wins \\
+\midrule
+tcl\_stability\_bias & $\mathbf{0.6974 \pm 0.007}$ & $0.181$ & $0.055$ & $-0.0358$ & 3/3 \\
+tcl\_carryover\_anchor & $0.7061 \pm 0.006$ & $0.183$ & $0.054$ & $-0.0271$ & 3/3 \\
+tcl\_balanced & $0.7115 \pm 0.001$ & $0.182$ & $0.053$ & $-0.0217$ & 3/3 \\
+tcl\_plasticity\_bias & $0.7181 \pm 0.002$ & $0.185$ & $0.052$ & $-0.0151$ & 3/3 \\
+tcl\_penalty\_only & $0.7256 \pm 0.003$ & $0.184$ & $0.051$ & $-0.0076$ & 3/3 \\
+tcl\_governor\_only & $0.7329 \pm 0.002$ & $0.189$ & $0.051$ & $-0.0003$ & 2/3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Best mechanism: \texttt{tcl\_stability\_bias} ($\Delta_\text{EWC} = -0.0299$,
+$p = 0.0118$, $d = 5.26$).
+
+\subsection{Phase 17: TinyImageNet Scale-Up}
+\label{sec:tinyimagenet}
+
+To assess whether the forgetting reductions observed on Split-CIFAR-10 transfer
+to a harder benchmark, we evaluate on Split-TinyImageNet: TinyImageNet
+(200 classes, $64\times64$) split into ten sequential tasks of 20 classes each,
+using a ResNet-18 backbone trained for 40 epochs per task.
+We report results over three fixed random seeds $\{42, 0, 1\}$.
+
+\begin{table}[h]
+\centering
+\caption{Phase 17: Split-TinyImageNet scale-up. Forgetting and accuracy are
+mean $\pm$ std over 3 seeds. $p$ and $d$ are paired $t$-test (two-tailed)
+of TCL vs.\ each baseline.}
+\label{tab:tinyimagenet}
+\begin{tabular}{lcccc}
+\toprule
+Method & Forgetting $\downarrow$ & Accuracy $\uparrow$ & $p$ & $d$ \\
+\midrule
+TCL (ours)   & $\mathbf{0.0221 \pm 0.006}$ & $0.592$ & --- & --- \\
+EWC ($\lambda=100$) & $0.0524 \pm 0.041$ & $0.596$ & $0.359$ & $0.68$ \\
+SGD (no reg.) & $0.5183 \pm 0.011$ & $0.298$ & $0.0001$ & $75.1$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{TCL vs.\ SGD.} TCL reduces mean forgetting by $0.4962$ on TinyImageNet
+($p = 0.0001$, $d = 75.1$, 3/3 seeds), confirming that the forgetting reduction
+observed on Split-CIFAR-10 is not benchmark-specific.
+
+\textbf{TCL vs.\ EWC.} TCL's mean forgetting ($0.0221$) is numerically lower
+than EWC's ($0.0524$), with 2/3 seeds showing TCL better. However, EWC exhibits
+high variance across seeds ($\pm 0.041$ vs.\ TCL's $\pm 0.006$), and the
+difference is not statistically significant at $n = 3$ ($p = 0.359$, $d = 0.68$).
+Whether TCL reliably outperforms EWC on TinyImageNet is not resolved at this
+seed count.

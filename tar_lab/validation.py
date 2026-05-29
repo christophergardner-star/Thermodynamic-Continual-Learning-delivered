@@ -220,7 +220,17 @@ def classify_trust_tier(
         trust_tier = TRUST_LEGACY
         basis = "legacy_pre_rail_or_missing_env"
 
-    publication_allowed = trust_tier in TRUST_PUBLICATION_ALLOWED
+    MIN_SEEDS_FOR_PUBLICATION = 5
+    seed_count = 0
+    if result_payload:
+        seed_count = int(result_payload.get("seed_count", 0) or 0)
+        if not seed_count:
+            seeds = result_payload.get("seeds") or result_payload.get("seed_results") or []
+            seed_count = len(seeds) if isinstance(seeds, (list, dict)) else 0
+    publication_allowed = (
+        trust_tier in TRUST_PUBLICATION_ALLOWED
+        and seed_count >= MIN_SEEDS_FOR_PUBLICATION
+    )
     provenance_status = "env_snapshot_present" if env_present else "missing_env_snapshot"
     catalog = phase_catalog_by_logical_name().get(logical_name)
     return {
@@ -260,6 +270,16 @@ def validate_result_artifact(
         issues.append("statistics_block_missing_or_empty")
     if trust["provenance_status"] != "env_snapshot_present" and trust["trust_tier"] in {TRUST_TRUSTED_RERUN, TRUST_TRUSTED_MANUAL}:
         issues.append("trusted_result_missing_env_snapshot")
+    if not trust["publication_allowed"] and trust["provenance_status"] == "env_snapshot_present":
+        # env present but publication still blocked — seed count too low
+        seed_count = 0
+        if result_payload:
+            seed_count = int(result_payload.get("seed_count", 0) or 0)
+            if not seed_count:
+                seeds = result_payload.get("seeds") or result_payload.get("seed_results") or []
+                seed_count = len(seeds) if isinstance(seeds, (list, dict)) else 0
+        if seed_count < 5:
+            issues.append(f"insufficient_seeds_for_publication: {seed_count} < 5")
     return {
         "schema": "tar_result_validation_v1",
         "validated_at": _now_iso(),
@@ -339,6 +359,52 @@ def validate_paper_evidence(
         "waiting_for_experiments": waiting,
         "unsupported_experiments": unsupported,
         "issues": issues,
+    }
+
+
+def validate_paper_evidence_partial(
+    workspace: Path,
+    *,
+    paper_id: str,
+    linked_experiment_ids: list[str],
+    waiting_for_experiment_ids: list[str],
+) -> dict[str, Any]:
+    """Partial-evidence variant of validate_paper_evidence.
+
+    Gate B (publication_allowed trust-tier check) is still a hard stop.
+    Gate A (waiting experiments that have not yet run) produces stubs instead of
+    blocking entirely.  Returns evidence_ready=True when Gate B passes, plus
+    partial_mode=True and stub_experiment_ids when Gate A has pending items.
+    """
+    trusted_ids    = _trusted_experiment_ids(workspace)
+    superseded_ids = _superseded_experiment_ids(workspace)
+    waiting = [str(x) for x in waiting_for_experiment_ids if str(x).strip()]
+    linked  = [str(x) for x in linked_experiment_ids      if str(x).strip()]
+
+    # Gate B: results that EXIST but are not publication-allowed (hard stop, same as
+    # the strict variant).  Waiting experiments are excluded here because they have no
+    # result to validate yet — there is nothing untrustworthy about them, they just
+    # haven't run.
+    unsupported = [
+        x for x in linked
+        if x not in trusted_ids and x not in superseded_ids and x not in waiting
+    ]
+
+    # Gate A: experiments not yet run — these become LaTeX stubs (not a hard stop).
+    stub_ids = [x for x in waiting if x not in trusted_ids]
+
+    issues: list[str] = []
+    if unsupported:
+        issues.append(f"linked_experiments_not_publication_allowed: {unsupported}")
+
+    return {
+        "paper_id":                 paper_id,
+        "evidence_ready":           not unsupported,   # True when Gate B passes
+        "partial_mode":             bool(stub_ids),    # True when Gate A has pending items
+        "stub_experiment_ids":      stub_ids,
+        "waiting_for_experiments":  waiting,
+        "unsupported_experiments":  unsupported,
+        "issues":                   issues,
     }
 
 

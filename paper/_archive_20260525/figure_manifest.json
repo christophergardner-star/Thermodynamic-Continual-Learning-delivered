@@ -1,0 +1,41 @@
+{
+  "generated_at": "2026-05-16T14:33:59.843670+00:00",
+  "required_figures": [
+    {
+      "figure_id": "phase16_hpc_comparison",
+      "source_phases": [
+        "phase16"
+      ]
+    },
+    {
+      "figure_id": "tar_architecture",
+      "source_phases": []
+    },
+    {
+      "figure_id": "continual_learning_schematic",
+      "source_phases": []
+    }
+  ],
+  "generated_figures": [
+    {
+      "figure_id": "phase16_hpc_comparison",
+      "path": "C:\\Users\\cgard\\TAR\\Thermodynamic-Continual-Learning-delivered\\paper\\figures\\phase16_hpc_comparison.png",
+      "caption": "Phase 16 six-method comparison: HPC vs SGD, EWC, SI, and TCL baselines on Split-CIFAR-10. HPC (ours, highlighted) is the autonomous TAR hypothesis.",
+      "source_phases": [
+        "phase16"
+      ]
+    },
+    {
+      "figure_id": "tar_architecture",
+      "path": "C:\\Users\\cgard\\TAR\\Thermodynamic-Continual-Learning-delivered\\paper\\figures\\tar_architecture.png",
+      "caption": "TAR (Thermodynamic Active Research) autonomous research loop. Human review gates the transition from experiment queue to training worker.",
+      "source_phases": []
+    },
+    {
+      "figure_id": "continual_learning_schematic",
+      "path": "C:\\Users\\cgard\\TAR\\Thermodynamic-Continual-Learning-delivered\\paper\\figures\\continual_learning_schematic.png",
+      "caption": "Split-CIFAR-10 task structure: five sequential binary classification tasks. Forgetting is measured as the accuracy drop on previous tasks after each new task is learned.",
+      "source_phases": []
+    }
+  ]
+}

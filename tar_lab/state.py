@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Type, TypeVar
+
+_T = TypeVar("_T")
 
 from tar_lab.schemas import (
     AgendaDecisionRecord,
@@ -137,6 +140,7 @@ class TARStateStore:
         self.build_attestations_dir.mkdir(parents=True, exist_ok=True)
         self.literature_dir.mkdir(parents=True, exist_ok=True)
         self.literature_manifests_dir.mkdir(parents=True, exist_ok=True)
+        self._lock: threading.RLock = threading.RLock()
 
     def _atomic_write_text(self, path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,6 +150,27 @@ class TARStateStore:
 
     def _atomic_write_json(self, path: Path, payload: Dict[str, Any]) -> None:
         self._atomic_write_text(path, json.dumps(payload, indent=2))
+
+    def _safe_jsonl_append(self, path: Path, data: Dict[str, Any]) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(data) + "\n")
+                handle.flush()
+        except OSError:
+            pass  # append failures must not crash daemon cycles
+
+    def _iter_jsonl(self, path: Path, model_class: Type[_T]) -> List[_T]:
+        if not path.exists():
+            return []
+        rows: List[_T] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                try:
+                    rows.append(model_class.model_validate_json(line))  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+        return rows
 
     @staticmethod
     def _safe_literature_manifest_path(root: Path, manifest_id: str) -> Path:
@@ -175,62 +200,43 @@ class TARStateStore:
         self._atomic_write_json(self.knowledge_graph_path, graph.model_dump(mode="json"))
 
     def append_knowledge_entry(self, entry: KnowledgeGraphEntry) -> None:
-        graph = self.load_knowledge_graph()
-        graph.entries.append(entry)
-        self.save_knowledge_graph(graph)
+        with self._lock:
+            graph = self.load_knowledge_graph()
+            graph.entries.append(entry)
+            self.save_knowledge_graph(graph)
 
     def update_knowledge_entry(self, trial_id: str, **updates: Any) -> None:
-        graph = self.load_knowledge_graph()
-        new_entries: List[KnowledgeGraphEntry] = []
-        for entry in graph.entries:
-            if entry.trial_id == trial_id:
-                new_entries.append(entry.model_copy(update=updates))
-            else:
-                new_entries.append(entry)
-        self.save_knowledge_graph(KnowledgeGraphState(entries=new_entries))
+        with self._lock:
+            graph = self.load_knowledge_graph()
+            new_entries: List[KnowledgeGraphEntry] = []
+            for entry in graph.entries:
+                if entry.trial_id == trial_id:
+                    new_entries.append(entry.model_copy(update=updates))
+                else:
+                    new_entries.append(entry)
+            self.save_knowledge_graph(KnowledgeGraphState(entries=new_entries))
 
     def append_metric(self, metrics: GovernorMetrics) -> None:
-        with self.metrics_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(metrics.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.metrics_log_path, metrics.model_dump(mode="json"))
 
     def iter_metrics(self) -> Iterable[GovernorMetrics]:
-        if not self.metrics_log_path.exists():
-            return []
-        rows: List[GovernorMetrics] = []
-        for line in self.metrics_log_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(GovernorMetrics.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.metrics_log_path, GovernorMetrics)
 
     def tail_metrics(self, count: int = 3) -> List[GovernorMetrics]:
         rows = list(self.iter_metrics())
         return rows[-count:]
 
     def append_research_document(self, document: ResearchDocument) -> None:
-        with self.research_intel_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(document.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.research_intel_path, document.model_dump(mode="json"))
 
     def iter_research_documents(self) -> Iterable[ResearchDocument]:
-        if not self.research_intel_path.exists():
-            return []
-        rows: List[ResearchDocument] = []
-        for line in self.research_intel_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(ResearchDocument.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.research_intel_path, ResearchDocument)
 
     def append_frontier_gap(self, gap: FrontierGapRecord) -> None:
-        with self.frontier_gaps_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(gap.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.frontier_gaps_path, gap.model_dump(mode="json"))
 
     def iter_frontier_gaps(self) -> Iterable[FrontierGapRecord]:
-        if not self.frontier_gaps_path.exists():
-            return []
-        rows: List[FrontierGapRecord] = []
-        for line in self.frontier_gaps_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(FrontierGapRecord.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.frontier_gaps_path, FrontierGapRecord)
 
     def get_frontier_gap(self, gap_id: str) -> Optional[FrontierGapRecord]:
         for gap in self.iter_frontier_gaps():
@@ -248,33 +254,27 @@ class TARStateStore:
         )
 
     def update_frontier_gap(self, gap_id: str, **updates: Any) -> Optional[FrontierGapRecord]:
-        rows = list(self.iter_frontier_gaps())
-        updated_gap: Optional[FrontierGapRecord] = None
-        new_rows: List[FrontierGapRecord] = []
-        for gap in rows:
-            if gap.gap_id == gap_id:
-                updated_gap = gap.model_copy(update=updates)
-                new_rows.append(updated_gap)
-            else:
-                new_rows.append(gap)
-        content = ""
-        if new_rows:
-            content = "\n".join(json.dumps(item.model_dump(mode="json")) for item in new_rows) + "\n"
-        self._atomic_write_text(self.frontier_gaps_path, content)
-        return updated_gap
+        with self._lock:
+            rows = list(self.iter_frontier_gaps())
+            updated_gap: Optional[FrontierGapRecord] = None
+            new_rows: List[FrontierGapRecord] = []
+            for gap in rows:
+                if gap.gap_id == gap_id:
+                    updated_gap = gap.model_copy(update=updates)
+                    new_rows.append(updated_gap)
+                else:
+                    new_rows.append(gap)
+            content = ""
+            if new_rows:
+                content = "\n".join(json.dumps(item.model_dump(mode="json")) for item in new_rows) + "\n"
+            self._atomic_write_text(self.frontier_gaps_path, content)
+            return updated_gap
 
     def append_gap_scan_report(self, report: FrontierGapScanReport) -> None:
-        with self.gap_scan_reports_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(report.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.gap_scan_reports_path, report.model_dump(mode="json"))
 
     def iter_gap_scan_reports(self) -> Iterable[FrontierGapScanReport]:
-        if not self.gap_scan_reports_path.exists():
-            return []
-        rows: List[FrontierGapScanReport] = []
-        for line in self.gap_scan_reports_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(FrontierGapScanReport.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.gap_scan_reports_path, FrontierGapScanReport)
 
     def load_registered_families(self) -> RegisteredFamilyState:
         if not self.registered_families_path.exists():
@@ -299,13 +299,14 @@ class TARStateStore:
         return [GenerativeDirectorProposal.model_validate(item) for item in rows]
 
     def save_family_proposal(self, proposal: GenerativeDirectorProposal) -> None:
-        proposals = [item for item in self.load_family_proposals() if item.proposal_id != proposal.proposal_id]
-        proposals.append(proposal)
-        proposals.sort(key=lambda item: (item.created_at, item.proposal_id))
-        self._atomic_write_text(
-            self.family_proposals_path,
-            json.dumps([item.model_dump(mode="json") for item in proposals], indent=2),
-        )
+        with self._lock:
+            proposals = [item for item in self.load_family_proposals() if item.proposal_id != proposal.proposal_id]
+            proposals.append(proposal)
+            proposals.sort(key=lambda item: (item.created_at, item.proposal_id))
+            self._atomic_write_text(
+                self.family_proposals_path,
+                json.dumps([item.model_dump(mode="json") for item in proposals], indent=2),
+            )
 
     def get_approved_families(self) -> List[ProposedExperimentFamily]:
         return [
@@ -315,17 +316,10 @@ class TARStateStore:
         ]
 
     def append_verification_report(self, report: VerificationReport) -> None:
-        with self.verification_reports_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(report.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.verification_reports_path, report.model_dump(mode="json"))
 
     def iter_verification_reports(self) -> Iterable[VerificationReport]:
-        if not self.verification_reports_path.exists():
-            return []
-        rows: List[VerificationReport] = []
-        for line in self.verification_reports_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(VerificationReport.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.verification_reports_path, VerificationReport)
 
     def latest_verification_report(self, trial_id: Optional[str] = None) -> Optional[VerificationReport]:
         rows = list(self.iter_verification_reports())
@@ -335,17 +329,10 @@ class TARStateStore:
         return None
 
     def append_breakthrough_report(self, report: BreakthroughReport) -> None:
-        with self.breakthrough_reports_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(report.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.breakthrough_reports_path, report.model_dump(mode="json"))
 
     def iter_breakthrough_reports(self) -> Iterable[BreakthroughReport]:
-        if not self.breakthrough_reports_path.exists():
-            return []
-        rows: List[BreakthroughReport] = []
-        for line in self.breakthrough_reports_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(BreakthroughReport.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.breakthrough_reports_path, BreakthroughReport)
 
     def latest_breakthrough_report(self, trial_id: Optional[str] = None) -> Optional[BreakthroughReport]:
         rows = list(self.iter_breakthrough_reports())
@@ -355,34 +342,28 @@ class TARStateStore:
         return None
 
     def append_claim_verdict(self, verdict: ClaimVerdict) -> None:
-        with self.claim_verdicts_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(verdict.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.claim_verdicts_path, verdict.model_dump(mode="json"))
 
     def upsert_claim_verdict(self, verdict: ClaimVerdict) -> None:
-        rows = list(self.iter_claim_verdicts())
-        replaced = False
-        updated_rows: List[ClaimVerdict] = []
-        for item in rows:
-            if item.verdict_id == verdict.verdict_id:
+        with self._lock:
+            rows = list(self.iter_claim_verdicts())
+            replaced = False
+            updated_rows: List[ClaimVerdict] = []
+            for item in rows:
+                if item.verdict_id == verdict.verdict_id:
+                    updated_rows.append(verdict)
+                    replaced = True
+                else:
+                    updated_rows.append(item)
+            if not replaced:
                 updated_rows.append(verdict)
-                replaced = True
-            else:
-                updated_rows.append(item)
-        if not replaced:
-            updated_rows.append(verdict)
-        content = ""
-        if updated_rows:
-            content = "\n".join(json.dumps(item.model_dump(mode="json")) for item in updated_rows) + "\n"
-        self._atomic_write_text(self.claim_verdicts_path, content)
+            content = ""
+            if updated_rows:
+                content = "\n".join(json.dumps(item.model_dump(mode="json")) for item in updated_rows) + "\n"
+            self._atomic_write_text(self.claim_verdicts_path, content)
 
     def iter_claim_verdicts(self) -> Iterable[ClaimVerdict]:
-        if not self.claim_verdicts_path.exists():
-            return []
-        rows: List[ClaimVerdict] = []
-        for line in self.claim_verdicts_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(ClaimVerdict.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.claim_verdicts_path, ClaimVerdict)
 
     def latest_claim_verdict(self, trial_id: Optional[str] = None) -> Optional[ClaimVerdict]:
         rows = list(self.iter_claim_verdicts())
@@ -434,17 +415,10 @@ class TARStateStore:
         return decisions
 
     def append_research_decision(self, record: ResearchDecisionRecord) -> None:
-        with self.research_decisions_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.research_decisions_path, record.model_dump(mode="json"))
 
     def iter_research_decisions(self) -> Iterable[ResearchDecisionRecord]:
-        if not self.research_decisions_path.exists():
-            return []
-        rows: List[ResearchDecisionRecord] = []
-        for line in self.research_decisions_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(ResearchDecisionRecord.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.research_decisions_path, ResearchDecisionRecord)
 
     def latest_research_decision(
         self,
@@ -465,15 +439,16 @@ class TARStateStore:
         return None
 
     def append_problem_study(self, report: ProblemStudyReport) -> None:
-        with self.problem_studies_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(report.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.problem_studies_path, report.model_dump(mode="json"))
 
     def iter_problem_studies(self) -> Iterable[ProblemStudyReport]:
         if not self.problem_studies_path.exists():
             return []
         rows: List[ProblemStudyReport] = []
         for line in self.problem_studies_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
+            if not line.strip():
+                continue
+            try:
                 payload = json.loads(line)
                 environment = payload.get("environment")
                 if isinstance(environment, dict) and "execution_report_path" not in environment:
@@ -507,6 +482,8 @@ class TARStateStore:
                         for idx, text in enumerate(hypotheses, start=1)
                     ]
                 rows.append(ProblemStudyReport.model_validate(payload))
+            except Exception:
+                pass
         return rows
 
     def latest_problem_study(self, problem_id: Optional[str] = None) -> Optional[ProblemStudyReport]:
@@ -517,8 +494,7 @@ class TARStateStore:
         return None
 
     def append_problem_execution(self, report: ProblemExecutionReport) -> None:
-        with self.problem_executions_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(report.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.problem_executions_path, report.model_dump(mode="json"))
 
     def write_run_manifest(self, manifest: RunManifest) -> Path:
         path = self.manifests_dir / f"{manifest.manifest_id}.json"
@@ -654,13 +630,7 @@ class TARStateStore:
         return self.memory_manifest_path
 
     def iter_problem_executions(self) -> Iterable[ProblemExecutionReport]:
-        if not self.problem_executions_path.exists():
-            return []
-        rows: List[ProblemExecutionReport] = []
-        for line in self.problem_executions_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(ProblemExecutionReport.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.problem_executions_path, ProblemExecutionReport)
 
     def latest_problem_execution(self, problem_id: Optional[str] = None) -> Optional[ProblemExecutionReport]:
         rows = list(self.iter_problem_executions())
@@ -680,22 +650,24 @@ class TARStateStore:
         self._atomic_write_json(self.problem_schedule_path, state.model_dump(mode="json"))
 
     def append_problem_schedule(self, entry: ProblemScheduleEntry) -> None:
-        state = self.load_problem_schedule()
-        state.entries.append(entry)
-        self.save_problem_schedule(state)
+        with self._lock:
+            state = self.load_problem_schedule()
+            state.entries.append(entry)
+            self.save_problem_schedule(state)
 
     def update_problem_schedule(self, schedule_id: str, **updates: Any) -> Optional[ProblemScheduleEntry]:
-        state = self.load_problem_schedule()
-        updated_entry: Optional[ProblemScheduleEntry] = None
-        new_entries: List[ProblemScheduleEntry] = []
-        for entry in state.entries:
-            if entry.schedule_id == schedule_id:
-                updated_entry = entry.model_copy(update=updates)
-                new_entries.append(updated_entry)
-            else:
-                new_entries.append(entry)
-        self.save_problem_schedule(ProblemScheduleState(entries=new_entries))
-        return updated_entry
+        with self._lock:
+            state = self.load_problem_schedule()
+            updated_entry: Optional[ProblemScheduleEntry] = None
+            new_entries: List[ProblemScheduleEntry] = []
+            for entry in state.entries:
+                if entry.schedule_id == schedule_id:
+                    updated_entry = entry.model_copy(update=updates)
+                    new_entries.append(updated_entry)
+                else:
+                    new_entries.append(entry)
+            self.save_problem_schedule(ProblemScheduleState(entries=new_entries))
+            return updated_entry
 
     def iter_problem_schedules(self) -> Iterable[ProblemScheduleEntry]:
         return self.load_problem_schedule().entries
@@ -717,11 +689,12 @@ class TARStateStore:
         self._atomic_write_json(self.research_projects_path, state.model_dump(mode="json"))
 
     def upsert_research_project(self, project: ResearchProject) -> None:
-        state = self.load_research_projects()
-        entries = [item for item in state.entries if item.project_id != project.project_id]
-        entries.append(project)
-        entries.sort(key=lambda item: (item.updated_at, item.created_at, item.project_id))
-        self.save_research_projects(ResearchProjectState(entries=entries))
+        with self._lock:
+            state = self.load_research_projects()
+            entries = [item for item in state.entries if item.project_id != project.project_id]
+            entries.append(project)
+            entries.sort(key=lambda item: (item.updated_at, item.created_at, item.project_id))
+            self.save_research_projects(ResearchProjectState(entries=entries))
 
     def list_research_projects(self) -> List[ResearchProject]:
         return self.load_research_projects().entries
@@ -739,17 +712,18 @@ class TARStateStore:
         return sorted(entries, key=lambda item: (item.updated_at, item.created_at, item.project_id))[-1]
 
     def update_research_project(self, project_id: str, **updates: Any) -> Optional[ResearchProject]:
-        state = self.load_research_projects()
-        updated_project: Optional[ResearchProject] = None
-        new_entries: List[ResearchProject] = []
-        for entry in state.entries:
-            if entry.project_id == project_id:
-                updated_project = entry.model_copy(update=updates)
-                new_entries.append(updated_project)
-            else:
-                new_entries.append(entry)
-        self.save_research_projects(ResearchProjectState(entries=new_entries))
-        return updated_project
+        with self._lock:
+            state = self.load_research_projects()
+            updated_project: Optional[ResearchProject] = None
+            new_entries: List[ResearchProject] = []
+            for entry in state.entries:
+                if entry.project_id == project_id:
+                    updated_project = entry.model_copy(update=updates)
+                    new_entries.append(updated_project)
+                else:
+                    new_entries.append(entry)
+            self.save_research_projects(ResearchProjectState(entries=new_entries))
+            return updated_project
 
     def load_research_portfolio(self) -> ResearchPortfolio:
         if not self.research_portfolio_path.exists():
@@ -763,17 +737,10 @@ class TARStateStore:
         self._atomic_write_json(self.research_portfolio_path, updated.model_dump(mode="json"))
 
     def append_project_priority_record(self, record: ProjectPriorityRecord) -> None:
-        with self.project_priority_records_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.project_priority_records_path, record.model_dump(mode="json"))
 
     def iter_project_priority_records(self) -> Iterable[ProjectPriorityRecord]:
-        if not self.project_priority_records_path.exists():
-            return []
-        rows: List[ProjectPriorityRecord] = []
-        for line in self.project_priority_records_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(ProjectPriorityRecord.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.project_priority_records_path, ProjectPriorityRecord)
 
     def latest_project_priority_record(self, project_id: Optional[str] = None) -> Optional[ProjectPriorityRecord]:
         rows = list(self.iter_project_priority_records())
@@ -784,17 +751,10 @@ class TARStateStore:
         return None
 
     def append_evidence_debt_record(self, record: EvidenceDebtRecord) -> None:
-        with self.evidence_debt_records_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.evidence_debt_records_path, record.model_dump(mode="json"))
 
     def iter_evidence_debt_records(self) -> Iterable[EvidenceDebtRecord]:
-        if not self.evidence_debt_records_path.exists():
-            return []
-        rows: List[EvidenceDebtRecord] = []
-        for line in self.evidence_debt_records_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(EvidenceDebtRecord.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.evidence_debt_records_path, EvidenceDebtRecord)
 
     def latest_evidence_debt_record(self, project_id: Optional[str] = None) -> Optional[EvidenceDebtRecord]:
         rows = list(self.iter_evidence_debt_records())
@@ -805,17 +765,10 @@ class TARStateStore:
         return None
 
     def append_project_staleness_record(self, record: ProjectStalenessRecord) -> None:
-        with self.project_staleness_records_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.project_staleness_records_path, record.model_dump(mode="json"))
 
     def iter_project_staleness_records(self) -> Iterable[ProjectStalenessRecord]:
-        if not self.project_staleness_records_path.exists():
-            return []
-        rows: List[ProjectStalenessRecord] = []
-        for line in self.project_staleness_records_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(ProjectStalenessRecord.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.project_staleness_records_path, ProjectStalenessRecord)
 
     def latest_project_staleness_record(self, project_id: Optional[str] = None) -> Optional[ProjectStalenessRecord]:
         rows = list(self.iter_project_staleness_records())
@@ -826,17 +779,10 @@ class TARStateStore:
         return None
 
     def append_portfolio_decision(self, decision: PortfolioDecision) -> None:
-        with self.portfolio_decisions_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(decision.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.portfolio_decisions_path, decision.model_dump(mode="json"))
 
     def iter_portfolio_decisions(self) -> Iterable[PortfolioDecision]:
-        if not self.portfolio_decisions_path.exists():
-            return []
-        rows: List[PortfolioDecision] = []
-        for line in self.portfolio_decisions_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(PortfolioDecision.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.portfolio_decisions_path, PortfolioDecision)
 
     def latest_portfolio_decision(self) -> Optional[PortfolioDecision]:
         rows = list(self.iter_portfolio_decisions())
@@ -854,17 +800,10 @@ class TARStateStore:
         return path
 
     def append_publication_handoff(self, package: PublicationHandoffPackage) -> None:
-        with self.publication_handoffs_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(package.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.publication_handoffs_path, package.model_dump(mode="json"))
 
     def iter_publication_handoffs(self) -> Iterable[PublicationHandoffPackage]:
-        if not self.publication_handoffs_path.exists():
-            return []
-        rows: List[PublicationHandoffPackage] = []
-        for line in self.publication_handoffs_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(PublicationHandoffPackage.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.publication_handoffs_path, PublicationHandoffPackage)
 
     def latest_publication_handoff(self, project_id: Optional[str] = None) -> Optional[PublicationHandoffPackage]:
         rows = list(self.iter_publication_handoffs())
@@ -875,17 +814,10 @@ class TARStateStore:
         return None
 
     def append_priority_snapshot(self, snapshot: PortfolioPrioritySnapshot) -> None:
-        with self.priority_snapshots_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(snapshot.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.priority_snapshots_path, snapshot.model_dump(mode="json"))
 
     def iter_priority_snapshots(self) -> Iterable[PortfolioPrioritySnapshot]:
-        if not self.priority_snapshots_path.exists():
-            return []
-        rows: List[PortfolioPrioritySnapshot] = []
-        for line in self.priority_snapshots_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(PortfolioPrioritySnapshot.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.priority_snapshots_path, PortfolioPrioritySnapshot)
 
     def latest_priority_snapshot(self, project_id: Optional[str] = None) -> Optional[PortfolioPrioritySnapshot]:
         rows = list(self.iter_priority_snapshots())
@@ -896,17 +828,10 @@ class TARStateStore:
         return None
 
     def append_budget_allocation(self, decision: BudgetAllocationDecision) -> None:
-        with self.budget_allocations_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(decision.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.budget_allocations_path, decision.model_dump(mode="json"))
 
     def iter_budget_allocations(self) -> Iterable[BudgetAllocationDecision]:
-        if not self.budget_allocations_path.exists():
-            return []
-        rows: List[BudgetAllocationDecision] = []
-        for line in self.budget_allocations_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(BudgetAllocationDecision.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.budget_allocations_path, BudgetAllocationDecision)
 
     def latest_budget_allocation(self) -> Optional[BudgetAllocationDecision]:
         rows = list(self.iter_budget_allocations())
@@ -915,17 +840,28 @@ class TARStateStore:
         return rows[-1]
 
     def append_falsification_plan(self, plan: FalsificationPlan) -> None:
-        with self.falsification_plans_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(plan.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.falsification_plans_path, plan.model_dump(mode="json"))
 
     def iter_falsification_plans(self) -> Iterable[FalsificationPlan]:
-        if not self.falsification_plans_path.exists():
-            return []
-        rows: List[FalsificationPlan] = []
-        for line in self.falsification_plans_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(FalsificationPlan.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.falsification_plans_path, FalsificationPlan)
+
+    def save_falsification_plan(self, plan: FalsificationPlan) -> None:
+        with self._lock:
+            rows = list(self.iter_falsification_plans())
+            replaced = False
+            updated_rows: List[FalsificationPlan] = []
+            for item in rows:
+                if item.plan_id == plan.plan_id:
+                    updated_rows.append(plan)
+                    replaced = True
+                else:
+                    updated_rows.append(item)
+            if not replaced:
+                updated_rows.append(plan)
+            content = ""
+            if updated_rows:
+                content = "\n".join(json.dumps(item.model_dump(mode="json")) for item in updated_rows) + "\n"
+            self._atomic_write_text(self.falsification_plans_path, content)
 
     def latest_falsification_plan(
         self,
@@ -985,10 +921,11 @@ class TARStateStore:
         self._atomic_write_json(self.checkpoint_registry_path, state.model_dump(mode="json"))
 
     def upsert_checkpoint(self, record: CheckpointRecord) -> None:
-        state = self.load_checkpoint_registry()
-        entries = [item for item in state.entries if item.name != record.name]
-        entries.append(record)
-        self.save_checkpoint_registry(CheckpointRegistryState(entries=entries))
+        with self._lock:
+            state = self.load_checkpoint_registry()
+            entries = [item for item in state.entries if item.name != record.name]
+            entries.append(record)
+            self.save_checkpoint_registry(CheckpointRegistryState(entries=entries))
 
     def list_checkpoints(self) -> List[CheckpointRecord]:
         return self.load_checkpoint_registry().entries
@@ -1003,10 +940,11 @@ class TARStateStore:
         self._atomic_write_json(self.endpoint_registry_path, state.model_dump(mode="json"))
 
     def upsert_endpoint(self, record: EndpointRecord) -> None:
-        state = self.load_endpoint_registry()
-        entries = [item for item in state.entries if item.endpoint_name != record.endpoint_name]
-        entries.append(record)
-        self.save_endpoint_registry(EndpointRegistryState(entries=entries))
+        with self._lock:
+            state = self.load_endpoint_registry()
+            entries = [item for item in state.entries if item.endpoint_name != record.endpoint_name]
+            entries.append(record)
+            self.save_endpoint_registry(EndpointRegistryState(entries=entries))
 
     def list_endpoints(self) -> List[EndpointRecord]:
         return self.load_endpoint_registry().entries
@@ -1042,10 +980,11 @@ class TARStateStore:
         self._atomic_write_json(self.role_assignments_path, state.model_dump(mode="json"))
 
     def upsert_role_assignment(self, record: RoleAssignment) -> None:
-        state = self.load_role_assignments()
-        entries = [item for item in state.entries if item.role != record.role]
-        entries.append(record)
-        self.save_role_assignments(RoleAssignmentState(entries=entries))
+        with self._lock:
+            state = self.load_role_assignments()
+            entries = [item for item in state.entries if item.role != record.role]
+            entries.append(record)
+            self.save_role_assignments(RoleAssignmentState(entries=entries))
 
     def list_role_assignments(self) -> List[RoleAssignment]:
         return self.load_role_assignments().entries
@@ -1061,17 +1000,10 @@ class TARStateStore:
         self._atomic_write_json(self.operator_serving_path, state.model_dump(mode="json"))
 
     def append_alert(self, alert: AlertRecord) -> None:
-        with self.alerts_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(alert.model_dump(mode="json")) + "\n")
+        self._safe_jsonl_append(self.alerts_path, alert.model_dump(mode="json"))
 
     def iter_alerts(self) -> Iterable[AlertRecord]:
-        if not self.alerts_path.exists():
-            return []
-        rows: List[AlertRecord] = []
-        for line in self.alerts_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(AlertRecord.model_validate_json(line))
-        return rows
+        return self._iter_jsonl(self.alerts_path, AlertRecord)
 
     def latest_alerts(self, count: int = 20) -> List[AlertRecord]:
         rows = list(self.iter_alerts())
@@ -1084,8 +1016,7 @@ class TARStateStore:
             "action": action,
             "payload": payload,
         }
-        with self.audit_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record) + "\n")
+        self._safe_jsonl_append(self.audit_log_path, record)
 
     def iter_audit_events(self) -> Iterable[Dict[str, Any]]:
         if not self.audit_log_path.exists():
@@ -1093,7 +1024,10 @@ class TARStateStore:
         rows: List[Dict[str, Any]] = []
         for line in self.audit_log_path.read_text(encoding="utf-8").splitlines():
             if line.strip():
-                rows.append(json.loads(line))
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    pass
         return rows
 
     def latest_audit_events(self, count: int = 20) -> List[Dict[str, Any]]:

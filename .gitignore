@@ -14,3 +14,7 @@ anchors/
 training_artifacts/
 eval_artifacts/
 phase14_run.log
+*.db
+*.log
+test_output.txt
+tool_envs/

@@ -1394,8 +1394,9 @@ class TAROrchestrator:
         orphaned = self.recover_orphaned_runs()
         heartbeat = self.runtime_daemon.run_cycle(max_jobs=max_jobs, stale_after_s=stale_after_s)
         escalated_verdicts = self._age_claim_verdicts()
+        replication_actions_created = self._auto_schedule_replication_actions()
         elevated_anomalies = self.elevate_anomalies()
-        if orphaned or escalated_verdicts or elevated_anomalies:
+        if orphaned or escalated_verdicts or elevated_anomalies or replication_actions_created:
             notes = list(heartbeat.notes)
             if orphaned:
                 notes.append(f"orphan_recoveries={len(orphaned)}")
@@ -1403,6 +1404,8 @@ class TAROrchestrator:
                 notes.append(f"escalated_verdicts={len(escalated_verdicts)}")
             if elevated_anomalies:
                 notes.append(f"anomaly_elevations={len(elevated_anomalies)}")
+            if replication_actions_created:
+                notes.append(f"replication_actions_created={replication_actions_created}")
             heartbeat = heartbeat.model_copy(
                 update={
                     "stale_cleanups": heartbeat.stale_cleanups + len(orphaned),
@@ -4389,6 +4392,18 @@ class TAROrchestrator:
                 if candidate.blocked and not include_blocked:
                     continue
                 candidates.append(candidate)
+        # Boost actions linked to pending falsification tests so they get selected.
+        falsification_action_ids = {
+            test.linked_action_id
+            for plan in self.store.iter_falsification_plans()
+            for test in plan.tests
+            if test.status in {"attached", "planned"} and test.linked_action_id
+        }
+        if falsification_action_ids:
+            candidates = [
+                c.model_copy(update={"score": c.score * 1.8}) if c.action_id in falsification_action_ids else c
+                for c in candidates
+            ]
         candidates.sort(
             key=lambda item: (
                 -item.score,
@@ -4922,6 +4937,67 @@ class TAROrchestrator:
         except ValueError:
             return None
 
+    def _auto_schedule_replication_actions(self) -> int:
+        """
+        For every active project with replication_gap >= 0.5, ensure at least one
+        replication_check action exists in its planned_actions.  Returns count created.
+        """
+        created = 0
+        for project in self.store.list_research_projects():
+            if project.status in {"completed", "abandoned"}:
+                continue
+            debt = self._compute_evidence_debt(project)
+            if debt.replication_gap < 0.5:
+                continue
+            existing = [
+                a for a in project.planned_actions
+                if a.action_kind == "replication_check" and a.status in {"planned", "queued", "approved"}
+            ]
+            if existing:
+                continue
+            thread = self._project_thread(project)
+            if thread is None:
+                continue
+            latest_execution = self._latest_project_execution(project.project_id)
+            if latest_execution is None:
+                continue
+            action = ResearchPlannedAction(
+                action_id=self._continuity_id("action"),
+                project_id=project.project_id,
+                thread_id=thread.thread_id,
+                action_kind="replication_check",
+                description=(
+                    f"Replicate {latest_execution.problem_id} to reduce replication gap "
+                    f"({debt.replication_gap:.2f}). Run same config with a new seed."
+                ),
+                estimated_cost=0.8,
+                expected_evidence_gain=0.6,
+                status="planned",
+            )
+            updated_project = project.model_copy(
+                update={"planned_actions": [*project.planned_actions, action]}
+            )
+            self.store.upsert_research_project(updated_project)
+            created += 1
+        return created
+
+    def _close_falsification_tests_for_action(self, completed_action_id: str, result_summary: str) -> None:
+        """Mark falsification tests linked to a completed action as done."""
+        for plan in list(self.store.iter_falsification_plans()):
+            updated = False
+            new_tests = []
+            for test in plan.tests:
+                if test.linked_action_id == completed_action_id and test.status in {"attached", "planned", "running"}:
+                    new_tests.append(test.model_copy(update={
+                        "status": "completed",
+                        "result_summary": result_summary[:500],
+                    }))
+                    updated = True
+                else:
+                    new_tests.append(test)
+            if updated:
+                self.store.save_falsification_plan(plan.model_copy(update={"tests": new_tests}))
+
     def _project_last_progress_at(self, project: ResearchProject) -> Optional[str]:
         return project.updated_at or project.created_at
 
@@ -5023,6 +5099,31 @@ class TAROrchestrator:
                         },
                     )
                     escalated.append(updated_verdict.verdict_id)
+                elif verdict.lifecycle_status == "escalated" and verdict.status == "insufficient_evidence":
+                    # Auto-resolve verdicts that have been escalated for >30 days
+                    # with no supporting evidence — downgrade to rejected.
+                    _RESOLVE_AFTER_DAYS = 30
+                    age_days = (now - created_at.astimezone(timezone.utc)).days
+                    has_evidence = bool(verdict.supporting_evidence_ids)
+                    if age_days >= _RESOLVE_AFTER_DAYS and not has_evidence:
+                        resolved = verdict.model_copy(update={
+                            "status": "rejected",
+                            "lifecycle_status": "resolved",
+                            "rationale": list(verdict.rationale) + [
+                                f"Auto-resolved after {age_days}d with no supporting evidence. "
+                                "Insufficient evidence verdict downgraded to rejected."
+                            ],
+                        })
+                        self.store.upsert_claim_verdict(resolved)
+                        self.store.append_audit_event(
+                            "claim_verdict",
+                            "auto_resolve",
+                            {
+                                "verdict_id": resolved.verdict_id,
+                                "age_days": age_days,
+                                "reason": "no_evidence_after_30d",
+                            },
+                        )
                 continue
             if verdict.lifecycle_status != "aging":
                 updates["lifecycle_status"] = "aging"
@@ -5833,6 +5934,8 @@ class TAROrchestrator:
                 }
             )
             updated_project = self._replace_project_action(updated_project, updated_action)
+            if updated_action.status == "completed":
+                self._close_falsification_tests_for_action(updated_action.action_id, report.summary or "completed")
         next_question = ResearchOpenQuestion(
             question_id=self._continuity_id("question"),
             project_id=project.project_id,
@@ -5946,6 +6049,196 @@ class TAROrchestrator:
             reverse=True,
         )
         return matches[0]
+
+    def _prior_experiment_summaries_for_problem(self, domain: str) -> list[str]:
+        """Return short summaries of TAR's own validated results relevant to domain.
+
+        Used to stop the hypothesis generator re-proposing already-tried experiments.
+        Returns [] on any error.
+        """
+        try:
+            from tar_lab.result_artifacts import iter_canonical_comparison_records
+            records = iter_canonical_comparison_records(Path(self.workspace))
+            summaries: list[str] = []
+            for rec in records:
+                if not bool(rec.get("publication_allowed", False)):
+                    continue
+                logical = str(rec.get("logical_name", "") or "")
+                phase = rec.get("phase_number")
+                result_path = Path(str(rec.get("result_path", "") or ""))
+                if not result_path.exists():
+                    continue
+                try:
+                    rdata = json.loads(result_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                agg = rdata.get("aggregate", {})
+                if not isinstance(agg, dict):
+                    continue
+                for method, metrics in agg.items():
+                    if not isinstance(metrics, dict):
+                        continue
+                    forg = metrics.get("forgetting_mean")
+                    acc = metrics.get("acc_mean")
+                    parts = [f"Phase {phase} ({logical}) method={method}"]
+                    if forg is not None:
+                        parts.append(f"forgetting={forg:.4f}")
+                    if acc is not None:
+                        parts.append(f"acc={acc:.4f}")
+                    summaries.append(" ".join(parts))
+            return summaries[:8]
+        except Exception:
+            return []
+
+    def _frontier_context_for_problem(self, domain: str) -> list[str]:
+        """Return titles of open frontier problems relevant to the domain.
+
+        TAR self-conflict items surfaced first so the LLM sees them prominently.
+        Returns [] on any error.
+        """
+        try:
+            fp_path = Path(self.workspace) / "tar_state" / "frontier_problems.json"
+            if not fp_path.exists():
+                return []
+            data = json.loads(fp_path.read_text(encoding="utf-8"))
+            problems = data.get("problems", [])
+            if not isinstance(problems, list):
+                return []
+            domain_lower = (domain or "").lower()
+            relevant = [
+                p for p in problems
+                if str(p.get("status", "")) == "proposed"
+                and (
+                    domain_lower in str(p.get("domain", "")).lower()
+                    or domain_lower in str(p.get("description", "")).lower()
+                    or not domain_lower
+                )
+            ]
+            # self-conflict items first
+            relevant.sort(key=lambda p: (0 if str(p.get("source", "")) == "tar_self_conflict" else 1))
+            return [
+                f"[{p.get('source', 'gap')}] {p.get('title', '')}: {str(p.get('description', ''))[:120]}"
+                for p in relevant[:4]
+            ]
+        except Exception:
+            return []
+
+    def _find_project_for_problem(self, problem_id: str) -> "Optional[ResearchProject]":
+        """Return the research project whose studies include problem_id, or None."""
+        try:
+            for project in self.store.list_research_projects():
+                studies = self._project_studies(project.project_id)
+                if any(str(s.problem_id or "") == problem_id for s in studies):
+                    return project
+        except Exception:
+            pass
+        return None
+
+    def _revise_hypothesis_from_verdict(
+        self,
+        claim_verdict: "ClaimVerdict",
+        problem_id: Optional[str],
+    ) -> None:
+        """Update the active hypothesis thread confidence_state from a claim verdict.
+
+        Advisory only — never raises. Updates thread state in place via the project store.
+        """
+        if not problem_id:
+            return
+        try:
+            project = self._find_project_for_problem(problem_id)
+            if project is None:
+                return
+            thread = self._project_thread(project)
+            if thread is None:
+                return
+            now = self._project_now()
+            verdict_status = str(claim_verdict.status or "")
+            if verdict_status in {"accepted", "novel"}:
+                new_confidence = (
+                    "supported"
+                    if thread.confidence_state in {"provisional", "exploratory", "unknown"}
+                    else thread.confidence_state
+                )
+                updated_thread = thread.model_copy(update={
+                    "confidence_state": new_confidence,
+                    "supporting_evidence_ids": list(thread.supporting_evidence_ids) + [claim_verdict.verdict_id],
+                    "updated_at": now,
+                })
+            elif verdict_status in {"rejected", "contradicted"}:
+                summary = (claim_verdict.rationale[0] if claim_verdict.rationale else f"verdict:{claim_verdict.verdict_id}")[:120]
+                updated_thread = thread.model_copy(update={
+                    "confidence_state": "contradicted",
+                    "contradicting_evidence_ids": list(thread.contradicting_evidence_ids) + [claim_verdict.verdict_id],
+                    "updated_at": now,
+                    "hypothesis": thread.hypothesis + f" [REVISION: contradicted — {summary}]",
+                })
+            else:
+                return
+            updated_project = self._replace_project_thread(project, updated_thread)
+            self._persist_project(updated_project)
+        except Exception:
+            pass
+
+    def _apply_literature_novelty_advisory(self, report: "BreakthroughReport") -> "BreakthroughReport":
+        """Advisory-only novelty check against the literature knowledge graph.
+
+        Never changes report status. Appends a single rationale entry with the
+        semantic similarity verdict so reviewers can see it. Silently no-ops if
+        the graph is absent or too small.
+        """
+        try:
+            from pathlib import Path as _Path
+            db_path = _Path(self.workspace) / "tar_state" / "literature" / "literature_graph.db"
+            if not db_path.exists():
+                return report
+            from literature.knowledge_graph import LiteratureKnowledgeGraph
+            graph = LiteratureKnowledgeGraph(str(db_path))
+            if graph.paper_count() < 100:
+                return report
+            from literature.novelty_gate import NoveltyGate
+            gate = NoveltyGate(graph)
+            similar = gate._find_similar_papers(report.summary, max_results=5)
+            if not similar:
+                advisory = "literature_novelty_advisory: no semantically similar papers found in graph (graph_size={})".format(graph.paper_count())
+            else:
+                top = similar[0]
+                advisory = (
+                    "literature_novelty_advisory: max_similarity={:.3f} to '{}' "
+                    "(reason={}; advisory only — status unchanged)".format(
+                        top.similarity_score,
+                        (top.title or "")[:80],
+                        top.similarity_reason,
+                    )
+                )
+                if top.similarity_score >= 0.82:
+                    advisory += " WARNING: high similarity — verify novelty claim against this paper before submission."
+            advisory_lines: list[str] = [advisory]
+            try:
+                tar_rows = graph.conn.execute(
+                    "SELECT b.name AS benchmark_name, se.method_name, se.metric_name, "
+                    "se.metric_value, se.extra_metrics "
+                    "FROM sota_entries se "
+                    "JOIN benchmarks b ON se.benchmark_id = b.benchmark_id "
+                    "WHERE se.source = 'tar_internal'"
+                ).fetchall()
+                for tr in tar_rows:
+                    try:
+                        extra = json.loads(tr["extra_metrics"] or "{}")
+                    except Exception:
+                        extra = {}
+                    phase = int(float(extra.get("tar_phase", 0) or 0))
+                    advisory_lines.append(
+                        "tar_prior_benchmark: phase{} {}={:.4f} on {} method={}".format(
+                            phase, tr["metric_name"], float(tr["metric_value"] or 0.0),
+                            tr["benchmark_name"], tr["method_name"],
+                        )
+                    )
+            except Exception:
+                pass
+            return report.model_copy(update={"rationale": list(report.rationale) + advisory_lines})
+        except Exception:
+            return report
 
     def _apply_external_breakthrough_gate(
         self,
@@ -6535,7 +6828,14 @@ class TAROrchestrator:
         report = report.model_copy(
             update={
                 "evidence_bundle": evidence_bundle,
-                "hypotheses": build_hypotheses(problem, evidence_bundle, benchmark_ids=report.benchmark_ids),
+                "hypotheses": build_hypotheses(
+                    problem,
+                    evidence_bundle,
+                    benchmark_ids=report.benchmark_ids,
+                    operator_role=self._family_operator_role(),
+                    prior_experiment_summaries=self._prior_experiment_summaries_for_problem(report.domain if hasattr(report, "domain") else ""),
+                    frontier_context=self._frontier_context_for_problem(report.domain if hasattr(report, "domain") else ""),
+                ),
                 "contradiction_review": evidence_bundle.contradiction_review,
                 "retrieval_mode": retrieval_mode,
                 "retrieval_conflict_count": len(conflict_hits),
@@ -7347,6 +7647,8 @@ class TAROrchestrator:
                 report = report.model_copy(update={"status": "candidate"})
             elif claim_verdict.status in {"rejected", "contradicted"}:
                 report = report.model_copy(update={"status": "rejected"})
+        report = self._apply_literature_novelty_advisory(report)
+        self._revise_hypothesis_from_verdict(claim_verdict, problem_id)
         self.store.append_breakthrough_report(report)
         if self.vault is not None:
             self.vault.index_breakthrough_report(report)
@@ -7650,7 +7952,14 @@ class TAROrchestrator:
             study = self.study_problem(prompt, build_env=False, max_results=6, benchmark_tier="validation")
             memory_hits = self.vault.search(prompt, n_results=3, require_research_grade=True) if self.vault is not None else []
             evidence_bundle = study.evidence_bundle or build_evidence_bundle(prompt, memory_hits)
-            hypotheses = study.hypotheses or build_hypotheses(prompt, evidence_bundle, benchmark_ids=study.benchmark_ids)
+            hypotheses = study.hypotheses or build_hypotheses(
+                prompt,
+                evidence_bundle,
+                benchmark_ids=study.benchmark_ids,
+                operator_role=self._family_operator_role(),
+                prior_experiment_summaries=self._prior_experiment_summaries_for_problem(study.domain if hasattr(study, "domain") else ""),
+                frontier_context=self._frontier_context_for_problem(study.domain if hasattr(study, "domain") else ""),
+            )
             state_summary = (
                 f"Problem routed to domain={study.domain}, profile={study.profile_id}, "
                 f"confidence={study.resolution_confidence:.2f}, benchmark_tier={study.benchmark_tier}, "

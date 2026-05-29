@@ -424,7 +424,8 @@ class PayloadEnvironmentBuilder:
                 if mode == "target":
                     return self._unresolved_target_records(cleaned_specs, required=required)
             except subprocess.SubprocessError:
-                return self._unresolved_target_records(cleaned_specs, required=required)
+                if mode == "target":
+                    return self._unresolved_target_records(cleaned_specs, required=required)
 
         records_by_name: dict[str, DependencyPackageRecord] = {}
         for spec in cleaned_specs:

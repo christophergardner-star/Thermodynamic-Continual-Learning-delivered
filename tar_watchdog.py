@@ -427,7 +427,11 @@ class TARWatchdog:
                 healthy = True
                 adopted_pid = matched_pid
                 reason = "daemon_process_match"
-            elif adopted_pid:
+            elif adopted_pid and adopted_pid in {worker_pid, state_pid, matched_pid}:
+                # Only trust adopted_pid when corroborated by a current observation
+                # (state file, process registry, or process match). A stale tracked_pid
+                # alone — e.g. a Windows zombie that OpenProcess returns as "alive" —
+                # must not suppress a restart.
                 healthy = True
                 reason = "daemon_pid_alive"
         if not healthy and config.health_mode != "dashboard_http" and matched_pid and _pid_exists(matched_pid):

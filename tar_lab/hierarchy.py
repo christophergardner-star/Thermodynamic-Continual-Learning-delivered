@@ -32,9 +32,9 @@ from tar_lab.schemas import (
 from tar_lab.state import TARStateStore
 
 try:
-    from openai import OpenAI
+    import anthropic as _anthropic_module
 except ImportError:  # pragma: no cover - optional dependency
-    OpenAI = None
+    _anthropic_module = None
 
 
 class _DraftModel(BaseModel):
@@ -273,14 +273,169 @@ def build_evidence_bundle(query: str, hits: List[MemorySearchHit]) -> EvidenceBu
     )
 
 
+_HYPOTHESIS_SYNTHESIS_PROMPT = """\
+You are the hypothesis-generation engine for an autonomous ML research system (TAR).
+
+Problem: {problem}
+
+Literature evidence ({trace_count} trace(s)):
+{evidence_summary}
+{contradiction_block}
+{prior_block}
+{frontier_block}
+Generate 2-3 ranked, falsifiable hypotheses that address the problem.
+Each must be distinct — not variations of the same idea.
+
+Respond with ONLY a valid JSON array, no markdown:
+[
+  {{
+    "hypothesis": "Specific testable claim about the mechanism or approach",
+    "rationale": "Why the evidence supports this (cite paper titles if relevant)",
+    "confidence": 0.60,
+    "falsification_condition": "The experimental result that would disprove this"
+  }}
+]
+
+Confidence: 0.2 (speculative) to 0.9 (well-supported).
+Do NOT propose experiments already in the prior_experiments list.
+"""
+
+
+def _build_hypotheses_with_llm(
+    problem: str,
+    evidence_bundle: EvidenceBundle,
+    *,
+    benchmark_ids: List[str],
+    operator_role: LocalOpenAIRole,
+    prior_experiment_summaries: List[str],
+    frontier_context: List[str],
+) -> List[HypothesisRecord]:
+    """Call the operator LLM to synthesise hypotheses across the evidence bundle.
+
+    Returns an empty list on any failure so the caller can fall through to the
+    template-based path.
+    """
+    traces = evidence_bundle.traces
+    evidence_summary = "\n".join(
+        f"  [{i + 1}] {t.paper_title or t.document_id}"
+        f"{f' p.{t.page_number}' if t.page_number is not None else ''}"
+        f": {(t.claim_text or '')[:160]}"
+        for i, t in enumerate(traces[:5])
+    ) or "  (no evidence traces available)"
+
+    contradiction_block = ""
+    if evidence_bundle.contradiction_review is not None:
+        contradiction_block = (
+            f"\nContradiction note: {evidence_bundle.contradiction_review.summary[:200]}\n"
+        )
+
+    prior_block = ""
+    if prior_experiment_summaries:
+        prior_block = "\nPrior TAR experiments (do not re-propose these):\n" + "\n".join(
+            f"  - {s}" for s in prior_experiment_summaries[:6]
+        ) + "\n"
+
+    frontier_block = ""
+    if frontier_context:
+        frontier_block = "\nOpen literature gaps relevant to this problem:\n" + "\n".join(
+            f"  - {s}" for s in frontier_context[:4]
+        ) + "\n"
+
+    prompt = _HYPOTHESIS_SYNTHESIS_PROMPT.format(
+        problem=problem,
+        trace_count=len(traces),
+        evidence_summary=evidence_summary,
+        contradiction_block=contradiction_block,
+        prior_block=prior_block,
+        frontier_block=frontier_block,
+    )
+
+    client = operator_role._client()
+    raw = operator_role._chat(
+        client,
+        [
+            {"role": "system", "content": "Return a JSON array only. No markdown fences."},
+            {"role": "user", "content": prompt},
+        ],
+    )
+
+    # Extract JSON array robustly — strip markdown fences if present
+    text = raw.strip()
+    match = re.search(r"\[.*\]", text, re.DOTALL)
+    if not match:
+        return []
+    items = json.loads(match.group())
+    if not isinstance(items, list) or not items:
+        return []
+
+    records: List[HypothesisRecord] = []
+    for idx, item in enumerate(items[:3]):
+        if not isinstance(item, dict):
+            continue
+        hypothesis_text = str(item.get("hypothesis", "")).strip()
+        rationale_text = str(item.get("rationale", "")).strip()
+        if not hypothesis_text:
+            continue
+        try:
+            conf = float(item.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            conf = 0.5
+        falsification = str(item.get("falsification_condition", "")).strip()
+        unresolved = []
+        if falsification:
+            unresolved.append(f"falsification_condition: {falsification}")
+        if evidence_bundle.contradiction_review is not None:
+            unresolved.append("Contradictory literature remains unresolved.")
+        records.append(
+            HypothesisRecord(
+                hypothesis_id=_stable_id("hypothesis", problem + f"|llm|{idx}|" + hypothesis_text[:40]),
+                problem=problem,
+                hypothesis=hypothesis_text,
+                rationale=rationale_text,
+                confidence=max(0.0, min(1.0, round(conf, 4))),
+                evidence_bundle_id=evidence_bundle.bundle_id,
+                supporting_document_ids=evidence_bundle.supporting_document_ids[:4],
+                supporting_claim_ids=evidence_bundle.supporting_claim_ids[:4],
+                contradiction_review_id=(
+                    evidence_bundle.contradiction_review.review_id
+                    if evidence_bundle.contradiction_review else None
+                ),
+                proposed_benchmark_ids=benchmark_ids[:3],
+                unresolved_assumptions=unresolved,
+                revision_history=[f"generated_by_llm_synthesis rank={idx + 1}"],
+            )
+        )
+    return records
+
+
 def build_hypotheses(
     problem: str,
     evidence_bundle: EvidenceBundle,
     *,
     benchmark_ids: Optional[List[str]] = None,
+    operator_role: Optional[LocalOpenAIRole] = None,
+    prior_experiment_summaries: Optional[List[str]] = None,
+    frontier_context: Optional[List[str]] = None,
 ) -> List[HypothesisRecord]:
     benchmark_ids = benchmark_ids or []
     traces = evidence_bundle.traces
+
+    # ── LLM synthesis path ────────────────────────────────────────────────────
+    if operator_role is not None and traces:
+        try:
+            llm_hypotheses = _build_hypotheses_with_llm(
+                problem,
+                evidence_bundle,
+                benchmark_ids=benchmark_ids,
+                operator_role=operator_role,
+                prior_experiment_summaries=list(prior_experiment_summaries or []),
+                frontier_context=list(frontier_context or []),
+            )
+            if llm_hypotheses:
+                return llm_hypotheses
+        except Exception:
+            pass  # fall through to template path
+
     if not traces:
         return [
             HypothesisRecord(
@@ -460,13 +615,12 @@ class LocalOpenAIRole:
     def _client(self) -> Any:
         if self.client_factory is not None:
             return self.client_factory(self.config)
-        if OpenAI is None:
-            raise RuntimeError("openai is not installed; install it to enable live TAR hierarchy inference")
-        return OpenAI(
-            base_url=self.config.base_url,
-            api_key=self.config.api_key,
-            timeout=self.config.timeout_s,
-        )
+        if _anthropic_module is None:
+            raise RuntimeError("anthropic is not installed; pip install anthropic")
+        kwargs: dict[str, Any] = {"api_key": self.config.api_key}
+        if self.config.base_url:
+            kwargs["base_url"] = self.config.base_url
+        return _anthropic_module.Anthropic(**kwargs)
 
     def generate(self, system_prompt: str, user_prompt: str) -> _DraftModel:
         messages = [
@@ -502,12 +656,22 @@ class LocalOpenAIRole:
         raise RuntimeError(f"{self.role_name} did not produce valid JSON")
 
     def _chat(self, client: Any, messages: List[Dict[str, str]]) -> str:
-        response = client.chat.completions.create(
+        # Anthropic requires system as a separate kwarg, not in the messages list
+        system = ""
+        msg_list = []
+        for m in messages:
+            if m.get("role") == "system":
+                system = m.get("content", "")
+            else:
+                msg_list.append(m)
+        response = client.messages.create(
             model=self.config.model,
-            messages=messages,
+            max_tokens=4096,
+            system=system,
+            messages=msg_list,
             temperature=self.config.temperature,
         )
-        return _message_content(response.choices[0].message.content)
+        return _message_content(response.content[0].text)
 
 
 class RuleDirector:

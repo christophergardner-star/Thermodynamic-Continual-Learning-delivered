@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -602,6 +603,53 @@ def _render_actions_tab(orchestrator: TAROrchestrator) -> None:
         st.json(orchestrator.study_problem(problem_prompt).model_dump(mode="json"))
 
 
+def _render_live_log_tab() -> None:
+    """Stream the experiment orchestrator log live — shows per-epoch output."""
+    LOG_FILES = {
+        "Experiment (epochs)": Path("E:/TAR/Thermodynamic-Continual-Learning-delivered/tar_state/experiment_orchestrator.log"),
+        "Daemon (system)":     Path("E:/TAR/Thermodynamic-Continual-Learning-delivered/tar_state/living_research.log"),
+        "Literature ingest":   Path("E:/TAR/Thermodynamic-Continual-Learning-delivered/tar_state/logs/dashboard.err.log"),
+    }
+
+    col1, col2, col3 = st.columns([2, 1, 1])
+    selected = col1.selectbox("Log file", list(LOG_FILES.keys()), index=0, label_visibility="collapsed")
+    n_lines = col2.number_input("Lines", min_value=20, max_value=500, value=80, step=20)
+    epoch_only = col3.checkbox("Epochs only", value=False)
+
+    log_path = LOG_FILES[selected]
+    if not log_path.exists():
+        st.warning(f"Log not found: {log_path}")
+        return
+
+    raw = log_path.read_bytes().decode("utf-8", errors="replace")
+    lines = raw.splitlines()[-int(n_lines):]
+
+    if epoch_only:
+        lines = [l for l in lines if "seed=" in l and "epoch" in l]
+
+    # Colour epoch lines green, errors red, everything else normal
+    styled: list[str] = []
+    for line in lines:
+        if "seed=" in line and "epoch" in line:
+            styled.append(f'<span style="color:#4ade80">{line}</span>')
+        elif any(w in line.lower() for w in ["error", "traceback", "exception", "failed"]):
+            styled.append(f'<span style="color:#f87171">{line}</span>')
+        else:
+            styled.append(line)
+
+    html_block = (
+        '<div style="background:#0e1117;color:#e2e8f0;font-family:monospace;'
+        'font-size:12px;padding:12px;border-radius:6px;'
+        'max-height:600px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;">'
+        + "<br>".join(styled)
+        + "</div>"
+    )
+    st.markdown(html_block, unsafe_allow_html=True)
+
+    size_kb = log_path.stat().st_size // 1024
+    st.caption(f"{log_path.name} — {size_kb} KB — {len(lines)} lines shown — auto-refreshes with page")
+
+
 def _render_raw_tab(context: dict[str, Any]) -> None:
     status = context["status"]
     raw_col1, raw_col2 = st.columns(2)
@@ -704,7 +752,7 @@ def main() -> None:
             )
         )
 
-        tabs = st.tabs(["Overview", "Operator", "Project", "Publication", "Infrastructure", "Literature", "Frontier Gaps", "Actions", "Raw"])
+        tabs = st.tabs(["Overview", "Operator", "Project", "Publication", "Infrastructure", "Literature", "Frontier Gaps", "Actions", "Live Log", "Raw"])
         with tabs[0]:
             _render_overview_tab(context)
         with tabs[1]:
@@ -728,6 +776,8 @@ def main() -> None:
         with tabs[7]:
             _render_actions_tab(orchestrator)
         with tabs[8]:
+            _render_live_log_tab()
+        with tabs[9]:
             _render_raw_tab(context)
     finally:
         orchestrator.shutdown()

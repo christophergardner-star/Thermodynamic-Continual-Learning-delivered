@@ -2,7 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+
+def _long_path(path: Path) -> Path:
+    # On Windows, prepend the extended-length prefix to bypass the 260-char MAX_PATH limit.
+    if sys.platform != "win32":
+        return path
+    s = str(path.resolve())
+    if not s.startswith("\\\\"):
+        s = "\\\\?\\" + s
+    return Path(s)
 
 
 SCENARIOS = (
@@ -147,12 +158,12 @@ def parse_args() -> argparse.Namespace:
 
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _long_path(path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    _long_path(path).write_text(
         "\n".join(json.dumps(row, sort_keys=True) for row in rows) + ("\n" if rows else ""),
         encoding="utf-8",
     )

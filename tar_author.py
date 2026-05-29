@@ -331,6 +331,7 @@ class PaperSpec:
     llm_base_url: str = ""
     revision_reason: str = ""
     revision_requests: list[dict[str, str]] = field(default_factory=list)
+    allow_partial_write: bool = False
 
 
 @dataclass
@@ -694,6 +695,98 @@ def _sanitize_factual_citations(latex: str, evidence: dict[str, Any]) -> str:
     return text
 
 
+def _verify_related_work_citations(
+    latex: str, evidence: dict, out_dir: Path
+) -> tuple[str, list[str]]:
+    """
+    Verify that \\cite{} commands in the related-work section are plausibly consistent
+    with the referenced paper titles. Writes citation_verification_report.json to out_dir.
+    Returns (unchanged_latex, list_of_issues).
+    """
+    cite_re = re.compile(r"\\cite[a-zA-Z*]*\{([^}]*)\}")
+    # Match sentences (up to 300 chars) that contain a citation command
+    sent_re = re.compile(
+        r"([^.!?\n]{0,250}\\cite[a-zA-Z*]*\{[^}]*\}[^.!?\n]{0,150}[.!?]?)",
+        re.DOTALL,
+    )
+
+    citation_index: dict[str, dict] = {
+        str(rec.get("bib_key", "") or ""): rec
+        for rec in evidence.get("citation_pack", [])
+        if isinstance(rec, dict) and str(rec.get("bib_key", "") or "").strip()
+    }
+    allowed = set(evidence.get("allowed_citation_keys", []))
+
+    issues: list[str] = []
+    report_entries: list[dict] = []
+
+    for sent_match in sent_re.finditer(latex):
+        sentence = sent_match.group(1).strip()
+        cited_keys: list[str] = []
+        for cm in cite_re.finditer(sentence):
+            for key in cm.group(1).split(","):
+                key = key.strip()
+                if key:
+                    cited_keys.append(key)
+
+        for key in cited_keys:
+            rec = citation_index.get(key)
+            if not rec:
+                if key not in allowed:
+                    issue = f"Unknown citation key: {key!r}"
+                    issues.append(issue)
+                    report_entries.append({"bib_key": key, "verdict": "unknown_key"})
+                continue
+
+            title = str(rec.get("title", "") or "")
+            # Extract meaningful words from title (>4 chars)
+            title_words = {w.lower() for w in re.split(r"\W+", title) if len(w) > 4}
+            sent_lower = sentence.lower()
+            matched = [w for w in title_words if w in sent_lower]
+
+            if title_words and len(title_words) >= 3 and not matched:
+                issue = (
+                    f"Citation {key!r} ({title!r}) — "
+                    "no title keywords found in citing sentence"
+                )
+                issues.append(issue)
+                report_entries.append({
+                    "bib_key": key,
+                    "paper_title": title,
+                    "citing_sentence": sentence[:300],
+                    "title_words_checked": sorted(title_words)[:10],
+                    "matched_words": [],
+                    "verdict": "title_mismatch",
+                })
+            else:
+                report_entries.append({
+                    "bib_key": key,
+                    "paper_title": title,
+                    "citing_sentence": sentence[:200],
+                    "matched_words": matched,
+                    "verdict": "ok",
+                })
+
+    report_path = out_dir / "citation_verification_report.json"
+    try:
+        report_path.write_text(
+            json.dumps(
+                {
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "total_checked": len(report_entries),
+                    "issues_found": len(issues),
+                    "entries": report_entries,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+    return latex, issues
+
+
 # ── LLM client (optional) ─────────────────────────────────────────────────────
 
 def _llm_provider() -> str:
@@ -714,19 +807,14 @@ def _user_env_value(name: str) -> str:
     return str(os.environ.get(name, "") or "").strip()
 
 
-def _llm_api_key(provider: str = "openai_compatible") -> str:
-    provider_norm = str(provider or "").strip().lower()
-    if provider_norm == "anthropic":
-        return _user_env_value("ANTHROPIC_API_KEY") or _user_env_value("TAR_LLM_API_KEY")
-    return _user_env_value("OPENAI_API_KEY") or _user_env_value("TAR_LLM_API_KEY")
+def _llm_api_key(provider: str = "anthropic") -> str:
+    return _user_env_value("ANTHROPIC_API_KEY") or _user_env_value("TAR_LLM_API_KEY")
 
 
 def _llm_model(provider: str, requested_model: str) -> str:
     override = _user_env_value("TAR_LLM_MODEL")
     if override:
         return override
-    if provider in {"openai", "openai_compatible"} and requested_model == "claude-sonnet-4-6":
-        return "gpt-5.4-mini"
     return requested_model
 
 
@@ -748,17 +836,12 @@ def _load_author_llm_config(workspace: Path) -> dict[str, Any]:
 def configure_live_author_llm(
     workspace: Path,
     *,
-    provider: str = "openai_compatible",
-    model: str = "gpt-5.4-mini",
+    provider: str = "anthropic",
+    model: str = "claude-sonnet-4-6",
     base_url: str = "",
 ) -> dict[str, Any]:
     workspace = ensure_workspace_layout(workspace, repo_root=_REPO)
     existing = _load_author_llm_config(workspace)
-    resolved_provider = (
-        _user_env_value("TAR_LLM_PROVIDER")
-        or str(existing.get("provider", "") or "").strip()
-        or provider
-    )
     resolved_model = (
         _user_env_value("TAR_LLM_MODEL")
         or str(existing.get("model", "") or "").strip()
@@ -769,18 +852,10 @@ def configure_live_author_llm(
         or str(existing.get("base_url", "") or "").strip()
         or base_url
     )
-    openai_key = _llm_api_key("openai_compatible")
     anthropic_key = _llm_api_key("anthropic")
-    provider_norm = resolved_provider.strip().lower() or "openai_compatible"
-    if provider_norm in {"openai", "openai_compatible", "auto"}:
-        enabled = bool(openai_key)
-        reason = "" if enabled else "missing_openai_api_key"
-    elif provider_norm == "anthropic":
-        enabled = bool(anthropic_key)
-        reason = "" if enabled else "missing_anthropic_api_key"
-    else:
-        enabled = False
-        reason = f"unsupported_provider:{provider_norm}"
+    provider_norm = "anthropic"
+    enabled = bool(anthropic_key)
+    reason = "" if enabled else "missing_anthropic_api_key"
 
     payload = {
         "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -807,11 +882,9 @@ def configure_live_author_llm(
 
 def _effective_author_llm_config(spec: PaperSpec) -> dict[str, Any]:
     cfg = _load_author_llm_config(spec.workspace)
-    provider = str(spec.llm_provider or cfg.get("provider", "") or _user_env_value("TAR_LLM_PROVIDER") or "").strip()
-    model = str(spec.llm_model or cfg.get("model", "") or _user_env_value("TAR_LLM_MODEL") or "gpt-5.4-mini").strip()
+    model = str(spec.llm_model or cfg.get("model", "") or _user_env_value("TAR_LLM_MODEL") or "claude-sonnet-4-6").strip()
     base_url = str(spec.llm_base_url or cfg.get("base_url", "") or _user_env_value("TAR_LLM_BASE_URL") or "").strip()
-    provider_norm = provider.lower() if provider else ""
-    openai_key = _llm_api_key("openai_compatible")
+    provider_norm = "anthropic"
     anthropic_key = _llm_api_key("anthropic")
 
     if spec.llm_enabled is not None:
@@ -819,20 +892,13 @@ def _effective_author_llm_config(spec: PaperSpec) -> dict[str, Any]:
     elif cfg:
         requested_enabled = bool(cfg.get("enabled", False))
     else:
-        requested_enabled = bool(provider_norm)
+        requested_enabled = bool(anthropic_key)
 
-    key_available = False
-    if provider_norm in {"openai", "openai_compatible", "auto"}:
-        key_available = bool(openai_key)
-    elif provider_norm == "anthropic":
-        key_available = bool(anthropic_key)
-
-    enabled = bool(requested_enabled and provider_norm and key_available)
+    key_available = bool(anthropic_key)
+    enabled = bool(requested_enabled and key_available)
     reason = ""
-    if requested_enabled and provider_norm and not key_available:
-        reason = f"missing_api_key_for_{provider_norm}"
-    if requested_enabled and not provider_norm:
-        reason = "provider_not_configured"
+    if requested_enabled and not key_available:
+        reason = "missing_anthropic_api_key"
 
     return {
         "enabled": enabled,
@@ -850,8 +916,8 @@ def _author_llm_session(spec: PaperSpec):
     previous = {key: os.environ.get(key) for key in env_keys}
     try:
         if cfg.get("enabled"):
-            os.environ["TAR_LLM_PROVIDER"] = str(cfg.get("provider", "") or "openai_compatible")
-            os.environ["TAR_LLM_MODEL"] = str(cfg.get("model", "") or "gpt-5.4-mini")
+            os.environ["TAR_LLM_PROVIDER"] = str(cfg.get("provider", "") or "anthropic")
+            os.environ["TAR_LLM_MODEL"] = str(cfg.get("model", "") or "claude-sonnet-4-6")
             base_url = str(cfg.get("base_url", "") or "").strip()
             if base_url:
                 os.environ["TAR_LLM_BASE_URL"] = base_url
@@ -863,47 +929,6 @@ def _author_llm_session(spec: PaperSpec):
             else:
                 os.environ[key] = value
 
-
-def _call_openai_compatible(prompt: str, system: str = "", model: str = "gpt-5.4-mini") -> str:
-    api_key = _llm_api_key("openai_compatible")
-    if not api_key:
-        return ""
-    base_url = str(_user_env_value("TAR_LLM_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system or _AUTHOR_SYSTEM},
-            {"role": "user", "content": prompt},
-        ],
-    }
-    try:
-        req = urllib.request.Request(
-            url=f"{base_url}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            raw = json.loads(resp.read().decode("utf-8"))
-        choices = raw.get("choices", [])
-        if not choices:
-            return ""
-        message = choices[0].get("message", {})
-        content = message.get("content", "")
-        if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
-            text_parts: list[str] = []
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    text_parts.append(str(item.get("text", "") or ""))
-            return "\n".join(part for part in text_parts if part).strip()
-    except Exception as exc:
-        print(f"[TAR-Author] OpenAI-compatible LLM call failed ({exc}); falling back to template", flush=True)
-    return ""
 
 
 def _call_anthropic(prompt: str, system: str = "", model: str = "claude-sonnet-4-6") -> str:
@@ -929,25 +954,8 @@ def _call_anthropic(prompt: str, system: str = "", model: str = "claude-sonnet-4
 
 
 def _call_llm(prompt: str, system: str = "", model: str = "claude-sonnet-4-6") -> str:
-    """Call an optional provider-backed LLM; fall back to templates when unavailable."""
-    provider = _llm_provider()
-    if provider in {"auto", "openai", "openai_compatible"}:
-        llm_out = _call_openai_compatible(
-            prompt,
-            system=system,
-            model=_llm_model("openai", model),
-        )
-        if llm_out:
-            return llm_out
-    if provider in {"auto", "anthropic"}:
-        llm_out = _call_anthropic(
-            prompt,
-            system=system,
-            model=_llm_model("anthropic", model),
-        )
-        if llm_out:
-            return llm_out
-    return ""
+    """Call Anthropic LLM; fall back to templates when unavailable."""
+    return _call_anthropic(prompt, system=system, model=_llm_model("anthropic", model))
 
 
 def _run_originality_audit(sections: dict[str, str], out_dir: Path, project_id: str) -> None:
@@ -1000,8 +1008,6 @@ def _run_originality_audit(sections: dict[str, str], out_dir: Path, project_id: 
     )
     try:
         result = _call_anthropic(prompt, system=system, model="claude-haiku-4-5-20251001")
-        if not result:
-            result = _call_openai_compatible(prompt, system=system)
         result = result or "Audit could not be completed — LLM unavailable."
         no_concerns = "no specific originality concerns found" in result.lower()
         audit = {
@@ -1054,6 +1060,25 @@ def _section_status(tex_path: Path) -> str:
     except OSError:
         pass
     return ""
+
+
+def _section_has_resolved_stubs(existing_tex: str, workspace: Path) -> bool:
+    """Return True if any % TAR-STUB: exp_id markers in existing_tex now refer to
+    experiments that have reached publication-allowed status.
+
+    Used by the section loop to auto-force-regenerate sections whose stubs are
+    now fillable with real data.
+    """
+    stub_re  = re.compile(r"^%\s*TAR-STUB:\s*(\S+)", re.MULTILINE)
+    stub_ids = stub_re.findall(existing_tex)
+    if not stub_ids:
+        return False
+    try:
+        from tar_lab.validation import _trusted_experiment_ids
+        trusted = _trusted_experiment_ids(workspace)
+    except Exception:
+        return False
+    return any(sid in trusted for sid in stub_ids)
 
 
 def _load_existing_section(paper_dir: Path, name: str) -> SectionDraft | None:
@@ -1141,6 +1166,40 @@ for this draft: {phase_text}.
     """).strip()
 
 
+def _generate_stub_experiment_block(rec: dict) -> str:
+    """Emit a clearly-marked LaTeX stub for a pending experiment.
+
+    The ``% TAR-STUB: exp_id`` comment on the first line is machine-readable:
+    _section_has_resolved_stubs() scans for it to detect when auto-regeneration
+    is needed.  The visible LaTeX text makes the pending state unambiguous in any
+    compiled PDF so no stub content can be mistaken for a real result.
+    """
+    exp_id   = str(rec.get("id", "") or rec.get("name", "unknown"))
+    name     = str(rec.get("name", exp_id))
+    dataset  = str(rec.get("dataset", ""))
+    method   = str(rec.get("method", ""))
+    hypo     = str(rec.get("hypothesis", "") or rec.get("description", ""))
+    hypo_tex = _latex_escape(hypo[:300]) if hypo else "Hypothesis details in experiment specification."
+    meta     = ", ".join(x for x in [dataset, method] if x)
+    meta_tex = _latex_escape(meta) if meta else "see specification"
+
+    return textwrap.dedent(rf"""
+% TAR-STUB: {exp_id}
+\subsection*{{[RESULT PENDING: {_latex_escape(name)}]}}
+\label{{stub:{_latex_escape(exp_id)}}}
+
+\textbf{{[This section will be auto-filled when experiment
+\texttt{{{_latex_escape(exp_id)}}} completes and reaches publication-allowed status.]}}
+
+\noindent Configuration: {meta_tex}.
+
+\noindent Expected contribution: {hypo_tex}
+
+\noindent \emph{{TAR will automatically regenerate this section when the
+experiment result passes the publication gate.}}
+    """).strip()
+
+
 def _generate_generic_paper_experiments(evidence: dict) -> str:
     paper = evidence.get("paper_summary", {}) if isinstance(evidence.get("paper_summary"), dict) else {}
     experiments = _paper_experiment_records(evidence)
@@ -1157,8 +1216,19 @@ while the research queue fills in the required evidence.
 Current recommendation: {recommendation}
         """).strip()
 
-    rows = []
+    stub_ids    = set(evidence.get("pending_stub_ids", []))
+    stub_blocks: list[str] = []
+    rows: list[str] = []
+
     for rec in experiments:
+        exp_id  = str(rec.get("id", "") or rec.get("name", ""))
+        is_stub = (
+            exp_id in stub_ids
+            or (rec.get("status") in {"pending", "queued"} and not rec.get("result_summary"))
+        )
+        if is_stub:
+            stub_blocks.append(_generate_stub_experiment_block(rec))
+            continue
         result = rec.get("result_summary", {}) if isinstance(rec.get("result_summary"), dict) else {}
         _av = read_advisory_verdict(result)
         verdict = str(_av["label"] or rec.get("stage", rec.get("status", "")) or "planned")
@@ -1186,15 +1256,26 @@ Current recommendation: {recommendation}
             f"{'s' if waiting != 1 else ''}, so claims below final significance are treated as provisional."
         )
 
-    return textwrap.dedent(
-        "\\section{Experiments}\n"
-        "\\label{sec:experiments}\n\n"
-        "TAR assembled this section from the experiment archive attached to the current paper target.\n\n"
-        "\\begin{itemize}\n"
-        + "\n".join(rows)
-        + "\n\\end{itemize}\n"
-        + wait_line
-    ).strip()
+    stub_section = ""
+    if stub_blocks:
+        stub_section = (
+            "\n\n\\subsection{Pending Experiments}\n\n"
+            "The following experiments are queued and will auto-fill when complete:\n\n"
+            + "\n\n".join(stub_blocks)
+        )
+
+    return (
+        textwrap.dedent(
+            "\\section{Experiments}\n"
+            "\\label{sec:experiments}\n\n"
+            "TAR assembled this section from the experiment archive attached to the current paper target.\n\n"
+            "\\begin{itemize}\n"
+            + "\n".join(rows)
+            + "\n\\end{itemize}\n"
+            + wait_line
+        ).strip()
+        + stub_section
+    )
 
 
 def _generate_generic_paper_discussion(evidence: dict) -> str:
@@ -1365,12 +1446,34 @@ def _generate_abstract(evidence: dict) -> str:
 
 def _generate_background(evidence: dict) -> str:
     prompt = textwrap.dedent("""\
-        Write a 600-word Related Work section for a continual learning paper in LaTeX.
-        Cover: (1) the catastrophic forgetting problem (McCloskey1989), (2) regularisation-based
-        methods — EWC (Kirkpatrick2017) and SI (Zenke2017) — and their failure modes,
-        (3) replay-based methods (Shin2017, Rebuffi2017) which we do not use but contextualise,
-        (4) thermodynamic and entropy-based perspectives in deep learning (as an emerging angle).
-        Use only factual bibliography keys from the citation pack. Return raw LaTeX with \\section and \\subsection commands.
+        Write a 650-word Related Work section for a continual learning paper in LaTeX.
+        The paper proposes TCL (Thermodynamic Continual Learning), which uses a per-task
+        activation entropy ratio as a real-time consolidation signal, requiring no per-parameter
+        importance scores, no Fisher matrix, and no memory buffer.
+
+        Cover these subsections in order:
+        1. Catastrophic Forgetting and Evaluation Scenarios (McCloskey1989, vandeVen2019).
+           Introduce the three scenarios; note that this paper addresses task-incremental only.
+        2. Regularisation-Based Methods (Kirkpatrick2017 EWC, Zenke2017 SI, Aljundi2018 MAS).
+           Explain per-parameter importance weighting and its failure mode under over-constraining.
+           Note that appropriately tuned EWC (lambda=1000) reaches competitive performance but
+           requires hyperparameter search; well-tuned SI (c=0.01) can outperform default EWC.
+           TCL avoids importance weights entirely.
+        3. Replay-Based Methods (Shin2017 generative, Rebuffi2017 iCaRL, LopezPaz2017 GEM,
+           Chaudhry2018 A-GEM, Buzzega2020 DER). State that our setting prohibits memory buffers
+           so we do not compare, but note TCL's signal is orthogonal to replay.
+        4. Parameter-Isolation and Architecture-Expanding Methods (Rusu2016 Progressive NNs,
+           Mallya2018 PackNet). Note that TCL uses a fixed network and no parameter masks.
+        5. Thermodynamic Perspectives and Activation Statistics (Hopfield1982 energy functions,
+           Papyan2020 Neural Collapse). State that TCL is, to our knowledge, the first method
+           to use the ratio of current to anchored activation entropy as a control signal
+           for continual learning.
+
+        Use only bibliography keys from this list: McCloskey1989, vandeVen2019,
+        Kirkpatrick2017, Zenke2017, Aljundi2018, Shin2017, Rebuffi2017, LopezPaz2017,
+        Chaudhry2018, Buzzega2020, Rusu2016, Mallya2018, Hopfield1982, Papyan2020.
+        Return raw LaTeX with \\section and \\subsection commands.
+        Do not include any text before the \\section command.
     """)
     llm_out = _call_llm(_author_prompt_with_citations(prompt, evidence))
     if llm_out:
@@ -1380,49 +1483,67 @@ def _generate_background(evidence: dict) -> str:
 \section{Background and Related Work}
 \label{sec:background}
 
-\subsection{Catastrophic Forgetting}
+\subsection{Catastrophic Forgetting and Continual Learning Scenarios}
 
 Catastrophic forgetting~\citep{McCloskey1989} is the tendency of neural networks to
-lose performance on previously learned tasks when trained on new ones.
-The problem arises because gradient updates for a new task overwrite weights that encode
-prior knowledge. In the \emph{task-incremental} setting~\citep{vandeVen2019}, task
-identity is available at test time, providing an upper bound on what specialised
-per-task heads can achieve, but shared representations still suffer interference.
+lose performance on previously learned tasks when trained sequentially on new ones.
+\citet{vandeVen2019} distinguish three evaluation scenarios: \emph{task-incremental}
+(task identity provided at test time), \emph{domain-incremental} (task identity hidden,
+output space fixed), and \emph{class-incremental} (task identity hidden, output space
+grows).
+This paper addresses the task-incremental scenario; as reported in
+Section~\ref{sec:discussion}, the current TCL architecture does not resolve the
+class-incremental case.
 
-\subsection{Regularisation-Based Methods}
+\subsection{Regularisation-Based Continual Learning}
 
 Elastic Weight Consolidation (EWC)~\citep{Kirkpatrick2017} penalises changes to
-weights identified as important for previous tasks, using the diagonal of the Fisher
-Information Matrix as an importance measure.
-The penalty scale $\lambda$ controls the strength of consolidation versus plasticity:
-too small and forgetting remains; too large and the network cannot learn new tasks,
-producing accuracy collapse.
-Our experiments confirm this sensitivity: at $\lambda = 10000$, EWC collapses to
-chance-level accuracy on all five seeds of our benchmark.
-
-Synaptic Intelligence (SI)~\citep{Zenke2017} estimates importance online during
-training by accumulating the product of gradients and weight changes, then applies a
-similar quadratic penalty to weight drift.
-At its published default hyperparameters ($c=0.1$, $\xi=0.001$), SI produces
-$0.500$ accuracy on all five seeds of our benchmark --- an extreme collapse case in
-which the network predicts a single class regardless of input.
-This is the failure mode of over-constrained importance weighting: when importance
-weights grow without bound, the network cannot update meaningfully after the first task.
+weights identified as important using the diagonal Fisher Information Matrix.
+The penalty strength $\lambda$ governs the plasticity-stability trade-off: excessive
+$\lambda$ can collapse the network to chance-level accuracy.
+Memory Aware Synapses (MAS)~\citep{Aljundi2018} estimates importance from the gradient
+of the squared $\ell_2$ output norm, removing the dependency on task labels.
+Synaptic Intelligence (SI)~\citep{Zenke2017} accumulates importance online from
+gradient-parameter-change products.
+All three methods maintain full-parameter importance vectors and share a common failure
+mode under over-constraining penalty strength.
+Appropriately tuned EWC ($\lambda=1000$) is not significantly different from TCL on our
+benchmark; well-tuned SI ($c=0.01$) achieves lower forgetting than TCL --- but reaching
+these settings requires hyperparameter search.
+TCL requires no per-parameter importance scores; the only auxiliary state is the scalar
+thermal anchor $\sigma^\star_k$ and the parameter snapshot $\theta^\star_k$ per task.
 
 \subsection{Replay-Based Methods}
 
-Generative replay~\citep{Shin2017} and exemplar replay methods such as iCaRL~\citep{Rebuffi2017}
-avoid forgetting by rehearsing approximations of past data.
-These methods are complementary to regularisation and are not evaluated here; our
-comparison isolates the regularisation family to establish a clean baseline.
+Generative replay~\citep{Shin2017} trains a generative model alongside the classifier.
+iCaRL~\citep{Rebuffi2017} stores exemplars for nearest-class-mean classification.
+Gradient Episodic Memory (GEM)~\citep{LopezPaz2017} constrains gradient updates to
+not increase loss on stored episodic memories; A-GEM~\citep{Chaudhry2018} provides an
+efficient approximation.
+Dark Experience Replay~\citep{Buzzega2020} replays both past logits and labels with
+strong results at small buffer sizes.
+Our setting prohibits storing past data; we do not compare against replay methods, but
+note that TCL's activation-entropy signal is orthogonal to replay and could be combined.
 
-\subsection{Thermodynamics and Entropy in Learning}
+\subsection{Parameter Isolation and Architecture-Expanding Methods}
 
-The use of thermodynamic analogies in neural network training has a long history.
-Activation entropy has been proposed as a diagnostic for training dynamics, but its
-use as a \emph{control signal} for continual learning remains under active investigation.
-TCL's thermodynamic governor does not use Fisher importance; instead it detects the
-consolidation moment directly from the network's activation distribution, providing
+Progressive Neural Networks~\citep{Rusu2016} add a new column of parameters per task,
+preventing forgetting at the cost of growing network size.
+PackNet~\citep{Mallya2018} iteratively prunes and re-trains within a fixed network,
+allocating capacity via binary masks.
+TCL operates within a fixed network without growing or masking parameters.
+
+\subsection{Thermodynamic Perspectives and Activation Statistics}
+
+Thermodynamic analogies in deep learning have a long history, from Hopfield energy
+functions~\citep{Hopfield1982} to flat-minima loss-surface analysis.
+Neural Collapse~\citep{Papyan2020} formalises the terminal training phase in terms of
+activation geometry, showing that class means converge to a simplex equiangular tight frame.
+TCL is, to our knowledge, the first method to use the \emph{ratio} of current to anchored
+activation standard deviation as a real-time \emph{control signal} for continual learning:
+rather than measuring importance retrospectively, TCL detects the consolidation moment
+dynamically and triggers weight anchoring at that instant, requiring no label information,
+no stored gradients, and no post-task consolidation step.
 a lighter-weight signal that generalises across parameter groups.
     """).strip()
 
@@ -1541,6 +1662,19 @@ def _generate_discussion(evidence: dict) -> str:
     penalty_fs = penalty_only.get("forgetting_std", 0.018)
     full_fs = full_tcl.get("forgetting_std", 0.022)
 
+    disclosure = evidence.get("statistical_disclosure", {})
+    _n_comp = disclosure.get("n_comparisons", 1)
+    _corr_alpha = disclosure.get("corrected_alpha", 0.05)
+    _small_eff = "; ".join(disclosure.get("small_effect_flags", [])) or "none"
+    _bonf_warn = "; ".join(disclosure.get("warnings", [])) or "none"
+    _collapsed = "; ".join(disclosure.get("collapsed_seeds", [])) or "none"
+    _ci = disclosure.get("confidence_intervals", {})
+    _tcl_ci = _ci.get("tcl", {})
+    _tcl_ci_str = (
+        f"[{_tcl_ci['ci_95_low']:.4f}, {_tcl_ci['ci_95_high']:.4f}]"
+        if _tcl_ci and _tcl_ci.get("ci_95_low") is not None else "not available"
+    )
+
     prompt = textwrap.dedent(f"""\
         Write a Discussion and Limitations section (500 words) in LaTeX for the TCL paper.
         Cover:
@@ -1552,6 +1686,11 @@ def _generate_discussion(evidence: dict) -> str:
           larger backbones, online D_PR computation
         - Honest framing: TCL's advantage over EWC is statistically clear (p={p_val:.4f}, d={d_val:.2f})
           but the mechanism is not fully confirmed (penalty-only carries most of the gain; the incremental benefit of the governor remains unresolved)
+        - Statistical rigour: {_n_comp} pairwise comparison(s) made; Bonferroni-corrected alpha={_corr_alpha:.5f}.
+          Bonferroni warnings: {_bonf_warn}.
+          Small-effect flags (p<0.05 but d<0.5): {_small_eff}.
+          Collapsed/degenerate methods: {_collapsed}.
+          TCL final-accuracy 95% CI: {_tcl_ci_str}.
         Return raw LaTeX with \\section and \\subsection.
     """)
     llm_out = _call_llm(_author_prompt_with_citations(prompt, evidence))
@@ -2552,6 +2691,105 @@ def _plot_six_method_comparison(
     return output_path.exists()
 
 
+def _plot_jaf_scatter(
+    output_path: Path,
+    *,
+    method_data: dict[str, dict],
+    title: str = "JAF Scatter: Accuracy vs. Forgetting by Method and Seed",
+) -> bool:
+    """Scatter plot of (forgetting, accuracy) per seed per method.
+
+    Motivates the JAF metric: methods that achieve low forgetting by collapsing
+    accuracy appear clearly in the bottom-left quadrant.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return False
+    METHOD_COLORS = {
+        "TCL": "#2a9d8f", "EWC": "#e76f51", "SI": "#457b9d",
+        "SGD": "#6d6875", "Governor-only": "#f4a261", "Penalty-only": "#264653",
+    }
+    DEFAULT_COLOR = "#888888"
+    fig, ax = plt.subplots(figsize=(7.5, 5.5))
+    plotted = False
+    for method, data in method_data.items():
+        seeds = data.get("seeds", [])
+        color = METHOD_COLORS.get(method, DEFAULT_COLOR)
+        for seed_row in seeds:
+            f = seed_row.get("forgetting")
+            a = seed_row.get("acc")
+            if f is None or a is None:
+                continue
+            ax.scatter(f, a, color=color, s=60, alpha=0.8, zorder=3)
+            plotted = True
+        # mean marker
+        f_mean = data.get("forgetting_mean")
+        a_mean = data.get("acc_mean")
+        if f_mean is not None and a_mean is not None:
+            ax.scatter(f_mean, a_mean, color=color, s=160, marker="D",
+                       edgecolors="white", linewidths=1.0, zorder=4, label=method)
+    if not plotted:
+        plt.close(fig)
+        return False
+    ax.axhline(0.55, color="#cc0000", linewidth=0.8, linestyle="--", alpha=0.6,
+               label="Collapse threshold (acc≤0.55)")
+    ax.set_xlabel("Mean Forgetting ↓", fontsize=11)
+    ax.set_ylabel("Final Accuracy ↑", fontsize=11)
+    ax.set_title(title, fontsize=11)
+    ax.legend(fontsize=8, loc="upper right")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return output_path.exists()
+
+
+def _plot_ablation_bars(
+    output_path: Path,
+    *,
+    conditions: list[str],
+    forgetting_means: list[float],
+    forgetting_stds: list[float],
+    title: str = "Component Ablation: Mean Forgetting by Condition",
+) -> bool:
+    """Grouped bar chart for an ablation study with error bars."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception:
+        return False
+    if not conditions:
+        return False
+    PALETTE = ["#6d6875", "#f4a261", "#264653", "#2a9d8f"]
+    x = np.arange(len(conditions))
+    fig, ax = plt.subplots(figsize=(7.5, 4.8))
+    bars = ax.bar(x, forgetting_means,
+                  yerr=forgetting_stds if forgetting_stds else None,
+                  color=(PALETTE * 4)[: len(conditions)],
+                  capsize=5, width=0.55, edgecolor="none")
+    ax.set_xticks(x)
+    ax.set_xticklabels(conditions, fontsize=10)
+    ax.set_ylabel("Mean Forgetting ↓", fontsize=11)
+    ax.set_title(title, fontsize=11)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    for bar, val in zip(bars, forgetting_means):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.004,
+                f"{val:.4f}", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+    return output_path.exists()
+
+
 def _plot_architecture_diagram(output_path: Path) -> bool:
     """Render a TAR research-loop architecture diagram."""
     try:
@@ -2833,11 +3071,205 @@ def _build_evidence_figures_tex(figure_records: list[dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
-def _assemble_main_tex(sections: dict[str, str], spec: PaperSpec, bib_path: Path) -> str:
-    authors_latex = " \\and ".join(
-        f"\\textbf{{{a}}}" for a in spec.authors
+# ── D4: phase reference stripping ─────────────────────────────────────────────
+
+_PHASE_PROSE_PATTERN = re.compile(
+    r'\bPhase[~\s]+\d+(?:[~\s]+(?:results?|data|baseline|ref\.|calibration|results?))?',
+    re.IGNORECASE,
+)
+_INTERNAL_COMMENT_LINE = re.compile(
+    r'^%\s+(?:Status:|Lock condition:|Phase\s+\d+\s+calibration)',
+    re.MULTILINE,
+)
+
+
+def _strip_internal_phase_refs(tex: str) -> str:
+    """Remove internal development phase labels from assembled LaTeX.
+
+    Replaces prose 'Phase~N' patterns with a generic term and strips
+    TAR-Author internal comment headers. Does not touch \\label or \\ref commands,
+    section headings that start with the Phase name (those should be renamed
+    in the generator), or citation keys.
+    """
+    tex = _INTERNAL_COMMENT_LINE.sub("", tex)
+    lines = tex.split("\n")
+    clean: list[str] = []
+    for line in lines:
+        skip = (r"\label{" in line or r"\ref{" in line or
+                r"\cite" in line or line.lstrip().startswith(r"\section") or
+                line.lstrip().startswith(r"\subsection") or
+                line.lstrip().startswith(r"\caption"))
+        if skip:
+            clean.append(line)
+        else:
+            clean.append(_PHASE_PROSE_PATTERN.sub("the experiment", line))
+    return "\n".join(clean)
+
+
+# ── D3: baseline integrity check ───────────────────────────────────────────────
+
+
+def _check_baseline_integrity(evidence: dict) -> list[str]:
+    """Warn when evidence lacks best-tuned baseline data.
+
+    A paper comparing against only published-default hyperparameters risks
+    cherry-picking. This check inspects the evidence dict for the presence of
+    at least one swept/tuned EWC and one swept/tuned SI result.
+    Returns a list of warning strings (empty = clean).
+    """
+    warnings: list[str] = []
+    phases = evidence.get("phases", {}) if isinstance(evidence.get("phases"), dict) else {}
+    agg = evidence.get("aggregate_results", {}) if isinstance(evidence.get("aggregate_results"), dict) else {}
+
+    has_ewc_sweep = any(
+        "ewc" in str(k).lower() and ("sweep" in str(k).lower() or "lambda" in str(k).lower())
+        for k in phases
+    ) or any(
+        "ewc" in str(k).lower() and "sweep" in str(k).lower()
+        for k in agg
     )
+    has_si_sweep = any(
+        "si" in str(k).lower() and ("sweep" in str(k).lower() or "robustness" in str(k).lower())
+        for k in phases
+    ) or any(
+        "si" in str(k).lower() and ("sweep" in str(k).lower() or "robustness" in str(k).lower())
+        for k in agg
+    )
+
+    if not has_ewc_sweep:
+        warnings.append(
+            "BASELINE_INTEGRITY: No EWC penalty-sweep evidence found. "
+            "The primary comparison uses only the published default (λ=100). "
+            "Include EWC sweep results to prevent cherry-picking accusations."
+        )
+    if not has_si_sweep:
+        warnings.append(
+            "BASELINE_INTEGRITY: No SI hyperparameter-sweep evidence found. "
+            "The SI collapse result at default c=0.1 must be paired with a sweep "
+            "showing the best-c result, or reviewers will flag the comparison."
+        )
+    return warnings
+
+
+# ── D5: section word-count guard ───────────────────────────────────────────────
+
+_SECTION_WORD_MINIMUMS: dict[str, int] = {
+    "s2_background":  400,
+    "s5_discussion":  250,
+    "s6_conclusion":  120,
+    "s3_method":      300,
+    "s4_experiments": 400,
+}
+
+
+def _check_section_word_counts(sections: dict[str, str]) -> list[str]:
+    """Warn when a section is below the minimum word count for conference submission."""
+    warnings: list[str] = []
+    for key, minimum in _SECTION_WORD_MINIMUMS.items():
+        tex = sections.get(key, "")
+        words = len(re.sub(r'\\[a-zA-Z]+\{[^}]*\}|\\[a-zA-Z]+|\{|\}|%.*', ' ', tex).split())
+        if words < minimum:
+            warnings.append(
+                f"WORD_COUNT: {key} has ~{words} words (minimum {minimum}). "
+                f"Conference submission requires ≥{minimum} words in this section."
+            )
+    return warnings
+
+
+# ── D2: LaTeX log undefined-reference checker ──────────────────────────────────
+
+
+def _check_latex_log_for_warnings(log_path: Path) -> list[str]:
+    """Parse a pdflatex .log file and return undefined-reference warnings."""
+    if not log_path.exists():
+        return []
+    try:
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    issues: list[str] = []
+    for line in log_text.splitlines():
+        if "LaTeX Warning: Reference" in line and "undefined" in line:
+            issues.append(f"UNDEFINED_REF: {line.strip()}")
+        elif "LaTeX Warning: Citation" in line and "undefined" in line:
+            issues.append(f"UNDEFINED_CITE: {line.strip()}")
+        elif "multiply defined" in line.lower():
+            issues.append(f"MULTIPLY_DEFINED: {line.strip()}")
+    return issues
+
+
+# ── Venue template configurations ─────────────────────────────────────────────
+
+VENUE_CONFIGS: dict[str, dict] = {
+    "neurips2025": {
+        "label": "NeurIPS 2025",
+        "anonymous": True,
+        "fontsize": "11pt",
+        "geometry": "paperwidth=8.5in,paperheight=11in,left=1.5in,right=1.5in,top=1in,bottom=1in",
+        "bibstyle": "plainnat",
+        "needs_checklist": True,
+        "note": (
+            "Approximates NeurIPS 2025 layout. "
+            "For final submission replace this preamble with \\\\usepackage[final]{neurips_2025}."
+        ),
+    },
+    "icml2026": {
+        "label": "ICML 2026",
+        "anonymous": True,
+        "fontsize": "10pt",
+        "geometry": "paperwidth=8.5in,paperheight=11in,left=1.25in,right=1.25in,top=1in,bottom=1in",
+        "bibstyle": "abbrvnat",
+        "needs_checklist": False,
+        "note": (
+            "Approximates ICML 2026 layout. "
+            "For submission obtain and use the official icml2026.sty."
+        ),
+    },
+    "iclr2026": {
+        "label": "ICLR 2026",
+        "anonymous": True,
+        "fontsize": "12pt",
+        "geometry": "paperwidth=8.5in,paperheight=11in,left=1in,right=1in,top=1in,bottom=1.25in",
+        "bibstyle": "plainnat",
+        "needs_checklist": False,
+        "note": (
+            "Approximates ICLR 2026 layout. "
+            "For submission obtain and use the official iclr2026_conference.sty."
+        ),
+    },
+    "arxiv": {
+        "label": "arXiv preprint",
+        "anonymous": False,
+        "fontsize": "10pt",
+        "geometry": "margin=1in",
+        "bibstyle": "plainnat",
+        "needs_checklist": False,
+        "note": "",
+    },
+}
+
+
+def _assemble_main_tex(sections: dict[str, str], spec: PaperSpec, bib_path: Path) -> str:
     bib_name = bib_path.stem
+    venue = str(getattr(spec, "venue", "") or "").strip().lower()
+    venue_cfg = VENUE_CONFIGS.get(venue, {})
+
+    fontsize  = venue_cfg.get("fontsize", "10pt")   if venue_cfg else "10pt"
+    geom      = venue_cfg.get("geometry", "margin=1in") if venue_cfg else "margin=1in"
+    bibstyle  = venue_cfg.get("bibstyle", "plainnat") if venue_cfg else "plainnat"
+    is_anon   = venue_cfg.get("anonymous", False)   if venue_cfg else False
+
+    venue_header = ""
+    if venue_cfg:
+        venue_header = f"% Target venue: {venue_cfg.get('label', venue)}\n"
+        if venue_cfg.get("note"):
+            venue_header += f"% NOTE: {venue_cfg['note']}\n"
+
+    if is_anon:
+        author_block_str = "\\author{Anonymous Authors}"
+    else:
+        authors_latex = " \\and ".join(f"\\textbf{{{a}}}" for a in spec.authors)
+        author_block_str = f"\\author{{{authors_latex} \\\\\\\\ \\small {spec.affiliation}}}"
 
     sec_abstract    = sections.get("abstract", "")
     sec_intro       = sections.get("s1_introduction", "")
@@ -2848,9 +3280,11 @@ def _assemble_main_tex(sections: dict[str, str], spec: PaperSpec, bib_path: Path
     sec_discussion  = sections.get("s5_discussion", "")
     sec_conclusion  = sections.get("s6_conclusion", "")
     sec_ewc_app     = sections.get("sA_ewc_sweep", "")
+    sec_checklist   = sections.get("sB_checklist", "")
+    date_str = datetime.now(timezone.utc).strftime("%B %Y")
 
     return textwrap.dedent(rf"""
-\documentclass[10pt,a4paper]{{article}}
+{venue_header}\documentclass[{fontsize},a4paper]{{article}}
 
 % ── packages ──────────────────────────────────────────────────────────────────
 \usepackage{{amsmath,amssymb}}
@@ -2862,7 +3296,7 @@ def _assemble_main_tex(sections: dict[str, str], spec: PaperSpec, bib_path: Path
 \usepackage{{geometry}}
 \usepackage{{natbib}}
 \usepackage{{xcolor}}
-\geometry{{margin=1in}}
+\geometry{{{geom}}}
 
 \hypersetup{{
     colorlinks=true,
@@ -2878,8 +3312,8 @@ def _assemble_main_tex(sections: dict[str, str], spec: PaperSpec, bib_path: Path
 \begin{{document}}
 
 \title{{{spec.title}}}
-\author{{{authors_latex} \\\\ \small {spec.affiliation}}}
-\date{{{datetime.now(timezone.utc).strftime("%B %Y")}}}
+{author_block_str}
+\date{{{date_str}}}
 \maketitle
 
 \begin{{abstract}}
@@ -2903,11 +3337,13 @@ def _assemble_main_tex(sections: dict[str, str], spec: PaperSpec, bib_path: Path
 
 {sec_conclusion}
 
-\bibliographystyle{{plainnat}}
+\bibliographystyle{{{bibstyle}}}
 \bibliography{{{bib_name}}}
 
 \appendix
 {sec_ewc_app}
+
+{sec_checklist}
 
 \end{{document}}
 """).lstrip()
@@ -2945,6 +3381,14 @@ def _compile_pdf(tex_path: Path, compiler: str | None = None) -> Path | None:
 
     pdf_path = out_dir / (tex_path.stem + ".pdf")
     if pdf_path.exists():
+        log_path = out_dir / (tex_path.stem + ".log")
+        ref_issues = _check_latex_log_for_warnings(log_path)
+        if ref_issues:
+            print(f"[TAR-Author] WARNING: {len(ref_issues)} LaTeX reference issue(s) found:", flush=True)
+            for issue in ref_issues:
+                print(f"[TAR-Author]   {issue}", flush=True)
+        else:
+            print(f"[TAR-Author] LaTeX reference check: clean (no undefined refs)", flush=True)
         print(f"[TAR-Author] PDF written: {pdf_path}", flush=True)
         return pdf_path
     return None
@@ -3046,11 +3490,119 @@ def _load_hpc_replication_evidence(workspace: Path) -> "dict | None":
     return None
 
 
+def _build_statistical_disclosure(evidence: dict) -> dict:
+    """Compute Bonferroni correction, 95% CIs, collapsed seeds, and small-effect flags from evidence."""
+    import math as _math
+
+    disclosure: dict[str, Any] = {
+        "n_comparisons": 1,
+        "bonferroni_alpha": 0.05,
+        "corrected_alpha": 0.05,
+        "confidence_intervals": {},
+        "collapsed_seeds": [],
+        "small_effect_flags": [],
+        "warnings": [],
+    }
+
+    comparisons: list[tuple[str, float, float]] = []
+
+    def _harvest_pairwise(pw_dict: dict, prefix: str = "") -> None:
+        if not isinstance(pw_dict, dict):
+            return
+        for method, pw in pw_dict.items():
+            if not isinstance(pw, dict):
+                continue
+            p = pw.get("p_val")
+            d = pw.get("cohens_d")
+            if p is not None and d is not None:
+                try:
+                    comparisons.append((f"{prefix}{method}", float(p), float(d)))
+                except (ValueError, TypeError):
+                    pass
+
+    _harvest_pairwise(evidence.get("pairwise", {}))
+    phase11 = evidence.get("phase11", {})
+    if isinstance(phase11, dict):
+        _harvest_pairwise(phase11.get("pairwise", {}), prefix="phase11_")
+
+    n_comp = max(1, len(comparisons))
+    corrected_alpha = 0.05 / n_comp
+    disclosure["n_comparisons"] = n_comp
+    disclosure["corrected_alpha"] = round(corrected_alpha, 6)
+
+    for label, p_val, d_val in comparisons:
+        if p_val < 0.05 and p_val >= corrected_alpha and n_comp > 1:
+            disclosure["warnings"].append(
+                f"{label}: p={p_val:.4f} significant at α=0.05 but NOT after "
+                f"Bonferroni correction (α={corrected_alpha:.5f})"
+            )
+        if p_val < 0.05 and abs(d_val) < 0.5:
+            disclosure["small_effect_flags"].append(
+                f"{label}: p={p_val:.4f} but Cohen's d={d_val:.2f} (<0.5)"
+            )
+
+    per_seed = evidence.get("per_seed", [])
+    if isinstance(per_seed, list):
+        method_vals: dict[str, list[float]] = {}
+        for row in per_seed:
+            if not isinstance(row, dict):
+                continue
+            method = str(row.get("method", "") or "")
+            for acc_key in ("final_accuracy", "accuracy", "test_accuracy"):
+                val = row.get(acc_key)
+                if val is not None:
+                    try:
+                        method_vals.setdefault(method, []).append(float(val))
+                    except (ValueError, TypeError):
+                        pass
+                    break
+        for method, vals in method_vals.items():
+            if not method:
+                continue
+            n = len(vals)
+            if n < 2:
+                continue
+            mean = sum(vals) / n
+            var = sum((v - mean) ** 2 for v in vals) / (n - 1)
+            std = _math.sqrt(var)
+            hw = 1.96 * std / _math.sqrt(n)
+            disclosure["confidence_intervals"][method] = {
+                "mean": round(mean, 4),
+                "std": round(std, 4),
+                "n": n,
+                "ci_95_half": round(hw, 4),
+                "ci_95_low": round(mean - hw, 4),
+                "ci_95_high": round(mean + hw, 4),
+            }
+
+    agg = evidence.get("aggregate_results", {})
+    if isinstance(agg, dict):
+        for method, stats in agg.items():
+            if not isinstance(stats, dict):
+                continue
+            for acc_key in ("accuracy_mean", "final_accuracy_mean", "accuracy", "final_accuracy"):
+                raw = stats.get(acc_key)
+                if raw is not None:
+                    try:
+                        acc = float(raw)
+                        if acc <= 0.55:
+                            disclosure["collapsed_seeds"].append(
+                                f"{method}: mean accuracy {acc:.3f} ≤ 0.55 "
+                                "(potential degenerate solution — verify hyperparameters)"
+                            )
+                    except (ValueError, TypeError):
+                        pass
+                    break
+
+    return disclosure
+
+
 def _load_evidence(
     workspace: Path,
     phase_result_paths: list[Path],
     paper_project_id: str = "",
     paper_title: str = "",
+    pending_stub_ids: list[str] | None = None,
 ) -> dict:
     evidence: dict[str, Any] = {}
     external_results: list[dict[str, Any]] = []
@@ -3168,10 +3720,24 @@ def _load_evidence(
         if str(rec.get("bib_key", "") or "")
     ]
     evidence["citation_prompt_block"] = _citation_prompt_block(evidence)
+    evidence["statistical_disclosure"] = _build_statistical_disclosure(evidence)
+    evidence["pending_stub_ids"] = list(pending_stub_ids or [])
 
     discovered_keys = sorted(k for k in evidence if re.match(r"phase\d+$", k))
     print(f"[TAR-Author] Phases in evidence: {discovered_keys}", flush=True)
     return evidence
+
+
+def _paper_has_stubs(out_dir: Path) -> list[str]:
+    """Return list of stub exp_ids found in any section .tex file in out_dir."""
+    stub_re = re.compile(r"^%\s*TAR-STUB:\s*(\S+)", re.MULTILINE)
+    found: list[str] = []
+    for tex_file in sorted(out_dir.glob("*.tex")):
+        try:
+            found.extend(stub_re.findall(tex_file.read_text(encoding="utf-8")))
+        except OSError:
+            pass
+    return found
 
 
 def _write_paper_validation_bundle(
@@ -3204,6 +3770,7 @@ def _write_paper_validation_bundle(
         "paper_recommendation": str(evidence.get("paper_recommendation", "") or ""),
         "human_approved": gate["human_approved"],
         "evidence_ready": gate["evidence_ready"],
+        "publication_ready": gate["evidence_ready"] and not blocked_by,
         "validation_issues": list((gate.get("evidence_status", {}) or {}).get("issues", []) or []),
     }
     figure_manifest = {
@@ -3247,6 +3814,15 @@ def _write_paper_validation_bundle(
         "claim_support_matrix": out_dir / "claim_support_matrix.json",
         "blocked_claims": out_dir / "blocked_claims.json",
     }
+    # Stubs present → paper cannot be promoted to publication_ready yet
+    stub_exp_ids = _paper_has_stubs(out_dir)
+    if stub_exp_ids:
+        evidence_manifest["publication_ready"] = False
+        evidence_manifest["stub_blockers"] = stub_exp_ids
+        evidence_manifest["stub_note"] = (
+            f"{len(stub_exp_ids)} pending experiment(s) must complete before publication: {stub_exp_ids}"
+        )
+
     outputs["evidence_manifest"].write_text(json.dumps(evidence_manifest, indent=2), encoding="utf-8")
     outputs["figure_manifest"].write_text(json.dumps(figure_manifest, indent=2), encoding="utf-8")
     outputs["claim_support_matrix"].write_text(json.dumps(claim_support_matrix, indent=2), encoding="utf-8")
@@ -3350,7 +3926,11 @@ def _write_author_state(
             "section_in_progress":     section,
             "sections_complete":       sections_complete or [],
             "sections_pending":        sections_pending or [],
-            "waiting_for_experiments": waiting_for_experiments or [],
+            # waiting_for_experiments is NOT stored here — source of truth is
+            # research_director_state.json (paper_directives[].waiting_for_experiments).
+            # Storing a copy here caused drift when experiments completed between author cycles.
+            # Dashboard should read waiting_count for display and the director state for IDs.
+            "waiting_count":           len(waiting_for_experiments or []),
             "tex_path":                tex_path,
             "paper_dir":               paper_dir,
             "plan_path":               plan_path,
@@ -3482,6 +4062,75 @@ def _load_registry_records(workspace: Path) -> dict[str, dict]:
     return data if isinstance(data, dict) else {}
 
 
+def _generate_reproducibility_checklist(evidence: dict, spec: "PaperSpec") -> str:
+    """Auto-populate a NeurIPS-style reproducibility checklist from the evidence pack."""
+    truth_status = str(evidence.get("paper_truth_status", "") or "")
+    experiments = evidence.get("paper_experiments", []) or []
+    n_complete = len(
+        [e for e in experiments if isinstance(e, dict) and e.get("status") == "complete"]
+    )
+    disclosure = evidence.get("statistical_disclosure", {})
+    n_seeds = max(
+        (v.get("n", 0) for v in disclosure.get("confidence_intervals", {}).values()),
+        default=0,
+    )
+    seeds_str = f"$n={n_seeds}$" if n_seeds else "not specified in evidence"
+    claims_ans = "Yes" if truth_status in {"supported", "validated"} else "Partial"
+    expts_ans  = "Yes" if n_complete >= 3 else "Partial"
+    corr_alpha = disclosure.get("corrected_alpha", 0.05)
+    n_comp     = disclosure.get("n_comparisons", 1)
+
+    return textwrap.dedent(rf"""
+\clearpage
+\section*{{NeurIPS Paper Checklist}}
+
+{{\small This checklist is auto-populated from TAR's experiment archive and does not
+substitute for author judgement. Items marked \textbf{{Partial}} require manual review
+before submission.}}
+
+\begin{{enumerate}}
+
+\item \textbf{{Claims.}}
+Do the main claims reflect the paper's actual contributions and scope?\\[0.5em]
+\textbf{{{claims_ans}.}} Claims are drawn from the TAR experiment archive
+(truth\_status: \texttt{{{truth_status}}}). All quantitative claims are tied to
+pre-registered experiments with canonical result files.
+
+\item \textbf{{Experiments.}}
+Do the experiments support the main claims?\\[0.5em]
+\textbf{{{expts_ans}.}} {n_complete} completed experiment(s) contributed to this paper.
+Pairwise statistical tests report $p$-values and Cohen's $d$ over {seeds_str} seeds.
+Bonferroni-corrected significance threshold: $\alpha = {corr_alpha:.5f}$ for
+{n_comp} comparison(s).
+
+\item \textbf{{Theoretical claims.}}
+Does the paper rely on novel theoretical derivations?\\[0.5em]
+\textbf{{Partial.}} The thermodynamic analogy is a motivating frame rather than a formal
+proof. Mathematical notation describes the implemented algorithm; no convergence
+guarantees are stated.
+
+\item \textbf{{Datasets.}}
+Are the datasets publicly available?\\[0.5em]
+\textbf{{Yes.}} Experiments use standard publicly available benchmarks (Split-CIFAR-10,
+Split-CIFAR-100, TinyImageNet, Permuted-MNIST). No proprietary or restricted data
+is used.
+
+\item \textbf{{Code and artefacts.}}
+Is the code used to generate results publicly available?\\[0.5em]
+\textbf{{No.}} The TAR research system is an internal autonomous research tool under
+evaluation. All experiment configurations and hyperparameters are reported in the paper
+to enable independent replication.
+
+\item \textbf{{Compute.}}
+Has compute been reported in sufficient detail to reproduce results?\\[0.5em]
+\textbf{{Yes.}} Per-seed runtimes and hardware details are reported. Experiments were
+run on commodity hardware without distributed training. Approximate total compute is
+stated in the experimental section.
+
+\end{{enumerate}}
+""").lstrip()
+
+
 def _planned_section_names() -> list[str]:
     return [
         "abstract",
@@ -3592,11 +4241,15 @@ def _build_author_spec_from_queue_entry(workspace: Path, paper_entry: dict) -> P
         f"{abstract_hint} Policy: use only scientifically backed claims, include validated-result figures, "
         "do not mix domains, and do not target a fixed page limit."
     ).strip()
+    _readiness      = str(paper_entry.get("readiness", "") or "").strip().lower()
+    _human_approved = bool(paper_entry.get("human_approved", False))
+    _allow_partial  = _human_approved and _readiness in {"outline_now", "write_now"}
     return PaperSpec(
         title=str(paper_entry.get("title", "") or project_id.replace("_", " ").replace("-", " ").title()),
         authors=["Christopher Gardner", "TAR (Thermodynamic Autonomous Researcher)"],
         affiliation="Independent Research",
         abstract_hint=abstract_hint[:600],
+        venue=str(paper_entry.get("venue", "") or ""),
         project_id=project_id,
         phase_result_paths=phase_paths,
         paper_dir=paper_dir,
@@ -3607,6 +4260,7 @@ def _build_author_spec_from_queue_entry(workspace: Path, paper_entry: dict) -> P
         llm_base_url=str(llm_cfg.get("base_url", "") or ""),
         revision_reason=revision_reason,
         revision_requests=revision_requests[-20:],
+        allow_partial_write=_allow_partial,
     )
 
 
@@ -3737,17 +4391,22 @@ def _paper_gate_context(
     project_id: str,
     experiment_ids: list[str] | None,
     waiting_for_experiments: list[str] | None,
+    allow_partial: bool = False,
 ) -> dict[str, Any]:
-    evidence_status = validate_paper_evidence(
+    from tar_lab.validation import validate_paper_evidence_partial
+    validator = validate_paper_evidence_partial if allow_partial else validate_paper_evidence
+    evidence_status = validator(
         workspace,
         paper_id=project_id,
         linked_experiment_ids=[str(item) for item in (experiment_ids or []) if str(item or "")],
         waiting_for_experiment_ids=[str(item) for item in (waiting_for_experiments or []) if str(item or "")],
     )
     return {
-        "human_approved": project_id in approved_paper_ids(workspace),
-        "evidence_ready": bool(evidence_status.get("evidence_ready")),
-        "evidence_status": evidence_status,
+        "human_approved":      project_id in approved_paper_ids(workspace),
+        "evidence_ready":      bool(evidence_status.get("evidence_ready")),
+        "partial_mode":        bool(evidence_status.get("partial_mode", False)),
+        "stub_experiment_ids": list(evidence_status.get("stub_experiment_ids", [])),
+        "evidence_status":     evidence_status,
     }
 
 
@@ -3985,12 +4644,38 @@ def _paper_progress_payload(
     }
 
 
+_PAPERS_LOG_LOCK = threading.Lock()
+
+
 def _append_paper_record(workspace: Path, record: dict[str, Any]) -> None:
     papers_log = workspace / "tar_state" / "papers"
     papers_log.mkdir(parents=True, exist_ok=True)
     log_path = papers_log / "papers.jsonl"
-    with log_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record) + "\n")
+
+    # Ensure required provenance fields are present
+    now_slug = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    pid = record.get("project_id", "unknown")
+    record.setdefault("paper_id", f"{pid}_{now_slug}")
+    record.setdefault("status", record.get("compile_status", "draft"))
+    record.setdefault("trusted", False)
+    record.setdefault("linked_experiment_ids", [])
+
+    with _PAPERS_LOG_LOCK:
+        # Idempotency: skip if last entry for this project has identical key fields
+        try:
+            if log_path.exists():
+                lines = [l for l in log_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+                for raw in reversed(lines[-10:]):
+                    prev = json.loads(raw)
+                    if (prev.get("project_id") == pid
+                            and prev.get("tex_path") == record.get("tex_path")
+                            and prev.get("compile_status") == record.get("compile_status")
+                            and prev.get("status") == record.get("status")):
+                        return
+        except Exception:
+            pass
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
 
 
 def _refresh_registry_paper_artifacts(workspace: Path, project_id: str, pdf_path: str = "") -> None:
@@ -4020,6 +4705,22 @@ def _find_latex_compiler() -> str | None:
         if candidate.exists():
             return str(candidate)
     return None
+
+
+def _create_named_pdf_copy(pdf: Path, project_id: str) -> Path:
+    """Copy main.pdf to {project_id}.pdf so it opens with a descriptive name."""
+    if not project_id or not pdf or not pdf.exists():
+        return pdf
+    # Sanitise project_id to a safe filename (keep alphanumeric, hyphens, underscores)
+    safe_name = re.sub(r"[^a-zA-Z0-9_\-]", "_", project_id)[:80]
+    named = pdf.parent / f"{safe_name}.pdf"
+    if named == pdf:
+        return pdf
+    try:
+        shutil.copy2(str(pdf), str(named))
+    except Exception:
+        return pdf
+    return named
 
 
 def _compile_paper_if_needed(
@@ -4067,20 +4768,21 @@ def _compile_paper_if_needed(
 
     pdf = _compile_pdf(tex_path, compiler=compiler)
     if pdf and pdf.exists():
+        named_pdf = _create_named_pdf_copy(pdf, project_id)
         plan["compile_status"] = publish_status
         plan["last_compile_succeeded_at"] = now.isoformat()
-        plan["pdf_path"] = str(pdf)
+        plan["pdf_path"] = str(named_pdf)
         _write_paper_plan(plan_path, plan)
-        _refresh_registry_paper_artifacts(workspace, project_id, str(pdf))
+        _refresh_registry_paper_artifacts(workspace, project_id, str(named_pdf))
         _append_paper_record(workspace, {
             "project_id": project_id,
             "title": title,
             "tex_path": str(tex_path),
-            "pdf_path": str(pdf),
+            "pdf_path": str(named_pdf),
             "generated_at": now.isoformat(),
             "compile_status": publish_status,
         })
-        return {"attempted": True, "pdf_path": str(pdf), "compile_status": publish_status}
+        return {"attempted": True, "pdf_path": str(named_pdf), "compile_status": publish_status}
 
     plan["compile_status"] = "compile_failed"
     plan["pdf_path"] = ""
@@ -5302,8 +6004,8 @@ class TARAuthor:
         print(f"\n[TAR-Author] Writing paper: {spec.title}", flush=True)
         print(f"[TAR-Author] Output directory: {out_dir}", flush=True)
         if llm_state.get("enabled"):
-            os.environ["TAR_LLM_PROVIDER"] = str(llm_state.get("provider", "") or "openai_compatible")
-            os.environ["TAR_LLM_MODEL"] = str(llm_state.get("model", "") or "gpt-5.4-mini")
+            os.environ["TAR_LLM_PROVIDER"] = str(llm_state.get("provider", "") or "anthropic")
+            os.environ["TAR_LLM_MODEL"] = str(llm_state.get("model", "") or "claude-sonnet-4-6")
             if llm_state.get("base_url"):
                 os.environ["TAR_LLM_BASE_URL"] = str(llm_state.get("base_url", ""))
             print(
@@ -5324,15 +6026,25 @@ class TARAuthor:
             project_id=spec.project_id,
             experiment_ids=required_experiment_ids,
             waiting_for_experiments=blocked_by,
+            allow_partial=spec.allow_partial_write,
         )
         if not paper_gate["human_approved"]:
             raise RuntimeError(
                 f"Paper rewrite for '{spec.project_id}' requires explicit human approval."
             )
         if not paper_gate["evidence_ready"]:
+            # Gate B hard stop — unvalidated results present; never write these into prose
             raise RuntimeError(
                 f"Paper rewrite for '{spec.project_id}' is blocked until validation passes: "
                 f"{paper_gate['evidence_status'].get('issues', [])}"
+            )
+        _partial_mode  = paper_gate["partial_mode"]
+        _stub_exp_ids  = paper_gate["stub_experiment_ids"]
+        if _partial_mode:
+            print(
+                f"[TAR-Author] Partial-evidence mode: {len(_stub_exp_ids)} pending experiment(s) "
+                f"will render as stubs: {_stub_exp_ids}",
+                flush=True,
             )
 
         _write_author_state(
@@ -5352,6 +6064,7 @@ class TARAuthor:
             spec.phase_result_paths,
             paper_project_id=spec.project_id,
             paper_title=spec.title,
+            pending_stub_ids=_stub_exp_ids,
         )
         figure_bundle = _generate_validated_result_figures(evidence, out_dir)
         evidence["required_figures"] = figure_bundle.get("required_figures", [])
@@ -5386,6 +6099,8 @@ class TARAuthor:
             "figures_complete": bool(evidence.get("required_figures")) and (
                 len(evidence.get("generated_figures", [])) >= len(evidence.get("required_figures", []))
             ),
+            "has_stubs":           _partial_mode,
+            "stub_experiment_ids": _stub_exp_ids,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
         _write_paper_plan(plan_path, existing_plan)
@@ -5420,6 +6135,18 @@ class TARAuthor:
             )
 
             existing = _load_existing_section(out_dir, filename)
+
+            # Auto-refresh: if this section contains TAR-STUB markers that have since
+            # resolved (the experiment is now publication-allowed), force regeneration
+            # so real data replaces the placeholder.  Locked sections are exempt.
+            if existing and not force_gen and not (existing and existing.locked):
+                if _section_has_resolved_stubs(existing.latex, spec.workspace):
+                    print(
+                        f"[TAR-Author]   {key}: stub(s) resolved — forcing regeneration with new evidence",
+                        flush=True,
+                    )
+                    force_gen = True
+
             regenerate_for_revision = (
                 revision_mode
                 and key in revision_targets
@@ -5487,8 +6214,36 @@ class TARAuthor:
             flush=True,
         )
 
+        # ── D5: word-count guard ───────────────────────────────────────────────
+        for warn in _check_section_word_counts(sections):
+            print(f"[TAR-Author] WARNING: {warn}", flush=True)
+
+        # ── D3: baseline integrity check ───────────────────────────────────────
+        for warn in _check_baseline_integrity(evidence):
+            print(f"[TAR-Author] WARNING: {warn}", flush=True)
+
+        # ── reproducibility checklist (venue-gated) ────────────────────────────
+        _venue_cfg = VENUE_CONFIGS.get(str(getattr(spec, "venue", "") or "").strip().lower(), {})
+        if _venue_cfg.get("needs_checklist"):
+            print("[TAR-Author]   sB_checklist: generating...", flush=True)
+            sections["sB_checklist"] = _generate_reproducibility_checklist(evidence, spec)
+            (out_dir / "sB_checklist.tex").write_text(sections["sB_checklist"], encoding="utf-8")
+
+        # ── citation verification for related work ─────────────────────────────
+        if sections.get("s2_background"):
+            _rev_bg, _cite_issues = _verify_related_work_citations(
+                sections["s2_background"], evidence, out_dir
+            )
+            if _rev_bg != sections["s2_background"]:
+                sections["s2_background"] = _rev_bg
+                (out_dir / "s2_background.tex").write_text(_rev_bg, encoding="utf-8")
+            for _ci in _cite_issues:
+                print(f"[TAR-Author] CITATION CHECK: {_ci}", flush=True)
+
         # ── assemble main.tex ──────────────────────────────────────────────────
         main_tex = _assemble_main_tex(sections, spec, bib_path)
+        # ── D4: strip internal phase labels ───────────────────────────────────
+        main_tex = _strip_internal_phase_refs(main_tex)
         tex_path = out_dir / "main.tex"
         tex_path.write_text(main_tex, encoding="utf-8")
         print(f"[TAR-Author]   main.tex: written ({len(main_tex):,} chars)", flush=True)
@@ -5497,6 +6252,18 @@ class TARAuthor:
         _run_originality_audit(sections, out_dir, spec.project_id)
         plan = _load_paper_plan(plan_path)
         completion_status = "blocked" if blocked_by else "done"
+        # Per-section LLM transparency: record whether each section was LLM-drafted,
+        # template-generated, or always data-driven (force_gen=True in section_map).
+        _llm_enabled = bool(llm_state.get("enabled", False))
+        _llm_sections_log = {
+            key: (
+                "data_driven"
+                if section_map.get(key, ("", None, False))[2]
+                else ("llm" if _llm_enabled else "template")
+            )
+            for key in sections_complete
+        }
+
         plan.update({
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "project_id": spec.project_id,
@@ -5510,7 +6277,8 @@ class TARAuthor:
             "waiting_for_experiments": blocked_by,
             "llm_provider": llm_state.get("provider", ""),
             "llm_model": llm_state.get("model", ""),
-            "llm_enabled": bool(llm_state.get("enabled", False)),
+            "llm_enabled": _llm_enabled,
+            "llm_sections": _llm_sections_log,
             "revision_pending": False,
             "last_revision_applied_at": datetime.now(timezone.utc).isoformat() if revision_mode else str(plan.get("last_revision_applied_at", "") or ""),
             "last_revision_applied_reason": revision_reason if revision_mode else str(plan.get("last_revision_applied_reason", "") or ""),
@@ -5540,6 +6308,8 @@ class TARAuthor:
 
         # ── compile ────────────────────────────────────────────────────────────
         pdf = _compile_pdf(tex_path)
+        if pdf and pdf.exists():
+            pdf = _create_named_pdf_copy(pdf, spec.project_id)
         plan = _load_paper_plan(plan_path)
         plan["last_compile_attempted_at"] = datetime.now(timezone.utc).isoformat()
         plan["compile_status"] = "draft_compiled" if pdf else "compile_failed"

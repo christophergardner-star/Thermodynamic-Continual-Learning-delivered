@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TAR Research Dashboard</title>
+<title>TAR — Autonomous Research</title>
 <style>
 :root{
   --bg:#07111a;
@@ -646,7 +646,7 @@ pre{
 .history-group-header{display:flex;align-items:baseline;gap:12px;margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
 .history-group-title{font-size:1rem;font-weight:700;color:var(--fg)}
 .history-group-count{font-size:.78rem;color:var(--soft)}
-.history-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px}
+.history-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:16px}
 .exp-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:10px;transition:border-color .15s}
 .exp-card:hover{border-color:rgba(103,183,255,.25)}
 .exp-card.verdict-confirmed{border-left:3px solid #3dd5a0}
@@ -670,6 +670,39 @@ pre{
 .exp-findings-text{font-size:.78rem;line-height:1.55;color:var(--soft);margin-top:6px;padding:8px 10px;background:rgba(61,213,160,.04);border:1px solid rgba(61,213,160,.12);border-radius:6px;white-space:pre-wrap;display:none}
 .exp-findings-text.open{display:block}
 .exp-date{font-size:.72rem;color:var(--soft)}
+.history-controls{display:flex;flex-direction:column;gap:10px;margin-bottom:20px}
+.history-ctrl-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.history-search{flex:1;min-width:180px;padding:7px 14px;border-radius:8px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--fg);font-size:.85rem;font-family:inherit;outline:none;transition:border-color .15s}
+.history-search:focus{border-color:rgba(103,183,255,.4);background:rgba(255,255,255,.06)}
+.history-search::placeholder{color:var(--soft)}
+.history-sort-sel{padding:5px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--soft);font-size:.82rem;font-family:inherit;cursor:pointer;outline:none}
+.history-ctrl-label{font-size:.75rem;color:var(--soft);white-space:nowrap}
+.hgroup-label{display:flex;gap:6px;align-items:center}
+.hstatus-row{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.hstatus-btn{padding:4px 11px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--soft);font-size:.76rem;cursor:pointer;font-family:inherit;transition:all .15s;white-space:nowrap}
+.hstatus-btn:hover{border-color:rgba(103,183,255,.3);color:var(--fg)}
+.hstatus-btn.active{background:rgba(255,255,255,.07);color:var(--fg);border-color:var(--line-strong)}
+.hstatus-btn.sv-confirmed.active{border-color:rgba(61,213,160,.5);background:rgba(61,213,160,.1);color:#3dd5a0}
+.hstatus-btn.sv-directional.active{border-color:rgba(251,191,36,.4);background:rgba(251,191,36,.08);color:#fbbf24}
+.hstatus-btn.sv-adverse.active{border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.08);color:#f87171}
+.hstatus-btn.sv-running.active{border-color:rgba(103,183,255,.4);background:rgba(103,183,255,.1);color:#67b7ff}
+.hstatus-divider{color:var(--line-strong);padding:0 3px;font-size:.9rem}
+.hgroup-verdict-row{display:flex;flex-wrap:wrap;gap:4px;margin-left:auto}
+.hgv-pill{font-size:.67rem;padding:2px 7px;border-radius:999px;font-weight:700}
+.hgv-pill.confirmed{background:rgba(61,213,160,.12);color:#3dd5a0;border:1px solid rgba(61,213,160,.25)}
+.hgv-pill.directional{background:rgba(251,191,36,.1);color:#fbbf24;border:1px solid rgba(251,191,36,.25)}
+.hgv-pill.null-v{background:rgba(255,255,255,.04);color:var(--soft);border:1px solid rgba(255,255,255,.1)}
+.hgv-pill.adverse{background:rgba(248,113,113,.08);color:#f87171;border:1px solid rgba(248,113,113,.2)}
+.hgv-pill.running{background:rgba(103,183,255,.08);color:#67b7ff;border:1px solid rgba(103,183,255,.2)}
+.exp-status-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-top:5px}
+.exp-status-dot.running{background:#67b7ff;box-shadow:0 0 6px #67b7ff88;animation:pulse 1.5s ease-in-out infinite}
+.exp-status-dot.complete-confirmed{background:#3dd5a0;box-shadow:0 0 5px #3dd5a055}
+.exp-status-dot.complete-directional{background:#fbbf24}
+.exp-status-dot.complete-adverse{background:#f87171}
+.exp-status-dot.complete{background:rgba(255,255,255,.3)}
+.exp-status-dot.pending{background:rgba(255,255,255,.15)}
+.history-empty{padding:60px 0;text-align:center;color:var(--soft);font-size:.9rem}
+.history-match-count{font-size:.8rem;color:var(--soft);padding-bottom:10px}
 .seed-trail{display:flex;gap:7px;align-items:center;flex-wrap:wrap;padding:4px 0}
 .seed-pip{width:14px;height:14px;border-radius:50%;cursor:default;position:relative;transition:transform .15s;flex-shrink:0}
 .seed-pip:hover{transform:scale(1.5)}
@@ -723,7 +756,31 @@ pre{
 <div class="shell">
   <section class="hero">
     <article class="hero-card">
-      <h1>TAR Research Dashboard</h1>
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 620 200" role="img" aria-label="TAR — Autonomous Research" style="width:100%;max-width:380px;margin-bottom:12px;display:block">
+        <defs>
+          <linearGradient id="tar-descent-db" gradientUnits="userSpaceOnUse" x1="48" y1="58" x2="128" y2="142">
+            <stop offset="0" stop-color="#8899aa"/>
+            <stop offset="0.6" stop-color="#B0552F"/>
+            <stop offset="1" stop-color="#E2683C"/>
+          </linearGradient>
+        </defs>
+        <g transform="translate(8,12) scale(0.88)">
+          <path d="M133.3 25.1 A82 82 0 0 0 39.1 154.9 A82 82 0 0 0 178.0 74.7" fill="none" stroke="#D8D3C7" stroke-width="13" stroke-linecap="round"/>
+          <path d="M52 64 C 70 122 86 140 108 140 C 132 140 144 122 158 98" fill="none" stroke="url(#tar-descent-db)" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="52" cy="64" r="7" fill="#D8D3C7"/>
+          <circle cx="108" cy="140" r="11" fill="#E2683C"/>
+        </g>
+        <line x1="208" y1="58" x2="208" y2="142" stroke="rgba(255,255,255,0.18)" stroke-width="2"/>
+        <g transform="translate(232,54) scale(0.92)" fill="#edf4fb">
+          <path d="M0 0 H92 V22 H57 V100 H35 V22 H0 Z"/>
+          <g stroke="#edf4fb" fill="none">
+            <polyline points="116,100 160,2 204,100" stroke-width="22" stroke-linecap="butt" stroke-linejoin="round"/>
+            <line x1="140" y1="68" x2="180" y2="68" stroke-width="20" stroke-linecap="butt"/>
+          </g>
+          <path fill-rule="evenodd" d="M235 0 H300 C328 0 342 14 342 31 C342 47 330 57 309 60 L342 100 L314 100 L281 64 H257 V100 H235 Z M257 22 H299 C312 22 318 26 318 31 C318 36 312 40 299 40 H257 Z"/>
+        </g>
+        <text x="234" y="180" font-family="'Aptos','Segoe UI Variable','Segoe UI',sans-serif" font-size="16" font-weight="600" letter-spacing="6" fill="#9bb2c8">AUTONOMOUS&#160;&#160;RESEARCH</text>
+      </svg>
       <p>
         One control surface for the whole system: live runtime, queued work, human approvals,
         validation trust, research direction, papers, and raw state. The goal here is to make
@@ -860,10 +917,32 @@ pre{
 
   <section class="tab-panel" id="tab-history">
     <div id="history-summary" class="history-summary">Loading experiment history…</div>
-    <div id="history-filters" class="history-filters" style="display:none">
-      <button class="hfilt-btn active" data-filter="paper" type="button">Group by Paper</button>
-      <button class="hfilt-btn" data-filter="frontier" type="button">Group by Frontier</button>
-      <button class="hfilt-btn" data-filter="all" type="button">All Experiments</button>
+    <div class="history-controls" id="history-controls" style="display:none">
+      <div class="history-ctrl-row">
+        <input id="history-search" class="history-search" type="search" placeholder="Search by name, method, dataset…" autocomplete="off">
+        <select id="history-sort" class="history-sort-sel" title="Sort order">
+          <option value="date-desc">Newest first</option>
+          <option value="date-asc">Oldest first</option>
+          <option value="forgetting-asc">Best forgetting first</option>
+          <option value="forgetting-desc">Worst forgetting first</option>
+        </select>
+        <div class="hgroup-label">
+          <span class="history-ctrl-label">Group:</span>
+          <button class="hfilt-btn active" data-filter="paper" type="button">Paper</button>
+          <button class="hfilt-btn" data-filter="frontier" type="button">Frontier</button>
+          <button class="hfilt-btn" data-filter="all" type="button">None</button>
+        </div>
+      </div>
+      <div class="hstatus-row">
+        <button class="hstatus-btn active" data-status="all" type="button">All</button>
+        <button class="hstatus-btn" data-status="complete" type="button">Complete</button>
+        <button class="hstatus-btn sv-running" data-status="running" type="button">Running</button>
+        <button class="hstatus-btn" data-status="pending" type="button">Pending</button>
+        <span class="hstatus-divider">|</span>
+        <button class="hstatus-btn sv-confirmed" data-status="CONFIRMED" type="button">CONFIRMED</button>
+        <button class="hstatus-btn sv-directional" data-status="DIRECTIONAL" type="button">DIRECTIONAL</button>
+        <button class="hstatus-btn sv-adverse" data-status="NULL" type="button">NULL</button>
+      </div>
     </div>
     <div id="history-content"></div>
   </section>
@@ -904,7 +983,7 @@ pre{
             <div class="confidence-track">
               <div class="confidence-fill" id="confidence-fill" style="width:0%"></div>
             </div>
-            <div class="threshold-note" id="threshold-note">Pre-registered: forgetting &lt; 0.1161</div>
+            <div class="threshold-note" id="threshold-note">Loading…</div>
             <div style="margin-top:16px">
               <div class="small muted" style="margin-bottom:8px">Each dot = one completed seed</div>
               <div class="seed-trail" id="seed-trail"></div>
@@ -913,6 +992,31 @@ pre{
         </div>
       </article>
     </div>
+
+    <article class="panel" style="margin-bottom:18px" id="epoch-panel">
+      <div class="panel-head">
+        <div>
+          <h2>Live Experiment Terminal</h2>
+          <p>Per-epoch output — loss &amp; accuracy as each epoch completes. Auto-updates every 5 s.</p>
+        </div>
+        <div class="meta" style="display:flex;align-items:center;gap:8px">
+          <label style="font-size:.7rem;color:var(--soft)">
+            <input type="checkbox" id="epoch-only-chk" checked style="margin-right:4px">Epochs only
+          </label>
+          <span id="epoch-log-mtime" style="font-size:.65rem;color:var(--soft)"></span>
+        </div>
+      </div>
+      <div class="panel-body" style="padding:0">
+        <div id="epoch-log-box" style="
+          font-family:monospace;font-size:.7rem;line-height:1.6;
+          background:#04080f;color:#7fb3d3;
+          padding:10px 14px;
+          min-height:120px;max-height:340px;
+          overflow-y:auto;white-space:pre-wrap;word-break:break-all;
+          border-radius:0 0 8px 8px;
+        ">Loading experiment log…</div>
+      </div>
+    </article>
 
     <article class="panel" style="margin-bottom:18px">
       <div class="panel-head">
@@ -957,6 +1061,14 @@ pre{
       <div class="panel-body" id="whats-next-panel">
         <div class="muted small">Loading…</div>
       </div>
+    </article>
+
+    <article class="panel" style="margin-top:18px">
+      <div class="panel-head">
+        <div><h2>LLM Insights</h2><p>Claim verifications, experiment evaluations, and frontier syntheses generated by the LLM bridge.</p></div>
+        <div class="meta" id="llm-insights-meta"></div>
+      </div>
+      <div class="panel-body" id="llm-insights-panel"><div class="muted small">Loading…</div></div>
     </article>
   </section>
 
@@ -1049,6 +1161,22 @@ pre{
         </article>
       </div>
     </div>
+
+    <article class="panel" style="margin-top:18px">
+      <div class="panel-head">
+        <div><h2>Phase History</h2><p>All completed TAR phases — forgetting, accuracy, and verdict.</p></div>
+        <div class="meta" id="phases-meta"></div>
+      </div>
+      <div class="panel-body" id="phases-panel"><div class="muted small">Loading…</div></div>
+    </article>
+
+    <article class="panel" style="margin-top:18px">
+      <div class="panel-head">
+        <div><h2>Experiment Findings</h2><p>Auto-generated memos from completed experiments, plus failure diagnoses.</p></div>
+        <div class="meta" id="findings-meta"></div>
+      </div>
+      <div class="panel-body" id="findings-panel"><div class="muted small">Loading…</div></div>
+    </article>
   </section>
 
   <section class="tab-panel" id="tab-research">
@@ -1099,6 +1227,22 @@ pre{
           <div class="panel-body" id="scheduler-panel"></div>
         </article>
       </div>
+    </div>
+
+    <div class="grid-2" style="margin-top:18px">
+      <article class="panel">
+        <div class="panel-head">
+          <div><h2>Literature Ingestion</h2><p>Domain health, cadence, and recent harvest errors.</p></div>
+          <div class="meta" id="literature-meta"></div>
+        </div>
+        <div class="panel-body" id="literature-panel"><div class="muted small">Loading…</div></div>
+      </article>
+      <article class="panel">
+        <div class="panel-head">
+          <div><h2>Coordination State</h2><p>Which experiments and papers are currently active, blocked, or aligned.</p></div>
+        </div>
+        <div class="panel-body" id="coordination-panel"><div class="muted small">Loading…</div></div>
+      </article>
     </div>
   </section>
 
@@ -1191,6 +1335,12 @@ const endpointBuilders = {
   replication: () => "/api/replication",
   websitePapers: () => "/api/website_papers",
   experimentHistory: () => "/api/experiment_history",
+  epochLog: () => "/api/log/experiment_orchestrator",
+  phases: () => "/api/phases",
+  findings: () => "/api/findings",
+  llmInsights: () => "/api/llm_insights",
+  coordination: () => "/api/coordination",
+  literature: () => "/api/literature",
 };
 
 const rawOrder = [
@@ -1342,13 +1492,7 @@ function buildWarnings(){
   const queueSteps = Array.isArray(status.queue_steps) ? status.queue_steps : [];
   const limited = Number(validation.summary?.limited_scope || 0);
   const missingEnv = Number(validation.summary?.missing_env || 0);
-  // >2 allows 1 dashboard worker + 1 daemon (normal); only warn on genuine extras
-  const duplicateDashboard = processes.filter((proc) => !proc.experiment_id).length > 2;
-
-  if (duplicateDashboard) warnings.push({ tone: "bad", text: "Multiple non-experiment Python processes are visible. This usually means duplicate dashboard or control processes are still live." });
   if (running === 0 && pending > 0) warnings.push({ tone: "warn", text: `There are ${pending} queued or planned experiment entries but nothing is running. The queue is not progressing on its own.` });
-  // limited-scope and missing-env are a known permanent state for pre-RAIL results — informational only
-  if (limited > 0 || missingEnv > 0) warnings.push({ tone: "info", text: `${limited} result(s) are limited-scope and ${missingEnv} are missing env provenance (pre-RAIL runs — expected).` });
   const blockedPapers = papers.filter((paper) => String(paper.status || "") === "blocked");
   // Only alarming when nothing is running — if experiments are in flight, papers will unblock naturally
   if (blockedPapers.length && running === 0 && pending === 0) warnings.push({ tone: "warn", text: `${blockedPapers.length} paper(s) are blocked and no experiments are queued to unblock them.` });
@@ -1558,6 +1702,8 @@ function renderExperimentsOverview(){
             ${cardMetaGrid([
               { k: "Method", v: exp.method || "—" },
               { k: "Runtime est", v: num(exp.est_h, "—") + " h" },
+              { k: "ETA remaining", v: progress.eta_remaining_h != null ? (progress.eta_remaining_h === 0 ? "done" : num(progress.eta_remaining_h, "—") + " h") : "—" },
+              { k: "Avg / seed", v: progress.avg_per_seed_h != null ? num(progress.avg_per_seed_h, "—") + " h" : "—" },
               { k: "Seeds", v: formatList(exp.seeds) },
               { k: "Frontier", v: exp.frontier_problem_id || "—" },
               { k: "Hardware", v: exp.hardware_budget ? (exp.hardware_budget.vram_gb || "?") + "GB VRAM · " + (exp.hardware_budget.cpu_cores || "?") + "cores" : "—" },
@@ -2460,10 +2606,10 @@ function updateConfidenceWidget(d, threshold){
     if (label) label.textContent = "Seeds passing threshold";
     if (note) note.textContent = "Idle — no experiment running";
   } else {
-    if (heading) heading.textContent = "Hypothesis Confidence";
-    if (desc) desc.textContent = "Fraction of seeds passing the pre-registered forgetting threshold.";
-    if (label) label.textContent = "Seeds passing threshold";
-    if (note) note.textContent = "Pre-registered: forgetting < 0.1161";
+    if (heading) heading.textContent = "Experiment Progress";
+    if (desc) desc.textContent = "Seeds completed for the current running experiment.";
+    if (label) label.textContent = "Seeds completed";
+    if (note) note.textContent = "No pre-registered threshold — probe or sensitivity experiment";
   }
 }
 
@@ -2539,6 +2685,9 @@ function renderSeedTrail(trail, total, threshold){
 
 // ── Experiment History tab ────────────────────────────────────────────────────
 let _historyFilter = "paper";
+let _historyStatus = "all";
+let _historySearch = "";
+let _historySort = "date-desc";
 
 function renderForgettingChart(seedResults, meanForgetting){
   if (!seedResults || !seedResults.length) return "";
@@ -2585,18 +2734,48 @@ function verdictColor(verdict){
   return {CONFIRMED:"var(--good)",DIRECTIONAL:"#fbbf24",NULL:"var(--soft)",ADVERSE:"#f87171"}[verdict] || "var(--soft)";
 }
 
-function renderExpCard(exp){
+function humanizeExpId(id) {
+  const ACRONYMS = new Set(["vit","sgd","ewc","si","der","hpc","tcl","tar","cifar","mnist","rl","mlp","cnn","rnn","lstm"]);
+  let s = String(id).replace(/^director-/, "").replace(/[-_]/g, " ").trim();
+  s = s.replace(/\s+0*(\d+)$/, " #$1");
+  return s.split(/\s+/).filter(Boolean).map(w =>
+    ACRONYMS.has(w.toLowerCase()) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)
+  ).join(" ");
+}
+
+function humanizeGroupId(gid, mode) {
+  if (gid === "unassigned") return mode === "frontier" ? "No Frontier Assigned" : "General / Unassigned";
+  return humanizeExpId(gid);
+}
+
+function groupVerdictPills(exps) {
+  const vc = {};
+  for (const e of exps) {
+    const v = String((e.result || {}).verdict || "");
+    if (v) vc[v] = (vc[v] || 0) + 1;
+    else if ((e.status || "") === "running") vc["running"] = (vc["running"] || 0) + 1;
+  }
+  const ORDER = ["CONFIRMED","DIRECTIONAL","NULL","ADVERSE","running"];
+  const CLS = {CONFIRMED:"confirmed",DIRECTIONAL:"directional",NULL:"null-v",ADVERSE:"adverse",running:"running"};
+  return ORDER.filter(k => vc[k]).map(k =>
+    `<span class="hgv-pill ${CLS[k]}">${vc[k]} ${k}</span>`
+  ).join("");
+}
+
+function renderExpCard(exp, seq){
   const eid = exp.id || exp.experiment_id || exp.project_id || "?";
-  const name = exp.name || eid;
+  const name = humanizeExpId(exp.name || eid);
   const result = exp.result || {};
   const verdict = result.verdict || "";
   const seeds = exp.seeds || [];
-  const dataset = exp.dataset || "?";
-  const method = exp.method || "?";
+  const dataset = exp.dataset || "";
+  const method = exp.method || "";
+  const st = exp.status || "pending";
   const completedAt = exp.completed_at || exp.started_at || "";
-  const dateStr = completedAt ? new Date(completedAt).toLocaleDateString("en-GB", {day:"numeric",month:"short",year:"numeric"}) : (exp.status || "pending");
+  const dateStr = completedAt ? new Date(completedAt).toLocaleDateString("en-GB", {day:"numeric",month:"short",year:"2-digit"}) : "";
   const seedResults = result.seed_results || [];
-  const vClass = verdict ? `verdict-${verdict.toLowerCase()}` : (exp.status === "running" ? "verdict-running" : "");
+  const vClass = verdict ? `verdict-${verdict.toLowerCase()}` : (st === "running" ? "verdict-running" : "");
+  const dotCls = st === "running" ? "running" : (verdict ? `complete-${verdict.toLowerCase()}` : (st === "complete" ? "complete" : "pending"));
 
   const chartHtml = seedResults.length
     ? `<div class="exp-chart-wrap">
@@ -2628,23 +2807,31 @@ function renderExpCard(exp){
       <div class="exp-findings-text" id="${findingsId}">${escapeHtml(exp.findings_memo)}</div>
     </div>` : "";
 
-  const configParts = Object.entries(result.config_overrides || exp.config_overrides || {})
-    .filter(([k,v]) => v !== true && v !== false)
-    .map(([k,v]) => `${k.replace("tcl_","")}: ${v}`)
-    .join(" · ");
+  const chips = [
+    dataset && `<span class="exp-chip">${escapeHtml(dataset)}</span>`,
+    method && `<span class="exp-chip">${escapeHtml(method)}</span>`,
+    seeds.length && `<span class="exp-chip">${seeds.length} seed${seeds.length>1?"s":""}</span>`,
+  ].filter(Boolean).join("");
+
+  const seqBadge = typeof seq === "number"
+    ? `<span style="font-size:.65rem;color:var(--soft);background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08);border-radius:4px;padding:1px 6px;flex-shrink:0;font-variant-numeric:tabular-nums">#${seq+1}</span>`
+    : "";
 
   return `
     <div class="exp-card ${vClass}">
       <div class="exp-card-head">
-        <span class="exp-name">${escapeHtml(name)}</span>
-        ${verdict ? `<span style="font-size:.78rem;font-weight:700;color:${verdictColor(verdict)};flex-shrink:0">${escapeHtml(verdict)}</span>` : pill(exp.status||"pending","soft")}
-      </div>
-      <div class="exp-chips">
-        <span class="exp-chip">${escapeHtml(dataset)}</span>
-        <span class="exp-chip">${escapeHtml(method)}</span>
-        ${seeds.length ? `<span class="exp-chip">${seeds.length} seeds</span>` : ""}
-        ${configParts ? `<span class="exp-chip">${escapeHtml(configParts)}</span>` : ""}
-        <span class="exp-date">${escapeHtml(dateStr)}</span>
+        <div class="exp-status-dot ${dotCls}"></div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:flex-start;gap:6px;flex-wrap:wrap">
+            <span class="exp-name">${escapeHtml(name)}</span>
+            ${verdict ? `<span style="font-size:.75rem;font-weight:700;color:${verdictColor(verdict)};flex-shrink:0;margin-top:2px">${escapeHtml(verdict)}</span>` : pill(st||"pending","soft")}
+          </div>
+          ${chips ? `<div class="exp-chips" style="margin-top:4px">${chips}</div>` : ""}
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex-shrink:0">
+          ${seqBadge}
+          ${dateStr ? `<span class="exp-date">${escapeHtml(dateStr)}</span>` : ""}
+        </div>
       </div>
       ${chartHtml}
       ${statsHtml}
@@ -2663,7 +2850,7 @@ function toggleFindings(id){
 
 function renderExperimentHistory(){
   const summaryEl = $("history-summary");
-  const filtersEl = $("history-filters");
+  const controlsEl = $("history-controls");
   const contentEl = $("history-content");
   const d = state.data.experimentHistory;
   if (!d){ if (summaryEl) summaryEl.textContent = "Loading experiment history…"; return; }
@@ -2679,41 +2866,83 @@ function renderExperimentHistory(){
     <div class="hsumm-pill null-v"><span class="hsv">${vd.NULL||0}</span><span class="hsl">Null</span></div>
     ${vd.ADVERSE ? `<div class="hsumm-pill adverse"><span class="hsv">${vd.ADVERSE}</span><span class="hsl">Adverse</span></div>` : ""}`;
 
-  if (filtersEl) filtersEl.style.display = "flex";
-
+  if (controlsEl) controlsEl.style.display = "flex";
   if (!contentEl) return;
-  const groups = d.groups || [];
-  if (!groups.length){ contentEl.innerHTML = `<div class="empty">No experiments recorded yet.</div>`; return; }
 
-  const groupField = _historyFilter === "frontier" ? "frontier_problem_id" : _historyFilter === "all" ? null : null;
-
-  let html = "";
-  if (_historyFilter === "all"){
-    const all = (d.experiments || []);
-    html = `<div class="history-group"><div class="history-grid">${all.map(renderExpCard).join("")}</div></div>`;
-  } else if (_historyFilter === "frontier"){
-    const byFrontier = {};
-    (d.experiments || []).forEach(e => {
-      const k = e.frontier_problem_id || "unassigned";
-      (byFrontier[k] = byFrontier[k] || []).push(e);
+  // Apply search filter
+  let exps = (d.experiments || []).slice();
+  const sq = _historySearch.trim().toLowerCase();
+  if (sq) {
+    exps = exps.filter(e => {
+      const hay = [e.id, e.experiment_id, e.project_id, e.name, e.method, e.dataset, e.frontier_problem_id]
+        .filter(Boolean).join(" ").toLowerCase();
+      return hay.includes(sq);
     });
-    html = Object.entries(byFrontier).map(([fid, exps]) =>
-      `<div class="history-group">
-        <div class="history-group-header">
-          <span class="history-group-title">${escapeHtml(fid)}</span>
-          <span class="history-group-count">${exps.length} experiment${exps.length>1?"s":""}</span>
-        </div>
-        <div class="history-grid">${exps.map(renderExpCard).join("")}</div>
-      </div>`).join("");
+  }
+
+  // Apply status / verdict filter
+  if (_historyStatus !== "all") {
+    const isVerdict = ["CONFIRMED","DIRECTIONAL","NULL","ADVERSE"].includes(_historyStatus);
+    if (isVerdict) {
+      exps = exps.filter(e => ((e.result||{}).verdict||"") === _historyStatus);
+    } else {
+      exps = exps.filter(e => (e.status||"") === _historyStatus);
+    }
+  }
+
+  // Sort
+  exps.sort((a, b) => {
+    if (_historySort === "forgetting-asc" || _historySort === "forgetting-desc") {
+      const af = (a.result||{}).mean_forgetting;
+      const bf = (b.result||{}).mean_forgetting;
+      if (af == null && bf == null) return 0;
+      if (af == null) return 1;
+      if (bf == null) return -1;
+      return _historySort === "forgetting-asc" ? af - bf : bf - af;
+    }
+    const ad = String(a.completed_at || a.started_at || a.submitted_at || "");
+    const bd = String(b.completed_at || b.started_at || b.submitted_at || "");
+    return _historySort === "date-asc" ? ad.localeCompare(bd) : bd.localeCompare(ad);
+  });
+
+  if (!exps.length) {
+    contentEl.innerHTML = `<div class="history-empty">${sq || _historyStatus !== "all" ? "No experiments match the current filters." : "No experiments recorded yet."}</div>`;
+    return;
+  }
+
+  const matchNote = (sq || _historyStatus !== "all")
+    ? `<div class="history-match-count">${exps.length} experiment${exps.length>1?"s":""} matching filters</div>`
+    : "";
+
+  let html = matchNote;
+  if (_historyFilter === "all") {
+    html += `<div class="history-group"><div class="history-grid">${exps.map(renderExpCard).join("")}</div></div>`;
   } else {
-    html = groups.map(g =>
-      `<div class="history-group">
+    const groupKey = _historyFilter === "frontier"
+      ? e => String(e.frontier_problem_id || "unassigned")
+      : e => String(e.author_paper_id || e.paper_id || "unassigned");
+
+    const groupMap = new Map();
+    for (const e of exps) {
+      const k = groupKey(e);
+      if (!groupMap.has(k)) groupMap.set(k, []);
+      groupMap.get(k).push(e);
+    }
+
+    for (const [gid, gexps] of groupMap) {
+      const label = humanizeGroupId(gid, _historyFilter);
+      const verdictPillsHtml = groupVerdictPills(gexps);
+      html += `<div class="history-group">
         <div class="history-group-header">
-          <span class="history-group-title">${escapeHtml(g.paper_id)}</span>
-          <span class="history-group-count">${g.experiments.length} experiment${g.experiments.length>1?"s":""}</span>
+          <div>
+            <span class="history-group-title">${escapeHtml(label)}</span>
+            <span class="history-group-count">${gexps.length} experiment${gexps.length>1?"s":""}</span>
+          </div>
+          ${verdictPillsHtml ? `<div class="hgroup-verdict-row">${verdictPillsHtml}</div>` : ""}
         </div>
-        <div class="history-grid">${g.experiments.map(renderExpCard).join("")}</div>
-      </div>`).join("");
+        <div class="history-grid">${gexps.map(renderExpCard).join("")}</div>
+      </div>`;
+    }
   }
   contentEl.innerHTML = html;
 }
@@ -2723,6 +2952,26 @@ document.addEventListener("click", e => {
     document.querySelectorAll(".hfilt-btn").forEach(b => b.classList.remove("active"));
     e.target.classList.add("active");
     _historyFilter = e.target.dataset.filter || "paper";
+    renderExperimentHistory();
+  }
+  if (e.target && e.target.classList.contains("hstatus-btn")){
+    document.querySelectorAll(".hstatus-btn").forEach(b => b.classList.remove("active"));
+    e.target.classList.add("active");
+    _historyStatus = e.target.dataset.status || "all";
+    renderExperimentHistory();
+  }
+});
+
+document.addEventListener("input", e => {
+  if (e.target && e.target.id === "history-search"){
+    _historySearch = e.target.value || "";
+    renderExperimentHistory();
+  }
+});
+
+document.addEventListener("change", e => {
+  if (e.target && e.target.id === "history-sort"){
+    _historySort = e.target.value || "date-desc";
     renderExperimentHistory();
   }
 });
@@ -2930,6 +3179,219 @@ function updateTabBadges(){
   });
 }
 
+function renderPhases(){
+  const phases = Array.isArray(state.data.phases) ? state.data.phases : [];
+  const meta = $("phases-meta");
+  const panel = $("phases-panel");
+  if (!panel) return;
+  if (meta) meta.textContent = `${phases.length} phases`;
+  if (!phases.length){ panel.innerHTML = `<span class="muted small">No phase data.</span>`; return; }
+  panel.innerHTML = `<table class="evidence-table"><thead><tr>
+    <th>Phase</th><th>Dataset</th><th>TCL Forgetting</th><th>vs EWC p</th><th>Verdict</th>
+  </tr></thead><tbody>${phases.map(p => {
+    const vk = escapeHtml(p.verdict_key || "");
+    const vColor = /BREAKTHROUGH|OUTCOME.A/i.test(p.verdict||"") ? "var(--good)" : /NULL|FAIL/i.test(p.verdict||"") ? "var(--bad)" : "var(--amber)";
+    const pv = typeof p.vs_ewc_p === "number" ? p.vs_ewc_p.toFixed(4) : "—";
+    const fg = typeof p.tcl_forgetting === "number" ? p.tcl_forgetting.toFixed(4) : "—";
+    return `<tr>
+      <td>${escapeHtml(String(p.phase||p.label||""))}</td>
+      <td>${escapeHtml(p.dataset||"")}</td>
+      <td>${fg}</td>
+      <td>${pv}</td>
+      <td style="color:${vColor};font-size:.7rem">${escapeHtml((p.verdict||"").slice(0,60))}${(p.verdict||"").length>60?"…":""}</td>
+    </tr>`;
+  }).join("")}</tbody></table>`;
+}
+
+function renderFindings(){
+  const data = state.data.findings || {};
+  const memos = Array.isArray(data.findings_memos) ? data.findings_memos : [];
+  const failures = Array.isArray(data.failure_diagnoses) ? data.failure_diagnoses : [];
+  const meta = $("findings-meta");
+  const panel = $("findings-panel");
+  if (!panel) return;
+  if (meta) meta.textContent = `${memos.length} memos · ${failures.length} failures`;
+  if (!memos.length && !failures.length){ panel.innerHTML = `<span class="muted small">No findings yet.</span>`; return; }
+  let html = "";
+  memos.forEach(m => {
+    const id = m.experiment_id || m.task_id || "unknown";
+    const content = String(m.content || m.memo || "").slice(0,400);
+    html += `<div style="margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--line)">
+      <div style="font-size:.7rem;color:var(--info);margin-bottom:4px">${escapeHtml(id)}</div>
+      <div style="font-size:.72rem;line-height:1.55;white-space:pre-wrap">${escapeHtml(content)}${content.length>=400?"…":""}</div>
+    </div>`;
+  });
+  failures.forEach(f => {
+    const id = f.experiment_id || f.task_id || "unknown";
+    const diag = String(f.diagnosis || f.error || "").slice(0,300);
+    html += `<div style="margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--line)">
+      <div style="font-size:.7rem;color:var(--bad);margin-bottom:4px">FAILURE: ${escapeHtml(id)}</div>
+      <div style="font-size:.72rem;line-height:1.55;white-space:pre-wrap">${escapeHtml(diag)}${diag.length>=300?"…":""}</div>
+    </div>`;
+  });
+  panel.innerHTML = html;
+}
+
+function renderLlmInsights(){
+  const data = state.data.llmInsights || {};
+  const meta = $("llm-insights-meta");
+  const panel = $("llm-insights-panel");
+  if (!panel) return;
+  if (!data.available){ panel.innerHTML = `<span class="muted small">LLM bridge not available.</span>`; return; }
+  const sections = [
+    { label: "Claim Verifications", items: data.claim_verifications || [] },
+    { label: "Experiment Evaluations", items: data.experiment_evaluations || [] },
+    { label: "Frontier Syntheses", items: data.frontier_syntheses || [] },
+  ];
+  const gapSignals = Array.isArray(data.gap_signals) ? data.gap_signals : [];
+  const total = sections.reduce((s,x) => s + x.items.length, 0) + gapSignals.length;
+  if (meta) meta.textContent = `${total} insights`;
+  let html = "";
+
+  // Active Gap Signals — LLM-identified research gaps feeding back into scoring
+  if (gapSignals.length) {
+    html += `<div style="margin-bottom:18px">
+      <div style="font-size:.72rem;font-weight:600;color:var(--warn);margin-bottom:8px">Active Gap Signals (${gapSignals.length})</div>
+      <div style="font-size:.65rem;color:var(--muted);margin-bottom:8px">These LLM-identified gaps are being applied to frontier priority scoring this cycle.</div>`;
+    gapSignals.forEach(gs => {
+      const deltaNum = Number(gs.priority_delta || 0);
+      const deltaStr = (deltaNum > 0 ? "+" : "") + deltaNum.toFixed(1);
+      const deltaColor = deltaNum > 0 ? "var(--warn)" : deltaNum < 0 ? "var(--soft)" : "var(--muted)";
+      const signals = Array.isArray(gs.signals) ? gs.signals : [];
+      html += `<div style="margin-bottom:8px;padding:8px 10px;background:rgba(255,196,80,.04);border-radius:6px;border-left:2px solid var(--warn)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <span style="font-size:.65rem;color:var(--soft)">${escapeHtml(gs.frontier_id || "")}</span>
+          <span style="font-size:.65rem;font-weight:600;color:${deltaColor}">Δ ${deltaStr}</span>
+        </div>
+        ${signals.length ? signals.map(s => `<div style="font-size:.7rem;color:var(--text);line-height:1.5">• ${escapeHtml(s)}</div>`).join("") : `<span class="muted small">No specific signals</span>`}
+      </div>`;
+    });
+    html += `</div>`;
+  }
+
+  sections.forEach(({ label, items }) => {
+    if (!items.length) return;
+    html += `<div style="margin-bottom:16px"><div style="font-size:.72rem;font-weight:600;color:var(--info);margin-bottom:8px">${escapeHtml(label)} (${items.length})</div>`;
+    items.slice(0,3).forEach(item => {
+      const id = item.task_id || item.experiment_id || "";
+      const text = String(item.verification || item.evaluation || item.synthesis || item.content || "").slice(0,350);
+      html += `<div style="margin-bottom:10px;padding:8px 10px;background:rgba(103,183,255,.04);border-radius:6px;border-left:2px solid var(--info)">
+        <div style="font-size:.65rem;color:var(--soft);margin-bottom:3px">${escapeHtml(id)}</div>
+        <div style="font-size:.71rem;line-height:1.55;white-space:pre-wrap">${escapeHtml(text)}${text.length>=350?"…":""}</div>
+      </div>`;
+    });
+    if (items.length > 3) html += `<div class="muted small">…and ${items.length-3} more</div>`;
+    html += `</div>`;
+  });
+  panel.innerHTML = html || `<span class="muted small">No LLM insights generated yet.</span>`;
+}
+
+function renderCoordination(){
+  const data = state.data.coordination || {};
+  const panel = $("coordination-panel");
+  if (!panel) return;
+  const activeExp = Array.isArray(data.active_experiment_ids) ? data.active_experiment_ids : [];
+  const blockedExp = Array.isArray(data.blocked_experiment_ids) ? data.blocked_experiment_ids : [];
+  const aligned = Array.isArray(data.aligned_experiment_ids) ? data.aligned_experiment_ids : [];
+  const activePaths = Array.isArray(data.active_path_ids) ? data.active_path_ids : [];
+  const curPaper = data.current_paper_id || "—";
+  const row = (label, items, color) =>
+    `<tr><td style="color:${color};font-size:.7rem;white-space:nowrap">${escapeHtml(label)}</td>
+     <td style="font-size:.7rem">${items.length ? escapeHtml(items.join(", ")) : "<span class='muted'>none</span>"}</td></tr>`;
+  panel.innerHTML = `<table class="evidence-table"><tbody>
+    ${row("Current paper", [curPaper], "var(--info)")}
+    ${row("Active paths", activePaths, "var(--good)")}
+    ${row("Active experiments", activeExp, "var(--info)")}
+    ${row("Aligned", aligned, "var(--good)")}
+    ${row("Blocked experiments", blockedExp, "var(--bad)")}
+  </tbody></table>`;
+}
+
+function renderLiterature(){
+  const data = state.data.literature || {};
+  const meta = $("literature-meta");
+  const panel = $("literature-panel");
+  if (!panel) return;
+  const cadence = data.cadence || {};
+  const nextDue = cadence.next_due || {};
+  const errors = Array.isArray(data.last_errors) ? data.last_errors : [];
+  const domains = data.domain_profiles || {};
+  const domainList = Array.isArray(domains) ? domains : Object.values(domains);
+  if (meta) meta.textContent = `${domainList.length} domains · ${errors.length} recent errors`;
+  const fmtS = s => s >= 3600 ? `${(s/3600).toFixed(1)}h` : s >= 60 ? `${(s/60).toFixed(0)}m` : `${Math.round(s)}s`;
+  let html = `<div style="margin-bottom:12px"><div style="font-size:.72rem;font-weight:600;color:var(--info);margin-bottom:6px">Next Scheduled Run</div>
+    <table class="evidence-table"><tbody>`;
+  ["fast","daily","weekly"].forEach(k => {
+    const entry = nextDue[k];
+    if (!entry) return;
+    const due = fmtS(Math.max(0, entry.due_in_s || 0));
+    html += `<tr><td style="font-size:.7rem">${k}</td><td style="font-size:.7rem">${due}</td></tr>`;
+  });
+  html += `</tbody></table><div class="muted small" style="margin-top:4px">${escapeHtml(cadence.reason||cadence.mode||"")}</div></div>`;
+  if (domainList.length){
+    html += `<div style="margin-bottom:12px"><div style="font-size:.72rem;font-weight:600;color:var(--info);margin-bottom:6px">Domain Health (${domainList.length})</div>
+      <table class="evidence-table"><thead><tr><th>Domain</th><th>Verified</th><th>Matched</th><th>SoTA</th><th>Confidence</th></tr></thead><tbody>`;
+    domainList.forEach(dp => {
+      const name = dp.domain_id || dp.label || "unknown";
+      const verified = num(dp.verified_paper_count || 0);
+      const matched = num(dp.matched_paper_count || 0);
+      const sota = num(dp.sota_entry_count || 0);
+      const conf = dp.learning_maturity_label || dp.mastery_status || "—";
+      const confColor = /master|strong|high/i.test(conf) ? "var(--good)" : /weak|low|early/i.test(conf) ? "var(--amber)" : "var(--soft)";
+      html += `<tr>
+        <td style="font-size:.7rem">${escapeHtml(name)}</td>
+        <td style="font-size:.7rem">${verified}</td>
+        <td style="font-size:.7rem">${matched}</td>
+        <td style="font-size:.7rem">${sota}</td>
+        <td style="font-size:.7rem;color:${confColor}">${escapeHtml(conf)}</td></tr>`;
+    });
+    html += `</tbody></table></div>`;
+  }
+  if (errors.length){
+    html += `<div><div style="font-size:.72rem;font-weight:600;color:var(--bad);margin-bottom:6px">Recent Errors (${errors.length})</div>`;
+    errors.slice(0,5).forEach(e => {
+      html += `<div style="font-size:.7rem;color:var(--bad);margin-bottom:4px">${escapeHtml(String(e).slice(0,150))}</div>`;
+    });
+    html += `</div>`;
+  }
+  panel.innerHTML = html || `<span class="muted small">No literature data.</span>`;
+}
+
+function renderEpochTerminal(){
+  const box = $("epoch-log-box");
+  const mtimeEl = $("epoch-log-mtime");
+  if (!box) return;
+  const payload = state.data.epochLog || {};
+  const allLines = Array.isArray(payload.lines) ? payload.lines : [];
+  const epochOnly = $("epoch-only-chk") && $("epoch-only-chk").checked;
+  const lines = epochOnly
+    ? allLines.filter((l) => /seed=|epoch\s+\d|task\s+\d/i.test(l))
+    : allLines;
+  if (mtimeEl) {
+    mtimeEl.textContent = payload.mtime ? `updated ${payload.mtime}` : "";
+  }
+  if (!allLines.length) {
+    box.textContent = "(no log data — experiment may not have started yet)";
+    return;
+  }
+  if (!lines.length) {
+    box.textContent = "(waiting for first epoch — no per-epoch lines yet)";
+    return;
+  }
+  const wasAtBottom = box.scrollHeight - box.scrollTop <= box.clientHeight + 40;
+  box.innerHTML = lines.map((line) => {
+    const esc = escapeHtml(line);
+    if (/error|failed|exception|traceback/i.test(line))
+      return `<span style="color:#f87171">${esc}</span>`;
+    if (/seed=|epoch\s+\d|task\s+\d/i.test(line))
+      return `<span style="color:#4ade80">${esc}</span>`;
+    if (/warning|warn/i.test(line))
+      return `<span style="color:#fbbf24">${esc}</span>`;
+    return `<span style="color:#7fb3d3">${esc}</span>`;
+  }).join("\n");
+  if (wasAtBottom) box.scrollTop = box.scrollHeight;
+}
+
 function renderAll(){
   renderHero();
   renderSummary();
@@ -2941,6 +3403,12 @@ function renderAll(){
   renderProcesses();
   renderLogSelector();
   renderLogPanel();
+  renderEpochTerminal();
+  renderPhases();
+  renderFindings();
+  renderLlmInsights();
+  renderCoordination();
+  renderLiterature();
   renderHumanReview();
   renderValidation();
   renderResults();
@@ -3135,6 +3603,21 @@ document.addEventListener("click", (e) => {
     });
   }
 });
+
+// Epoch terminal — fast 5s poll, independent of the 20s loadAll cycle
+(function startEpochPoll(){
+  async function fetchEpochLog(){
+    try {
+      state.data.epochLog = await fetchJson("/api/log/experiment_orchestrator");
+      renderEpochTerminal();
+    } catch(_){}
+  }
+  fetchEpochLog();
+  setInterval(fetchEpochLog, 5000);
+})();
+
+const _epochChk = $("epoch-only-chk");
+if (_epochChk) _epochChk.addEventListener("change", renderEpochTerminal);
 
 const _chatBtn = $("tar-chat-send");
 const _chatInput = $("tar-chat-input");

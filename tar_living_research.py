@@ -854,14 +854,62 @@ def _preregistration_path(workspace: Path) -> Path:
     return workspace / "tar_state" / "autonomous_research" / "preregistration.json"
 
 
+def _append_director_prereg_entry(workspace: Path, spec: "ExperimentSpec") -> None:
+    """Append a preregistration entry for a director-generated followup before it is queued."""
+    path = _preregistration_path(workspace)
+    try:
+        prereg: dict = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        prereg = {}
+    hypotheses: list = prereg.get("hypotheses", [])
+    existing_ids = {h.get("experiment_id") for h in hypotheses if h.get("experiment_id")}
+    if spec.id in existing_ids:
+        return
+    ctx = spec.context if isinstance(spec.context, dict) else {}
+    hypotheses.append({
+        "experiment_id":      spec.id,
+        "name":               spec.name,
+        "registered_at":      datetime.now(timezone.utc).isoformat(),
+        "prediction":         ctx.get("hypothesis") or ctx.get("projected_outcome") or "",
+        "criteria":           {"max_p": 0.05, "min_d": 0.5, "max_delta": -0.01},
+        "frontier_problem_id": spec.frontier_problem_id or "",
+        "author_paper_id":    spec.author_paper_id or "",
+        "seed_count":         len(spec.seeds),
+        "dataset":            spec.dataset,
+        "source":             "director_generated",
+    })
+    prereg["hypotheses"] = hypotheses
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(prereg, indent=2), encoding="utf-8")
+
+
 def write_preregistration(workspace: Path, plans: list[HypothesisPlan]) -> None:
+    # Standard min-N table for 80 % power, alpha=0.05, two-tailed one-sample t-test.
+    # Derived from: n = ceil(((z_0.975 + z_0.80) / d)^2) = ceil((2.802 / d)^2)
+    _power_guidance = {
+        "method":     "one_sample_t_approx",
+        "alpha":      0.05,
+        "target_power": 0.80,
+        "min_n_by_effect_size": {
+            "small_d0.2":  int(197),   # rarely achievable in TAR runs
+            "medium_d0.5": int(32),    # recommended minimum for credible results
+            "large_d0.8":  int(13),    # absolute floor for well-powered claims
+        },
+        "note": (
+            "TAR default of 5 seeds provides ≥80 % power only for very large effects (d≥1.26). "
+            "For medium effects (d=0.5) at least 32 seeds are required. "
+            "Underpowered results will be flagged automatically in ExperimentResult.power_analysis."
+        ),
+    }
     prereg = {
         "registered_at": datetime.now(timezone.utc).isoformat(),
+        "power_guidance": _power_guidance,
         "hypotheses": [
             {
                 "name": plan.name,
                 "prediction": plan.prediction,
                 "criteria": plan.breakthrough_criteria,
+                "min_n_for_medium_effect": 32,
                 "frontier_problem_id": plan.frontier_problem_id,
                 "author_paper_id": plan.author_paper_id,
             }
@@ -1367,13 +1415,59 @@ def _build_director_followup_specs(
             for key, value in dict(directive.get("config_overrides", {}) or {}).items()
             if str(key) not in _DIRECTOR_RUNTIME_METADATA_KEYS
         }
+
+        # Resolve method: built-ins run through the native runner (runner_key="").
+        # Novel method keys are synthesized via method_synthesizer and dispatched
+        # through the generic_cl runner (runner_key="generic_cl").
+        _NATIVE_METHODS = {
+            "tcl", "tcl_penalty_only", "tcl_canonical",
+            "ewc", "si", "sgd_baseline", "der_plus_plus", "lwf",
+        }
+        _proposed_method = str(directive.get("method", "tcl") or "tcl")
+        _runner_key = str(directive.get("runner_key", "") or "")
+        if _proposed_method not in _NATIVE_METHODS:
+            # Check if already synthesized in a prior cycle.
+            from tar_lab.method_registry import METHOD_REGISTRY, load_generated_methods
+            _synth_dir = workspace / "tar_state" / "synthesized_methods"
+            load_generated_methods(_synth_dir)
+            if _proposed_method not in METHOD_REGISTRY:
+                try:
+                    from tar_lab.method_synthesizer import synthesize_and_validate_method
+                    _idea = (
+                        str(directive.get("description", ""))
+                        or f"Implement a continual learning method for key '{_proposed_method}'."
+                    )
+                    _syn = synthesize_and_validate_method(_idea, str(workspace), log_fn=print)
+                    if _syn.get("success"):
+                        load_generated_methods(_synth_dir)
+                        _proposed_method = _syn["method_key"]  # may differ from directive name
+                        print(
+                            f"[Director] Synthesized method '{_proposed_method}' "
+                            f"for directive '{spec_id}'", flush=True
+                        )
+                    else:
+                        print(
+                            f"[Director] Synthesis failed for '{_proposed_method}' "
+                            f"(directive '{spec_id}'): {_syn.get('error')} — skipping.",
+                            flush=True,
+                        )
+                        continue
+                except Exception as _syn_exc:
+                    print(
+                        f"[Director] Synthesis error for '{_proposed_method}' "
+                        f"(directive '{spec_id}'): {_syn_exc} — skipping.",
+                        flush=True,
+                    )
+                    continue
+            _runner_key = "generic_cl"
+
         specs.append(ExperimentSpec(
             id=spec_id,
             name=str(directive.get("title", "") or f"Director Follow-up - {frontier_title}"),
             project_id=f"{spec_id}-{str(directive.get('dataset', DATASET_CIFAR10)).replace('split_', '')}-v1",
             hypothesis_name=str(directive.get("hypothesis_name", "") or "director_frontier_probe"),
             dataset=str(directive.get("dataset", DATASET_CIFAR10) or DATASET_CIFAR10),
-            method=str(directive.get("method", "tcl") or "tcl"),
+            method=_proposed_method,
             seeds=[int(seed) for seed in directive.get("seeds", [42, 0, 1]) or [42, 0, 1]],
             config_overrides=cfg,
             priority=priority,
@@ -1392,6 +1486,7 @@ def _build_director_followup_specs(
             author_paper_id=paper_id,
             context=context,
             depends_on=[str(dep) for dep in directive.get("depends_on", []) or [] if str(dep or "")],
+            runner_key=_runner_key,
         ))
         existing_ids.add(spec_id)
     return specs
@@ -1489,6 +1584,8 @@ def _ensure_director_seeded_queue(
             break
         if spec.id not in approved_ids:
             continue
+        # Preregister director followup BEFORE it enters the queue
+        _append_director_prereg_entry(workspace, spec)
         orch.submit(spec)
         submitted_ids.append(spec.id)
         existing_ids.add(spec.id)
@@ -1703,9 +1800,9 @@ def submit_portfolio(
     if include_autonomous:
         plans, autonomous_specs = build_autonomous_specs(workspace, only_names=only_autonomous_names)
         specs.extend(autonomous_specs)
-        write_preregistration(workspace, plans)
+        write_preregistration(workspace, plans)   # registered BEFORE queue entry is written
 
-    orch.submit_many(specs)
+    orch.submit_many(specs)  # queue written after preregistration
     director_state = ResearchDirector(workspace).update_state()
     author_state = write_planned_author_state(workspace)
     coordination_state = write_research_coordination_state(workspace, orch, director_state, author_state)

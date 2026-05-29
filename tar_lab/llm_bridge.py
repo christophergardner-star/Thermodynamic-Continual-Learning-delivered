@@ -129,11 +129,42 @@ def _cache_read(cache_dir: Path, cache_key: str, ttl_s: float = _TTL_LONG_S) -> 
         return None
 
 
+def _cache_read_structured(
+    cache_dir: Path, cache_key: str, ttl_s: float = _TTL_LONG_S
+) -> tuple[str | None, dict | None]:
+    """Return (content_str, structured_dict). Either may be None on miss or expiry."""
+    path = cache_dir / f"{cache_key}.json"
+    if not path.exists():
+        return None, None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if ttl_s > 0:
+            age = time.time() - float(data.get("written_at", 0))
+            if age > ttl_s:
+                return None, None
+        content = str(data.get("content", "") or "")
+        structured = data.get("structured") or None
+        return content, structured
+    except Exception:
+        return None, None
+
+
 def _cache_write(cache_dir: Path, cache_key: str, content: str) -> None:
     path = cache_dir / f"{cache_key}.json"
     try:
         path.write_text(
             json.dumps({"written_at": time.time(), "content": content}, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _cache_write_structured(cache_dir: Path, cache_key: str, content: str, structured: dict) -> None:
+    path = cache_dir / f"{cache_key}.json"
+    try:
+        path.write_text(
+            json.dumps({"written_at": time.time(), "content": content, "structured": structured}, indent=2),
             encoding="utf-8",
         )
     except Exception:
@@ -292,9 +323,10 @@ def synthesize_frontier_literature(
     domain_learned_summary: str = "",
     top_verified_titles: list[str] | None = None,
     truth_status: str = "weak",
-) -> str:
+) -> dict:
     """
     Synthesize what literature says about a frontier and what gap TAR should fill next.
+    Returns dict: {narrative, priority_delta, gap_signals, needs_more_evidence}.
     Cached per (frontier_id, content_hash) with 4h TTL.
     """
     cache_dir = _cache_dir(workspace)
@@ -303,9 +335,9 @@ def synthesize_frontier_literature(
         " ".join((evidence_notes or [])[:6]),
         (domain_learned_summary or "")[:200],
     )
-    cached = _cache_read(cache_dir, f"synthesis_{frontier_id}_{content_key}")
-    if cached is not None:
-        return cached
+    cached_content, cached_structured = _cache_read_structured(cache_dir, f"synthesis_{frontier_id}_{content_key}")
+    if cached_content is not None:
+        return {"narrative": cached_content, **(cached_structured or {})}
 
     titles_text = "\n".join(f"- {t}" for t in (top_verified_titles or [])[:5]) or "- None indexed"
     notes_text  = "\n".join(f"- {n}" for n in (evidence_notes or [])[:6]) or "- None yet"
@@ -317,12 +349,42 @@ def synthesize_frontier_literature(
         f"{domain_learned_summary or 'No literature summary available.'}\n\n"
         f"Top verified paper titles in this area:\n{titles_text}\n\n"
         "Write a 4-6 sentence synthesis: what is already known, what gap TAR has not yet filled, "
-        "and one specific experiment suggestion to fill it."
+        "and one specific experiment suggestion to fill it.\n\n"
+        "After your synthesis paragraph, on a new line output a JSON block:\n"
+        "```json\n"
+        "{\"priority_delta\": <float -20 to +20>, \"gap_signals\": [<1-3 short gap strings>], "
+        "\"needs_more_evidence\": <true/false>}\n"
+        "```\n"
+        "positive priority_delta = urgently needs more research; "
+        "negative = well-covered, system should move to other problems."
     )
-    synthesis = call_claude(prompt, system=_SYNTHESIS_SYSTEM, model=_SONNET, max_tokens=500, tag="frontier_synthesis")
-    if synthesis:
-        _cache_write(cache_dir, f"synthesis_{frontier_id}_{content_key}", synthesis)
-    return synthesis
+    raw = call_claude(prompt, system=_SYNTHESIS_SYSTEM, model=_SONNET, max_tokens=600, tag="frontier_synthesis")
+    return _parse_synthesis_response(raw, cache_dir, f"synthesis_{frontier_id}_{content_key}")
+
+
+def _parse_synthesis_response(raw: str, cache_dir: Path, cache_key: str) -> dict:
+    fallback: dict = {"priority_delta": 0.0, "gap_signals": [], "needs_more_evidence": False}
+    if not raw:
+        return {"narrative": "", **fallback}
+
+    narrative = raw
+    structured = dict(fallback)
+    json_match = re.search(r"```json\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    if json_match:
+        try:
+            parsed = json.loads(json_match.group(1))
+            structured = {
+                "priority_delta":      float(parsed.get("priority_delta", 0.0)),
+                "gap_signals":         [str(s) for s in (parsed.get("gap_signals") or [])[:5]],
+                "needs_more_evidence": bool(parsed.get("needs_more_evidence", False)),
+            }
+            narrative = raw[:json_match.start()].strip()
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+
+    if narrative:
+        _cache_write_structured(cache_dir, cache_key, narrative, structured)
+    return {"narrative": narrative, **structured}
 
 
 # ── 4. Experiment proposal evaluation ─────────────────────────────────────────
@@ -350,18 +412,19 @@ def evaluate_experiment_proposal(
     method: str = "",
     status: str = "proposed",
     evidence_notes: list[str] | None = None,
-) -> str:
+) -> dict:
     """
     Evaluate whether a proposed/queued experiment advances its frontier.
+    Returns dict: {narrative, recommendation, priority_delta}.
     Skips running/complete experiments. Cached per (experiment_id, content_hash) with 4h TTL.
     """
     if status in {"running", "complete", "failed"}:
-        return ""
+        return {"narrative": "", "recommendation": "neutral", "priority_delta": 0.0}
     cache_dir = _cache_dir(workspace)
     content_key = _content_hash(experiment_id, frontier_title, experiment_goal, status)
-    cached = _cache_read(cache_dir, f"eval_{experiment_id}_{content_key}")
-    if cached is not None:
-        return cached
+    cached_content, cached_structured = _cache_read_structured(cache_dir, f"eval_{experiment_id}_{content_key}")
+    if cached_content is not None:
+        return {"narrative": cached_content, **(cached_structured or {})}
 
     notes_text = "\n".join(f"- {n}" for n in (evidence_notes or [])[:5]) or "- None yet"
     prompt = (
@@ -374,10 +437,25 @@ def evaluate_experiment_proposal(
         "In 3-4 sentences, assess: Does it address the frontier gap? Is it redundant? Is it feasible?\n"
         "End with exactly one sentence: 'Run now.', 'Run after X.', or 'Deprioritize because Y.'"
     )
-    evaluation = call_claude(prompt, system=_EVAL_SYSTEM, model=_HAIKU, max_tokens=250, tag="exp_eval")
-    if evaluation:
-        _cache_write(cache_dir, f"eval_{experiment_id}_{content_key}", evaluation)
-    return evaluation
+    raw = call_claude(prompt, system=_EVAL_SYSTEM, model=_HAIKU, max_tokens=250, tag="exp_eval")
+    return _parse_eval_response(raw, cache_dir, f"eval_{experiment_id}_{content_key}")
+
+
+def _parse_eval_response(raw: str, cache_dir: Path, cache_key: str) -> dict:
+    if not raw:
+        return {"narrative": "", "recommendation": "neutral", "priority_delta": 0.0}
+    last_sentence = raw.strip().rstrip(".").split(".")[-1].strip().lower()
+    if "run now" in last_sentence:
+        recommendation, delta = "run_now", 10.0
+    elif "deprioritize" in last_sentence:
+        recommendation, delta = "deprioritize", -15.0
+    elif "run after" in last_sentence:
+        recommendation, delta = "run_after", 0.0
+    else:
+        recommendation, delta = "neutral", 0.0
+    structured = {"recommendation": recommendation, "priority_delta": delta}
+    _cache_write_structured(cache_dir, cache_key, raw, structured)
+    return {"narrative": raw, **structured}
 
 
 # ── 5. Claim verification ──────────────────────────────────────────────────────
@@ -402,16 +480,17 @@ def verify_result_claim(
     evidence_notes: list[str] | None = None,
     truth_status: str = "weak",
     domain_learned_summary: str = "",
-) -> str:
+) -> dict:
     """
     Verify whether a frontier claim is consistent with available evidence and literature.
+    Returns dict: {narrative, confidence, needs_replication}.
     Cached per (frontier_id, claim_hash, truth_status) with 4h TTL.
     """
     cache_dir = _cache_dir(workspace)
     content_key = _content_hash(frontier_id, claim_text, truth_status)
-    cached = _cache_read(cache_dir, f"verify_{frontier_id}_{content_key}")
-    if cached is not None:
-        return cached
+    cached_content, cached_structured = _cache_read_structured(cache_dir, f"verify_{frontier_id}_{content_key}")
+    if cached_content is not None:
+        return {"narrative": cached_content, **(cached_structured or {})}
 
     notes_text = "\n".join(f"- {n}" for n in (evidence_notes or [])[:6]) or "- None yet"
     prompt = (
@@ -422,10 +501,23 @@ def verify_result_claim(
         "In 3-5 sentences: Is this claim Consistent, Contradicted, or Unsupported?\n"
         "State the verdict, explain the key reason, flag the strongest counter-evidence if any."
     )
-    verdict_text = call_claude(prompt, system=_VERIFY_SYSTEM, model=_HAIKU, max_tokens=200, tag="claim_verify")
-    if verdict_text:
-        _cache_write(cache_dir, f"verify_{frontier_id}_{content_key}", verdict_text)
-    return verdict_text
+    raw = call_claude(prompt, system=_VERIFY_SYSTEM, model=_HAIKU, max_tokens=200, tag="claim_verify")
+    return _parse_verify_response(raw, cache_dir, f"verify_{frontier_id}_{content_key}")
+
+
+def _parse_verify_response(raw: str, cache_dir: Path, cache_key: str) -> dict:
+    if not raw:
+        return {"narrative": "", "confidence": "low", "needs_replication": False}
+    text_lower = raw.lower()
+    if "contradicted" in text_lower:
+        confidence, needs_replication = "low", True
+    elif "unsupported" in text_lower:
+        confidence, needs_replication = "medium", True
+    else:
+        confidence, needs_replication = "high", False
+    structured = {"confidence": confidence, "needs_replication": needs_replication}
+    _cache_write_structured(cache_dir, cache_key, raw, structured)
+    return {"narrative": raw, **structured}
 
 
 # ── 6. Scheduler rationale ────────────────────────────────────────────────────
@@ -483,7 +575,7 @@ def narrate_scheduler_decision(
         "Be specific about experiment names and hardware numbers."
     )
     narration = call_claude(
-        prompt, system=_SCHEDULER_SYSTEM, model=_HAIKU, max_tokens=200, tag="scheduler_rationale"
+        prompt, system=_SCHEDULER_SYSTEM, model=_HAIKU, max_tokens=600, tag="scheduler_rationale"
     )
     if narration:
         _cache_write(cache_dir, f"scheduler_{content_key}", narration)

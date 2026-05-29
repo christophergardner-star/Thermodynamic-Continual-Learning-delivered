@@ -1191,9 +1191,10 @@ def _runtime_experiment_records() -> list[dict[str, Any]]:
             if status == "running" or stage == "running":
                 pid = int(entry.get("pid", 0) or 0)
                 pid_matches = _pid_started_for_spec(pid, str(entry.get("started_at", "") or ""))
+                daemon_owns_this = bool(active_runtime_experiment_id and active_runtime_experiment_id == rec_id)
                 if (
                     (active_runtime_experiment_id and active_runtime_experiment_id != rec_id)
-                    or pid_matches is False
+                    or (not daemon_owns_this and pid_matches is False)
                 ):
                     entry["status"] = "pending"
                     entry["stage"] = "stalled"
@@ -1466,6 +1467,45 @@ def _experiment_log_sources(exp: dict[str, Any]) -> list[dict[str, Any]]:
     return sources
 
 
+def _parse_log_line_utc(line: str) -> datetime | None:
+    """Extract the UTC datetime embedded in a log line like '[2026-05-26 05:35:51 UTC] ...'."""
+    m = _LOG_LINE_TS_RE.match(line.strip())
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _preflight_run_start(exp: dict) -> datetime | None:
+    """
+    Return the prepared_at timestamp from the current run's preflight.json.
+    Falls back to started_at from the experiment queue entry.
+    Returns None if neither is available (caller skips filtering).
+    """
+    rc = exp.get("runtime_context") if isinstance(exp.get("runtime_context"), dict) else {}
+    runtime_dir = (rc or {}).get("current_runtime_dir", "")
+    if runtime_dir:
+        try:
+            pf = json.loads(
+                (Path(runtime_dir) / "manifests" / "preflight.json")
+                .read_text(encoding="utf-8")
+            )
+            ts = pf.get("prepared_at", "")
+            if ts:
+                return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except Exception:
+            pass
+    try:
+        ts = str(exp.get("started_at", "") or "")
+        if ts:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        pass
+    return None
+
+
 def _filtered_experiment_trace(path: Path, exp: dict[str, Any], limit: int = 160) -> list[str]:
     lines = _tail(path, 600) if path.exists() else []
     exp_id = str(exp.get("id", "") or "")
@@ -1485,6 +1525,16 @@ def _filtered_experiment_trace(path: Path, exp: dict[str, Any], limit: int = 160
             ):
                 start_idx = idx
         block = lines[start_idx:]
+        # Drop lines from prior runs: any timestamped line before this run's prepared_at
+        # is stale data from a previous execution of the same experiment ID.
+        run_start = _preflight_run_start(exp)
+        if run_start:
+            filtered = []
+            for line in block:
+                ts = _parse_log_line_utc(line)
+                if ts is None or ts >= run_start:
+                    filtered.append(line)
+            block = filtered
         if block:
             return block[-limit:]
     return lines[-min(limit, len(lines)):] if lines else ["(no experiment trace yet)"]
@@ -2217,7 +2267,8 @@ def api_human_review_decision(review_id: str):
 @app.route("/api/human_review/question/<path:question_id>/recommend", methods=["POST"])
 def api_human_review_recommend(question_id: str):
     """Ask Claude to explain TAR's recommended answer for a human review question."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    from tar_lab.llm_bridge import _api_key as _get_api_key
+    api_key = _get_api_key()
     if not api_key:
         return jsonify({"reasoning": None, "error": "ANTHROPIC_API_KEY not configured"}), 503
 
@@ -2545,20 +2596,24 @@ def api_papers():
             if raw:
                 candidates_tex.append(Path(str(raw)))
 
+        def _named_pdf_candidates(paper_dir: Path, pid: str) -> list[Path]:
+            safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", pid)[:80]
+            return [paper_dir / f"{safe}.pdf", paper_dir / "main.pdf"]
+
         for raw_dir in (
             queue_entry.get("paper_dir"),
             registry_rec.get("paper_dir"),
         ):
             if raw_dir:
                 paper_dir = Path(str(raw_dir))
-                candidates_pdf.append(paper_dir / "main.pdf")
+                candidates_pdf.extend(_named_pdf_candidates(paper_dir, project_id))
                 candidates_tex.append(paper_dir / "main.tex")
 
         if isinstance(current_paper, dict) and str(current_paper.get("project_id", "") or "") == project_id:
             raw_dir = current_paper.get("paper_dir")
             if raw_dir:
                 paper_dir = Path(str(raw_dir))
-                candidates_pdf.append(paper_dir / "main.pdf")
+                candidates_pdf.extend(_named_pdf_candidates(paper_dir, project_id))
                 candidates_tex.append(paper_dir / "main.tex")
             raw_tex = current_paper.get("tex_path")
             if raw_tex:
@@ -2608,13 +2663,26 @@ def api_papers():
     for root in [_REPO / "paper", _WS / "paper"]:
         if not root.exists():
             continue
-        for pdf in sorted(root.rglob("main.pdf")):
-            rel = str(pdf.relative_to(root)).replace("\\", "/")
-            tex = pdf.parent / "main.tex"
-            proj = pdf.parent.name
-            pid  = f"paper-{proj}"
-            if pid in seen_ids or rel in seen_serve:
+        # Prefer named PDFs (project_id.pdf) over main.pdf; skip main.pdf if named exists
+        # Exclude archive folders
+        _seen_paper_dirs: set[Path] = set()
+        for pdf in sorted(root.rglob("*.pdf")):
+            if any(part.startswith("_archive") for part in pdf.parts):
                 continue
+            if pdf.parent in _seen_paper_dirs:
+                continue
+            proj = pdf.parent.name
+            tex = pdf.parent / "main.tex"
+            pid = f"paper-{proj}"
+            if pid in seen_ids:
+                continue
+            # Prefer a named PDF (not main.pdf) if one exists alongside main.pdf
+            named_candidates = [p for p in pdf.parent.glob("*.pdf") if p.name != "main.pdf"]
+            best_pdf = named_candidates[0] if named_candidates else pdf
+            rel = str(best_pdf.relative_to(root)).replace("\\", "/")
+            if rel in seen_serve:
+                continue
+            _seen_paper_dirs.add(pdf.parent)
             seen_ids.add(pid)
             seen_serve.add(rel)
             papers.append({
@@ -2625,7 +2693,7 @@ def api_papers():
                 "has_pdf":         True,
                 "serve_pdf":       rel,
                 "serve_tex":       str(tex.relative_to(root)).replace("\\", "/") if tex.exists() else "",
-                "generated_at":    datetime.fromtimestamp(pdf.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "generated_at":    datetime.fromtimestamp(best_pdf.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
                 "mean_forgetting": None, "mean_delta": None, "p_val": None,
                 "progress_pct":    100,
                 "progress_label":  "PDF compiled",
@@ -2641,6 +2709,9 @@ def api_papers():
             pdf_path = Path(str(rec.get("paper_pdf", "") or "")) if rec.get("paper_pdf") else (paper_dir / "main.pdf" if paper_dir else None)
             serve_pdf = _serve_path_for(str(pdf_path)) if pdf_path and pdf_path.exists() else ""
             serve_tex = _serve_path_for(str(tex_path)) if tex_path and tex_path.exists() else ""
+            # Only show registry-sourced entries that have a compiled PDF on disk
+            if not serve_pdf:
+                continue
             if serve_pdf:
                 seen_serve.add(serve_pdf)
             if serve_tex:
@@ -3018,6 +3089,95 @@ def _find_replication_obs_root() -> "Path | None":
     return None
 
 
+_EPOCH_SEED_RE = re.compile(
+    r"seed=(\d+)\s+\[(\w+)\]\s+forgetting=([\d.]+)", re.IGNORECASE
+)
+_LOG_LINE_TS_RE = re.compile(r'^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC\]')
+
+
+def _parse_epoch_log_seed_progress(running: dict) -> dict:
+    """
+    Parse the epoch log for any running director experiment to count completed
+    seeds and extract per-seed forgetting values.
+
+    Director experiments don't write seeds_done back to experiment_queue.json,
+    so we read the terminal lines directly.  Works for any experiment:
+      1. Prefers the experiment's own runtime log directory (most specific).
+      2. Falls back to the watchdog log, filtered to lines after the most recent
+         occurrence of the experiment ID (so old experiments don't bleed through).
+
+    Returns {seeds_done, forgetting_so_far, seeds_seen}.
+    A seed is counted as done when the primary method (TCL, or most frequent)
+    has reported a forgetting value for it.
+    """
+    exp_id = str(running.get("id", "") or "")
+
+    # 1. Try experiment-specific runtime log first
+    runtime_ctx = running.get("runtime_context", {}) if isinstance(running.get("runtime_context"), dict) else {}
+    runtime_dir = Path(str(runtime_ctx.get("current_runtime_dir", "") or "")) if runtime_ctx.get("current_runtime_dir") else None
+    exp_lines: list[str] = []
+    if runtime_dir and runtime_dir.exists():
+        runtime_logs_dir = runtime_dir / "logs"
+        if runtime_logs_dir.exists():
+            candidates = sorted(runtime_logs_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+            for lp in candidates[:3]:
+                exp_lines.extend(_tail(lp, 400))
+            if exp_lines:
+                return _extract_seed_progress_from_lines(exp_lines)
+
+    # 2. Fall back to watchdog / living_research log, trimmed to after this exp_id
+    for log_path in [
+        _latest_matching_log("watchdog-living-research-*.log"),
+        _WS / "tar_state" / "living_research.log",
+    ]:
+        if log_path is None or not log_path.exists():
+            continue
+        all_lines = _tail(log_path, 1000)
+        if exp_id:
+            # Find the last line that mentions this experiment, start reading from there
+            anchor = -1
+            for idx, line in enumerate(all_lines):
+                if exp_id in line:
+                    anchor = idx
+            trimmed = all_lines[anchor:] if anchor >= 0 else all_lines[-600:]
+        else:
+            trimmed = all_lines[-600:]
+        result = _extract_seed_progress_from_lines(trimmed)
+        if result["seeds_done"] > 0:
+            return result
+
+    return {"seeds_done": 0, "forgetting_so_far": [], "seeds_seen": 0}
+
+
+def _extract_seed_progress_from_lines(lines: list[str]) -> dict:
+    """Parse seed=N [method] forgetting=X lines from a list of log strings."""
+    seed_results: dict[int, dict[str, float]] = {}
+    for line in lines:
+        m = _EPOCH_SEED_RE.search(line)
+        if m:
+            seed_num   = int(m.group(1))
+            method     = m.group(2).lower()
+            forgetting = float(m.group(3))
+            seed_results.setdefault(seed_num, {})[method] = forgetting
+
+    if not seed_results:
+        return {"seeds_done": 0, "forgetting_so_far": [], "seeds_seen": 0}
+
+    # Primary method: prefer tcl, else the most frequently seen
+    all_methods: dict[str, int] = {}
+    for methods in seed_results.values():
+        for meth in methods:
+            all_methods[meth] = all_methods.get(meth, 0) + 1
+    primary = "tcl" if "tcl" in all_methods else max(all_methods, key=lambda k: all_methods[k])
+
+    completed = sorted(seed for seed, ms in seed_results.items() if primary in ms)
+    return {
+        "seeds_done": len(completed),
+        "forgetting_so_far": [seed_results[s][primary] for s in completed],
+        "seeds_seen": len(seed_results),
+    }
+
+
 def _build_narration_context() -> dict:
     eq = _jload(_WS / "tar_state" / "experiment_queue.json") or {}
     experiments = eq.get("experiments", []) if isinstance(eq, dict) else []
@@ -3141,21 +3301,44 @@ def _build_narration_context() -> dict:
     rationale = str(sched.get("rationale", "") or "")[:300]
 
     frontier_id    = str(running.get("frontier_problem_id", "") or running.get("director_active_path_id", ""))
-    frontier_title = str(running.get("director_focus", "") or running.get("name", "") or exp_id)
-    hypothesis     = str(running.get("hypothesis_name", "") or running.get("director_intent", "") or "")
+    ctx_block      = running.get("context", {}) if isinstance(running.get("context"), dict) else {}
+    # Use human-readable description, not internal director tags
+    frontier_title = str(
+        running.get("description", "")
+        or ctx_block.get("why", "")
+        or running.get("name", "")
+        or exp_id
+    ).replace("Director-selected ", "").replace("Director Follow-up - ", "").strip()
+    # Use actual hypothesis text, not internal key names like "director_sigma_probe"
+    hypothesis = str(
+        ctx_block.get("hypothesis", "")
+        or running.get("description", "")
+        or ""
+    )
     dataset        = str(running.get("dataset", "") or "")
-    method         = str(running.get("method", "") or "")
+    method         = str(running.get("method", "") or "").upper()
     seeds          = running.get("seeds", []) or []
     seeds_total    = len(seeds)
     epochs         = running.get("epochs", 0) or 0
     queued_count   = sum(1 for e in experiments if e.get("status") == "pending")
 
-    # Pick up live seed progress from any experiment that tracks it
+    # Pick up live seed progress — first try the structured progress dict,
+    # then fall back to parsing the epoch log directly (director experiments
+    # don't write seeds_done back to experiment_queue.json).
     prog           = running.get("progress", {}) or {}
     seeds_done     = int(prog.get("seeds_done", 0) or 0)
     forgetting_so_far = list(prog.get("forgetting_so_far") or [])
     if not seeds_total and prog.get("seeds_total"):
         seeds_total = int(prog.get("seeds_total", 0))
+
+    if seeds_done == 0:
+        _log_progress = _parse_epoch_log_seed_progress(running)
+        if _log_progress["seeds_done"] > 0:
+            seeds_done        = _log_progress["seeds_done"]
+            forgetting_so_far = _log_progress["forgetting_so_far"]
+            if not seeds_total and _log_progress.get("seeds_seen"):
+                seeds_total = max(seeds_total, _log_progress["seeds_seen"])
+
     confidence = round(100 * seeds_done / seeds_total) if seeds_total else 0
 
     trail_note = ""
@@ -3171,17 +3354,19 @@ def _build_narration_context() -> dict:
         "You are TAR (Thermodynamic Active Research), an autonomous ML research system. "
         "Speak in first person as a thoughtful researcher. "
         "2-3 sentences, plain conversational English, no markdown, no bullet points.\n\n"
-        f"You are currently running an experiment to advance the frontier: '{frontier_title}'.\n"
-        f"Experiment: {exp_id}\n"
-        f"Hypothesis: {hypothesis or 'director-generated probe'}\n"
-        f"Dataset: {dataset or 'unknown'} · Method: {method or 'unknown'} · "
+        "IMPORTANT: TAR is the research SYSTEM running this experiment. "
+        f"The SUBJECT being studied is the {method or 'ML'} algorithm — do not confuse TAR's "
+        "own components (director, scheduler, orchestrator) with what is being tested.\n\n"
+        f"Research question: {frontier_title}\n"
+        f"Hypothesis: {hypothesis or 'probe experiment'}\n"
+        f"Dataset: {dataset or 'unknown'} · Method under study: {method or 'unknown'} · "
         f"Seeds: {seeds_total} · Epochs per seed: {epochs}\n"
         f"{trail_note}"
         f"GPU: {gpu_name} at {gpu_util}% utilisation, "
         f"{vram_used:.1f}/{vram_tot:.1f} GB VRAM, {gpu_temp}°C\n"
         f"{queued_count} experiment(s) queued behind this one.\n"
-        f"Scheduler note: {rationale[:200] if rationale else 'n/a'}\n"
-        "Narrate what you are doing right now and why it matters to your research programme."
+        "Narrate what you are doing right now and why it matters to the research. "
+        "Refer to the method being studied by name, not as 'the director' or TAR's own systems."
     )
     focus_label = f"{method or exp_id} · {dataset}" if dataset else exp_id
     return {
@@ -3215,9 +3400,10 @@ def api_narrate():
 
 
 def _llm_narrate(prompt: str, ctx: dict) -> str:
-    """Try Anthropic → OpenAI → template fallback for narration."""
+    """Try Anthropic → template fallback for narration."""
     # ── Anthropic ──────────────────────────────────────────────────────────────
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    from tar_lab.llm_bridge import _api_key as _get_bridge_key
+    api_key = _get_bridge_key()
     if api_key:
         try:
             import anthropic
@@ -3228,20 +3414,6 @@ def _llm_narrate(prompt: str, ctx: dict) -> str:
                 messages=[{"role": "user", "content": prompt}],
             )
             return msg.content[0].text.strip()
-        except Exception:
-            pass
-    # ── OpenAI ─────────────────────────────────────────────────────────────────
-    oai_key = os.environ.get("OPENAI_API_KEY", "")
-    if oai_key:
-        try:
-            import openai
-            resp = openai.OpenAI(api_key=oai_key).chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=160,
-                temperature=0.7,
-            )
-            return resp.choices[0].message.content.strip()
         except Exception:
             pass
     # ── Template fallback ──────────────────────────────────────────────────────
@@ -3381,12 +3553,36 @@ def api_llm_insights():
             if isinstance(data, dict):
                 scheduler_rationale = str(data.get("content", "") or "")
 
+    # Load active gap signals from the director priority overlay (written by LLM feedback loop)
+    import time as _time
+    overlay_raw = _jload(_WS / "tar_state" / "director_priority_overlay.json") or {}
+    _48H = 48 * 3600
+    now_ts = _time.time()
+    gap_signals = []
+    for fid, entry in overlay_raw.items():
+        if isinstance(entry, dict):
+            try:
+                if now_ts - float(entry.get("written_ts", 0)) > _48H:
+                    continue
+            except Exception:
+                pass
+            signals = entry.get("gap_signals", [])
+            delta = entry.get("priority_delta", 0)
+            if signals or delta:
+                gap_signals.append({
+                    "frontier_id": fid,
+                    "signals": signals,
+                    "priority_delta": round(float(delta), 2),
+                    "updated_at": entry.get("updated_at", ""),
+                })
+
     return jsonify({
         "frontier_syntheses": llm_insights.get("frontier_syntheses", []),
         "experiment_evaluations": llm_insights.get("experiment_evaluations", []),
         "claim_verifications": llm_insights.get("claim_verifications", []),
         "scheduler_rationale": scheduler_rationale,
-        "available": bool(llm_insights or scheduler_rationale),
+        "gap_signals": gap_signals,
+        "available": bool(llm_insights or scheduler_rationale or gap_signals),
     })
 
 
@@ -3487,7 +3683,8 @@ def api_tar_intelligence_ask():
     if len(question) > 600:
         return jsonify({"answer": None, "error": "Question too long (max 600 chars)"}), 400
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    from tar_lab.llm_bridge import _api_key as _get_api_key
+    api_key = _get_api_key()
     if not api_key:
         return jsonify({"answer": None, "error": "ANTHROPIC_API_KEY not configured — Claude Q&A unavailable"}), 503
 
@@ -3941,7 +4138,7 @@ select{background:#090f1a;color:var(--text2);border:1px solid var(--border);bord
       <div class="hdr" style="flex-shrink:0">
         <span>Live Log — <span id="log-label" style="color:var(--sky)">auto</span></span>
         <div style="display:flex;align-items:center;gap:6px">
-          <select id="log-select" onchange="onLogSelect(this.value)"><option value="">auto</option></select>
+          <select id="log-select" onchange="onLogSelect(this.value)"><option value="">auto</option><option value="experiment_orchestrator" selected>experiment_orchestrator</option></select>
           <span id="log-mtime" style="color:var(--text3);font-size:.58rem"></span>
         </div>
       </div>
@@ -4803,17 +5000,38 @@ function _deprecatedUpdateDirectorStage2(data){
 }
 
 // ── Log ────────────────────────────────────────────────────────────────────────
-let _selLog='';
+let _selLog='experiment_orchestrator';
 function onLogSelect(v){_selLog=v;loadLog(v);}
+function renderLogLines(lines){
+  const box=$('log-box');
+  const atBottom=box.scrollHeight-box.clientHeight<=box.scrollTop+60;
+  box.innerHTML='';
+  for(const raw of lines){
+    const span=document.createElement('span');
+    if(/seed=\S+.*epoch\s+\d+/i.test(raw)){
+      span.style.cssText='color:#4ade80;font-weight:600';
+      span.textContent=raw;
+    } else if(/error|traceback|exception|failed/i.test(raw)){
+      span.style.color='#f87171';
+      span.textContent=raw;
+    } else if(/\[execute\]|\[manifest\]|\[preflight\]/i.test(raw)){
+      span.style.color='#38bdf8';
+      span.textContent=raw;
+    } else {
+      span.textContent=raw;
+    }
+    box.appendChild(span);
+    box.appendChild(document.createTextNode('\n'));
+  }
+  if(atBottom)box.scrollTop=box.scrollHeight;
+}
 function loadLog(name){
-  fetch(name?`/api/log/${name}`:'/api/log')
+  const n=name||_selLog||'';
+  fetch(n?`/api/log/${n}`:'/api/log')
     .then(r=>r.json()).then(d=>{
       $('log-label').textContent=d.label||'—';
       $('log-mtime').textContent=d.mtime||'';
-      const box=$('log-box');
-      const atBottom=box.scrollHeight-box.clientHeight<=box.scrollTop+40;
-      box.textContent=d.lines.join('\n');
-      if(atBottom)box.scrollTop=box.scrollHeight;
+      renderLogLines(d.lines||[]);
     }).catch(()=>{});
 }
 function refreshLogList(){

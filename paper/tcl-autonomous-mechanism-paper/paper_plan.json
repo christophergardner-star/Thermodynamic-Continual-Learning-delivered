@@ -1,0 +1,67 @@
+{
+  "status": "blocked",
+  "compile_status": "blocked",
+  "updated_at": "2026-05-27T15:04:23.050695+00:00",
+  "progress": {
+    "stage": "blocked",
+    "pct": 83,
+    "label": "20/24 experiments complete - draft waiting on evidence",
+    "sections_complete_count": 0,
+    "sections_total": 7,
+    "experiments_complete_count": 20,
+    "experiments_total": 24,
+    "compile_status": "blocked"
+  },
+  "project_id": "tcl-autonomous-mechanism-paper",
+  "title": "Tcl Autonomous Mechanism Paper",
+  "readiness": "outline_now",
+  "truth_status": "supported",
+  "director_recommendation": "Anchor every manuscript in the external problem 'Reliable Change-State Detection in Non-Stationary ML Systems'. Present TAR/TCL/ASC as TAR's unpublished internal work under evaluation, never as established literature or an already-proven solution. Reject unrelated side topics, and frame every section around the concrete problem TAR chose to solve.",
+  "frontier_problem_ids": [
+    "fp-catastrophic-forgetting",
+    "fp-regime-detection-accuracy"
+  ],
+  "experiment_ids": [
+    "ar-deep_anchor",
+    "ar-graduated_penalty",
+    "ar-high_penalty_conservative",
+    "ar-strict_consolidation",
+    "ar-thermal_carryover",
+    "director-catastrophic-forgetting-01",
+    "director-catastrophic-forgetting-boundary-reset-probe",
+    "director-catastrophic-forgetting-carryover-probe",
+    "director-hyperparameter-robustness-01",
+    "director-hyperparameter-robustness-02",
+    "director-hyperparameter-robustness-03",
+    "director-hyperparameter-robustness-04",
+    "director-hyperparameter-robustness-05",
+    "director-hyperparameter-robustness-06",
+    "director-hyperparameter-robustness-07",
+    "director-regime-detection-accuracy-01",
+    "director-regime-detection-accuracy-regime-probe",
+    "director-regime-detection-accuracy-sigma-calibration-probe",
+    "phase10_baseline",
+    "phase11_ablation",
+    "phase12_ewc_sweep",
+    "phase13_si_sweep",
+    "regime_detection_harder_dataset_cifar100",
+    "regime_detection_mlp_backbone_permuted_mnist"
+  ],
+  "waiting_for_experiments": [
+    "director-catastrophic-forgetting-boundary-reset-probe",
+    "director-catastrophic-forgetting-carryover-probe",
+    "regime_detection_harder_dataset_cifar100",
+    "regime_detection_mlp_backbone_permuted_mnist"
+  ],
+  "sections_planned": [
+    "abstract",
+    "s1_introduction",
+    "s2_background",
+    "s3_method",
+    "s4_experiments",
+    "s5_discussion",
+    "s6_conclusion"
+  ],
+  "tex_path": "C:\\Users\\cgard\\TAR\\Thermodynamic-Continual-Learning-delivered\\paper\\tcl-autonomous-mechanism-paper\\main.tex",
+  "pdf_path": ""
+}

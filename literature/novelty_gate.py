@@ -75,9 +75,13 @@ def _keyword_similarity(text_a: str, text_b: str) -> float:
 def _try_load_sentence_transformer():
     """Load sentence-transformers if available; return None otherwise."""
     try:
+        import os
         from sentence_transformers import SentenceTransformer  # type: ignore
-        # allenai-specter is purpose-built for scientific papers
-        return SentenceTransformer("allenai-specter")
+        allow_download = os.environ.get("TAR_ALLOW_MODEL_DOWNLOAD", "").strip() == "1"
+        # allenai-specter is purpose-built for scientific papers.
+        # local_files_only=True prevents silent network calls; set
+        # TAR_ALLOW_MODEL_DOWNLOAD=1 for the one-time initial download.
+        return SentenceTransformer("allenai-specter", local_files_only=not allow_download)
     except Exception:
         return None
 
@@ -180,7 +184,7 @@ class NoveltyGate:
         Fast path: just check if metric_value beats current SoTA.
         Returns (beats_sota, current_best_entry).
         """
-        best = self._g.best_result(benchmark_id, metric_name, higher_is_better)
+        best = self._g.best_result(benchmark_id, metric_name, higher_is_better, exclude_source="tar_internal")
         if best is None:
             return True, None  # no prior result → trivially beats SoTA
         if higher_is_better:
@@ -205,7 +209,7 @@ class NoveltyGate:
             (sota_verdict, rank, delta, delta_pct, best_entry)
         sota_verdict: "better" | "marginal" | "equal" | "worse"
         """
-        best = self._g.best_result(benchmark_id, metric_name, higher_is_better)
+        best = self._g.best_result(benchmark_id, metric_name, higher_is_better, exclude_source="tar_internal")
         sota_table = self._g.get_sota_table(benchmark_id, metric_name)
         rank = sota_table.rank_of(metric_value) if sota_table.entries else 1
 

@@ -31,7 +31,7 @@ from literature.gap_detector import GapDetector
 from literature.knowledge_graph import LiteratureKnowledgeGraph
 from literature.openalex_client import OpenAlexClient
 from literature.pwc_client import BENCHMARK_REGISTRY, PapersWithCodeClient
-from literature.schemas import Paper
+from literature.schemas import Paper, SoTAEntry
 from literature.semantic_scholar import SemanticScholarClient
 from tar_storage import ensure_workspace_layout, resolve_workspace
 
@@ -153,6 +153,155 @@ _STOPWORDS = {
     "under", "over", "study", "paper", "via", "their", "after", "before",
     "across", "task", "tasks", "data", "deep", "systems", "system",
 }
+
+# Strong CS/ML field tokens — clear indicators of a CS/ML paper.
+_CS_FIELD_TOKENS: frozenset[str] = frozenset({
+    "computer science", "machine learning", "artificial intelligence",
+    "deep learning", "neural network", "natural language processing",
+    "computer vision", "robotics", "information retrieval", "data mining",
+    "data science", "computational", "pattern recognition",
+    "reinforcement learning", "knowledge graph", "human-computer",
+})
+
+# Weak field tokens present in many non-ML disciplines (manufacturing, fraud, agriculture).
+# Papers that ONLY match these require ML content in title/abstract to pass.
+_CS_WEAK_FIELD_TOKENS: frozenset[str] = frozenset({
+    "software engineering", "information science", "signal processing",
+    "statistics", "mathematics", "physics", "engineering", "optimization",
+})
+
+# ML-specific terms for title/abstract content check (weak-field and no-field papers).
+# Includes single-word CL-specific terms so papers with no abstract still pass
+# when the title alone is unambiguous (e.g. "Routing without Forgetting").
+_ML_CONTENT_TERMS: frozenset[str] = frozenset({
+    "neural network", "deep learning", "machine learning", "neural",
+    "transformer", "convolutional", "recurrent", "lstm", "attention",
+    "gradient descent", "backpropagation", "overfitting", "regularization",
+    "dropout", "batch normalization", "learning rate", "autoencoder",
+    "generative adversarial", "reinforcement learning", "continual learning",
+    "catastrophic forgetting", "transfer learning", "fine-tuning", "pretrain",
+    "self-supervised", "semi-supervised", "federated learning",
+    "knowledge distillation", "few-shot", "zero-shot", "meta-learning",
+    "language model", "bert", "gpt", "llm", "image recognition",
+    "object detection", "semantic segmentation", "graph neural",
+    "embedding", "latent space", "softmax", "cross-entropy",
+    "benchmark dataset", "ablation", "hyperparameter",
+    # CL/ML title signals for no-abstract / no-field papers:
+    "forgetting",               # catastrophic forgetting — virtually only ML
+    "continual",                # continual learning
+    "class-incremental",        # CL setting
+    "task-incremental",         # CL setting
+    "domain-incremental",       # CL setting
+    "incremental learning",     # general CL/ML phrase
+    "class incremental",        # space-separated variant
+    "task incremental",
+    "domain incremental",
+    "rehearsal",                # experience replay in CL
+    "plasticity",               # stability-plasticity tradeoff
+    "perceptron",               # classic ML unit
+    "backprop",                 # backpropagation shorthand
+    "fine-tune",                # common in transfer learning titles
+    "representation learning",  # ML sub-field
+    "prompt learning",          # PEFT / in-context learning
+    "prompt generation",        # NLP/ML
+    "adapter",                  # LoRA / adapter tuning
+    "classifier",               # classification models
+    "epoch",                    # training loop term
+    "accuracy",                 # ML evaluation metric
+    "dataset",                  # used in nearly all ML papers
+    "lifelong",                 # lifelong learning (CL variant)
+    "unlearning",               # machine unlearning
+    "diffusion",                # diffusion models
+    "yolo",                     # YOLO object detection family
+    "tuning",                   # fine-tuning / prompt tuning
+    "detection",                # object detection / anomaly detection
+})
+
+# Field tokens that are unambiguously non-CS/ML.
+# Used by the purge pass: paper is purged when it has one of these AND no strong CS field token.
+_OFFTOPIC_FIELD_TOKENS: frozenset[str] = frozenset({
+    "agriculture", "agronomy", "irrigation", "manure", "forestry",
+    "aquaculture", "horticulture", "crop science", "soil science",
+    "chemistry", "biochemistry", "photocatalysis", "electrochemistry",
+    "electrolyte", "catalysis", "thermodynamics of materials",
+    "oncology", "epidemiology", "radiology", "gynecology", "ophthalmology",
+    "endocrinology", "cardiology", "pulmonology", "nephrology",
+    "pharmacology", "pathology", "clinical medicine",
+    "ecology", "geology", "paleontology", "geophysics", "hydrology",
+    "archaeology", "anthropology", "sociology", "political science",
+    "economics", "accounting", "finance law", "business law",
+})
+
+# Venue name fragments (lowercase) that indicate a clearly non-CS publication.
+_OFFTOPIC_VENUE_FRAGMENTS: frozenset[str] = frozenset({
+    "lancet", "nucleic acids", "signal transduction", "targeted therapy",
+    "nature medicine", "new england journal", "cancer research",
+    "clinical oncology", "cardiology", "gastroenterology",
+    "psychiatry", "pediatrics", "radiology", "biochemistry",
+    "genomics", "proteomics", "microbiology", "immunology",
+    "pharmacology", "dermatology", "ophthalmology", "urology",
+    "orthopedic", "haematology", "thrombosis", "nephrology",
+    "endocrinology", "rheumatology", "pulmonology",
+})
+
+
+# ── TAR self-result ingestion maps ────────────────────────────────────────────
+# Maps logical_name prefixes to dataset keys (for phases without explicit field)
+_PHASE_DATASET_MAP: dict[str, str] = {
+    "phase10_": "split_cifar10",
+    "phase11_": "split_cifar10",
+    "phase12_": "split_cifar10",
+    "phase13_": "split_cifar10",
+    "phase17_": "split_tinyimagenet",
+}
+
+# Maps TAR dataset keys to canonical benchmark names (Papers With Code style)
+_BENCHMARK_NAME_MAP: dict[str, str] = {
+    "split_cifar10":      "continual-learning-on-split-cifar-10",
+    "split_cifar100":     "continual-learning-on-split-cifar-100",
+    "split_tinyimagenet": "continual-learning-on-split-tiny-imagenet",
+    "permuted_mnist":     "continual-learning-on-split-permuted-mnist",
+}
+
+# Maps raw method keys from result JSON to canonical method names
+_METHOD_NAME_MAP: dict[str, str] = {
+    "tcl":          "TCL",
+    "ewc":          "EWC",
+    "si":           "SI",
+    "sgd_baseline": "SGD",
+}
+
+
+def _paper_is_cs_relevant(paper: Paper) -> bool:
+    """Return True if the paper is likely CS/ML-relevant.
+
+    Logic:
+    - ArXiv: always accepted (fetched from CS-scoped categories).
+    - Venue blocklist applied first for fast-fail.
+    - Strong CS field token → pass immediately.
+    - Only weak tokens (engineering/statistics/physics/etc.) → require ML content
+      in title or abstract (prevents manufacturing/fraud/agriculture pass-through).
+    - Empty fields_of_study → same ML content requirement.
+    - No CS field match at all → reject.
+    """
+    if paper.source == "arxiv":
+        return True
+    if paper.venue:
+        venue_lower = paper.venue.lower()
+        if any(frag in venue_lower for frag in _OFFTOPIC_VENUE_FRAGMENTS):
+            return False
+    fields_text = " ".join(str(f).lower() for f in paper.fields_of_study if f)
+    if fields_text:
+        if any(tok in fields_text for tok in _CS_FIELD_TOKENS):
+            return True
+        if not any(tok in fields_text for tok in _CS_WEAK_FIELD_TOKENS):
+            return False
+    # Fallthrough: weak fields only, or no fields — require ML content signal.
+    content = " ".join([
+        str(paper.title or ""),
+        str(paper.abstract or "")[:800],
+    ]).lower()
+    return any(term in content for term in _ML_CONTENT_TERMS)
 
 
 def _now_iso() -> str:
@@ -507,6 +656,95 @@ def normalize_literature_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def _extract_sota_from_abstract(paper: Paper) -> list[SoTAEntry]:
+    """
+    Regex-based extraction of numeric benchmark claims from a paper abstract.
+    Covers common continual-learning result language.  Never fabricates — if a
+    pattern can't produce a clean (value, metric, benchmark) triple it is skipped.
+    """
+    if not paper.abstract:
+        return []
+
+    METRIC_HINTS: dict[str, bool] = {
+        "accuracy": True, "acc": True, "f1": True, "map": True,
+        "bleu": True, "rouge": True, "precision": True, "recall": True,
+        "plasticity": True, "transfer": True,
+        "forgetting": False, "error": False, "loss": False, "intransigence": False,
+    }
+    _SKIP_WORDS = frozenset({
+        "the", "a", "an", "its", "our", "on", "at", "in", "of",
+        "by", "up", "to", "is", "we", "new", "that", "this",
+    })
+
+    _NUM = r"(-?[\d]+\.[\d]+|\d+)"
+    _BM = r"([A-Z][A-Za-z0-9\-_/]{2,})"
+    _MET = r"(\w+)"
+    _BM_GENERIC = "ContinualLearningBenchmark"
+
+    # (pattern, [role_for_group_0, role_for_group_1, ...])
+    # roles: "val" | "metric" | "bench"
+    patterns: list[tuple[str, list[str]]] = [
+        # "achieves 73.4% accuracy on CIFAR-100" / "achieves 0.831 accuracy on CIFAR-100"
+        (rf"achiev(?:es?|ing)\s+{_NUM}\s*%?\s+{_MET}\s+(?:on|at)\s+{_BM}",
+         ["val", "metric", "bench"]),
+        # "84.1% accuracy on ImageNet"
+        (rf"{_NUM}\s*%\s+{_MET}\s+on\s+{_BM}",
+         ["val", "metric", "bench"]),
+        # "84.1 accuracy on ImageNet" (no %)
+        (rf"{_NUM}\s+(?:average\s+|mean\s+)?{_MET}\s+on\s+{_BM}",
+         ["val", "metric", "bench"]),
+        # "forgetting of 0.031 on Split-CIFAR"
+        (rf"{_MET}\s+of\s+{_NUM}\s+(?:on|at)\s+{_BM}",
+         ["metric", "val", "bench"]),
+        # "average/mean forgetting of 0.031" (no explicit benchmark)
+        (rf"(?:average|mean|avg\.?)\s+{_MET}\s+of\s+{_NUM}",
+         ["metric", "val"]),
+        # "reduces (catastrophic) forgetting by 25%"
+        (rf"reduc(?:es?|ing)\s+(?:catastrophic\s+)?{_MET}\s+by\s+{_NUM}\s*%",
+         ["metric", "val"]),
+        # "backward/forward transfer of -0.03"
+        (r"((?:backward|forward)\s+transfer)\s+of\s+(-?[\d]+\.[\d]+)",
+         ["metric", "val"]),
+    ]
+
+    results: list[SoTAEntry] = []
+    seen: set[str] = set()
+
+    for pat, order in patterns:
+        for m in re.finditer(pat, paper.abstract, re.IGNORECASE):
+            groups = m.groups()
+            try:
+                role_map = dict(zip(order, groups))
+                val_str = role_map.get("val")
+                metric = str(role_map.get("metric", "")).strip().lower()
+                benchmark = str(role_map.get("bench", _BM_GENERIC)).strip()
+                if val_str is None or not metric or metric in _SKIP_WORDS or len(metric) < 3:
+                    continue
+                value = float(val_str)
+                if value == 0.0 or abs(value) > 1000:
+                    continue
+                dedup = f"{paper.paper_id}|{benchmark[:20]}|{metric[:10]}|{val_str}"
+                if dedup in seen:
+                    continue
+                seen.add(dedup)
+                higher = METRIC_HINTS.get(metric, True)
+                entry_id = f"abstract-{paper.paper_id}-{benchmark[:20].lower()}-{metric[:10]}"
+                results.append(SoTAEntry(
+                    entry_id=entry_id,
+                    benchmark_id=f"abstract_extracted:{benchmark[:40].lower()}",
+                    method_name=(paper.title or "unknown")[:80],
+                    metric_name=metric,
+                    metric_value=value,
+                    higher_is_better=bool(higher),
+                    paper_id=paper.paper_id,
+                    paper_title=paper.title,
+                    year=paper.year,
+                ))
+            except (ValueError, IndexError):
+                continue
+    return results
+
+
 @dataclass
 class SourceRun:
     source: str
@@ -610,9 +848,56 @@ class ExternalEvidenceIngestor:
             profile = self._cadence_profile(self.read_state())
             self._stop_event.wait(float(profile.get("poll_interval_s", self.poll_interval_s) or self.poll_interval_s))
 
+    def _purge_irrelevant_papers(self) -> None:
+        """Conservatively remove papers with positive non-ML signals.
+
+        Purges only papers where:
+        - fields_of_study contains a clearly non-ML token (_OFFTOPIC_FIELD_TOKENS)
+          AND no strong CS/ML token (_CS_FIELD_TOKENS), OR
+        - venue matches _OFFTOPIC_VENUE_FRAGMENTS.
+
+        Does NOT purge papers with empty fields/abstracts (avoids false-positives
+        on CL papers ingested with incomplete metadata).
+        """
+        try:
+            rows = self.graph.conn.execute(
+                "SELECT paper_id, fields_of_study, venue, source FROM papers"
+            ).fetchall()
+            to_delete: list[str] = []
+            for row in rows:
+                if str(row["source"] or "") == "arxiv":
+                    continue
+                fields_raw = json.loads(row["fields_of_study"] or "[]") if row["fields_of_study"] else []
+                fields_lower = [str(f).lower() for f in fields_raw if f]
+                if fields_lower:
+                    fields_text = " ".join(fields_lower)
+                    has_strong_cs = any(tok in fields_text for tok in _CS_FIELD_TOKENS)
+                    has_offtopic = any(tok in fields_text for tok in _OFFTOPIC_FIELD_TOKENS)
+                    if has_offtopic and not has_strong_cs:
+                        to_delete.append(str(row["paper_id"]))
+                        continue
+                # Venue blocklist — apply regardless of fields
+                if row["venue"]:
+                    venue_lower = str(row["venue"]).lower()
+                    if any(frag in venue_lower for frag in _OFFTOPIC_VENUE_FRAGMENTS):
+                        to_delete.append(str(row["paper_id"]))
+            if to_delete:
+                placeholders = ",".join("?" * len(to_delete))
+                self.graph.conn.execute(
+                    f"DELETE FROM paper_authors WHERE paper_id IN ({placeholders})", to_delete
+                )
+                self.graph.conn.execute(
+                    f"DELETE FROM papers WHERE paper_id IN ({placeholders})", to_delete
+                )
+                self.graph.conn.commit()
+                print(f"[EvidenceIngest] Purged {len(to_delete)} off-topic papers from literature DB", flush=True)
+        except Exception as exc:
+            print(f"[EvidenceIngest] purge_irrelevant_papers failed ({exc}); continuing", flush=True)
+
     def run_once(self, *, force: bool = False, cycle: str = "auto") -> dict[str, Any]:
         prior_state = self.read_state()
         self._prior_state = prior_state if isinstance(prior_state, dict) else {}
+        self._purge_irrelevant_papers()
         selected_cycle = cycle if cycle != "auto" else self._select_cycle(prior_state, force=force)
         if selected_cycle == "idle":
             payload = self._build_state(cycle_result=None, prior_state=prior_state)
@@ -826,6 +1111,17 @@ class ExternalEvidenceIngestor:
             ["semantic_scholar", "openalex", "arxiv", "crossref"]
         )
         health = self._prior_state.get("source_health", {}) if isinstance(self._prior_state, dict) else {}
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        def _is_in_cooldown(source_name: str) -> bool:
+            entry = health.get(source_name, {}) if isinstance(health, dict) else {}
+            until = entry.get("rate_limited_until") if isinstance(entry, dict) else None
+            return bool(until and until > now_iso)
+
+        # Exclude sources still within their 4h rate-limit cooldown window.
+        # If all sources are in cooldown, the caller gets an empty list and
+        # skips the query — correct behaviour; don't waste API calls.
+        available = [s for s in base if not _is_in_cooldown(s)]
 
         def _rank(source_name: str) -> tuple[int, int, int]:
             entry = health.get(source_name, {}) if isinstance(health, dict) else {}
@@ -834,7 +1130,7 @@ class ExternalEvidenceIngestor:
             unhealthy = int(not bool(entry.get("ok", True)))
             return (rate_limited, unhealthy, base.index(source_name))
 
-        return sorted(base, key=_rank)
+        return sorted(available, key=_rank)
 
     def _search_source(self, source: str, query: str, *, connected: bool = False) -> tuple[SourceRun, list[dict[str, Any]]]:
         if source == "semantic_scholar":
@@ -947,9 +1243,15 @@ class ExternalEvidenceIngestor:
                 cycle_result.source_runs.append(run)
 
         try:
+            self._ingest_tar_results()
+        except Exception as exc:
+            cycle_result.errors.append(f"tar_results_ingest:{exc}")
+
+        try:
             gaps = self.gap_detector.detect_all(top_n=120)
             for gap in gaps:
                 self.graph.upsert_gap(gap)
+            self._merge_gaps_into_frontier(gaps[:20])
         except Exception as exc:
             cycle_result.errors.append(f"gap_detect:{exc}")
 
@@ -1009,6 +1311,28 @@ class ExternalEvidenceIngestor:
         except Exception as exc:
             cycle_result.errors.append(f"citation_expand:{exc}")
 
+        # ── Citation velocity update ──────────────────────────────────────────
+        try:
+            state = self.read_state()
+            cycles = state.get("cycles", {}) if isinstance(state, dict) else {}
+            last_weekly_ts = float((cycles.get("weekly", {}) or {}).get("completed_ts", 0.0) or 0.0)
+            days_elapsed = ((time.time() - last_weekly_ts) / 86400.0) if last_weekly_ts > 0 else 7.0
+            days_elapsed = max(0.5, days_elapsed)
+
+            velocity_rows = self.graph.conn.execute(
+                "SELECT paper_id, citation_count FROM papers "
+                "WHERE citation_count > 0 "
+                "ORDER BY citation_count DESC LIMIT 500"
+            ).fetchall()
+            for vrow in velocity_rows:
+                self.graph.update_citation_velocity(
+                    vrow["paper_id"],
+                    int(vrow["citation_count"] or 0),
+                    days_elapsed,
+                )
+        except Exception as exc:
+            cycle_result.errors.append(f"velocity_update:{exc}")
+
     def _ingest_papers(self, items: list[dict[str, Any]]) -> tuple[int, int, int]:
         ingested = 0
         verified = 0
@@ -1018,8 +1342,15 @@ class ExternalEvidenceIngestor:
                 paper = Paper(**item)
             except Exception:
                 continue
+            if not _paper_is_cs_relevant(paper):
+                continue
             self.graph.upsert_paper(paper)
             ingested += 1
+            for sota_entry in _extract_sota_from_abstract(paper):
+                try:
+                    self.graph.upsert_sota_entry(sota_entry)
+                except Exception:
+                    pass
             if self._paper_is_verified(paper):
                 verified += 1
             else:
@@ -1096,6 +1427,16 @@ class ExternalEvidenceIngestor:
             }
         if cycle_result is not None:
             source_health = self._source_health(cycle_result)
+            # Preserve rate_limited_until from prior state so cooldown survives cycles
+            prior_health = prior_state.get("source_health", {}) if isinstance(prior_state, dict) else {}
+            if isinstance(prior_health, dict):
+                now_iso = datetime.now(timezone.utc).isoformat()
+                for source_name, prior_entry in prior_health.items():
+                    if not isinstance(prior_entry, dict):
+                        continue
+                    prior_until = prior_entry.get("rate_limited_until", "")
+                    if prior_until and prior_until > now_iso:
+                        source_health.setdefault(source_name, {})["rate_limited_until"] = prior_until
         else:
             source_health = self._source_health(None)
             prior_health = prior_state.get("source_health", {}) if isinstance(prior_state, dict) else {}
@@ -1168,6 +1509,13 @@ class ExternalEvidenceIngestor:
             entry["last_sync"] = cycle_result.completed_at
             entry["ingested"] = int(entry.get("ingested", 0) or 0) + int(run.ingested_count or 0)
             entry["rate_limited"] = bool(entry.get("rate_limited", False)) or bool(run.rate_limited)
+            if run.rate_limited:
+                from datetime import timedelta
+                cooldown = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+                # Only extend if not already set to a later time
+                existing_until = entry.get("rate_limited_until", "")
+                if not existing_until or cooldown > existing_until:
+                    entry["rate_limited_until"] = cooldown
             if run.error:
                 entry["last_error"] = run.error
         return health
@@ -1355,6 +1703,256 @@ class ExternalEvidenceIngestor:
         if source == "crossref" and citation_count >= 35:
             return True
         return False
+
+    def _ingest_tar_results(self) -> None:
+        """Ingest TAR's own publication-allowed results into sota_entries as source='tar_internal'.
+
+        Reads canonical_results_index.jsonl, maps benchmarks + methods, and writes
+        SoTA entries so the gap detector and conflict detector can reason over them.
+        Fully idempotent (INSERT OR REPLACE keyed on entry_id).
+        Populates self._tar_internal_benchmarks (set of benchmark_ids) for provenance tagging.
+        """
+        import hashlib as _hashlib
+        from tar_lab.result_artifacts import iter_canonical_comparison_records
+
+        self._tar_internal_benchmarks: set[str] = set()
+
+        try:
+            records = iter_canonical_comparison_records(self.workspace)
+        except Exception as exc:
+            print(f"[EvidenceIngest] _ingest_tar_results: failed to read canonical index ({exc})", flush=True)
+            return
+
+        ingested = 0
+        now = _now_iso()
+
+        for record in records:
+            if not bool(record.get("publication_allowed", False)):
+                continue
+
+            logical_name = str(record.get("logical_name", "") or "")
+            phase_number = record.get("phase_number")
+            result_path_str = str(record.get("result_path", "") or "")
+            if not result_path_str:
+                continue
+
+            result_path = Path(result_path_str)
+            if not result_path.exists():
+                continue
+
+            try:
+                result_data = json.loads(result_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+
+            # Determine dataset key
+            dataset_key: str | None = None
+            explicit_dataset = str(result_data.get("dataset", "") or "")
+            if explicit_dataset and explicit_dataset in _BENCHMARK_NAME_MAP:
+                dataset_key = explicit_dataset
+            else:
+                for prefix, ds in _PHASE_DATASET_MAP.items():
+                    if logical_name.startswith(prefix):
+                        dataset_key = ds
+                        break
+
+            if dataset_key is None:
+                continue
+
+            benchmark_name = _BENCHMARK_NAME_MAP.get(dataset_key)
+            if benchmark_name is None:
+                continue
+
+            # Resolve or create benchmark
+            brow = self.graph.conn.execute(
+                "SELECT benchmark_id FROM benchmarks WHERE name = ?", (benchmark_name,)
+            ).fetchone()
+            if brow:
+                benchmark_id = brow["benchmark_id"]
+            else:
+                try:
+                    from literature.schemas import Benchmark as _Benchmark, _stable_id as _sid
+                    new_bmark = _Benchmark(
+                        benchmark_id=_sid(f"benchmark:{benchmark_name}"),
+                        name=benchmark_name,
+                        task="continual_learning",
+                        domain="continual_learning",
+                        description=f"Continual learning benchmark: {benchmark_name}",
+                        pwc_dataset_slug=dataset_key,
+                        pwc_task_slug=benchmark_name,
+                        metrics=["mean_forgetting", "mean_accuracy"],
+                        metrics_higher_better={"mean_forgetting": False, "mean_accuracy": True},
+                        scale="medium",
+                    )
+                    self.graph.upsert_benchmark(new_bmark)
+                    benchmark_id = new_bmark.benchmark_id
+                except Exception as exc:
+                    print(f"[EvidenceIngest] _ingest_tar_results: benchmark create failed for {benchmark_name} ({exc})", flush=True)
+                    continue
+
+            aggregate = result_data.get("aggregate", {})
+            if not isinstance(aggregate, dict):
+                continue
+
+            phase_int = int(phase_number) if phase_number is not None else 0
+            extra_metrics = json.dumps({"tar_phase": float(phase_int)})
+
+            for raw_method, metrics in aggregate.items():
+                if not isinstance(metrics, dict):
+                    continue
+                method_name = _METHOD_NAME_MAP.get(str(raw_method))
+                if method_name is None:
+                    continue
+
+                forgetting = metrics.get("forgetting_mean")
+                acc = metrics.get("acc_mean")
+                if forgetting is None and acc is None:
+                    continue
+
+                if forgetting is not None:
+                    eid = "tar_internal_" + _hashlib.md5(
+                        f"{benchmark_id}:{method_name}:forgetting:{phase_int}".encode()
+                    ).hexdigest()[:16]
+                    self.graph.conn.execute(
+                        """
+                        INSERT INTO sota_entries (
+                            entry_id, benchmark_id, method_name, metric_name, metric_value,
+                            higher_is_better, paper_id, paper_title, year, venue, venue_tier,
+                            extra_metrics, code_available, code_url, fetched_at, source
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(entry_id) DO UPDATE SET
+                            metric_value  = excluded.metric_value,
+                            extra_metrics = excluded.extra_metrics,
+                            source        = excluded.source
+                        """,
+                        (
+                            eid, benchmark_id, method_name, "mean_forgetting",
+                            float(forgetting), 0,
+                            None, f"TAR phase {phase_int} ({logical_name})",
+                            None, "tar_internal", "internal",
+                            extra_metrics, 1, None, now, "tar_internal",
+                        ),
+                    )
+                    self.graph.conn.execute(
+                        """
+                        INSERT INTO method_benchmark_coverage
+                            (method_name, benchmark_id, tested, best_result_entry_id)
+                        VALUES (?, ?, 1, ?)
+                        ON CONFLICT(method_name, benchmark_id) DO UPDATE SET
+                            tested = 1,
+                            best_result_entry_id = excluded.best_result_entry_id
+                        """,
+                        (method_name, benchmark_id, eid),
+                    )
+                    self._tar_internal_benchmarks.add(benchmark_id)
+                    ingested += 1
+
+                if acc is not None:
+                    eid = "tar_internal_" + _hashlib.md5(
+                        f"{benchmark_id}:{method_name}:accuracy:{phase_int}".encode()
+                    ).hexdigest()[:16]
+                    self.graph.conn.execute(
+                        """
+                        INSERT INTO sota_entries (
+                            entry_id, benchmark_id, method_name, metric_name, metric_value,
+                            higher_is_better, paper_id, paper_title, year, venue, venue_tier,
+                            extra_metrics, code_available, code_url, fetched_at, source
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(entry_id) DO UPDATE SET
+                            metric_value  = excluded.metric_value,
+                            extra_metrics = excluded.extra_metrics,
+                            source        = excluded.source
+                        """,
+                        (
+                            eid, benchmark_id, method_name, "mean_accuracy",
+                            float(acc), 1,
+                            None, f"TAR phase {phase_int} ({logical_name})",
+                            None, "tar_internal", "internal",
+                            extra_metrics, 1, None, now, "tar_internal",
+                        ),
+                    )
+                    self._tar_internal_benchmarks.add(benchmark_id)
+                    ingested += 1
+
+        if ingested:
+            self.graph.conn.commit()
+            print(
+                f"[EvidenceIngest] _ingest_tar_results: wrote {ingested} tar_internal SoTA entries "
+                f"across {len(self._tar_internal_benchmarks)} benchmark(s)",
+                flush=True,
+            )
+
+    def _merge_gaps_into_frontier(self, gaps: list) -> None:
+        """Merge top literature gaps into frontier_problems.json without overwriting director entries."""
+        import fcntl as _fcntl  # noqa: PLC0415 — POSIX only; Windows fallback below
+        fp_path = self.workspace / "tar_state" / "frontier_problems.json"
+        lock_path = fp_path.with_suffix(".lock")
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(lock_path, "w", encoding="utf-8") as _lf:
+                try:
+                    _fcntl.flock(_lf, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                except (AttributeError, OSError):
+                    pass  # Windows or lock busy — proceed anyway, writes are atomic enough
+                self._merge_gaps_into_frontier_locked(gaps, fp_path)
+        except Exception as exc:
+            print(f"[EvidenceIngest] _merge_gaps_into_frontier failed ({exc}); skipping", flush=True)
+
+    def _merge_gaps_into_frontier_locked(self, gaps: list, fp_path: Path) -> None:
+        existing: dict[str, Any] = {}
+        if fp_path.exists():
+            existing = json.loads(fp_path.read_text(encoding="utf-8"))
+        problems: list[dict[str, Any]] = existing.get("problems", [])
+        if not isinstance(problems, list):
+            problems = []
+
+        existing_ids = {str(p.get("id", "")) for p in problems}
+
+        # Build set of gap_ids whose benchmark overlaps with TAR's own ingested results
+        tar_benchmark_ids: set[str] = getattr(self, "_tar_internal_benchmarks", set())
+        tar_gap_ids: set[str] = set()
+        if tar_benchmark_ids:
+            for gap in gaps:
+                if getattr(gap, "benchmark_id", None) and gap.benchmark_id in tar_benchmark_ids:
+                    tar_gap_ids.add(gap.gap_id)
+
+        candidates = self.gap_detector.gaps_to_problems(gaps, top_n=len(gaps))
+        added = 0
+        for candidate in candidates:
+            cid = f"lit-gap-{candidate.problem_id}"
+            if cid in existing_ids:
+                continue
+            gap_ids = list(getattr(candidate, "gap_ids", []) or [])
+            involves_tar = bool(set(gap_ids) & tar_gap_ids)
+            problem: dict[str, Any] = {
+                "id": cid,
+                "title": candidate.title,
+                "domain": candidate.domain,
+                "description": candidate.description,
+                "proposed_experiment": candidate.proposed_experiment,
+                "falsification_criterion": candidate.falsification_criterion,
+                "compute_estimate": candidate.compute_estimate,
+                "priority": round(float(candidate.priority_score or 0.0), 4),
+                "source": "tar_self_conflict" if involves_tar else "literature_gap",
+                "gap_ids": gap_ids,
+                "status": "proposed",
+                "created_at": _now_iso(),
+                "updated_at": _now_iso(),
+            }
+            if involves_tar:
+                problem["notes"] = "derived from TAR internal results — check phase consistency before scheduling new runs"
+            problems.append(problem)
+            existing_ids.add(cid)
+            added += 1
+
+        if added:
+            tmp = fp_path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({"saved_at": _now_iso(), "problems": problems}, indent=2),
+                encoding="utf-8",
+            )
+            tmp.replace(fp_path)  # atomic on same filesystem
+            print(f"[EvidenceIngest] Merged {added} literature gaps into frontier_problems.json", flush=True)
 
     def _write_state(self, payload: dict[str, Any]) -> None:
         payload = normalize_literature_payload(payload)

@@ -19,6 +19,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from tar_lab.human_review import approved_paper_ids
+from tar_lab.validation import validate_paper_evidence
 from tar_storage import ensure_workspace_layout, resolve_workspace
 
 # ── taxonomy ──────────────────────────────────────────────────────────────────
@@ -276,23 +278,57 @@ class ProjectRegistry:
         except OSError:
             pass
 
-    def register(self, project: ResearchProject) -> ResearchProject:
-        """Register or update a project. If id already exists, merges updates."""
+    def register(
+        self,
+        project: ResearchProject,
+        *,
+        overwrite_existing: bool = False,
+    ) -> ResearchProject:
+        """Register or update a project."""
         existing = self._projects.get(project.id)
         if existing:
             project.created_at = existing.created_at
-            for field_name in ResearchProject.__dataclass_fields__:
-                if field_name in {"created_at", "updated_at"}:
-                    continue
-                incoming = getattr(project, field_name)
-                prior = getattr(existing, field_name)
-                if incoming in ("", [], 0.0) and prior not in ("", [], 0.0):
-                    setattr(project, field_name, prior)
+            if not overwrite_existing:
+                for field_name in ResearchProject.__dataclass_fields__:
+                    if field_name in {"created_at", "updated_at"}:
+                        continue
+                    incoming = getattr(project, field_name)
+                    prior = getattr(existing, field_name)
+                    if incoming in ("", [], 0.0) and prior not in ("", [], 0.0):
+                        setattr(project, field_name, prior)
         project.updated_at = datetime.now(timezone.utc).isoformat()
         self._projects[project.id] = project
         self._save()
         print(f"[Registry] Registered: {project.id} — {project.name}", flush=True)
         return project
+
+    def delete(self, project_id: str) -> None:
+        if project_id in self._projects:
+            del self._projects[project_id]
+            self._save()
+
+    def reset_director_paper_projects(self) -> None:
+        reset_ids = [
+            project.id
+            for project in self._projects.values()
+            if project.project_type == "paper"
+            and project.phase_source == "research_director"
+        ]
+        for project_id in reset_ids:
+            self._projects.pop(project_id, None)
+        if reset_ids:
+            self._save()
+
+    def prune_invalid_director_papers(self) -> None:
+        invalid_ids = [
+            project.id
+            for project in self._projects.values()
+            if _is_invalid_director_paper_project(project)
+        ]
+        for project_id in invalid_ids:
+            self._projects.pop(project_id, None)
+        if invalid_ids:
+            self._save()
 
     def update_status(self, project_id: str, status: str, notes: str = "") -> None:
         p = self._projects.get(project_id)
@@ -397,6 +433,33 @@ def register_phase_result(
     return registry.register(project)
 
 
+def _is_supported_director_paper_directive(directive: dict[str, Any]) -> bool:
+    if not isinstance(directive, dict):
+        return False
+    paper_id = str(directive.get("paper_id", "") or "")
+    frontier_id = str(directive.get("frontier_problem_id", "") or "")
+    scope_status = str(directive.get("scope_status", "") or "").strip().lower()
+    if not paper_id:
+        return False
+    if not frontier_id and (
+        scope_status in {"domain_watch", "out_of_scope", "incubating", "unscoped"}
+        or paper_id.startswith("director-")
+    ):
+        return False
+    return True
+
+
+def _is_invalid_director_paper_project(project: ResearchProject) -> bool:
+    if project.project_type != "paper" or project.phase_source != "research_director":
+        return False
+    if project.id.startswith("director-"):
+        return True
+    return (
+        not project.frontier_problem_ids
+        and project.scope_status in {"domain_watch", "out_of_scope", "incubating", "unscoped"}
+    )
+
+
 def sync_director_paper_projects(
     workspace: Path,
     director_state: dict[str, Any],
@@ -407,7 +470,13 @@ def sync_director_paper_projects(
     so planned or in-progress papers appear before a final PDF exists.
     """
     registry = ProjectRegistry(workspace)
-    paper_directives = director_state.get("paper_directives", []) if isinstance(director_state, dict) else []
+    registry.prune_invalid_director_papers()
+    raw_paper_directives = director_state.get("paper_directives", []) if isinstance(director_state, dict) else []
+    paper_directives = [
+        directive
+        for directive in raw_paper_directives
+        if _is_supported_director_paper_directive(directive)
+    ]
     frontier_directives = {
         str(rec.get("problem_id", "") or ""): rec
         for rec in director_state.get("frontier_directives", [])
@@ -416,6 +485,7 @@ def sync_director_paper_projects(
     current_paper = (author_state or {}).get("current_paper", {}) if isinstance(author_state, dict) else {}
     active_paper_id = str(current_paper.get("project_id", "") or "")
     active_paper_status = str(current_paper.get("status", "") or "")
+    human_approved_papers = approved_paper_ids(workspace)
 
     queue_path = workspace / "tar_state" / "experiment_queue.json"
     queue_data: dict[str, Any] = {}
@@ -442,6 +512,20 @@ def sync_director_paper_projects(
         for exp in (archive_data.get("experiments", []) if isinstance(archive_data, dict) else [])
         if isinstance(exp, dict) and exp.get("id")
     }
+    live_paper_ids = {
+        str(rec.get("paper_id", "") or "")
+        for rec in paper_directives
+        if str(rec.get("paper_id", "") or "")
+    }
+    stale_director_ids = [
+        project.id
+        for project in registry.list_all()
+        if project.phase_source == "research_director"
+        and project.project_type == "paper"
+        and project.id not in live_paper_ids
+    ]
+    for project_id in stale_director_ids:
+        registry.delete(project_id)
 
     def _experiment_complete(exp_id: str) -> bool:
         for rec in (exp_by_id.get(exp_id, {}), archive_by_id.get(exp_id, {})):
@@ -490,17 +574,29 @@ def sync_director_paper_projects(
             str(exp_id) for exp_id in directive.get("waiting_for_experiments", [])
             if str(exp_id or "") and not _experiment_complete(str(exp_id or ""))
         ]
-        dataset = ""
+        datasets: list[str] = []
         data_paths: list[str] = []
         for exp_id in linked_experiment_ids:
             exp = exp_by_id.get(exp_id, {})
-            if not dataset:
-                dataset = str(exp.get("dataset", "") or "")
+            dataset_value = str(exp.get("dataset", "") or "").strip()
+            if dataset_value and dataset_value not in datasets:
+                datasets.append(dataset_value)
             result_path = str(exp.get("result_path", "") or "")
             if result_path and result_path not in data_paths:
                 data_paths.append(result_path)
-        if not dataset:
-            dataset = "frontier_mixed"
+        if not datasets:
+            candidate_datasets = [
+                str(item).strip()
+                for item in directive.get("candidate_datasets", []) or frontier.get("candidate_datasets", []) or []
+                if str(item).strip()
+            ]
+            datasets = sorted(dict.fromkeys(candidate_datasets))
+        if len(datasets) == 1:
+            dataset = datasets[0]
+        elif len(datasets) > 1:
+            dataset = "multi_dataset"
+        else:
+            dataset = "validated_result_pending"
 
         title = str(directive.get("title", "") or paper_id.replace("_", " ").replace("-", " ").title())
         field, subfield, keywords = classify_research(
@@ -518,18 +614,32 @@ def sync_director_paper_projects(
         tex_path = paper_dir / "main.tex"
         pdf_path = paper_dir / "main.pdf"
         readiness = str(directive.get("readiness", "") or "planned")
+        evidence_status = validate_paper_evidence(
+            workspace,
+            paper_id=paper_id,
+            linked_experiment_ids=linked_experiment_ids,
+            waiting_for_experiment_ids=waiting_for,
+        )
+        evidence_ready = bool(evidence_status.get("evidence_ready"))
+        human_approved = paper_id in human_approved_papers
         if waiting_for:
             status = STATUS_PLANNED
             paper_status = "blocked"
-        elif pdf_path.exists():
-            status = STATUS_COMPLETE
-            paper_status = "published"
+        elif not evidence_ready:
+            status = STATUS_PLANNED
+            paper_status = "awaiting_validation"
         elif paper_id == active_paper_id and active_paper_status not in {"", "idle"}:
             status = STATUS_RUNNING
             paper_status = active_paper_status
+        elif pdf_path.exists():
+            status = STATUS_COMPLETE
+            paper_status = "draft_compiled"
+        elif human_approved:
+            status = STATUS_PLANNED
+            paper_status = "approved_for_rewrite"
         else:
             status = STATUS_PLANNED
-            paper_status = readiness or "planned"
+            paper_status = "awaiting_human_review"
 
         project = ResearchProject(
             id=paper_id,
@@ -561,7 +671,16 @@ def sync_director_paper_projects(
             scope_status=str(directive.get("scope_status", "") or ""),
             director_focus=str(directive.get("director_focus", "") or ""),
         )
-        linked.append(registry.register(project))
+        project.notes = "\n".join(
+            bit for bit in [
+                project.notes,
+                f"evidence_ready={evidence_ready}",
+                f"human_approved={human_approved}",
+                f"validation_issues={evidence_status.get('issues', [])}",
+            ]
+            if str(bit).strip()
+        )
+        linked.append(registry.register(project, overwrite_existing=True))
         if frontier_id:
             try:
                 from tar_frontier import FrontierRegistry
@@ -569,8 +688,30 @@ def sync_director_paper_projects(
                 FrontierRegistry(workspace).link_paper(frontier_id, paper_id)
             except Exception:
                 pass
+    registry.prune_invalid_director_papers()
 
     return linked
+
+
+def rebuild_registry_from_director_state(
+    workspace: Path,
+    director_state: dict[str, Any],
+    author_state: dict[str, Any] | None = None,
+) -> list[ResearchProject]:
+    """
+    Rebuild the director-managed paper slice of the registry from current truth.
+
+    This intentionally replaces stale Research Director paper entries rather than
+    merge-forwarding historical fields, so registry state follows the validated
+    evidence and active directives after reruns or audit corrections.
+    """
+    registry = ProjectRegistry(workspace)
+    registry.reset_director_paper_projects()
+    return sync_director_paper_projects(
+        workspace=workspace,
+        director_state=director_state,
+        author_state=author_state,
+    )
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

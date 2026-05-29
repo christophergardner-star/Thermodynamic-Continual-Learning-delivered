@@ -81,10 +81,9 @@ class SelfImprovementEngine:
             baseline_mean_score=baseline_mean_score,
             baseline_overclaim_rate=baseline_overclaim_rate,
         )
-        self._anchor_path.write_text(
-            manifest.model_dump_json(indent=2),
-            encoding="utf-8",
-        )
+        tmp = self._anchor_path.with_suffix(".json.tmp")
+        tmp.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+        tmp.replace(self._anchor_path)
         return manifest
 
     def load_anchor_manifest(self) -> FrozenAnchorPackManifest:
@@ -165,9 +164,8 @@ class SelfImprovementEngine:
     ) -> tuple[bool, str]:
         if not anchor_hash_verified:
             return False, "anchor_integrity_failed"
-        assert probe_overclaim_rate == 0.0, (
-            f"overclaim_rate={probe_overclaim_rate} violated hard zero invariant"
-        )
+        if probe_overclaim_rate != 0.0:
+            return False, f"overclaim_invariant_violated: rate={probe_overclaim_rate}"
         if probe_mean_score < self._policy.min_mean_score_floor:
             return False, (
                 f"mean_score={probe_mean_score} below floor "

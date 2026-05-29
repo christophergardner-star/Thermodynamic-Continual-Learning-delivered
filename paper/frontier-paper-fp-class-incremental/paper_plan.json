@@ -1,0 +1,40 @@
+{
+  "status": "blocked",
+  "compile_status": "blocked",
+  "updated_at": "2026-05-27T15:04:23.052103+00:00",
+  "progress": {
+    "stage": "blocked",
+    "pct": 10,
+    "label": "0/1 experiments complete - draft waiting on evidence",
+    "sections_complete_count": 0,
+    "sections_total": 7,
+    "experiments_complete_count": 0,
+    "experiments_total": 1,
+    "compile_status": "blocked"
+  },
+  "project_id": "frontier-paper-fp-class-incremental",
+  "title": "Frontier Paper Fp Class Incremental",
+  "readiness": "blocked",
+  "truth_status": "provisional",
+  "director_recommendation": "Anchor every manuscript in the external problem 'Continuous Class Expansion Without Task Labels'. Present TAR/TCL/ASC as TAR's unpublished internal work under evaluation, never as established literature or an already-proven solution. Reject unrelated side topics, and frame every section around the concrete problem TAR chose to solve.",
+  "frontier_problem_ids": [
+    "fp-class-incremental"
+  ],
+  "experiment_ids": [
+    "phase15_class_incremental_search"
+  ],
+  "waiting_for_experiments": [
+    "phase15_class_incremental_search"
+  ],
+  "sections_planned": [
+    "abstract",
+    "s1_introduction",
+    "s2_background",
+    "s3_method",
+    "s4_experiments",
+    "s5_discussion",
+    "s6_conclusion"
+  ],
+  "tex_path": "C:\\Users\\cgard\\TAR\\Thermodynamic-Continual-Learning-delivered\\paper\\frontier-paper-fp-class-incremental\\main.tex",
+  "pdf_path": ""
+}

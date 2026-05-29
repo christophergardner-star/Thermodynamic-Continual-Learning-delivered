@@ -40,6 +40,8 @@ from tar_suite_checkpoint import (
     save_suite_state,
 )
 from tar_suite_logging import tee_console
+from tar_lab.manifest import load_and_verify_manifest, ManifestGateError, write_refuse_note
+from tar_lab.result_artifacts import collect_environment_snapshot, write_canonical_comparison_result
 
 SEEDS = [42, 0, 1]
 BACKBONE = "resnet18"
@@ -61,6 +63,65 @@ EXPERIMENT_ID = "phase16_scale_up"
 
 CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
 CIFAR100_STD = (0.2675, 0.2565, 0.2761)
+
+
+def _require_manifest() -> None:
+    manifest_path_str = str(os.environ.get("TAR_MANIFEST_PATH", "") or "").strip()
+    if not manifest_path_str:
+        print("REFUSED: TAR_MANIFEST_PATH not set. Set it to the path of the signed manifest and re-run.", flush=True)
+        raise SystemExit(1)
+    manifest_path = Path(manifest_path_str)
+    if not manifest_path.is_absolute():
+        manifest_path = Path(_repo) / manifest_path
+    try:
+        manifest = load_and_verify_manifest(manifest_path, Path(_repo))
+        for experiment_id in (EXPERIMENT_ID, "phase16-scale-up-rerun"):
+            try:
+                manifest.assert_experiment_authorised(experiment_id)
+                print(f"[RAIL 3] Manifest gate: OK ({manifest.manifest_id})", flush=True)
+                return
+            except ManifestGateError:
+                continue
+        raise ManifestGateError(
+            "Manifest does not authorise any accepted Phase 16 execution id "
+            "('phase16_scale_up', 'phase16-scale-up-rerun')."
+        )
+    except ManifestGateError as exc:
+        write_refuse_note(
+            Path(workspace),
+            component="phase16_scale_up",
+            reason=str(exc),
+            experiment_id=EXPERIMENT_ID,
+            manifest_path=str(manifest_path),
+        )
+        print(f"REFUSED: {exc}", flush=True)
+        raise SystemExit(1)
+
+
+def _suite_config_payload(
+    *,
+    optimizer_backend: str,
+    optimizer_backend_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "suite": "phase16_scale_up",
+        "dataset": DATASET_ID,
+        "backbone": BACKBONE,
+        "epochs": EPOCHS,
+        "seeds": SEEDS,
+        "methods": METHODS,
+        "n_tasks": N_TASKS,
+        "classes_per_task": CLASSES_PER_TASK,
+        "batch_size": BATCH_SIZE,
+        "base_lr": BASE_LR,
+        "ewc_lambda": EWC_LAMBDA,
+        "tcl_alpha": TCL_ALPHA,
+        "tcl_penalty_lambda": TCL_PENALTY_LAMBDA,
+        "tcl_ordered_lr": TCL_ORDERED_LR,
+        "tcl_disordered_lr": TCL_DISORDERED_LR,
+        "optimizer_backend": optimizer_backend,
+        "optimizer_backend_config": optimizer_backend_config or {},
+    }
 
 
 def _mean(values: list[float]) -> float:
@@ -183,7 +244,13 @@ def _load_hf_cifar100(workspace: str):
     return train_items, test_items
 
 
-def _build_cifar100_tasks(seed: int, train_items: list, test_items: list):
+def _build_cifar100_tasks(
+    seed: int,
+    train_items: list,
+    test_items: list,
+    n_tasks: int = N_TASKS,
+    classes_per_task: int = CLASSES_PER_TASK,
+):
     import torchvision.transforms as T
 
     train_tf = T.Compose([
@@ -201,8 +268,8 @@ def _build_cifar100_tasks(seed: int, train_items: list, test_items: list):
     all_classes = list(range(100))
     rng.shuffle(all_classes)
     class_order = [
-        all_classes[i * CLASSES_PER_TASK:(i + 1) * CLASSES_PER_TASK]
-        for i in range(N_TASKS)
+        all_classes[i * classes_per_task:(i + 1) * classes_per_task]
+        for i in range(n_tasks)
     ]
 
     train_subsets = []
@@ -240,16 +307,20 @@ def run_one_seed(
     progress_callback: Callable[[dict], None] | None = None,
     optimizer_backend: str = "sgd",
     optimizer_backend_config: dict[str, Any] | None = None,
+    n_tasks: int = N_TASKS,
+    classes_per_task: int = CLASSES_PER_TASK,
 ) -> dict:
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_subsets, test_subsets = _build_cifar100_tasks(seed, train_items, test_items)
+    train_subsets, test_subsets = _build_cifar100_tasks(
+        seed, train_items, test_items, n_tasks=n_tasks, classes_per_task=classes_per_task
+    )
 
     trunk = _ResNet18Trunk().to(device)
-    heads = nn.ModuleList([nn.Linear(trunk.feat_dim, CLASSES_PER_TASK) for _ in range(N_TASKS)]).to(device)
+    heads = nn.ModuleList([nn.Linear(trunk.feat_dim, classes_per_task) for _ in range(n_tasks)]).to(device)
     all_params = list(trunk.parameters()) + list(heads.parameters())
 
     ewc_fisher: dict[str, torch.Tensor] = {}
@@ -270,7 +341,7 @@ def run_one_seed(
 
     accuracy_matrix: dict[int, dict[int, float]] = {}
 
-    for train_t in range(N_TASKS):
+    for train_t in range(n_tasks):
         if method == "tcl" and observer is not None and train_t > 0:
             observer.reset_for_new_task()
 
@@ -289,11 +360,19 @@ def run_one_seed(
         for _epoch in range(EPOCHS):
             trunk.train()
             heads[train_t].train()
+            _epoch_loss = 0.0
+            _epoch_n_batches = 0
+            _epoch_correct = 0
+            _epoch_total = 0
             for bx, by in loader:
                 bx, by = bx.to(device), by.to(device)
                 reps = trunk(bx)
                 logits = heads[train_t](reps)
                 loss = F.cross_entropy(logits, by)
+                _epoch_n_batches += 1
+                _epoch_loss += loss.item()
+                _epoch_correct += int((logits.detach().argmax(1) == by).sum())
+                _epoch_total += int(by.size(0))
 
                 if method == "ewc" and ewc_fisher:
                     ewc_pen = torch.zeros((), device=device)
@@ -321,6 +400,14 @@ def run_one_seed(
                         group["lr"] = adj_lr
                 maybe_apply_optimizer_safety(optimizer, all_params)
                 optimizer.step()
+
+            print(
+                f"\n  seed={seed}  task {train_t + 1}/{n_tasks}"
+                f"  epoch {_epoch + 1}/{EPOCHS}"
+                f"  loss {_epoch_loss / max(_epoch_n_batches, 1):.4f}"
+                f"  acc {100.0 * _epoch_correct / max(_epoch_total, 1):.1f}%",
+                flush=True,
+            )
 
         if method == "ewc":
             trunk.eval()
@@ -355,7 +442,7 @@ def run_one_seed(
 
         trunk.eval()
         row: dict[int, float] = {}
-        for eval_t in range(N_TASKS):
+        for eval_t in range(n_tasks):
             loader_eval = DataLoader(test_subsets[eval_t], batch_size=256, shuffle=False, num_workers=0)
             correct = 0
             total = 0
@@ -378,11 +465,11 @@ def run_one_seed(
             })
 
     forgetting_per_task = []
-    for task_idx in range(N_TASKS - 1):
-        peak = max(accuracy_matrix[step][task_idx] for step in range(task_idx, N_TASKS))
-        final = accuracy_matrix[N_TASKS - 1][task_idx]
+    for task_idx in range(n_tasks - 1):
+        peak = max(accuracy_matrix[step][task_idx] for step in range(task_idx, n_tasks))
+        final = accuracy_matrix[n_tasks - 1][task_idx]
         forgetting_per_task.append(peak - final)
-    final_accs = [accuracy_matrix[N_TASKS - 1][task_idx] for task_idx in range(N_TASKS)]
+    final_accs = [accuracy_matrix[n_tasks - 1][task_idx] for task_idx in range(n_tasks)]
     return {
         "mean_forgetting": _mean(forgetting_per_task),
         "mean_accuracy": _mean(final_accs),
@@ -399,7 +486,7 @@ def _run_phase16_suite_impl(
     optimizer_backend: str = "sgd",
     optimizer_backend_config: dict[str, Any] | None = None,
 ) -> dict:
-    out_path = Path(workspace) / "tar_state" / "comparisons" / "phase16_scale_up.json"
+    run_started_at = datetime.now(timezone.utc).isoformat()
     resume_state = _load_resume_state(workspace, restart=restart)
     completed_seeds = list(resume_state.get("completed_seeds", []))
     per_seed = list(resume_state.get("per_seed", []))
@@ -422,7 +509,7 @@ def _run_phase16_suite_impl(
         print("restart=True  — ignoring prior checkpoint and restarting suite from seed 1", flush=True)
     elif completed_seeds:
         print(f"resume=True   — recovered completed seeds: {completed_seeds}", flush=True)
-    print(f"{datetime.now(timezone.utc).isoformat()}")
+    print(f"{run_started_at}")
     print(f"{'='*70}", flush=True)
 
     if progress_callback is not None:
@@ -501,6 +588,7 @@ def _run_phase16_suite_impl(
         traceback.print_exc()
         resume_state["status"] = "stalled"
         save_suite_state(_resume_checkpoint_path(workspace), resume_state)
+        completed_at = datetime.now(timezone.utc).isoformat()
         payload = {
             "status": "ERROR",
             "dataset": DATASET_ID,
@@ -508,10 +596,29 @@ def _run_phase16_suite_impl(
             "verdict": f"ERROR - {err_msg}",
             "error": err_msg,
             "exception": str(exc),
-            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": completed_at,
         }
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(payload, indent=2))
+        env_payload = collect_environment_snapshot(
+            repo_root=Path(_repo),
+            workspace=Path(workspace),
+            config=_suite_config_payload(
+                optimizer_backend=optimizer_backend,
+                optimizer_backend_config=optimizer_backend_config,
+            ),
+            trigger="manual_script",
+            source_script=Path(__file__).name,
+            run_started_at=run_started_at,
+            run_ended_at=completed_at,
+            extra={"logical_name": "phase16_scale_up", "status": "ERROR"},
+        )
+        write_canonical_comparison_result(
+            workspace=Path(workspace),
+            logical_name="phase16_scale_up",
+            payload=payload,
+            env_payload=env_payload,
+            phase_number=16,
+            source_script=Path(__file__).name,
+        )
         _notify("TAR Phase 16 FAILED", str(exc)[:120])
         raise
 
@@ -568,6 +675,7 @@ def _run_phase16_suite_impl(
             "to 10-task CIFAR-100 at current hyperparameters."
         )
 
+    completed_at = datetime.now(timezone.utc).isoformat()
     payload = {
         "backbone": BACKBONE,
         "epochs": EPOCHS,
@@ -581,10 +689,29 @@ def _run_phase16_suite_impl(
         "pairwise": pairwise,
         "verdict_key": verdict_key,
         "verdict": verdict,
-        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "completed_at": completed_at,
     }
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, indent=2, default=str))
+    env_payload = collect_environment_snapshot(
+        repo_root=Path(_repo),
+        workspace=Path(workspace),
+        config=_suite_config_payload(
+            optimizer_backend=optimizer_backend,
+            optimizer_backend_config=optimizer_backend_config,
+        ),
+        trigger="manual_script",
+        source_script=Path(__file__).name,
+        run_started_at=run_started_at,
+        run_ended_at=completed_at,
+        extra={"logical_name": "phase16_scale_up", "status": "COMPLETE"},
+    )
+    artifacts = write_canonical_comparison_result(
+        workspace=Path(workspace),
+        logical_name="phase16_scale_up",
+        payload=payload,
+        env_payload=env_payload,
+        phase_number=16,
+        source_script=Path(__file__).name,
+    )
     resume_state = build_suite_state(
         EXPERIMENT_ID,
         SEEDS,
@@ -595,8 +722,10 @@ def _run_phase16_suite_impl(
     )
     save_suite_state(_resume_checkpoint_path(workspace), resume_state)
     _notify("TAR Phase 16 COMPLETE", f"{verdict_key} - {verdict[:80]}")
-    print(f"\nResult written: {out_path}")
-    print(f"[{datetime.now(timezone.utc).isoformat()}] Phase 16 complete")
+    print(f"\nResult written: {artifacts['result_path']}")
+    print(f"Env snapshot: {artifacts['env_path']}")
+    print(f"Index updated: {artifacts['index_path']}")
+    print(f"[{completed_at}] Phase 16 complete")
     return payload
 
 
@@ -619,6 +748,7 @@ def run_phase16_suite(
 
 def main() -> None:
     try:
+        _require_manifest()
         restart = "--restart" in set(sys.argv[1:])
         run_phase16_suite(workspace, restart=restart)
     except Exception:

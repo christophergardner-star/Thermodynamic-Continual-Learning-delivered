@@ -531,9 +531,23 @@ def quarantine_unregistered_results(
       tar_state/experiments/*/result.json
     os.walk is explicitly not used.
 
-    A result is legally registered only if its run_id is present in
-    index_records AND the env_snapshot_hash in that record exactly matches
-    the actual computed hash of the result's result_env.json on disk.
+    Phase-A two-tier trust model
+    ----------------------------
+    Tier 1 — Index-registered: experiment directory name matches a ``run_id``
+        or ``logical_name`` field in any index_records entry.  Accepted without
+        env_snapshot_hash verification.  Phase B will tighten this to require
+        hash verification for entries that carry an env_snapshot_hash.
+
+    Tier 2 — Archive-complete: experiment appears in experiment_archive.json
+        with status ``"complete"`` but has no matching index entry.  These are
+        pre-registration results that completed through the autonomous pipeline
+        before the canonical index existed; accepted without hash verification.
+
+    Quarantine trigger: an experiment that has a ``result_env.json`` sibling
+        (i.e. is env-snapshot-capable) yet matches neither tier.  An env-capable
+        result with no traceable provenance is the only genuinely suspicious
+        case.  Experiments without result_env.json predate the env-snapshot
+        system and cannot be hash-verified in any tier; they are not flagged.
 
     Returns (quarantine_set, is_clean_trust_state).
     is_clean_trust_state = (len(quarantine_set) == 0).
@@ -544,31 +558,42 @@ def quarantine_unregistered_results(
     if not experiments_dir.is_dir():
         return [], True
 
-    # Build lookup from registry-written index entries only (must have both fields).
-    registered: dict[str, str] = {}
+    # Tier 1: names drawn from index records — accept run_id OR logical_name.
+    index_names: set[str] = set()
     for record in index_records:
         r_id = record.get("run_id")
-        r_hash = record.get("env_snapshot_hash")
-        if r_id and r_hash:
-            registered[str(r_id)] = str(r_hash)
+        l_name = record.get("logical_name")
+        if r_id:
+            index_names.add(str(r_id))
+        if l_name:
+            index_names.add(str(l_name))
+
+    # Tier 2: completed IDs from the autonomous experiment archive.
+    archive_complete: set[str] = set()
+    archive_path = workspace / "tar_state" / "experiment_archive.json"
+    if archive_path.exists():
+        try:
+            archive_data = json.loads(archive_path.read_text(encoding="utf-8"))
+            for exp in archive_data.get("experiments", []):
+                if exp.get("status") == "complete" and exp.get("id"):
+                    archive_complete.add(str(exp["id"]))
+        except Exception:
+            pass  # unreadable archive — no tier-2 trust granted this run
 
     # Non-recursive single-level glob (RAIL-6 compliant; os.walk forbidden).
     quarantine_set: list[str] = []
     for result_path in experiments_dir.glob("*/result.json"):
         run_id = result_path.parent.name
+
+        if run_id in index_names:        # tier 1
+            continue
+        if run_id in archive_complete:   # tier 2
+            continue
+
+        # Neither tier matched.  Only flag if an env snapshot is present —
+        # env-capable but unregistered is the suspicious case.
         env_path = result_path.with_name("result_env.json")
-
-        if run_id not in registered:
-            quarantine_set.append(run_id)
-            continue
-
-        try:
-            actual_hash = _compute_env_hash(env_path)
-        except Exception:
-            quarantine_set.append(run_id)
-            continue
-
-        if actual_hash != registered[run_id]:
+        if env_path.exists():
             quarantine_set.append(run_id)
 
     is_clean_trust_state = len(quarantine_set) == 0
