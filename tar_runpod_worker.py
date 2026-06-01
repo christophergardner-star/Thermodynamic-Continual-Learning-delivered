@@ -35,23 +35,45 @@ def _ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _write_progress(path: str, data: dict[str, Any]) -> None:
-    """Atomic write so the poller never reads a partial file."""
+def _atomic_write(path: str, data: dict[str, Any]) -> None:
+    """Atomic JSON write."""
     p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
-    data["updated_at"] = _ts()
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.replace(tmp, p)
 
 
-def _write_result(workspace: str, experiment_id: str, result: dict[str, Any]) -> None:
-    out = Path(workspace) / f"result_{experiment_id}.json"
-    tmp = out.with_suffix(".tmp")
+def _write_progress(path: str, data: dict[str, Any], volume_path: str = "") -> None:
+    """Write progress JSON atomically — to pod disk AND to network volume if mounted."""
+    data["updated_at"] = _ts()
+    _atomic_write(path, data)
+    # Mirror to network volume for durability (survives pod death)
+    if volume_path:
+        try:
+            _atomic_write(f"{volume_path}/progress.json", data)
+        except Exception:
+            pass  # volume write failure is non-fatal
+
+
+def _write_result(workspace: str, experiment_id: str, result: dict[str, Any], volume_path: str = "") -> None:
+    """Write result JSON to pod disk AND to network volume."""
     result["execution_backend"] = "runpod"
     result["completed_at"] = _ts()
-    tmp.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    os.replace(tmp, out)
-    print(f"[worker] Result written: {out}", flush=True)
+
+    # Pod disk (for immediate SFTP pull)
+    pod_path = str(Path(workspace) / f"result_{experiment_id}.json")
+    _atomic_write(pod_path, result)
+    print(f"[worker] Result written to pod disk: {pod_path}", flush=True)
+
+    # Network volume (durable — survives pod death)
+    if volume_path:
+        try:
+            vol_path = f"{volume_path}/result.json"
+            _atomic_write(vol_path, result)
+            print(f"[worker] Result written to volume: {vol_path}", flush=True)
+        except Exception as exc:
+            print(f"[worker] Volume write warning: {exc}", flush=True)
 
 
 def _setup_env(workspace: str) -> None:
@@ -72,7 +94,7 @@ def _build_workspace_layout(workspace: str) -> None:
         (ws / sub).mkdir(parents=True, exist_ok=True)
 
 
-def run_tinyimagenet(spec_args: argparse.Namespace, progress_file: str) -> dict[str, Any]:
+def run_tinyimagenet(spec_args: argparse.Namespace, progress_file: str, volume_path: str = "") -> dict[str, Any]:
     """Run split_tinyimagenet via phase17_tinyimagenet runner."""
     print("[worker] Loading TinyImageNet dataset...", flush=True)
     from phase17_tinyimagenet import _load_hf_tinyimagenet, run_one_seed as _run17
@@ -119,13 +141,13 @@ def run_tinyimagenet(spec_args: argparse.Namespace, progress_file: str) -> dict[
             "tasks_done":    n_tasks,
             "latest_accs":   [f"{acc:.4f}" for acc in accuracy_list],
             "forgetting_so_far": forgetting_list[:],
-        })
+        }, volume_path=volume_path)
         print(f"[worker] Seed {seed}: forgetting={res['mean_forgetting']:.4f} acc={res['mean_accuracy']:.4f}", flush=True)
 
     return {"seed_results": seed_results, "forgetting_list": forgetting_list, "accuracy_list": accuracy_list}
 
 
-def run_cifar100(spec_args: argparse.Namespace, progress_file: str) -> dict[str, Any]:
+def run_cifar100(spec_args: argparse.Namespace, progress_file: str, volume_path: str = "") -> dict[str, Any]:
     """Run split_cifar100 via phase16_scale_up runner."""
     print("[worker] Loading CIFAR-100 dataset...", flush=True)
     from phase16_scale_up import _load_hf_cifar100, run_one_seed as _run16
@@ -171,13 +193,13 @@ def run_cifar100(spec_args: argparse.Namespace, progress_file: str) -> dict[str,
             "tasks_done":    n_tasks,
             "latest_accs":   [f"{acc:.4f}" for acc in accuracy_list],
             "forgetting_so_far": forgetting_list[:],
-        })
+        }, volume_path=volume_path)
         print(f"[worker] Seed {seed}: forgetting={res['mean_forgetting']:.4f} acc={res['mean_accuracy']:.4f}", flush=True)
 
     return {"seed_results": seed_results, "forgetting_list": forgetting_list, "accuracy_list": accuracy_list}
 
 
-def run_generic(spec_args: argparse.Namespace, progress_file: str) -> dict[str, Any]:
+def run_generic(spec_args: argparse.Namespace, progress_file: str, volume_path: str = "") -> dict[str, Any]:
     """Run any other dataset via generic_cl_runner."""
     from tar_lab.generic_cl_runner import run_generic_benchmark
     workspace = spec_args.workspace
@@ -271,6 +293,8 @@ def main() -> None:
     parser.add_argument("--config-overrides", default="{}")
     parser.add_argument("--workspace",        default="/workspace")
     parser.add_argument("--progress-file",    required=True)
+    parser.add_argument("--volume-path",      default="",
+                        help="Network volume path for durable result storage, e.g. /runpod-volume/experiments/abc123")
     args = parser.parse_args()
 
     # Parse config overrides
@@ -301,20 +325,28 @@ def main() -> None:
         "forgetting_so_far": [],
     })
 
+    volume_path = str(getattr(args, "volume_path", "") or "").strip()
+    if volume_path:
+        # Ensure volume exp dir exists
+        Path(volume_path).mkdir(parents=True, exist_ok=True)
+        print(f"[worker] Results will be mirrored to volume: {volume_path}", flush=True)
+    else:
+        print("[worker] No volume path — results on pod disk only", flush=True)
+
     # Route to correct runner
     dataset = args.dataset
     print(f"[worker] Routing to runner for: {dataset}", flush=True)
 
     if dataset == "split_tinyimagenet":
-        run_output = run_tinyimagenet(args, args.progress_file)
+        run_output = run_tinyimagenet(args, args.progress_file, volume_path=volume_path)
     elif dataset == "split_cifar100":
-        run_output = run_cifar100(args, args.progress_file)
+        run_output = run_cifar100(args, args.progress_file, volume_path=volume_path)
     else:
-        run_output = run_generic(args, args.progress_file)
+        run_output = run_generic(args, args.progress_file, volume_path=volume_path)
 
-    # Build and write result
+    # Build and write result to pod disk + volume
     result = build_result(args, run_output)
-    _write_result(args.workspace, args.experiment_id, result)
+    _write_result(args.workspace, args.experiment_id, result, volume_path=volume_path)
 
     print(f"\n[worker] DONE: verdict={result.get('verdict')} mean_forgetting={result.get('mean_forgetting', '?'):.4f}", flush=True)
     sys.exit(0)

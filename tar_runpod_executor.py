@@ -521,12 +521,13 @@ class RunPodExecutor:
 
     # ── Worker execution ──────────────────────────────────────────────────────
 
-    def _run_worker(self, client: Any, spec: Any, seeds: list[int]) -> int:
+    def _run_worker(self, client: Any, spec: Any, seeds: list[int], *, volume_path: str = "") -> int:
         """SSH-exec tar_runpod_worker.py on pod, stream stdout. Returns exit code."""
-        seeds_arg     = " ".join(str(s) for s in seeds)
-        config_json   = json.dumps(getattr(spec, "config_overrides", {}) or {})
-        # Escape for shell
+        seeds_arg      = " ".join(str(s) for s in seeds)
+        config_json    = json.dumps(getattr(spec, "config_overrides", {}) or {})
         config_escaped = config_json.replace("'", "'\\''")
+
+        volume_arg = f"--volume-path '{volume_path}'" if volume_path else ""
 
         cmd = (
             "cd /workspace/repo && "
@@ -543,6 +544,7 @@ class RunPodExecutor:
             f"--config-overrides '{config_escaped}' "
             f"--workspace /workspace "
             f"--progress-file /workspace/progress_{spec.id}.json "
+            f"{volume_arg} "
             f"2>&1"
         )
         self._log(f"Launching worker on pod (seeds={seeds})")
@@ -654,7 +656,22 @@ class RunPodExecutor:
         """
         Execute spec on RunPod. Returns raw result dict on success, None to
         trigger local fallback. Raises RunPodInterruptedError on retriable failure.
+
+        Storage flow:
+          1. Ensure a persistent network volume exists for results
+          2. Mount volume on pod at /runpod-volume/
+          3. Worker writes result to both /workspace/ (fast) and /runpod-volume/ (durable)
+          4. Executor pulls result via SFTP while pod is alive
+          5. If pod dies before SFTP pull: spin retrieval pod, mount same volume, pull result
         """
+        from tar_runpod_storage import (
+            ensure_results_volume,
+            setup_run_folder,
+            mark_run_complete,
+            retrieve_results,
+            volume_exp_path,
+        )
+
         dry_run = str(os.environ.get("RUNPOD_DRY_RUN", "") or "").strip() in {"1", "true"}
         if dry_run:
             self._log(
@@ -663,13 +680,22 @@ class RunPodExecutor:
             )
             return None
 
-        seeds    = self._get_resume_seeds(spec)
-        max_h    = float(getattr(spec, "estimated_runtime_h", 8.0) or 8.0) * float(self.config.get("watchdog_multiplier", _WATCHDOG_MULT))
-        pod_id   = ""
+        api_key    = os.environ["RUNPOD_API_KEY"]
+        seeds      = self._get_resume_seeds(spec)
+        max_h      = float(getattr(spec, "estimated_runtime_h", 8.0) or 8.0) * float(self.config.get("watchdog_multiplier", _WATCHDOG_MULT))
+        pod_id     = ""
         client: Any = None
 
+        # ── Step 1: Ensure persistent results volume ────────────────────────
+        volume_id = ensure_results_volume(
+            self.workspace, self.config, api_key, log_fn=self._log
+        )
+        # Refresh config so _create_pod picks up the volume_id
+        from tar_runpod_executor import load_runpod_config
+        self.config = load_runpod_config(self.workspace)
+
         try:
-            # ── Create pod ──────────────────────────────────────────────────
+            # ── Step 2: Create training pod ─────────────────────────────────
             try:
                 pod_id, gpu_type = self._create_pod(spec)
             except RunPodCreditError as exc:
@@ -683,60 +709,111 @@ class RunPodExecutor:
                 return None
 
             self._pod_id = pod_id
+
+            # ── Step 3: Set up per-run storage folder ───────────────────────
+            manifest = setup_run_folder(
+                self.workspace, spec, volume_id, gpu_type, seeds, log_fn=self._log
+            )
+            vol_exp_path = volume_exp_path(spec.id)
+
             self._save_pod_state({
-                "active_pod_id": pod_id,
-                "gpu_type": gpu_type,
-                "experiment_id": getattr(spec, "id", ""),
+                "active_pod_id":  pod_id,
+                "gpu_type":       gpu_type,
+                "experiment_id":  getattr(spec, "id", ""),
                 "pod_created_at": _ts(),
-                "seeds_todo": seeds,
-                "seeds_total": len(getattr(spec, "seeds", [])),
-                "estimated_h": getattr(spec, "estimated_runtime_h", 0),
+                "seeds_todo":     seeds,
+                "seeds_total":    len(getattr(spec, "seeds", [])),
+                "estimated_h":    getattr(spec, "estimated_runtime_h", 0),
                 "watchdog_kills_at_h": max_h,
+                "volume_id":      volume_id,
+                "vol_exp_path":   vol_exp_path,
             })
 
             # Start watchdog
             self._cost_watchdog(pod_id, max_h)
 
-            # ── Wait for SSH ────────────────────────────────────────────────
+            # ── Step 4: SSH + environment setup ─────────────────────────────
             ssh_info = self._wait_for_ssh(pod_id)
+            client   = self._get_ssh_client(ssh_info)
 
-            # ── Connect ─────────────────────────────────────────────────────
-            client = self._get_ssh_client(ssh_info)
+            # Write manifest to volume on pod
+            if volume_id:
+                import json as _json
+                self._ssh_exec(client, f"mkdir -p {vol_exp_path}", timeout=15)
+                manifest_json = _json.dumps(manifest, indent=2).replace("'", "'\\''")
+                self._ssh_exec(
+                    client,
+                    f"echo '{manifest_json}' > {vol_exp_path}/manifest.json",
+                    timeout=10,
+                )
 
-            # ── Prepare environment ─────────────────────────────────────────
             self._sync_code(client, spec)
             self._install_deps(client)
             self._prepare_dataset(client, spec)
 
-            # ── Run experiment ──────────────────────────────────────────────
+            # ── Step 5: Run experiment ───────────────────────────────────────
             progress_thread = self._start_progress_polling(client, spec)
-            exit_code = self._run_worker(client, spec, seeds)
+            exit_code = self._run_worker(client, spec, seeds, volume_path=vol_exp_path if volume_id else "")
             self._progress_stop.set()
             progress_thread.join(timeout=5)
 
             if exit_code != 0:
                 raise RunPodInterruptedError(f"Worker exited with code {exit_code}")
 
-            # ── Collect result ──────────────────────────────────────────────
+            # ── Step 6: Pull result (SFTP primary, volume fallback) ──────────
             result_data = self._sync_result(client, spec)
+
+            if result_data is None and volume_id:
+                self._log("SFTP pull failed — trying volume retrieval pod...")
+                priv_path, pub_key = self._setup_ssh_key()
+                result_data = retrieve_results(
+                    self.workspace, spec, volume_id, self.config, api_key,
+                    pub_key, priv_path, log_fn=self._log,
+                )
+
             if result_data is None:
                 raise RunPodInterruptedError("No result.json found after worker completed")
 
             spec.result_path = str(
                 self.workspace / "tar_state" / "experiments" / spec.id / "result.json"
             )
-            # Clear partial progress — run succeeded
+            mark_run_complete(self.workspace, spec.id, result_data.get("verdict", "?"))
             (self.workspace / "tar_state" / "runpod_partial" / f"{spec.id}.json").unlink(missing_ok=True)
-
             return result_data
 
         except RunPodCreditError as exc:
             self._handle_credit_exhaustion(spec)
             self._save_partial(spec, str(exc))
+            # Try volume retrieval even after credit exhaustion — results may already be written
+            if volume_id:
+                self._log("Attempting volume retrieval after credit exhaustion...")
+                try:
+                    priv_path, pub_key = self._setup_ssh_key()
+                    result_data = retrieve_results(
+                        self.workspace, spec, volume_id, self.config, api_key,
+                        pub_key, priv_path, log_fn=self._log,
+                    )
+                    if result_data:
+                        self._log("Volume retrieval succeeded despite credit exhaustion")
+                        return result_data
+                except Exception as re:
+                    self._log(f"Volume retrieval also failed: {re}")
             raise RunPodInterruptedError(str(exc)) from exc
 
         except (BrokenPipeError, ConnectionResetError, EOFError, TimeoutError) as exc:
             self._save_partial(spec, str(exc))
+            if volume_id and pod_id:
+                self._log("Connection lost — trying volume retrieval...")
+                try:
+                    priv_path, pub_key = self._setup_ssh_key()
+                    result_data = retrieve_results(
+                        self.workspace, spec, volume_id, self.config, api_key,
+                        pub_key, priv_path, log_fn=self._log,
+                    )
+                    if result_data:
+                        return result_data
+                except Exception:
+                    pass
             raise RunPodInterruptedError(f"Connection lost: {exc}") from exc
 
         except RunPodInterruptedError:
