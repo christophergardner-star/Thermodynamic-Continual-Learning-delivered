@@ -89,6 +89,7 @@ def load_runpod_config(workspace: Path) -> dict[str, Any]:
         "container_disk_in_gb": 30,
         "min_vram_gb": _DEFAULT_MIN_VRAM_GB,
         "max_cost_per_hour": _DEFAULT_MAX_COST_PER_H,
+        "max_experiment_cost_usd": 10.0,   # hard dollar ceiling per experiment
     }
     if path.exists():
         try:
@@ -290,10 +291,10 @@ class RunPodExecutor:
         self._log(f"GPU selection order: {[f'{g}(${p:.2f})' for g,p in qualifying[:5]]}")
         return qualifying
 
-    def _create_pod(self, spec: Any) -> tuple[str, str]:
+    def _create_pod(self, spec: Any) -> tuple[str, str, float]:
         """
         Select cheapest eligible GPU (min 24GB VRAM, max $2/hr), try in order.
-        Returns (pod_id, gpu_type). Raises RunPodNoGPUError if all fail.
+        Returns (pod_id, gpu_type, price_per_hour). Raises RunPodNoGPUError if all fail.
         """
         import runpod as rp
         rp.api_key = os.environ["RUNPOD_API_KEY"]
@@ -331,7 +332,7 @@ class RunPodExecutor:
                     pod    = rp.create_pod(**kwargs)
                     pod_id = str(pod["id"])
                     self._log(f"Pod {pod_id} created: {gpu_type} @ {price_str}")
-                    return pod_id, gpu_type
+                    return pod_id, gpu_type, price
                 except Exception as exc:
                     err_lo = str(exc).lower()
                     if any(k in err_lo for k in _CREDIT_ERROR_KEYWORDS):
@@ -348,6 +349,7 @@ class RunPodExecutor:
             f"No GPU available within budget (min {self.config.get('min_vram_gb',24)}GB VRAM, "
             f"max ${self.config.get('max_cost_per_hour',2.0):.2f}/hr). Last: {last_error}"
         )
+
 
     def _wait_for_ssh(self, pod_id: str) -> dict[str, Any]:
         """Poll until pod SSH port is ready. Return ssh_info dict."""
@@ -414,12 +416,78 @@ class RunPodExecutor:
         except Exception as exc:
             self._log(f"Terminate error for {pod_id}: {exc}")
 
-    def _cost_watchdog(self, pod_id: str, max_h: float) -> None:
-        """Daemon thread: terminate pod after max_h hours no matter what."""
+    def _cost_watchdog(
+        self,
+        pod_id: str,
+        max_h: float,
+        price_per_hour: float = 0.0,
+        max_cost_usd: float = 0.0,
+    ) -> None:
+        """
+        Daemon thread with two tiers:
+
+        WARNING tier  — logs and writes runpod_cost_warning.flag when
+                         spent >= max_cost_usd / 3  (the configured warning threshold).
+                         Dashboard turns orange. User decides whether to kill.
+                         Does NOT terminate the pod — legitimate slow runs continue.
+
+        HARD KILL tier — terminates only when spent >= max_cost_usd (which is set
+                         to 3× the user's warning threshold in run(), so this fires
+                         at $30 when the user set $10 as their warning level).
+                         Also fires if elapsed time exceeds max_h (genuine stuck process).
+
+        Checks every 60s. Maximum billing overshoot per check: 1 minute.
+        """
+        warn_threshold = max_cost_usd / 3.0 if max_cost_usd > 0 else 0.0
+        warned = False
+
         def _watch() -> None:
-            time.sleep(max_h * 3600)
-            self._log(f"WATCHDOG: {max_h:.1f}h elapsed — force-terminating {pod_id}")
-            self._terminate(pod_id)
+            nonlocal warned
+            start = time.time()
+            while True:
+                time.sleep(60.0)
+                elapsed_h = (time.time() - start) / 3600.0
+                spent     = elapsed_h * price_per_hour if price_per_hour > 0 else 0.0
+
+                # Warning tier — dashboard signal, no kill
+                if not warned and warn_threshold > 0 and spent >= warn_threshold:
+                    warned = True
+                    self._log(
+                        f"COST WARNING: ${spent:.2f} spent "
+                        f"(${price_per_hour:.2f}/hr × {elapsed_h:.1f}h). "
+                        f"Threshold ${warn_threshold:.2f} reached. "
+                        f"Use dashboard Kill Pod Now if you want to stop early."
+                    )
+                    # Write warning flag for dashboard to display
+                    warn_path = self.workspace / "tar_state" / "runpod_cost_warning.json"
+                    try:
+                        warn_path.write_text(json.dumps({
+                            "pod_id":       pod_id,
+                            "spent_usd":    round(spent, 2),
+                            "price_per_h":  price_per_hour,
+                            "elapsed_h":    round(elapsed_h, 2),
+                            "written_at":   _ts(),
+                        }, indent=2), encoding="utf-8")
+                    except Exception:
+                        pass
+
+                # Hard kill tier — only genuine runaways
+                if max_cost_usd > 0 and spent >= max_cost_usd:
+                    self._log(
+                        f"WATCHDOG HARD KILL: ${spent:.2f} >= hard ceiling ${max_cost_usd:.2f} "
+                        f"— terminating {pod_id}"
+                    )
+                    self._terminate(pod_id)
+                    return
+
+                if elapsed_h >= max_h:
+                    self._log(
+                        f"WATCHDOG HARD KILL: {elapsed_h:.1f}h >= time ceiling {max_h:.1f}h "
+                        f"— terminating {pod_id}"
+                    )
+                    self._terminate(pod_id)
+                    return
+
         t = threading.Thread(target=_watch, daemon=True, name=f"runpod-watchdog-{pod_id}")
         t.start()
 
@@ -681,10 +749,13 @@ class RunPodExecutor:
             return None
 
         api_key    = os.environ["RUNPOD_API_KEY"]
-        seeds      = self._get_resume_seeds(spec)
-        max_h      = float(getattr(spec, "estimated_runtime_h", 8.0) or 8.0) * float(self.config.get("watchdog_multiplier", _WATCHDOG_MULT))
-        pod_id     = ""
-        client: Any = None
+        seeds          = self._get_resume_seeds(spec)
+        estimated_h    = float(getattr(spec, "estimated_runtime_h", 8.0) or 8.0)
+        max_h          = estimated_h * float(self.config.get("watchdog_multiplier", _WATCHDOG_MULT))
+        max_cost_usd   = float(self.config.get("max_experiment_cost_usd", 10.0))
+        pod_id         = ""
+        price_per_hour = 0.0
+        client: Any    = None
 
         # ── Step 1: Ensure persistent results volume ────────────────────────
         volume_id = ensure_results_volume(
@@ -697,7 +768,7 @@ class RunPodExecutor:
         try:
             # ── Step 2: Create training pod ─────────────────────────────────
             try:
-                pod_id, gpu_type = self._create_pod(spec)
+                pod_id, gpu_type, price_per_hour = self._create_pod(spec)
             except RunPodCreditError as exc:
                 self._handle_credit_exhaustion(spec)
                 raise RunPodInterruptedError(f"Credit exhausted: {exc}") from exc
@@ -709,6 +780,16 @@ class RunPodExecutor:
                 return None
 
             self._pod_id = pod_id
+
+            # ── Pre-flight cost estimate ─────────────────────────────────────
+            if price_per_hour > 0:
+                est_cost = estimated_h * price_per_hour
+                self._log(
+                    f"Cost estimate: ~${est_cost:.2f} "
+                    f"({estimated_h:.1f}h × ${price_per_hour:.2f}/hr on {gpu_type}). "
+                    f"Dollar warning threshold: ${max_cost_usd:.2f}. "
+                    f"Hard kill at: ${max_cost_usd * 3:.2f} (3× warning threshold)."
+                )
 
             # ── Step 3: Set up per-run storage folder ───────────────────────
             manifest = setup_run_folder(
@@ -729,8 +810,15 @@ class RunPodExecutor:
                 "vol_exp_path":   vol_exp_path,
             })
 
-            # Start watchdog
-            self._cost_watchdog(pod_id, max_h)
+            # Start watchdog — HARD kill only at 3× the dollar warning threshold
+            # (a genuine runaway, not just a slow legitimate run).
+            # Normal overspend shows a dashboard warning; user kills manually.
+            self._cost_watchdog(
+                pod_id,
+                max_h=max_h,
+                price_per_hour=price_per_hour,
+                max_cost_usd=max_cost_usd * 3.0,  # hard kill at 3× warning threshold
+            )
 
             # ── Step 4: SSH + environment setup ─────────────────────────────
             ssh_info = self._wait_for_ssh(pod_id)

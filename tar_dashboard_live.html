@@ -3443,7 +3443,15 @@ function renderRunPod(){
   }
 
   // Budget line
-  const budgetLine = `<span style="color:var(--soft);font-size:.82rem">Min ${d.min_vram_gb || 24}GB VRAM &nbsp;·&nbsp; Max $${Number(d.max_cost_per_hour||2).toFixed(2)}/hr &nbsp;·&nbsp; Routes experiments &gt;${d.threshold_runtime_h||12}h</span>`;
+  const budgetLine = `<span style="color:var(--soft);font-size:.82rem">Min ${d.min_vram_gb || 24}GB VRAM &nbsp;·&nbsp; Max $${Number(d.max_cost_per_hour||2).toFixed(2)}/hr GPU &nbsp;·&nbsp; Routes experiments &gt;${d.threshold_runtime_h||12}h &nbsp;·&nbsp; Warn at $${Number(d.max_experiment_cost_usd||10).toFixed(0)}</span>`;
+
+  // Cost warning banner
+  const cw = d.cost_warning || {};
+  const costWarnHtml = cw.spent_usd ? `
+    <div style="margin-top:8px;padding:10px;background:rgba(255,191,95,.1);border:1px solid rgba(255,191,95,.3);border-radius:8px">
+      <div style="color:#ffbf5f;font-weight:600;font-size:.85rem">⚠ Cost warning — $${Number(cw.spent_usd).toFixed(2)} spent so far</div>
+      <div style="color:var(--soft);font-size:.8rem;margin-top:3px">${Number(cw.price_per_h||0).toFixed(2)}/hr × ${Number(cw.elapsed_h||0).toFixed(1)}h. Use Kill Pod Now if you want to stop.</div>
+    </div>` : "";
 
   // Active pod section
   let podHtml = "";
@@ -3510,6 +3518,7 @@ function renderRunPod(){
     <div class="list">
       <div class="item">
         ${budgetLine}
+        ${costWarnHtml}
         ${podHtml}
         ${suspendedHtml}
         ${keyWarn}

@@ -3838,6 +3838,18 @@ def api_runpod_status():
         except Exception:
             pass
 
+    # Cost warning
+    cost_warning: dict = {}
+    warn_path = _WS / "tar_state" / "runpod_cost_warning.json"
+    if warn_path.exists():
+        try:
+            cw = json.loads(warn_path.read_text(encoding="utf-8"))
+            # Only show warning if it's for the current active pod
+            if not active_pod_id or cw.get("pod_id") == active_pod_id:
+                cost_warning = cw
+        except Exception:
+            pass
+
     return jsonify({
         "mode":               mode,
         "api_key_set":        api_key,
@@ -3850,10 +3862,12 @@ def api_runpod_status():
         "cost_est_usd":       cost_est,
         "min_vram_gb":        float(config.get("min_vram_gb", 24)),
         "max_cost_per_hour":  float(config.get("max_cost_per_hour", 2.0)),
+        "max_experiment_cost_usd": float(config.get("max_experiment_cost_usd", 10.0)),
         "threshold_runtime_h": float(config.get("threshold_runtime_h", 12)),
         "suspended_reason":   str(suspended_data.get("reason", "") or ""),
         "suspended_at":       str(suspended_data.get("suspended_at", "") or ""),
         "volume_id":          str(config.get("volume_id", "") or ""),
+        "cost_warning":       cost_warning,
     })
 
 
