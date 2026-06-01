@@ -165,6 +165,18 @@ class ExperimentPreflightManager:
         if resume_preserved:
             notes.append("Suite checkpoint state was preserved so resume-safe runs do not lose progress.")
 
+        # RunPod routing — override execution_mode before finalising report.
+        try:
+            from tar_runpod_executor import should_use_runpod
+            if should_use_runpod(spec, self.workspace):
+                execution_mode = "runpod"
+                notes.append(
+                    f"RunPod routing active: estimated_runtime_h="
+                    f"{getattr(spec,'estimated_runtime_h',0):.1f}h — will run on cloud GPU."
+                )
+        except Exception:
+            pass  # RunPod not installed or misconfigured — continue locally
+
         # Check git cleanliness — warn if working tree is dirty but do not block.
         clean_state_ready = True
         try:

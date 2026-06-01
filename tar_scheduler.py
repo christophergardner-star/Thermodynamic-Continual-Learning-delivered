@@ -350,32 +350,43 @@ class TARScheduler:
                 can_start.append(spec.id)
                 continue
 
-            # GPU experiment: check slot and VRAM
-            if gpu_running >= 1:
-                running_name = running_specs[0].name if running_specs else "current"
-                est_h = getattr(running_specs[0], "estimated_runtime_h", 0) if running_specs else 0
-                hold_reasons.append(HoldReason(
-                    experiment_id   = spec.id,
-                    experiment_name = spec.name,
-                    reason = (
-                        f"GPU slot occupied by '{running_name}' "
-                        f"(est. {est_h:.1f}h remaining). "
-                        f"Needs {exp_vram:.1f} GB VRAM — queued."
-                    )
-                ))
-                continue
+            # RunPod routing bypass: if this spec would go to cloud, skip local
+            # slot/VRAM checks — it won't consume local GPU resources.
+            _runpod_routed = False
+            try:
+                from tar_runpod_executor import should_use_runpod
+                if should_use_runpod(spec, self.workspace):
+                    _runpod_routed = True
+            except Exception:
+                pass
 
-            if vram_committed + exp_vram > vram_headroom:
-                hold_reasons.append(HoldReason(
-                    experiment_id   = spec.id,
-                    experiment_name = spec.name,
-                    reason = (
-                        f"Needs {exp_vram:.1f} GB VRAM but only "
-                        f"{vram_headroom - vram_committed:.1f} GB free "
-                        f"(keeping {reserve_headroom:.1f} GB headroom)."
-                    )
-                ))
-                continue
+            if not _runpod_routed:
+                # GPU experiment: check slot and VRAM
+                if gpu_running >= 1:
+                    running_name = running_specs[0].name if running_specs else "current"
+                    est_h = getattr(running_specs[0], "estimated_runtime_h", 0) if running_specs else 0
+                    hold_reasons.append(HoldReason(
+                        experiment_id   = spec.id,
+                        experiment_name = spec.name,
+                        reason = (
+                            f"GPU slot occupied by '{running_name}' "
+                            f"(est. {est_h:.1f}h remaining). "
+                            f"Needs {exp_vram:.1f} GB VRAM — queued."
+                        )
+                    ))
+                    continue
+
+                if vram_committed + exp_vram > vram_headroom:
+                    hold_reasons.append(HoldReason(
+                        experiment_id   = spec.id,
+                        experiment_name = spec.name,
+                        reason = (
+                            f"Needs {exp_vram:.1f} GB VRAM but only "
+                            f"{vram_headroom - vram_committed:.1f} GB free "
+                            f"(keeping {reserve_headroom:.1f} GB headroom)."
+                        )
+                    ))
+                    continue
 
             # Clear to run
             can_start.append(spec.id)

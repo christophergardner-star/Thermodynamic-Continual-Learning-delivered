@@ -18,3 +18,10 @@ phase14_run.log
 *.log
 test_output.txt
 tool_envs/
+tar_state/runpod_ssh/
+tar_state/runpod_config.json
+tar_state/runpod_state.json
+tar_state/runpod_enabled.flag
+tar_state/runpod_suspended.flag
+tar_state/runpod_dryrun.flag
+tar_state/runpod_partial/

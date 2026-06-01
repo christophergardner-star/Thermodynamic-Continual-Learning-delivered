@@ -1638,6 +1638,8 @@ class ExperimentOrchestrator:
             report = self._prepare_execution(spec)
             if report.get("execution_mode") == "workspace_venv" and not force_in_process:
                 return self._execute_in_prepared_subprocess(spec, report)
+            if report.get("execution_mode") == "runpod" and not force_in_process:
+                return self._execute_on_runpod(spec, report)
 
         self._log(f"\n{'='*60}")
         self._log(f"[execute] {spec.id}  {spec.name}")
@@ -1851,6 +1853,48 @@ class ExperimentOrchestrator:
         if proc.returncode != 0 and refreshed.status != EXP_COMPLETE:
             self._log(f"[execute] Prepared worker exited with code {proc.returncode} for {spec.id}")
         return self._load_saved_result(refreshed)
+
+    def _execute_on_runpod(self, spec: ExperimentSpec, report: dict[str, Any]) -> ExperimentResult | None:
+        """Execute experiment on a RunPod cloud GPU pod."""
+        from tar_runpod_executor import RunPodExecutor, RunPodInterruptedError
+
+        self._log(f"[runpod] Routing {spec.id} to RunPod cloud GPU")
+
+        spec.status     = EXP_RUNNING
+        spec.stage      = STAGE_RUNNING
+        spec.started_at = datetime.now(timezone.utc).isoformat()
+        spec.error      = ""
+        spec.progress   = {"seeds_done": 0, "seeds_total": len(spec.seeds),
+                           "tasks_done": 0, "latest_accs": [], "forgetting_so_far": []}
+        spec.runtime_context = {**(spec.runtime_context or {}), "execution_backend": "runpod"}
+        self._save()
+
+        executor = RunPodExecutor(workspace=self.workspace, orchestrator=self)
+        try:
+            result_data = executor.run(spec)
+        except RunPodInterruptedError as exc:
+            self._log(f"[runpod] Interrupted for {spec.id}: {exc}")
+            spec.status = EXP_PENDING
+            spec.stage  = STAGE_STALLED
+            spec.error  = f"runpod_interrupted: {exc}"
+            self._save()
+            return None
+
+        # None means local fallback was requested (no GPU available)
+        if result_data is None:
+            self._log(f"[runpod] Falling back to local execution for {spec.id}")
+            spec.runtime_context = {**(spec.runtime_context or {}), "execution_backend": "local_fallback"}
+            return self._dispatch(spec)
+
+        # Build ExperimentResult from the returned dict
+        saved_path = self.workspace / "tar_state" / "experiments" / spec.id / "result.json"
+        spec.result_path  = str(saved_path)
+        spec.status       = EXP_COMPLETE
+        spec.stage        = STAGE_COMPLETE
+        spec.completed_at = datetime.now(timezone.utc).isoformat()
+        self._save()
+        self._log(f"[runpod] {spec.id} complete: verdict={result_data.get('verdict','?')}")
+        return self._load_saved_result(spec)
 
     def _load_saved_result(self, spec: ExperimentSpec) -> ExperimentResult | None:
         path = self._resolved_result_path(spec)

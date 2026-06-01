@@ -46,3 +46,5 @@ torchvision
 tqdm
 transformers
 uvicorn
+runpod>=1.6.0
+paramiko>=3.4.0
