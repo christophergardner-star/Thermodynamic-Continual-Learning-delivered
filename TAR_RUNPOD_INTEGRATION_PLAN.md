@@ -445,3 +445,346 @@ Pricing as of mid-2025 (community cloud, on-demand):
 | A100 SXM | 80 GB | ~$1.89 | ~$7.56 (4h) | ~$3.78 (2h) |
 
 **Recommendation:** RTX 4090 community cloud for most TAR experiments. 24 GB VRAM handles everything in the current queue. ~$0.44/hr is comparable to electricity costs of running a PC continuously.
+
+---
+
+## Operational Resilience — Full Design
+
+This section covers the four failure modes the initial plan did not address.
+
+---
+
+### A. GPU Not Available / Pod Won't Start
+
+RunPod community cloud GPUs go in and out of availability constantly. The
+executor must never block TAR waiting for a GPU that isn't there.
+
+**Strategy: try → fallback → local**
+
+```
+Attempt 1: preferred GPU (e.g. RTX 4090)
+  → available? create pod, proceed
+  → not available? wait 60s, retry once
+
+Attempt 2: next GPU in preference list (e.g. A40)
+  → available? create pod, proceed
+  → not available? try next
+
+Attempt N: all preferences exhausted
+  → fall back to local execution
+  → log: "RunPod: no GPU available, running locally"
+  → experiment queued as local (status unchanged, no error)
+```
+
+Implementation in `_create_pod()`:
+
+```python
+def _create_pod(self, spec: ExperimentSpec) -> tuple[str, str]:
+    """Returns (pod_id, gpu_type_used). Falls back to local if nothing available."""
+    for gpu_type in self.config["gpu_preference"]:
+        for attempt in range(2):
+            try:
+                pod = runpod.create_pod(
+                    name=f"tar-{spec.id}",
+                    image_name=self.config["image"],
+                    gpu_type_id=gpu_type,
+                    cloud_type=self.config["cloud_type"],
+                    ...
+                )
+                return pod["id"], gpu_type
+            except runpod.error.RunPodError as e:
+                if "no longer available" in str(e).lower() or "out of capacity" in str(e).lower():
+                    time.sleep(60)
+                    continue
+                raise
+    # All GPUs exhausted
+    raise RunPodNoGPUError("No GPU available in any preference tier")
+
+def run(self, spec: ExperimentSpec) -> ExperimentResult | None:
+    try:
+        pod_id, gpu_used = self._create_pod(spec)
+    except RunPodNoGPUError:
+        self._log(f"[RunPod] No GPU available — falling back to local execution")
+        # Signal orchestrator to re-execute locally
+        spec.runtime_context["runpod_fallback"] = "no_gpu_available"
+        return None   # orchestrator retries as in_process
+```
+
+The orchestrator checks for `None` return + `runpod_fallback` key and re-dispatches locally.
+
+**Availability pre-check (optional):** Before routing a spec to RunPod, call
+`runpod.get_gpus()` and check `communityCloud` or `secureCloud` field to see if
+any preferred GPU type has available capacity. If none, skip routing entirely and
+run local. This avoids the create-fail-retry cycle.
+
+---
+
+### B. Manual Enable / Disable Control
+
+You need to be able to turn RunPod on and off without editing JSON files or
+restarting TAR. Three control layers:
+
+#### Layer 1: Flag file (instant, no restart)
+
+```
+E:\TAR\...\tar_state\runpod_enabled.flag
+```
+
+- **Exists** → RunPod routing active
+- **Deleted** → all experiments run locally, no cloud calls
+- Checked every daemon cycle (30s), so disabling takes effect within 30 seconds
+
+Create/delete via new control script (see Layer 3) or manually:
+```powershell
+# Enable
+New-Item -ItemType File "E:\TAR\...\tar_state\runpod_enabled.flag" -Force
+
+# Disable
+Remove-Item "E:\TAR\...\tar_state\runpod_enabled.flag"
+```
+
+#### Layer 2: Environment variable override
+
+```powershell
+$env:RUNPOD_ENABLED = "0"    # disable for this session
+$env:RUNPOD_ENABLED = "1"    # force enable
+$env:RUNPOD_DRY_RUN = "1"    # log all actions, no actual API calls
+```
+
+Takes precedence over flag file. Useful for testing.
+
+#### Layer 3: `tar_runpod_control.py` CLI (new file, ~80 lines)
+
+```powershell
+python tar_runpod_control.py status       # show current state + active pod (if any)
+python tar_runpod_control.py enable       # touch runpod_enabled.flag
+python tar_runpod_control.py disable      # remove runpod_enabled.flag
+python tar_runpod_control.py pause        # disable + let current pod finish
+python tar_runpod_control.py kill         # disable + terminate any active pod NOW
+python tar_runpod_control.py check-gpus   # list available GPUs + prices right now
+python tar_runpod_control.py dry-run      # toggle dry-run mode
+```
+
+`status` output example:
+```
+RunPod status: ENABLED
+Active pod: rp-abc123 (RTX 4090, running 2h14m)
+  Experiment: harder_domain_split_tinyimagenet
+  Progress: seed 1/5, task 7/10
+  Estimated cost so far: $0.98
+  Estimated remaining: ~$1.76
+Credit balance: $18.42
+```
+
+#### Layer 4: Dashboard indicator
+
+Add a RunPod status chip to the TAR dashboard (green/yellow/red):
+- 🟢 **RunPod active** — pod running, experiment in progress
+- 🟡 **RunPod enabled** — will route next eligible experiment
+- 🔴 **RunPod disabled** — all experiments running locally
+- ⚫ **RunPod suspended** — auto-disabled due to credit/error (see Section D)
+
+---
+
+### C. Pod Interrupted Mid-Run (Credit, Spot Preemption, Network)
+
+The SSH connection drops. The experiment was on seed 2 of 5. This must not
+mean the entire experiment is lost.
+
+#### Step 1: Detect the interruption
+
+The executor's `_run_worker()` method streams SSH stdout. When the connection
+drops (RunPod terminates the pod), the SSH subprocess receives EOF or a broken-
+pipe exception. The executor catches this:
+
+```python
+def _run_worker(self, ssh_info, spec):
+    try:
+        proc = subprocess.Popen(ssh_cmd, stdout=PIPE, text=True)
+        for line in proc.stdout:
+            self._handle_output_line(line, spec)
+        proc.wait()
+        if proc.returncode != 0:
+            raise RunPodInterruptedError(f"Worker exited {proc.returncode}")
+    except (BrokenPipeError, ConnectionResetError, subprocess.SubprocessError) as e:
+        raise RunPodInterruptedError(f"SSH connection lost: {e}") from e
+```
+
+#### Step 2: Save partial progress
+
+Before raising, the executor reads the last `progress.json` it polled (kept in
+memory) and saves it to the local workspace:
+
+```python
+# In the except block:
+if self._last_progress:
+    path = self.workspace / "tar_state" / "runpod_partial" / f"{spec.id}.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({
+        **self._last_progress,
+        "interrupted_at": _ts(),
+        "pod_id": self._pod_id,
+        "reason": str(e),
+    }), encoding="utf-8")
+```
+
+#### Step 3: Resume from last completed seed
+
+On the next daemon cycle, the orchestrator sees the experiment is `stalled`.
+When it retries, the RunPod executor checks for a partial progress file:
+
+```python
+def _get_resume_seeds(self, spec: ExperimentSpec) -> list[int]:
+    partial_path = self.workspace / "tar_state" / "runpod_partial" / f"{spec.id}.json"
+    if not partial_path.exists():
+        return spec.seeds   # start from scratch
+    partial = json.loads(partial_path.read_text())
+    seeds_done = int(partial.get("seeds_done", 0))
+    if seeds_done == 0:
+        return spec.seeds   # nothing completed, start fresh
+    completed = spec.seeds[:seeds_done]
+    remaining = spec.seeds[seeds_done:]
+    self._log(f"[RunPod] Resuming: {seeds_done} seeds done, continuing with {remaining}")
+    return remaining
+```
+
+The worker receives `--seeds 1 2 3` (remaining only). When it finishes, the
+executor merges the partial results with the new ones before calling
+`_build_result()`.
+
+#### Step 4: State left in the queue
+
+The experiment goes back to `status: pending, stage: stalled` (same as a local
+crash recovery). The reconciler handles this automatically — same path as today.
+
+**No experiment is permanently lost to an interruption.** At worst, it re-runs
+seeds that were already done (worst case: 1 extra seed worth of compute cost,
+at ~$0.70).
+
+---
+
+### D. Credit Exhaustion — Auto-Suspend
+
+When RunPod's account credit hits zero, it terminates all running pods
+immediately and returns API errors on new pod creation requests.
+
+**Detection signals (any one of these triggers auto-suspend):**
+
+| Signal | How detected |
+|--------|-------------|
+| Pod creation fails with billing error | `runpod.error.RunPodError` containing "insufficient funds" / "billing" / "credit" |
+| SSH drops AND RunPod API confirms pod terminated with reason "billing" | `get_pod(pod_id)["desiredStatus"] == "TERMINATED"` + check termination reason |
+| `runpod.get_user()["currentSpend"]` approaches account balance | Proactive check before pod creation |
+
+**On detection:**
+
+```python
+def _handle_credit_exhaustion(self, spec: ExperimentSpec):
+    self._log("[RunPod] CREDIT EXHAUSTED — auto-suspending RunPod routing")
+
+    # 1. Write suspend flag
+    suspend_path = self.workspace / "tar_state" / "runpod_suspended.flag"
+    suspend_path.write_text(json.dumps({
+        "suspended_at": _ts(),
+        "reason": "credit_exhaustion",
+        "interrupted_experiment": spec.id,
+        "seeds_done": self._last_progress.get("seeds_done", 0),
+    }), encoding="utf-8")
+
+    # 2. Remove enabled flag
+    enabled_path = self.workspace / "tar_state" / "runpod_enabled.flag"
+    enabled_path.unlink(missing_ok=True)
+
+    # 3. Mark experiment stalled (not failed) — it can resume when credit is restored
+    spec.error = "runpod_credit_exhausted"
+    spec.stage = STAGE_STALLED
+
+    # 4. Dashboard shows red chip: "RunPod suspended — credit exhausted"
+```
+
+**Resuming after topping up credit:**
+
+```powershell
+# After adding credit to RunPod account:
+python tar_runpod_control.py enable      # removes suspended flag, restores enabled flag
+# OR:
+python tar_runpod_control.py status      # shows "suspended" with instructions
+```
+
+`tar_runpod_control.py enable` also clears `runpod_suspended.flag` and checks
+account balance via `runpod.get_user()` before re-enabling, so it won't
+silently re-enable if balance is still zero.
+
+**Health check addition (tar_health_check.py):**
+
+New check `R1: runpod_not_suspended_with_stalled_experiments` — if
+`runpod_suspended.flag` exists AND any experiment has `stage: stalled` with
+`error: runpod_credit_exhausted`, emit a warning with instructions to top up.
+
+---
+
+### E. Pod Lifecycle State File
+
+A new `tar_state/runpod_state.json` tracks the currently active pod so TAR
+can recover if the daemon itself is restarted mid-run:
+
+```json
+{
+  "active_pod_id": "rp-abc123xyz",
+  "gpu_type": "NVIDIA RTX 4090",
+  "experiment_id": "harder_domain_split_tinyimagenet",
+  "pod_created_at": "2026-06-01T15:00:00+00:00",
+  "estimated_cost_usd": 0.98,
+  "seeds_done": 1,
+  "seeds_total": 5,
+  "last_ssh_ok_at": "2026-06-01T17:14:00+00:00"
+}
+```
+
+On daemon startup, if this file exists and `active_pod_id` is set:
+1. Call `runpod.get_pod(pod_id)` to check if it's still alive
+2. If alive → reconnect SSH and continue monitoring
+3. If terminated → load partial progress, mark experiment stalled, clear state file
+
+This means **TAR can survive a restart mid cloud-run** without losing the pod
+or the partially completed seeds.
+
+---
+
+### F. Updated Flag File Summary
+
+```
+tar_state/
+  runpod_enabled.flag       exists = routing on | deleted = routing off
+  runpod_suspended.flag     exists = auto-suspended (credit/error), do not route
+  runpod_state.json         active pod info (cleared when pod terminates)
+  runpod_partial/{id}.json  partial seed results from an interrupted run
+  runpod_config.json        static config (GPU prefs, threshold, volume ID)
+```
+
+Control precedence (highest to lowest):
+```
+1. RUNPOD_ENABLED=0 env var    → always off
+2. RUNPOD_DRY_RUN=1 env var    → simulate only
+3. runpod_suspended.flag       → off until manually cleared
+4. runpod_enabled.flag absent  → off
+5. runpod_enabled.flag present → on (subject to gpu availability)
+```
+
+---
+
+### G. Updated Phase Plan
+
+These additions slot into the existing phases:
+
+| Phase | Addition |
+|-------|----------|
+| Phase 2 | Pod fallback list + `RunPodNoGPUError` + `runpod_state.json` |
+| Phase 3 | `tar_runpod_control.py` CLI + flag file system |
+| Phase 4 | Worker: atomic `progress.json` writes + partial seed resume args |
+| Phase 5 | Interrupted-run recovery + partial merge + `runpod_partial/` saves |
+| Phase 5 | Credit exhaustion detection + `runpod_suspended.flag` auto-write |
+| Phase 6 | Dashboard status chip (enabled/active/disabled/suspended) |
+| Phase 7 | Health check `R1` + test all interruption scenarios in dry-run |
+
+**Revised total: ~5 sessions** (1 extra session for resilience work).
