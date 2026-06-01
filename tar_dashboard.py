@@ -3780,6 +3780,137 @@ def api_experiment_history():
     })
 
 
+# ── RunPod cloud GPU control ──────────────────────────────────────────────────
+
+@app.route("/api/runpod/status")
+def api_runpod_status():
+    import os
+    try:
+        from tar_runpod_executor import load_runpod_config, is_runpod_enabled
+    except ImportError:
+        return jsonify({"mode": "unavailable", "error": "tar_runpod_executor not installed"})
+
+    config     = load_runpod_config(_WS)
+    enabled    = is_runpod_enabled(_WS)
+    api_key    = bool(os.environ.get("RUNPOD_API_KEY", ""))
+
+    suspended_path = _WS / "tar_state" / "runpod_suspended.flag"
+    state_path     = _WS / "tar_state" / "runpod_state.json"
+
+    suspended_data = {}
+    if suspended_path.exists():
+        try:
+            suspended_data = json.loads(suspended_path.read_text(encoding="utf-8"))
+        except Exception:
+            suspended_data = {"reason": "unknown"}
+
+    pod_state: dict = {}
+    if state_path.exists():
+        try:
+            pod_state = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    active_pod_id = str(pod_state.get("active_pod_id", "") or "")
+    uptime_h      = 0.0
+    cost_est      = 0.0
+
+    # Determine mode
+    if suspended_data:
+        mode = "suspended"
+    elif active_pod_id and enabled:
+        mode = "active"
+    elif enabled:
+        mode = "enabled"
+    else:
+        mode = "disabled"
+
+    # Try live pod uptime from RunPod API (best-effort, non-blocking)
+    if active_pod_id and api_key:
+        try:
+            import runpod as _rp
+            _rp.api_key = os.environ["RUNPOD_API_KEY"]
+            info = _rp.get_pod(active_pod_id)
+            runtime = info.get("runtime") or {}
+            uptime_s = float(runtime.get("uptimeInSeconds") or 0)
+            uptime_h = round(uptime_s / 3600, 2)
+            cost_est = round(uptime_h * 0.44, 2)  # conservative $0.44/hr est
+        except Exception:
+            pass
+
+    return jsonify({
+        "mode":               mode,
+        "api_key_set":        api_key,
+        "pod_id":             active_pod_id,
+        "gpu_type":           str(pod_state.get("gpu_type", "") or ""),
+        "experiment_id":      str(pod_state.get("experiment_id", "") or ""),
+        "seeds_done":         int(pod_state.get("seeds_done_snapshot", 0) or 0),
+        "seeds_total":        int(pod_state.get("seeds_total", 0) or 0),
+        "uptime_h":           uptime_h,
+        "cost_est_usd":       cost_est,
+        "min_vram_gb":        float(config.get("min_vram_gb", 24)),
+        "max_cost_per_hour":  float(config.get("max_cost_per_hour", 2.0)),
+        "threshold_runtime_h": float(config.get("threshold_runtime_h", 12)),
+        "suspended_reason":   str(suspended_data.get("reason", "") or ""),
+        "suspended_at":       str(suspended_data.get("suspended_at", "") or ""),
+        "volume_id":          str(config.get("volume_id", "") or ""),
+    })
+
+
+@app.route("/api/runpod/enable", methods=["POST"])
+def api_runpod_enable():
+    import os
+    if not os.environ.get("RUNPOD_API_KEY"):
+        return jsonify({"ok": False, "error": "RUNPOD_API_KEY environment variable not set"}), 400
+    try:
+        flag = _WS / "tar_state" / "runpod_enabled.flag"
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.write_text(json.dumps({"enabled_at": _utcnow_iso()}), encoding="utf-8")
+        suspended = _WS / "tar_state" / "runpod_suspended.flag"
+        suspended.unlink(missing_ok=True)
+        return jsonify({"ok": True, "mode": "enabled"})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/runpod/disable", methods=["POST"])
+def api_runpod_disable():
+    try:
+        (_WS / "tar_state" / "runpod_enabled.flag").unlink(missing_ok=True)
+        return jsonify({"ok": True, "mode": "disabled"})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/runpod/kill", methods=["POST"])
+def api_runpod_kill():
+    import os
+    killed_pod = ""
+    try:
+        (_WS / "tar_state" / "runpod_enabled.flag").unlink(missing_ok=True)
+        state_path = _WS / "tar_state" / "runpod_state.json"
+        if state_path.exists():
+            try:
+                pod_state  = json.loads(state_path.read_text(encoding="utf-8"))
+                pod_id     = str(pod_state.get("active_pod_id", "") or "")
+                if pod_id and os.environ.get("RUNPOD_API_KEY"):
+                    import runpod as _rp
+                    _rp.api_key = os.environ["RUNPOD_API_KEY"]
+                    _rp.terminate_pod(pod_id)
+                    killed_pod = pod_id
+            except Exception:
+                pass
+            state_path.unlink(missing_ok=True)
+        return jsonify({"ok": True, "mode": "disabled", "killed_pod": killed_pod})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+def _utcnow_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
 # ── paper file serving ────────────────────────────────────────────────────────
 @app.route("/serve/paper/<path:relpath>")
 def serve_paper(relpath: str):

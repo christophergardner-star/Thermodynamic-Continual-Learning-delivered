@@ -150,6 +150,18 @@ code,pre,.mono{
 .btn.good{border-color:rgba(61,213,160,.45)}
 .btn.warn{border-color:rgba(255,191,95,.45)}
 .btn.bad{border-color:rgba(255,127,127,.45)}
+.rp-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;font-size:.78rem;font-weight:600;letter-spacing:.03em}
+.rp-chip.disabled{background:rgba(120,120,140,.12);color:var(--soft);border:1px solid rgba(120,120,140,.25)}
+.rp-chip.enabled{background:rgba(61,213,160,.12);color:#3dd5a0;border:1px solid rgba(61,213,160,.3)}
+.rp-chip.active{background:rgba(103,183,255,.15);color:#67b7ff;border:1px solid rgba(103,183,255,.35);animation:rp-pulse 2s infinite}
+.rp-chip.suspended{background:rgba(255,191,95,.12);color:#ffbf5f;border:1px solid rgba(255,191,95,.3)}
+.rp-chip.unavailable{background:rgba(120,120,140,.08);color:var(--soft);border:1px solid rgba(120,120,140,.18)}
+@keyframes rp-pulse{0%,100%{opacity:1}50%{opacity:.6}}
+.rp-seed-bar{display:flex;gap:3px;align-items:center;margin:4px 0}
+.rp-seed-pip{width:12px;height:12px;border-radius:3px;background:rgba(103,183,255,.15);border:1px solid rgba(103,183,255,.25)}
+.rp-seed-pip.done{background:rgba(61,213,160,.5);border-color:rgba(61,213,160,.7)}
+.rp-seed-pip.active{background:rgba(103,183,255,.5);border-color:rgba(103,183,255,.8);animation:rp-pulse 1.5s infinite}
+.rp-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 .btn.small{
   padding:8px 10px;
   font-size:.88rem;
@@ -892,6 +904,17 @@ pre{
           <div class="panel-body" id="runtime-panel"></div>
         </article>
 
+        <article class="panel" id="runpod-panel-wrap">
+          <div class="panel-head">
+            <div>
+              <h2>RunPod Cloud GPU</h2>
+              <p>Toggle cloud offloading for long-running experiments.</p>
+            </div>
+            <div class="meta" id="runpod-meta"></div>
+          </div>
+          <div class="panel-body" id="runpod-panel"></div>
+        </article>
+
         <article class="panel">
           <div class="panel-head">
             <div>
@@ -1341,13 +1364,14 @@ const endpointBuilders = {
   llmInsights: () => "/api/llm_insights",
   coordination: () => "/api/coordination",
   literature: () => "/api/literature",
+  runpod: () => "/api/runpod/status",
 };
 
 const rawOrder = [
   "status", "hardware", "experiments", "processes", "results",
   "breakthroughs", "humanReview", "alerts", "validation", "frontier",
   "researchDirector", "scheduler", "author", "registry", "papers", "logs", "log",
-  "autonomous", "replication", "websitePapers"
+  "autonomous", "replication", "websitePapers", "runpod"
 ];
 
 function $(id){ return document.getElementById(id); }
@@ -3392,12 +3416,156 @@ function renderEpochTerminal(){
   if (wasAtBottom) box.scrollTop = box.scrollHeight;
 }
 
+// ── RunPod cloud GPU panel ────────────────────────────────────────────────────
+
+function renderRunPod(){
+  const d   = state.data.runpod || {};
+  const err = state.errors.runpod;
+  const meta = $("runpod-meta");
+  const panel = $("runpod-panel");
+  if (!panel) return;
+
+  // Mode chip
+  const modeLabels = {
+    disabled:    ["DISABLED",   "disabled"],
+    enabled:     ["ENABLED",    "enabled"],
+    active:      ["ACTIVE",     "active"],
+    suspended:   ["SUSPENDED",  "suspended"],
+    unavailable: ["UNAVAILABLE","unavailable"],
+  };
+  const mode       = d.mode || "unavailable";
+  const [chipText, chipClass] = modeLabels[mode] || ["UNKNOWN","unavailable"];
+  if (meta) meta.innerHTML = `<span class="rp-chip ${chipClass}">${chipText}</span>`;
+
+  if (err || mode === "unavailable") {
+    panel.innerHTML = `<div class="muted small">${err ? "API error: " + escapeHtml(err) : "RunPod integration not available"}</div>`;
+    return;
+  }
+
+  // Budget line
+  const budgetLine = `<span style="color:var(--soft);font-size:.82rem">Min ${d.min_vram_gb || 24}GB VRAM &nbsp;·&nbsp; Max $${Number(d.max_cost_per_hour||2).toFixed(2)}/hr &nbsp;·&nbsp; Routes experiments &gt;${d.threshold_runtime_h||12}h</span>`;
+
+  // Active pod section
+  let podHtml = "";
+  if (d.pod_id) {
+    const seeds_done  = d.seeds_done  || 0;
+    const seeds_total = d.seeds_total || 5;
+    const pips = Array.from({length: seeds_total}, (_, i) => {
+      const cls = i < seeds_done ? "done" : i === seeds_done && mode === "active" ? "active" : "";
+      return `<div class="rp-seed-pip ${cls}" title="Seed ${i+1}"></div>`;
+    }).join("");
+
+    podHtml = `
+      <div class="item" style="margin-top:8px">
+        <div class="item-title">Active pod</div>
+        ${cardMetaGrid([
+          { k: "Pod ID",     v: d.pod_id },
+          { k: "GPU",        v: d.gpu_type || "—" },
+          { k: "Experiment", v: d.experiment_id || "—" },
+          { k: "Uptime",     v: d.uptime_h ? d.uptime_h.toFixed(1) + "h" : "—" },
+          { k: "Est. cost",  v: d.cost_est_usd ? "$" + d.cost_est_usd.toFixed(2) : "—" },
+        ])}
+        <div class="rp-seed-bar">${pips}<span style="margin-left:6px;font-size:.8rem;color:var(--soft)">${seeds_done}/${seeds_total} seeds</span></div>
+      </div>`;
+  }
+
+  // Suspended info
+  let suspendedHtml = "";
+  if (mode === "suspended") {
+    suspendedHtml = `<div class="item" style="margin-top:8px;padding:10px;background:rgba(255,191,95,.07);border:1px solid rgba(255,191,95,.2);border-radius:8px">
+      <div style="color:#ffbf5f;font-size:.85rem;font-weight:600">⚠ Auto-suspended — ${escapeHtml(d.suspended_reason || "unknown reason")}</div>
+      <div style="color:var(--soft);font-size:.8rem;margin-top:4px">Top up RunPod credit, then click Enable to resume.</div>
+    </div>`;
+  }
+
+  // API key warning
+  let keyWarn = "";
+  if (!d.api_key_set) {
+    keyWarn = `<div style="color:var(--warn);font-size:.82rem;margin-top:8px">⚠ RUNPOD_API_KEY not set — set it as a system environment variable and restart TAR.</div>`;
+  }
+
+  // Volume info
+  let volHtml = "";
+  if (d.volume_id) {
+    volHtml = `<div style="font-size:.78rem;color:var(--soft);margin-top:6px">Results volume: <code style="color:var(--fg)">${escapeHtml(d.volume_id)}</code></div>`;
+  } else if (mode !== "disabled") {
+    volHtml = `<div style="font-size:.78rem;color:var(--soft);margin-top:6px">No results volume yet — will be created automatically on first run.</div>`;
+  }
+
+  // Action buttons
+  let actions = '<div class="rp-actions">';
+  if (mode === "disabled" || mode === "suspended") {
+    const disabledAttr = d.api_key_set ? "" : "disabled title='Set RUNPOD_API_KEY first'";
+    actions += `<button class="btn good small" onclick="runpodEnable()" ${disabledAttr}>Enable RunPod</button>`;
+  }
+  if (mode === "enabled" || mode === "active") {
+    actions += `<button class="btn secondary small" onclick="runpodDisable()">Disable</button>`;
+  }
+  if (mode === "active" && d.pod_id) {
+    actions += `<button class="btn bad small" onclick="runpodKill()">Kill Pod Now</button>`;
+  }
+  actions += '</div>';
+
+  panel.innerHTML = `
+    <div class="list">
+      <div class="item">
+        ${budgetLine}
+        ${podHtml}
+        ${suspendedHtml}
+        ${keyWarn}
+        ${volHtml}
+        ${actions}
+      </div>
+    </div>`;
+}
+
+async function runpodEnable(){
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = "Enabling…";
+  try {
+    const res = await fetch("/api/runpod/enable", { method: "POST" });
+    const d = await res.json();
+    if (!d.ok) { alert("Enable failed: " + (d.error || "unknown error")); }
+    state.data.runpod = await fetchJson("/api/runpod/status");
+    renderRunPod();
+  } catch(e) { alert("Error: " + e); }
+  finally { btn.disabled = false; btn.textContent = "Enable RunPod"; }
+}
+
+async function runpodDisable(){
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = "Disabling…";
+  try {
+    await fetch("/api/runpod/disable", { method: "POST" });
+    state.data.runpod = await fetchJson("/api/runpod/status");
+    renderRunPod();
+  } catch(e) { alert("Error: " + e); }
+  finally { btn.disabled = false; btn.textContent = "Disable"; }
+}
+
+async function runpodKill(){
+  if (!confirm("Terminate the active pod now?\n\nAny completed seeds are already saved to the results volume and will not be lost.")) return;
+  const btn = event.target;
+  btn.disabled = true; btn.textContent = "Killing…";
+  try {
+    const res = await fetch("/api/runpod/kill", { method: "POST" });
+    const d = await res.json();
+    if (d.killed_pod) {
+      console.log("Killed pod:", d.killed_pod);
+    }
+    state.data.runpod = await fetchJson("/api/runpod/status");
+    renderRunPod();
+  } catch(e) { alert("Error: " + e); }
+  finally { btn.disabled = false; btn.textContent = "Kill Pod Now"; }
+}
+
 function renderAll(){
   renderHero();
   renderSummary();
   renderWarnings();
   renderAlerts();
   renderRuntime();
+  renderRunPod();
   renderExperimentsOverview();
   renderReviewSummary();
   renderProcesses();
