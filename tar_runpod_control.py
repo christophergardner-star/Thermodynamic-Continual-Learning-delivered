@@ -96,9 +96,10 @@ def cmd_status(ws: Path) -> None:
     else:
         print("  API Key:     NOT SET — set RUNPOD_API_KEY environment variable")
 
-    # Thresholds
+    # Thresholds and budget
     print(f"  Threshold:   >{config['threshold_runtime_h']:.0f}h estimated runtime OR >{config['threshold_vram_gb']:.1f}GB VRAM → routes to cloud")
-    print(f"  GPU prefs:   {', '.join(config['gpu_preference'][:3])}")
+    print(f"  GPU budget:  min {config.get('min_vram_gb', 24):.0f}GB VRAM  |  max ${config.get('max_cost_per_hour', 2.0):.2f}/hr")
+    print(f"  GPU prefs:   {', '.join(config['gpu_preference'][:4])}")
 
     # Active pod
     if state.get("active_pod_id"):
@@ -245,15 +246,33 @@ def cmd_check_gpus(ws: Path) -> None:
         print(f"ERROR fetching GPUs: {exc}")
         sys.exit(1)
 
-    print("\n── Available RunPod GPUs ────────────────────────────────────")
-    print(f"  {'GPU':<30} {'VRAM':>6}  {'Community':>12}  {'Secure':>10}")
-    print(f"  {'-'*30} {'-'*6}  {'-'*12}  {'-'*10}")
+    config     = _load_config(ws)
+    min_vram   = float(config.get("min_vram_gb", 24))
+    max_price  = float(config.get("max_cost_per_hour", 2.0))
+
+    print(f"\n── Available RunPod GPUs (budget: min {min_vram:.0f}GB VRAM, max ${max_price:.2f}/hr) ──")
+    print(f"  {'GPU':<32} {'VRAM':>6}  {'On-Demand':>10}  {'In Budget':>10}  {'Avail':>7}")
+    print(f"  {'-'*32} {'-'*6}  {'-'*10}  {'-'*10}  {'-'*7}")
+    qualifying = []
     for g in sorted(gpus, key=lambda x: x.get("memoryInGb", 0)):
         name   = str(g.get("displayName", g.get("id", "?")))
-        mem    = g.get("memoryInGb", "?")
-        comm   = "available" if g.get("communityCloud") else "unavailable"
-        secure = "available" if g.get("secureCloud")    else "unavailable"
-        print(f"  {name:<30} {str(mem):>5}GB  {comm:>12}  {secure:>10}")
+        mem    = float(g.get("memoryInGb", 0) or 0)
+        comm   = g.get("communityCloud", False)
+        prices = g.get("lowestPrice") or {}
+        price  = float(prices.get("uninterruptablePrice") or prices.get("minimumBidPrice") or 0)
+        avail  = "yes" if comm else "no"
+        price_str = f"${price:.2f}/hr" if price > 0 else "unknown"
+        in_budget = (mem >= min_vram and price <= max_price and price > 0 and comm)
+        budget_str = "✓ YES" if in_budget else "no"
+        if in_budget:
+            qualifying.append((name, mem, price))
+        print(f"  {name:<32} {mem:>5.0f}GB  {price_str:>10}  {budget_str:>10}  {avail:>7}")
+    print()
+    if qualifying:
+        qualifying.sort(key=lambda x: x[2])
+        print(f"  Cheapest qualifying GPU: {qualifying[0][0]} ({qualifying[0][1]:.0f}GB @ ${qualifying[0][2]:.2f}/hr)")
+    else:
+        print(f"  WARNING: No GPUs found matching budget constraints.")
     print("─────────────────────────────────────────────────────────────\n")
 
 

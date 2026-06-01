@@ -28,12 +28,16 @@ if TYPE_CHECKING:
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 _DEFAULT_GPU_PREFERENCE = [
+    "NVIDIA GeForce RTX 3090",
+    "NVIDIA RTX 3090",
+    "NVIDIA GeForce RTX 4090",
     "NVIDIA RTX 4090",
+    "NVIDIA GeForce RTX 5090",
+    "NVIDIA RTX 5090",
     "NVIDIA A40",
-    "NVIDIA A100-SXM4-80GB",
-    "NVIDIA A100 PCIe",
-    "NVIDIA RTX A4000",
 ]
+_DEFAULT_MIN_VRAM_GB    = 24
+_DEFAULT_MAX_COST_PER_H = 2.0
 _DEFAULT_IMAGE = "runpod/pytorch:2.2.0-py3.11-cuda12.1.1-devel-ubuntu22.04"
 _DEFAULT_THRESHOLD_H = 12.0
 _DEFAULT_THRESHOLD_VRAM = 3.9
@@ -83,6 +87,8 @@ def load_runpod_config(workspace: Path) -> dict[str, Any]:
         "min_vcpu_count": 4,
         "min_memory_in_gb": 16,
         "container_disk_in_gb": 30,
+        "min_vram_gb": _DEFAULT_MIN_VRAM_GB,
+        "max_cost_per_hour": _DEFAULT_MAX_COST_PER_H,
     }
     if path.exists():
         try:
@@ -227,22 +233,84 @@ class RunPodExecutor:
 
     # ── Pod lifecycle ─────────────────────────────────────────────────────────
 
+    def _select_gpu_candidates(self, rp: Any) -> list[tuple[str, float]]:
+        """
+        Query RunPod for available GPUs, filter by budget constraints, return
+        sorted list of (gpu_type_id, price_per_hour) cheapest first.
+
+        Hard constraints (from config):
+          min_vram_gb      — must have at least this much VRAM (default 24 GB)
+          max_cost_per_hour — must cost no more than this per hour (default $2.00)
+
+        Soft preference: gpu_preference list in config is tried first, then any
+        other qualifying GPU is appended as further fallback.
+        """
+        min_vram  = float(self.config.get("min_vram_gb",    _DEFAULT_MIN_VRAM_GB))
+        max_price = float(self.config.get("max_cost_per_hour", _DEFAULT_MAX_COST_PER_H))
+        cloud_type = str(self.config.get("cloud_type", "COMMUNITY")).upper()
+        prefs      = [str(g).strip() for g in self.config.get("gpu_preference", _DEFAULT_GPU_PREFERENCE) if g]
+
+        self._log(f"Budget: min {min_vram:.0f}GB VRAM, max ${max_price:.2f}/hr")
+
+        try:
+            gpus = rp.get_gpus()
+        except Exception as exc:
+            self._log(f"Could not fetch GPU list: {exc} — falling back to preference list")
+            return [(g, 0.0) for g in prefs]
+
+        qualifying: list[tuple[str, float]] = []
+        for g in gpus:
+            gpu_id   = str(g.get("id", g.get("displayName", "")))
+            vram     = float(g.get("memoryInGb", 0) or 0)
+            # Community or secure cloud availability
+            avail    = g.get("communityCloud") if "COMMUNITY" in cloud_type else g.get("secureCloud")
+            if not avail:
+                continue
+            if vram < min_vram:
+                continue
+
+            # Extract price — RunPod returns lowestPrice.uninterruptablePrice for on-demand
+            prices   = g.get("lowestPrice") or {}
+            price_od = float(prices.get("uninterruptablePrice") or prices.get("minimumBidPrice") or 999.0)
+            if price_od > max_price:
+                self._log(f"  Skip {gpu_id} ({vram:.0f}GB) — ${price_od:.2f}/hr exceeds ${max_price:.2f} budget")
+                continue
+
+            qualifying.append((gpu_id, price_od))
+            self._log(f"  Candidate: {gpu_id} ({vram:.0f}GB VRAM, ${price_od:.2f}/hr)")
+
+        if not qualifying:
+            self._log("No GPUs found matching budget — will try preference list directly")
+            return [(g, 0.0) for g in prefs]
+
+        # Sort: preference list order first, then by price ascending
+        pref_index = {g: i for i, g in enumerate(prefs)}
+        qualifying.sort(key=lambda x: (pref_index.get(x[0], len(prefs)), x[1]))
+
+        self._log(f"GPU selection order: {[f'{g}(${p:.2f})' for g,p in qualifying[:5]]}")
+        return qualifying
+
     def _create_pod(self, spec: Any) -> tuple[str, str]:
-        """Try GPU preference list in order. Return (pod_id, gpu_type). Raises RunPodNoGPUError if all fail."""
+        """
+        Select cheapest eligible GPU (min 24GB VRAM, max $2/hr), try in order.
+        Returns (pod_id, gpu_type). Raises RunPodNoGPUError if all fail.
+        """
         import runpod as rp
         rp.api_key = os.environ["RUNPOD_API_KEY"]
 
         _, pub_key = self._setup_ssh_key()
-        gpu_prefs  = self.config.get("gpu_preference", _DEFAULT_GPU_PREFERENCE)
         cloud_type = str(self.config.get("cloud_type", "COMMUNITY"))
         image      = str(self.config.get("image", _DEFAULT_IMAGE))
         volume_id  = str(self.config.get("volume_id", "") or "")
 
+        candidates = self._select_gpu_candidates(rp)
         last_error: Exception | None = None
-        for gpu_type in gpu_prefs:
+
+        for gpu_type, price in candidates:
             for attempt in range(2):
                 try:
-                    self._log(f"Creating pod: {gpu_type} (attempt {attempt + 1})")
+                    price_str = f"${price:.2f}/hr" if price > 0 else "price unknown"
+                    self._log(f"Trying: {gpu_type} ({price_str}) attempt {attempt + 1}")
                     kwargs: dict[str, Any] = dict(
                         name=f"tar-{spec.id[:8]}",
                         image_name=image,
@@ -260,24 +328,26 @@ class RunPodExecutor:
                     if volume_id:
                         kwargs["network_volume_id"] = volume_id
                         kwargs["volume_mount_path"] = "/runpod-volume"
-                    pod = rp.create_pod(**kwargs)
+                    pod    = rp.create_pod(**kwargs)
                     pod_id = str(pod["id"])
-                    self._log(f"Pod {pod_id} created on {gpu_type}")
+                    self._log(f"Pod {pod_id} created: {gpu_type} @ {price_str}")
                     return pod_id, gpu_type
                 except Exception as exc:
                     err_lo = str(exc).lower()
-                    # Check for billing errors immediately
                     if any(k in err_lo for k in _CREDIT_ERROR_KEYWORDS):
                         raise RunPodCreditError(str(exc)) from exc
-                    # GPU unavailable — try next
                     if any(k in err_lo for k in ("no longer available", "out of capacity", "no instances", "unavailable", "not available")):
-                        self._log(f"{gpu_type} unavailable: {exc}")
+                        self._log(f"  {gpu_type} unavailable: {exc}")
                         last_error = exc
                         if attempt == 0:
                             time.sleep(_POD_CREATE_RETRY_WAIT_S)
-                        break  # move to next GPU type
-                    raise  # unexpected error
-        raise RunPodNoGPUError(f"No GPU available from preference list. Last: {last_error}")
+                        break
+                    raise
+
+        raise RunPodNoGPUError(
+            f"No GPU available within budget (min {self.config.get('min_vram_gb',24)}GB VRAM, "
+            f"max ${self.config.get('max_cost_per_hour',2.0):.2f}/hr). Last: {last_error}"
+        )
 
     def _wait_for_ssh(self, pod_id: str) -> dict[str, Any]:
         """Poll until pod SSH port is ready. Return ssh_info dict."""
