@@ -131,6 +131,19 @@ def storage_env(workspace: Path | None = None, base_env: Mapping[str, str] | Non
         "TMP": str(tmp_root),
         "TMPDIR": str(tmp_root),
     })
+    # Merge API keys from secrets file — survives watchdog restarts and new logins.
+    # Keys in the file override nothing that is already set in the environment.
+    secrets_path = workspace / "tar_state" / "api_secrets.json"
+    if secrets_path.exists():
+        try:
+            import json as _json
+            secrets = _json.loads(secrets_path.read_text(encoding="utf-8"))
+            if isinstance(secrets, dict):
+                for k, v in secrets.items():
+                    if k and v and k not in env:
+                        env[str(k)] = str(v)
+        except Exception:
+            pass
     return env
 
 
