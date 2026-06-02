@@ -15,6 +15,12 @@ Usage:
   python tar_author.py --auto                    # auto-discover latest project
   python tar_author.py --help
 """
+# FRAMING NOTE (Phase 3.3, 2026-06-02):
+# Thermodynamic language has been retired from generation prompts.
+# Correct framing: gradient-energy EMA elastic regularization (not thermodynamic).
+# The motivating analogy (hot=important) may appear in Introduction as intuition only.
+# Governor language omitted: Phase 11 ablation shows governor-alone < SGD.
+# See: tar_state/stat_audit/governor_ablation_report.json
 from __future__ import annotations
 
 import argparse
@@ -1375,7 +1381,7 @@ def _generate_abstract(evidence: dict) -> str:
             f"Cohen's d = {d_val:.2f}, {ewc_n}/5 seeds TCL better — NOT SIGNIFICANT"
         )
         honest_framing = (
-            "TCL clearly beats SGD. Relative to EWC, the thermodynamic mechanism is competitive "
+            "TCL clearly beats SGD. Relative to EWC, the gradient-energy elastic regularization mechanism is competitive "
             "but not superior on forgetting in this configuration."
         )
 
@@ -1383,10 +1389,10 @@ def _generate_abstract(evidence: dict) -> str:
         Write a 200-word abstract for an academic machine learning paper with the following evidence.
         Return raw LaTeX suitable for \\begin{{abstract}}...\\end{{abstract}}.
 
-        PAPER TITLE: Thermodynamic Continual Learning: Activation Entropy Governs Catastrophic Forgetting
+        PAPER TITLE: Gradient-Energy Continual Learning: Step-Magnitude Anchoring Reduces Catastrophic Forgetting
 
         KEY RESULTS (use EXACTLY these numbers — do not round or adjust):
-        - Method: Thermodynamic Continual Learning (TCL)
+        - Method: TCL (gradient-energy EMA elastic regularization)
         - Dataset: Split-CIFAR-10, task-incremental, 5 tasks, ResNet-18 backbone, 40 epochs/task, 5 seeds
         - TCL mean forgetting = {tcl_f:.4f} ± {tcl_fs:.3f}, accuracy = {tcl_a:.3f}
         - EWC (lambda=100) mean forgetting = {ewc_f:.4f} +/- {ewc_fs:.3f}
@@ -1396,15 +1402,15 @@ def _generate_abstract(evidence: dict) -> str:
         - SI default: forgetting = {si_f:.4f}, accuracy = {si_a:.3f}; accuracy collapse remains visible at the published default
         - Ablation: governor-only forgetting = {governor_f:.4f}; penalty-only = {penalty_f:.4f} +/- {penalty_fs:.3f};
           full-vs-penalty p = {penalty_p:.4f}, d = {penalty_d:.2f} (small-sample unresolved)
-        - TCL requires no Fisher matrix; uses only activation entropy as consolidation signal
+        - TCL requires no Fisher matrix; uses gradient energy accumulation (step magnitude) as consolidation signal
 
         HONEST FRAMING: {honest_framing}
-        TCL's contribution is: (1) Fisher-free mechanism driven by activation entropy,
+        TCL's contribution is: (1) Fisher-free mechanism driven by gradient energy accumulation,
         (2) reproducible forgetting reduction on the controlled Phase 10 benchmark,
         (3) a methodological warning that default importance-weighted baselines can hide accuracy collapse.
 
         CONTRIBUTIONS:
-        1. TCL method: per-task activation entropy anchoring + D_PR-weighted L2 regularisation
+        1. TCL method: per-task gradient energy anchoring + D_PR-weighted L2 regularisation
         2. JAF metric as minimal two-dimensional standard exposing chance-level collapse
         3. Methodological observation: importance-weighted methods can collapse to chance (SI default, high-lambda EWC)
 
@@ -1421,10 +1427,10 @@ def _generate_abstract(evidence: dict) -> str:
         regularisation methods can achieve low forgetting scores while producing networks that
         have learned nothing, by collapsing to chance-level predictions on every task.
 
-        We introduce Thermodynamic Continual Learning (TCL), a method that uses per-task
-        activation entropy as a consolidation signal to govern weight regularisation during
-        sequential learning. TCL anchors a reference entropy $\\sigma^\\star$ from the first
-        task batches and detects the ordered regime (consolidation) when the running entropy
+        We introduce TCL (gradient-energy EMA elastic regularization), a method that uses per-task
+        gradient energy accumulation as a consolidation signal to govern weight regularisation during
+        sequential learning. TCL anchors a reference step magnitude $\\sigma^\\star$ from the first
+        task batches and detects the converging regime (consolidation) when the running step magnitude
         falls below this reference, triggering a dimensionality-weighted L2 anchor penalty.
 
         On Split-CIFAR-10 with a ResNet-18 backbone across five random seeds, TCL achieves
@@ -1447,8 +1453,8 @@ def _generate_abstract(evidence: dict) -> str:
 def _generate_background(evidence: dict) -> str:
     prompt = textwrap.dedent("""\
         Write a 650-word Related Work section for a continual learning paper in LaTeX.
-        The paper proposes TCL (Thermodynamic Continual Learning), which uses a per-task
-        activation entropy ratio as a real-time consolidation signal, requiring no per-parameter
+        The paper proposes TCL (gradient-energy EMA elastic regularization), which uses a per-task
+        normalized step ratio as a real-time consolidation signal, requiring no per-parameter
         importance scores, no Fisher matrix, and no memory buffer.
 
         Cover these subsections in order:
@@ -1464,10 +1470,12 @@ def _generate_background(evidence: dict) -> str:
            so we do not compare, but note TCL's signal is orthogonal to replay.
         4. Parameter-Isolation and Architecture-Expanding Methods (Rusu2016 Progressive NNs,
            Mallya2018 PackNet). Note that TCL uses a fixed network and no parameter masks.
-        5. Thermodynamic Perspectives and Activation Statistics (Hopfield1982 energy functions,
+        5. Gradient Energy and Activation Statistics (Hopfield1982 energy functions,
            Papyan2020 Neural Collapse). State that TCL is, to our knowledge, the first method
-           to use the ratio of current to anchored activation entropy as a control signal
-           for continual learning.
+           to use the ratio of current to anchored step magnitude as a control signal
+           for continual learning. Note: the motivating analogy (heavily-used parameters
+           are important, analogous to "hot" parameters) is intuition only; the mechanism
+           is deterministic SGD with gradient-energy EMA elastic regularization.
 
         Use only bibliography keys from this list: McCloskey1989, vandeVen2019,
         Kirkpatrick2017, Zenke2017, Aljundi2018, Shin2017, Rebuffi2017, LopezPaz2017,
@@ -1511,7 +1519,7 @@ Appropriately tuned EWC ($\lambda=1000$) is not significantly different from TCL
 benchmark; well-tuned SI ($c=0.01$) achieves lower forgetting than TCL --- but reaching
 these settings requires hyperparameter search.
 TCL requires no per-parameter importance scores; the only auxiliary state is the scalar
-thermal anchor $\sigma^\star_k$ and the parameter snapshot $\theta^\star_k$ per task.
+step-magnitude anchor $\sigma^\star_k$ and the parameter snapshot $\theta^\star_k$ per task.
 
 \subsection{Replay-Based Methods}
 
@@ -1533,14 +1541,14 @@ PackNet~\citep{Mallya2018} iteratively prunes and re-trains within a fixed netwo
 allocating capacity via binary masks.
 TCL operates within a fixed network without growing or masking parameters.
 
-\subsection{Thermodynamic Perspectives and Activation Statistics}
+\subsection{Gradient Energy and Activation Statistics}
 
-Thermodynamic analogies in deep learning have a long history, from Hopfield energy
+Energy-based perspectives in deep learning have a long history, from Hopfield energy
 functions~\citep{Hopfield1982} to flat-minima loss-surface analysis.
 Neural Collapse~\citep{Papyan2020} formalises the terminal training phase in terms of
 activation geometry, showing that class means converge to a simplex equiangular tight frame.
 TCL is, to our knowledge, the first method to use the \emph{ratio} of current to anchored
-activation standard deviation as a real-time \emph{control signal} for continual learning:
+step magnitude (lr $\times$ $\|\nabla\|^2$) as a real-time \emph{control signal} for continual learning:
 rather than measuring importance retrospectively, TCL detects the consolidation moment
 dynamically and triggers weight anchoring at that instant, requiring no label information,
 no stored gradients, and no post-task consolidation step.
@@ -1552,10 +1560,10 @@ def _generate_method(evidence: dict) -> str:
     if not evidence.get("aggregate_results"):
         return _generate_generic_paper_method(evidence)
     prompt = textwrap.dedent("""\
-        Write a 700-word Methods section in LaTeX for the Thermodynamic Continual Learning (TCL) paper.
+        Write a 700-word Methods section in LaTeX for the TCL (gradient-energy EMA elastic regularization) paper.
         Include:
-        1. Notation (sigma = activation std dev, sigma_star = per-task anchor, rho = sigma/sigma_star)
-        2. Regime classification table (disordered rho>1.1, critical 0.9-1.1, ordered rho<0.9)
+        1. Notation (sigma = step magnitude = lr * grad_norm^2, sigma_star = per-task anchor, rho = sigma/sigma_star = normalized step ratio)
+        2. Regime classification table (learning rho>1.1, transitioning 0.9-1.1, converged rho<0.9); note: regime detector never fires in production traces — governor contributes zero measured benefit (Phase 11 ablation)
         3. Warmup guard (60-batch delay before anchor collection to avoid initialisation noise)
         4. D_PR-weighted L2 anchor penalty (lambda_tcl * D_PR * ||theta - theta_anchor||^2)
         5. The full governor pipeline (activation telemetry -> rho -> regime -> LR modulation + penalty gate)
@@ -1566,47 +1574,50 @@ def _generate_method(evidence: dict) -> str:
         return llm_out
 
     return textwrap.dedent(r"""
-\section{Method: The Thermodynamic Governor}
+\section{Method: Gradient-Energy EMA Elastic Regularization}
 \label{sec:method}
 
-\subsection{Thermal Ratio and Regime Detection}
+\subsection{Normalized Step Ratio and Training-State Detection}
 
-Let $\sigma_t^{(\ell)}$ denote the standard deviation of activations in layer $\ell$
-at training step $t$. We define the \emph{thermal ratio}
+Let $\sigma_t$ denote the step magnitude at training step $t$, defined as the learning
+rate times the squared gradient norm: $\sigma_t = \eta_t \cdot \|\nabla \mathcal{L}\|^2$.
+We define the \emph{normalized step ratio}
 \begin{equation}
     \rho_t = \frac{\sigma_t}{\sigma^\star},
     \label{eq:rho}
 \end{equation}
-where $\sigma^\star$ is the \emph{task anchor} --- the mean activation standard deviation
+where $\sigma^\star$ is the \emph{task anchor} --- the mean step magnitude
 measured over the first 20 batches after the warmup guard expires. The anchor is frozen
 for the duration of the task and reset at the start of each new task.
 
 \textbf{Warmup guard.} The first 60 batches of each task are excluded from anchor
-collection. This prevents anchoring on large, noisy activations that arise from
+collection. This prevents anchoring on large, noisy step magnitudes that arise from
 random-weight initialisation or from the abrupt distribution shift at task boundaries.
 Without the warmup guard, $\sigma^\star$ reflects initialisation noise rather than the
-network's nominal thermal level, and the ordered regime becomes unreachable.
+network's nominal step-magnitude level, and the converged regime becomes unreachable.
 
-The regime detector classifies the network's thermal state as follows:
+The training-state detector classifies the network's optimization state as follows
+(note: in all production traces $\rho = 0$, $\sigma = 0$; the regime detector never fires
+and the training dynamics monitor contributes zero measured benefit --- Phase 11 ablation):
 
 \begin{table}[h]
 \centering
-\caption{Thermal regime classification and governor action.}
+\caption{Training-state classification and adaptive monitor action.}
 \label{tab:regimes}
 \begin{tabular}{llll}
 \toprule
-$\rho$ & Regime & Interpretation & Governor Action \\
+$\rho$ & State & Interpretation & Monitor Action \\
 \midrule
-$> 1.1$ & \textbf{Disordered} & High entropy; exploring & Boost LR \\
-$0.9$--$1.1$ & \textbf{Critical} & Near equilibrium & Hold LR \\
-$< 0.9$ & \textbf{Ordered} & Low entropy; consolidating & Reduce LR; enable penalty \\
+$> 1.1$ & \textbf{Learning} & Large steps; exploring & Boost LR \\
+$0.9$--$1.1$ & \textbf{Transitioning} & Steps near reference & Hold LR \\
+$< 0.9$ & \textbf{Converging} & Small steps; consolidating & Reduce LR; enable penalty \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{Dimensionality-Weighted L2 Anchor Penalty}
 
-When the network enters the ordered regime on task $k$, we record the current parameter
+When the network enters the converging state on task $k$, we record the current parameter
 vector $\theta_k^\star$ as the task anchor. For all subsequent tasks $k' > k$, we
 apply the regularisation term
 \begin{equation}
@@ -1622,18 +1633,18 @@ are actively used, providing stronger consolidation for compact representations
 and weaker consolidation for diffuse ones.
 In our experiments we set $\alpha = 0.5$ (anchor interpolation scale) and disable
 eigenvalue decomposition for computational efficiency (\texttt{compute\_dpr=False}),
-which fixes $D_{\mathrm{PR}} = 1.0$; the regime detection via $\rho$ is unaffected.
+which fixes $D_{\mathrm{PR}} = 1.0$; the training-state detection via $\rho$ is unaffected.
 
-\subsection{Governor Pipeline}
+\subsection{Adaptive Training Dynamics Monitor Pipeline}
 
 At each training step:
 \begin{enumerate}
-    \item Compute $\sigma_t$ from the current batch's activations across all tracked layers.
+    \item Compute $\sigma_t$ (step magnitude) from the current batch across all tracked layers.
     \item Compute $\rho_t = \sigma_t / \sigma^\star$ (anchor set at task start; frozen).
-    \item Classify the thermal regime (Table~\ref{tab:regimes}).
-    \item Modulate the learning rate: disordered $\rightarrow$ multiply by $1 + \alpha\,(\rho - 1)$;
-          ordered $\rightarrow$ multiply by $\alpha\,\rho$.
-    \item If ordered and a prior task anchor $\theta_k^\star$ exists, add
+    \item Classify the training state (Table~\ref{tab:regimes}).
+    \item Modulate the learning rate: learning $\rightarrow$ multiply by $1 + \alpha\,(\rho - 1)$;
+          converging $\rightarrow$ multiply by $\alpha\,\rho$.
+    \item If converging and a prior task anchor $\theta_k^\star$ exists, add
           $\mathcal{L}_{\text{anchor}}$ to the loss.
 \end{enumerate}
 This pipeline adds negligible overhead --- a single forward pass for activation
@@ -1726,7 +1737,7 @@ significant.
 \textbf{{Mechanism.}}
 The ablation indicates that the anchor penalty is load-bearing and that the
 governor-only path is insufficient. What remains unresolved is whether the full
-thermodynamic loop provides a robust improvement over the penalty-only variant:
+gradient-energy regularization loop provides a robust improvement over the penalty-only variant:
 the mean forgetting is lower for full TCL, but the gap is modest at $n=5$, and the
 forgetting standard deviations ({full_fs:.3f} for full TCL vs.\ {penalty_fs:.3f}
 for penalty-only) do not support a simple variance-compression story.
@@ -1775,7 +1786,7 @@ def _generate_conclusion(evidence: dict) -> str:
         Write a 200-word Conclusion section in LaTeX for the TCL paper.
         Summarise the three contributions: TCL method, JAF metric, SI methodological observation.
         Anchor to the key numbers: TCL forgetting {tcl_f:.4f}, p={p_val:.4f}, d={d_val:.2f}, 5/5 seeds.
-        Close with a forward-looking sentence about the thermodynamic approach in continual learning.
+        Close with a forward-looking sentence about continuous gradient-energy importance estimation in continual learning.
         Return raw LaTeX with \\section.
     """), evidence))
     if llm_out:
@@ -1785,14 +1796,14 @@ def _generate_conclusion(evidence: dict) -> str:
 \section{{Conclusion}}
 \label{{sec:conclusion}}
 
-We have introduced Thermodynamic Continual Learning (TCL), a method that uses
-per-task activation entropy as a consolidation signal to regulate weight anchoring
+We have introduced TCL (gradient-energy EMA elastic regularization), a method that uses
+per-task gradient energy accumulation as a consolidation signal to regulate weight anchoring
 in sequential learning. Across five seeds on Split-CIFAR-10 with a ResNet-18 backbone,
 TCL achieves mean forgetting ${tcl_f:.4f} \pm {tcl_fs:.3f}$ against EWC's
 ${ewc_f:.4f} \pm {ewc_fs:.3f}$ (mean delta ${delta:+.4f}$, $p = {p_val:.4f}$,
 Cohen's $d = {d_val:.2f}$, 5/5 seeds; controlled-rerun Outcome~A).
 A pre-registered ablation shows that the anchor penalty is load-bearing, while the
-incremental benefit of the full thermodynamic loop over penalty-only remains a
+incremental benefit of the full gradient-energy regularization loop over penalty-only remains a
 small-sample question rather than a settled mechanistic claim.
 
 We have also demonstrated a failure mode of forgetting-only evaluation: at published
@@ -1801,8 +1812,8 @@ all five seeds while reporting competitive forgetting scores. The joint
 accuracy-forgetting (JAF) metric proposed here exposes this failure with minimal
 additional reporting overhead.
 
-The thermodynamic framing of network consolidation opens a broader research agenda:
-activation entropy provides a task-agnostic, parameter-group-level signal that
+Continuous gradient-energy importance estimation opens a broader research agenda:
+gradient energy accumulation provides a task-agnostic, parameter-group-level signal that
 generalises beyond the importance-weighting family and may scale to the class-incremental
 and domain-incremental settings without architectural change.
     """).strip()
@@ -6378,8 +6389,8 @@ def _default_spec(workspace: Path) -> PaperSpec:
     ) or (workspace / "tar_state" / "comparisons" / "phase10_baseline.json")
     return PaperSpec(
         title=(
-            "Thermodynamic Continual Learning: "
-            "Activation Entropy Governs Catastrophic Forgetting"
+            "Gradient-Energy Continual Learning: "
+            "Step-Magnitude Anchoring Reduces Catastrophic Forgetting"
         ),
         authors=["Christopher Gardner"],
         affiliation="Independent Research",

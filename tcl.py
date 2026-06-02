@@ -90,6 +90,9 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
+# Default gamma for second-order importance (Task 3.7)
+_DEFAULT_SECOND_ORDER_GAMMA: float = 0.1
+
 
 # ── ThermalImportance ──────────────────────────────────────────────────────────
 
@@ -144,6 +147,82 @@ class ThermalImportance:
             if p.requires_grad and p.grad is not None and name in self._v:
                 g2 = p.grad.detach().float() ** 2
                 self._v[name].mul_(beta).add_(g2, alpha=1.0 - beta)
+        self._step += 1
+
+    def accumulate_second_order(
+        self,
+        model: Optional[nn.Module] = None,
+        gamma: float = 0.1,
+        use_first_order: bool = True,
+    ) -> None:
+        """
+        Upgrade ThermalImportance from first-order (gradient-squared EMA) to
+        second-order by adding a Fisher-Rao normalised gradient term.
+
+        The Hessian diagonal approximation uses the Fisher-Rao normalisation:
+
+            h_ii ≈ g_i² / (||g||²_F + ε)
+
+        where ||g||²_F = Σ_j g_j² (Frobenius-squared norm over all parameters).
+
+        This gives a scale-invariant importance measure: parameters whose squared
+        gradient represents a large fraction of the total gradient energy are
+        considered important regardless of their absolute scale.
+
+        The update rule is:
+
+            v_i ← β·v_i + (1−β)·g_i²  [if use_first_order]
+            v_i ← v_i + γ·h_ii          [second-order term, always]
+
+        Three ablation modes:
+          - First-order only:  call accumulate() (existing method)
+          - Second-order only: call accumulate_second_order(use_first_order=False)
+          - Combined:          call accumulate_second_order(use_first_order=True)
+
+        Reference: Amari (1998), Natural Gradient Works Efficiently in Learning.
+        Neural Computation 10(2):251-276. The Fisher-Rao metric provides the
+        natural geometry for gradient-space importance; h_ii approximates the
+        diagonal of the Fisher-Rao metric tensor.
+
+        Parameters
+        ----------
+        model : nn.Module, optional
+            If None, uses self.model (set at construction time).
+        gamma : float
+            Weight for the second-order term. Default 0.1 gives a mild
+            curvature correction without dominating the first-order signal.
+        use_first_order : bool
+            If True (default), also applies the standard EMA update from
+            accumulate(). If False, applies only the h_ii term — this is
+            the 'second-order only' ablation condition.
+        """
+        m = model if model is not None else self.model
+        beta = self.ema_beta
+
+        # Compute total gradient Frobenius-squared norm across all parameters
+        grad_norm_sq: float = 0.0
+        for p in m.parameters():
+            if p.requires_grad and p.grad is not None:
+                grad_norm_sq += float(p.grad.detach().float().pow(2).sum().item())
+        grad_norm_sq = max(grad_norm_sq, 1e-10)   # prevent division by zero
+
+        for name, p in m.named_parameters():
+            if not (p.requires_grad and p.grad is not None and name in self._v):
+                continue
+
+            g2 = p.grad.detach().float().pow(2)
+
+            if use_first_order:
+                # Standard EMA update (same as accumulate())
+                self._v[name].mul_(beta).add_(g2, alpha=1.0 - beta)
+            else:
+                # Second-order only: decay existing EMA without first-order term
+                self._v[name].mul_(beta)
+
+            # Fisher-Rao normalised Hessian diagonal approximation
+            h_approx = g2 / grad_norm_sq            # element-wise / scalar
+            self._v[name].add_(h_approx, alpha=gamma)
+
         self._step += 1
 
     def finalize(self, normalize: bool = True) -> Dict[str, torch.Tensor]:

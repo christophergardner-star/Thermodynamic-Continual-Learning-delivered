@@ -664,3 +664,64 @@ class TCLMethod(CLMethod):
             self._memory.commit(model, self._importance, task_id=task_id)
         # Reset so stale gradients cannot bleed into the next task's accumulation
         self._importance = None
+
+
+# ── TCL Second-Order variants (Task 3.7) ──────────────────────────────────────
+
+@register_method("tcl_second_order")
+class TCLSecondOrderMethod(TCLMethod):
+    """
+    TCL with combined first-order (gradient EMA) and second-order (Fisher-Rao
+    normalised Hessian diagonal approximation) importance accumulation.
+
+    Ablation condition 3 in the Task 3.7 second-order importance study.
+    gamma=0.1 adds a mild curvature correction to the standard EMA.
+    """
+
+    def __init__(self, config: Any) -> None:
+        super().__init__(config)
+        from tcl import _DEFAULT_SECOND_ORDER_GAMMA  # noqa: PLC0415
+        self.gamma = float(getattr(config, "tcl_so_gamma", _DEFAULT_SECOND_ORDER_GAMMA))
+
+    def augmented_loss(
+        self,
+        model: nn.Module,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        task_id: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if self._importance is not None:
+            self._importance.accumulate_second_order(
+                model, gamma=self.gamma, use_first_order=True
+            )
+        return torch.tensor(0.0, device=device)
+
+
+@register_method("tcl_second_order_only")
+class TCLSecondOrderOnlyMethod(TCLMethod):
+    """
+    TCL with ONLY second-order (Fisher-Rao normalised) importance accumulation.
+    No standard gradient-squared EMA. Uses h_ii = g_i² / ||g||² as the sole
+    importance signal.
+
+    Ablation condition 2 in the Task 3.7 second-order importance study.
+    """
+
+    def __init__(self, config: Any) -> None:
+        super().__init__(config)
+        self.gamma = float(getattr(config, "tcl_so_gamma", 1.0))  # gamma=1.0 for pure second-order
+
+    def augmented_loss(
+        self,
+        model: nn.Module,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        task_id: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if self._importance is not None:
+            self._importance.accumulate_second_order(
+                model, gamma=self.gamma, use_first_order=False
+            )
+        return torch.tensor(0.0, device=device)

@@ -404,6 +404,56 @@ def _reset_bn_running_stats(model: nn.Module) -> None:
             module.reset_running_stats()
 
 # ---------------------------------------------------------------------------
+# D_PR (participation ratio) at task boundaries (Task 3.5)
+# ---------------------------------------------------------------------------
+
+def _compute_dpr_at_boundary(
+    model: nn.Module,
+    task_loader: DataLoader,
+    device: torch.device,
+    n_batches: int = 4,
+) -> float:
+    """
+    Compute the participation ratio D_PR of trunk activations at a task boundary.
+
+    D_PR = (Σᵢ λᵢ)² / Σᵢ λᵢ² where λᵢ are the eigenvalues of the activation
+    covariance matrix.  Range: [1, feat_dim].  Higher D_PR = activations use
+    more feature dimensions = richer representation.
+
+    D_PR compression at task boundaries (drop in D_PR after training on task T+1)
+    is hypothesised to correlate with forgetting of task T — Task 3.5 of the TAR
+    PhD Rehabilitation Plan.
+
+    Reference: Lomonaco et al. (2020); thermoobserver.compute_participation_ratio().
+    """
+    try:
+        from tar_lab.thermoobserver import compute_participation_ratio as _cpr
+    except Exception:
+        return 0.0
+
+    # Capture trunk features across n_batches
+    trunk = getattr(model, "trunk", None)
+    if trunk is None:
+        return 0.0
+
+    model.eval()
+    feature_batches: list[torch.Tensor] = []
+    with torch.no_grad():
+        for i, (x, _) in enumerate(task_loader):
+            if i >= n_batches:
+                break
+            feats = trunk(x.to(device))               # (B, feat_dim)
+            feature_batches.append(feats.cpu())
+
+    model.train()
+    if not feature_batches:
+        return 0.0
+
+    all_features = torch.cat(feature_batches, dim=0)  # (N, feat_dim)
+    return float(_cpr(all_features, feature_axis=-1))
+
+
+# ---------------------------------------------------------------------------
 # Single-seed training
 # ---------------------------------------------------------------------------
 
@@ -419,6 +469,7 @@ def _run_one_seed(
     log_fn: Callable[[str], None],
     progress_callback: Callable[[dict], None] | None,
     reset_bn_at_task_boundary: bool = False,
+    compute_dpr: bool = False,
 ) -> dict:
     from tar_lab.method_registry import METHOD_REGISTRY
 
@@ -437,6 +488,7 @@ def _run_one_seed(
     n_tasks    = len(task_train_loaders)
     # acc_matrix[task_t][after_task_k] — only filled for k >= t
     acc_matrix: list[list[float]] = [[] for _ in range(n_tasks)]
+    dpr_per_task: list[float] = []   # D_PR at each task boundary (Task 3.5)
 
     for task_id, train_loader in enumerate(task_train_loaders):
         method.pre_task(task_id, model, device)
@@ -471,6 +523,11 @@ def _run_one_seed(
                 f"  seed={seed}  task={task_id}  eval_task={prev_t}"
                 f"  acc={acc:.4f}"
             )
+
+        # D_PR at this task boundary — captures representation richness (Task 3.5)
+        if compute_dpr:
+            dpr = _compute_dpr_at_boundary(model, task_test_loaders[task_id], device)
+            dpr_per_task.append(round(dpr, 4))
 
         if progress_callback is not None:
             latest = [acc_matrix[t][-1] for t in range(task_id + 1)]
@@ -507,6 +564,8 @@ def _run_one_seed(
         "ece_trajectory":      ece_trajectory,
         # Task 2.11 ablation flag — records which variant was run
         "bn_reset_at_boundaries": reset_bn_at_task_boundary,
+        # Task 3.5 — D_PR at each task boundary; [] when compute_dpr=False
+        "dpr_per_task": dpr_per_task,
     }
 
 # ---------------------------------------------------------------------------
@@ -528,6 +587,7 @@ def run_generic_benchmark(
     prebuilt_task_test:  list[DataLoader] | None = None,
     progress_callback:   Callable[[int, dict], None] | None = None,
     reset_bn_at_task_boundary: bool = False,
+    compute_dpr: bool = False,
 ) -> tuple[list[dict], list[float], list[float]]:
     """
     Run a continual-learning benchmark with a registered CLMethod.
@@ -598,6 +658,7 @@ def run_generic_benchmark(
             log_fn        = log_fn,
             progress_callback = _cb,
             reset_bn_at_task_boundary = reset_bn_at_task_boundary,
+            compute_dpr   = compute_dpr,
         )
 
         forgetting_list.append(res["mean_forgetting"])
@@ -615,6 +676,8 @@ def run_generic_benchmark(
             "ece_trajectory":      res["ece_trajectory"],
             # Task 2.11 ablation flag
             "bn_reset_at_boundaries": res["bn_reset_at_boundaries"],
+            # Task 3.5 — D_PR at task boundaries
+            "dpr_per_task": res["dpr_per_task"],
         })
 
         log_fn(
