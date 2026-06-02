@@ -467,6 +467,12 @@ class SelfImprovementEngine:
         retrain = self.load_retrain(retrain_id)
         if retrain is None:
             raise ValueError(f"Retrain record not found: {retrain_id}")
+        if not retrain.gate_passed:
+            raise RuntimeError(
+                f"Deploy blocked: retrain {retrain_id} has not passed the gate. "
+                "Save gate_passed=True on the retrain record via save_retrain() "
+                "after evaluate_gate() returns True before calling deploy()."
+            )
         if not retrain.adapter_output_path:
             raise ValueError(f"Retrain record {retrain_id} has no adapter output path")
         adapter_path = Path(retrain.adapter_output_path)

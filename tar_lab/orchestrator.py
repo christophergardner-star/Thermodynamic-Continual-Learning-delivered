@@ -796,7 +796,14 @@ class TAROrchestrator:
         return self._self_improvement_engine().run1(cycle_id, delta_id)
 
     def deploy_improved_adapter(self, cycle_id: str, retrain_id: str) -> str:
-        return self._self_improvement_engine().deploy(cycle_id, retrain_id)
+        engine = self._self_improvement_engine()
+        retrain = engine.load_retrain(retrain_id)
+        if retrain is None or not retrain.gate_passed:
+            raise RuntimeError(
+                f"Deploy blocked: retrain {retrain_id} not found or gate not passed. "
+                "gate_passed must be set True on the retrain record before deploying."
+            )
+        return engine.deploy(cycle_id, retrain_id)
 
     def self_improvement_status(self) -> SelfImprovementCycleRecord:
         return self._self_improvement_engine().current_status()
