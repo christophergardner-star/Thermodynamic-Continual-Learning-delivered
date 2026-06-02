@@ -1162,4 +1162,607 @@ Phase 15 data shows p=0.012, d=5.26 for TCL in class-incremental (CIL) setting w
 
 ---
 
-*Stage 2 complete — Phases 1 and 2 with 23 tasks (1.1–1.10, 2.1–2.13)*
+---
+
+## PHASE 3 — MECHANISTIC CLARITY & THEORETICAL GROUNDING
+**Duration:** 4–8 weeks (overlaps with Phase 2)
+**Track:** A (Science)
+**Owner:** Lead Researcher
+**Objective:** Produce a coherent, defensible theoretical narrative grounded in what the experiments actually show. Retire the thermodynamic framing where it is not grounded. Build the Fisher-EMA theorem that constitutes the paper's theoretical contribution.
+
+---
+
+### Task 3.1 — Conduct the definitive 7-condition mechanistic ablation
+
+**Priority:** HIGH — required to understand what actually drives TCL's performance
+
+Phase 11 established that penalty > governor. This ablation must determine: why does the penalty work? Does the governor contribute at all under ideal conditions? Does the per-task anchor (sigma_star freezing) matter?
+
+**Pre-registered conditions (all on Split-CIFAR-10, n=5 seeds, Bonferroni-corrected across 6 inter-condition comparisons):**
+
+| Condition ID | Description | Primary hypothesis |
+|---|---|---|
+| `sgd_baseline` | No regularization | Worst forgetting (positive control) |
+| `penalty_only` | Gradient-EMA elastic penalty, no governor LR adjustment | Should match or beat full TCL |
+| `governor_only` | Regime-detection LR adjustment, no penalty | Hypothesis: ≈ SGD (from Phase 11) |
+| `full_tcl` | Both penalty and governor | Should match or slightly exceed penalty-only |
+| `anchor_frozen_at_init` | Penalty with sigma_star fixed from random init (no per-task reset) | Controls for per-task anchor mechanism |
+| `warmup_batches_60` | Penalty with governor, warmup_batches=60 | Tests whether warmup enables governor activation |
+| `ewc_best_lambda` | EWC at Phase 12-tuned λ | External comparator establishing reference |
+
+**Pre-registered primary comparison:** penalty_only vs sgd_baseline (tests whether gradient-EMA importance adds value at all).
+
+**Pre-registered secondary comparisons (Bonferroni threshold α=0.05/6=0.0083):**
+- full_tcl vs penalty_only (tests governor marginal contribution)
+- anchor_frozen_at_init vs penalty_only (tests per-task anchor value)
+- warmup_batches_60 vs governor_only (tests whether warmup fixes governor)
+- penalty_only vs ewc_best_lambda (establishes paper's theoretical claim)
+
+**Verification:** All 7 conditions complete with n=5 seeds; result JSON includes all conditions; Bonferroni-corrected significance table produced.
+
+---
+
+### Task 3.2 — Formalise the Fisher-EMA theorem
+
+**Priority:** HIGH — without this, the Methods section makes a claim but not a contribution
+
+The plan names this as a deliverable but does not contain the actual derivation. Here is what it must say:
+
+**Theorem (Temporally-Smoothed Fisher Estimation):**
+
+Let `g_i(t)` denote the gradient of parameter `θ_i` at training step t. Define the EMA importance estimate: `v_i(T) = (1−β) Σ_{t=1}^{T} β^{T−t} g_i(t)²`.
+
+Define the true diagonal Fisher: `F_ii = E_{x~D_task}[(∂ℓ/∂θ_i)²]` where D_task is the task data distribution.
+
+**Claim:** Under i.i.d. sampling with replacement from D_task, as T → ∞:
+
+`|v_i(T) − F_ii| ≤ C · β^T`
+
+where `C = F_ii` (bounded by the Fisher value itself), and the convergence rate is controlled by the EMA decay β.
+
+**Corollary (EWC as a limiting case):** EWC's importance estimate is `w_i^EWC = (1/N) Σ_{t=T-N}^{T} g_i(t)²` (uniform average over the final N batches). When β → 0 (fast decay), `v_i(T) ≈ g_i(T)²` (last-batch only). When β → 1 (slow decay), `v_i(T) ≈ (1/T) Σ_{t=1}^{T} g_i(t)²` (uniform average = time-discounted EWC). EWC's snapshot is thus recovered as a special case.
+
+**Key difference:** EWC's snapshot is biased by gradient non-stationarity within the task (gradients at task start vs end differ substantially during convergence). TCL's EMA over-weights recent gradients but captures the full training trajectory. In non-stationary settings, TCL's bias-variance tradeoff is typically better.
+
+**What to derive formally:**
+- The bias term for EWC (gradient non-stationarity within task training)
+- The bias term for TCL (exponential weighting of recent gradients)
+- Show that for gradient processes with mixing time τ, setting `β = 1 − 1/τ` minimises total bias + variance
+
+**Verification:** A LaTeX proof sketch of at least 1 page exists in `tar_state/papers/fisher_ema_theorem.tex`. The derivation has been verified by computing numerical values for Phase 10 and confirming that `v_i(T)` converges to the empirical Fisher over the training run.
+
+---
+
+### Task 3.3 — Reframe the contribution correctly and retire the thermodynamic language
+
+**Priority:** HIGH — the paper cannot be submitted with a broken theoretical frame
+
+**From the theory audit:** The thermodynamic analogy requires stochastic dynamics (Langevin), which TAR's deterministic SGD does not have. There is no Boltzmann distribution. The sigma metric (`lr × ||grad||²`) is not entropy in any statistical mechanics sense.
+
+**Action plan:**
+
+1. **Paper title:** Remove "thermodynamic" from the title. Candidate titles:
+   - "Continuous Gradient Energy Accumulation for Low-Tuning Continual Learning"
+   - "Temporal Fisher Smoothing Reduces Catastrophic Forgetting"
+   - "Why EWC's Canonical Hyperparameters Underfit Activation Heterogeneity: A Controlled Replication"
+
+2. **Terminology replacement throughout the paper:**
+   - "thermodynamic governor" → "adaptive learning rate monitor" (or omit if Path A)
+   - "thermal regime" → "training dynamics regime"
+   - "ordered/disordered/critical" → "converged/learning/transitioning"
+   - "entropy sigma" → "step magnitude"
+   - "regime rho" → "relative learning rate ratio"
+
+3. **What can stay:** The motivating intuition — "parameters with high gradient energy are 'hot' and important" — is valid as an analogy. It can appear in the introduction as motivation only, clearly labelled as intuition rather than formal claim.
+
+4. **Update `tar_author.py` prompts:** All section generation prompts that reference "thermodynamic" framing must be updated to use the corrected framing. Check every `_AUTHOR_SYSTEM` and section-specific prompt.
+
+**Verification:** Search `tar_author.py` for the word "thermodynamic"; confirm it appears only in historical comments, not in active prompts.
+
+---
+
+### Task 3.4 — Formally characterise HPC: lambda vs momentum ablation
+
+**Priority:** HIGH (if HPC replication succeeds) — determines whether HPC is a new mechanism or better hyperparameters
+
+HPC differs from TCL baseline in two ways: (1) higher regularization lambda, and (2) SGD momentum disabled. A 4-condition ablation determines which factor drives the forgetting reduction.
+
+**Pre-registered 4-condition design (Split-CIFAR-10, n=5 seeds, Bonferroni threshold α=0.05/3=0.0167):**
+
+| Condition | Lambda | Momentum | Expected |
+|---|---|---|---|
+| `tcl_baseline` | Standard (0.01) | Enabled (0.9) | Baseline forgetting |
+| `tcl_high_lambda` | High (0.1–1.0) | Enabled (0.9) | Tests lambda effect |
+| `tcl_no_momentum` | Standard (0.01) | Disabled (0.0) | Tests momentum effect |
+| `hpc` | High | Disabled | Combined (best) |
+
+**Pre-registered primary comparison:** `hpc` vs `tcl_high_lambda` — tests whether momentum removal adds value beyond lambda increase.
+
+**Decision rule:**
+- If `tcl_high_lambda` ≈ `hpc` (p>0.05): momentum removal adds nothing; HPC is "TCL with better lambda" — a robustness finding.
+- If `hpc` significantly beats `tcl_high_lambda`: momentum removal is mechanistically important; HPC is a new contribution.
+
+**Verification:** All 4 conditions complete; pre-registration committed before data collection; result reported in paper ablation section.
+
+---
+
+### Task 3.5 — Build and empirically test the D_PR–forgetting connection
+
+**Priority:** MEDIUM — theoretical standing of D_PR as a forgetting signal
+
+D_PR (participation ratio of activation covariance) is used throughout the system as a monitoring metric but has no formal connection to forgetting established.
+
+**Empirical test:**
+
+For each method (TCL, EWC, SGD, DER++) across all seeds in Phase 10 rerun:
+1. Record `D_PR` after each task boundary (at the moment of task switch)
+2. Record `forgetting_t` for each task t at the end of training
+3. Compute Spearman correlation between `D_PR_drop_t` (D_PR compression during task t+1) and `forgetting_t`
+
+**Expected finding:** Lower D_PR at task boundaries correlates with higher forgetting (compressed representation means task-T features were overwritten). If confirmed, this provides empirical evidence that TCL's penalty resists D_PR compression — making D_PR a valid diagnostic.
+
+**Theoretical connection to write:** TCL's elastic penalty adds a restoring force on each parameter proportional to its importance. High-importance parameters resist update, preserving the covariance structure of task-T activations. This is the mechanism linking the penalty to D_PR stability.
+
+**Verification:** A correlation plot of D_PR_drop vs forgetting_t is produced for each method. Spearman ρ and p-value reported. If |ρ| > 0.5 and p < 0.05, D_PR is a meaningful signal.
+
+---
+
+### Task 3.6 — Assess ASC novelty and plan the TCL-for-LLMs prototype
+
+**Priority:** MEDIUM — establishes whether ASC should be published separately or folded into TCL
+
+**ASC novelty assessment:**
+
+The ASC architecture (EMA target model + online student + consistency loss + LatentWarp MLP) is architecturally identical to Mean Teacher (Tarvainen & Valpola, 2017) with a learned adversarial perturbation head. Mean Teacher is 2017 work. The LatentWarp head does not constitute novelty over standard knowledge distillation.
+
+**Decision:** Do not submit ASC as a standalone contribution. Instead, use it as the foundation for TCL-for-LLMs (Phase 10 long-term), where the combination is genuinely novel.
+
+**TCL-for-LLMs architecture sketch (for Paper 2 planning):**
+
+```
+TCL-for-LLMs = Task-aware Continual Fine-tuning for Language Models
+
+During fine-tuning on task T:
+  - Accumulate per-parameter EMA of gradient energy (ThermalImportance)
+  - EMA target model (from ASC) = frozen anchor for importance computation
+
+During fine-tuning on task T+1:
+  - Add TCL elastic penalty: L_reg = λ · Σ_i v_i^T · (θ_i − θ_i^T)²
+  - Prevents catastrophic forgetting of task-T fine-tuning knowledge
+  - Works with LoRA: importance tracks only the adapter parameters
+```
+
+**Verification:** A `tar_state/papers/paper_2_tcl_llms_architecture.md` scoping document exists. The prototype code sketch is committed to a branch `feature/tcl-llms`.
+
+---
+
+### Task 3.7 — Prototype second-order importance (Hessian diagonal upgrade)
+
+**Priority:** MEDIUM — potential +2–4% forgetting reduction; genuinely novel importance estimator
+
+Upgrade `ThermalImportance` from first-order (gradient-squared EMA) to second-order by adding the Hessian diagonal:
+
+```python
+def accumulate_second_order(self, model: nn.Module, 
+                             loss: torch.Tensor, gamma: float = 0.1) -> None:
+    """Call after loss.backward() — before optimizer.step()."""
+    beta = self.ema_beta
+    for name, p in model.named_parameters():
+        if p.requires_grad and p.grad is not None and name in self._v:
+            g2 = p.grad.detach().float() ** 2
+            self._v[name].mul_(beta).add_(g2, alpha=1.0 - beta)
+            # Hessian diagonal via finite differences or Pearlmutter trick
+            # Simple approximation: h_ii ≈ g_i² / (||g||² + eps) (Fisher-Rao normalization)
+            grad_norm_sq = sum((q.grad ** 2).sum() for q in model.parameters() 
+                               if q.grad is not None).item()
+            h_approx = g2 / (grad_norm_sq + 1e-8)
+            self._v[name].add_(h_approx * gamma)
+    self._step += 1
+```
+
+Run a 3-condition ablation (Split-CIFAR-10, n=5 seeds): first-order only vs second-order only vs combined. Report Δforgetting and ΔCI95.
+
+**Verification:** `ThermalImportance` has `accumulate_second_order` method; ablation result JSON exists.
+
+---
+
+**Phase 3 exit gate — ALL must be true:**
+- [ ] 7-condition mechanistic ablation complete; penalty_only vs sgd_baseline confirmed (primary finding)
+- [ ] Fisher-EMA theorem proof sketch written in LaTeX; numerically verified
+- [ ] Paper title no longer contains "thermodynamic"; `tar_author.py` prompts updated
+- [ ] HPC lambda-vs-momentum ablation complete (if HPC replication succeeded)
+- [ ] D_PR–forgetting correlation tested; result recorded
+- [ ] ASC novelty assessed; TCL-for-LLMs architecture scoped for Paper 2
+- [ ] Second-order importance prototype complete with ablation result
+
+**What Phase 3 unlocks:** Paper 1 theory section can be drafted. Paper 2 planning begins.
+
+---
+
+## PHASE 4 — CODE QUALITY & ALGORITHM CORRECTNESS
+**Duration:** 3–4 weeks (overlaps with Phases 2–3, begins after Phase 0)
+**Track:** B (Code & Engineering)
+**Owner:** Algorithm Engineer / Systems Engineer
+**Objective:** Bring the algorithm codebase to the standard where it can be shared publicly as supplementary material to a peer-reviewed paper. Fix all known correctness issues.
+
+---
+
+### Task 4.1 — Fix the CI formula in all four locations (mirror of Task 1.1)
+
+This is the engineering implementation of the statistical fix from Task 1.1. Confirm all four files use the correct t-distribution formula and are consistent with each other. Write a shared utility function in `tar_lab/benchmark_stats.py` that all other files import:
+
+```python
+# tar_lab/benchmark_stats.py
+def compute_ci95(values: list[float]) -> tuple[float, float, str]:
+    """Returns (ci_low, ci_high, method) using t-distribution for n<30."""
+    n = len(values)
+    mean = np.mean(values)
+    std = np.std(values, ddof=1)
+    df = n - 1
+    t_crit = float(t_dist.ppf(0.975, df)) if df > 0 else 1.96
+    half = t_crit * (std / np.sqrt(n))
+    return (mean - half, mean + half, "t_distribution")
+```
+
+Replace all four duplicate implementations with imports of this function.
+
+**Verification:** Unit test: `compute_ci95([0.1, 0.2, 0.3])` returns interval wider than the z-critical version. All four files import from the same source.
+
+---
+
+### Task 4.2 — Fix TCL device placement edge cases
+
+`ThermalMemory.penalty()` returns `torch.zeros(1, requires_grad=False)` without specifying a device. If the model is on CUDA, this creates a CPU tensor; the subsequent addition triggers an implicit CPU→GPU copy or a type error.
+
+**Fix in `tcl.py`:**
+```python
+def penalty(self, model: nn.Module, device: Optional[torch.device] = None) -> torch.Tensor:
+    if not self._tasks:
+        # FIX: specify device explicitly
+        if device is None:
+            try:
+                device = next(model.parameters()).device
+            except StopIteration:
+                device = torch.device('cpu')
+        return torch.zeros(1, device=device, requires_grad=False)
+    # ... rest of method
+```
+
+Same fix in `ThermalCheckpoint.effective_importance()`:
+```python
+def effective_importance(self, name: str) -> torch.Tensor:
+    base = self.importance.get(name)
+    if base is None:
+        return torch.zeros(1)  # FIX: add device=base.device or keep CPU (importance is stored on CPU)
+```
+
+**Add unit test in `tests/test_tcl.py`:**
+```python
+def test_penalty_device_match():
+    """Penalty tensor must be on the same device as model parameters."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    device = torch.device("cuda:0")
+    model = _make_model().to(device)
+    memory = ThermalMemory()
+    # ... train task 0
+    penalty = memory.penalty(model, device=device)
+    assert penalty.device.type == "cuda", f"Got {penalty.device}"
+```
+
+**Verification:** Test passes on systems with CUDA. On CPU-only systems, test is skipped gracefully.
+
+---
+
+### Task 4.3 — Fix the method synthesizer baseline validation gap
+
+`tar_lab/method_synthesizer.py` validates synthesised code only by running the sandbox without crashing. A method that always returns zero penalty passes sandbox validation but produces invalid scientific results.
+
+**Add mandatory minibench validation after sandbox success:**
+```python
+def _validate_synthesised_method(method_class_code: str, method_name: str) -> tuple[bool, str]:
+    """Run synthesised method on tiny benchmark; verify output sanity."""
+    # Inject method into a temporary module
+    # Run: split_cifar10, tiny_cnn, 3 tasks, seed=42, 2 epochs
+    # Check: 0.0 <= mean_forgetting <= 1.0, accuracy > 0.15 (above absolute floor)
+    # Check: no NaN or Inf in any metric
+    # Check: method produces a non-zero regularization loss at least once
+    try:
+        result = _run_minibench(method_class_code)
+        if result["mean_forgetting"] < 0 or result["mean_forgetting"] > 1:
+            return False, f"Forgetting out of range: {result['mean_forgetting']}"
+        if result["mean_accuracy"] < 0.15:
+            return False, f"Accuracy below floor (likely collapse): {result['mean_accuracy']}"
+        if result.get("max_reg_loss", 0) == 0:
+            return False, "Method never produced non-zero regularization loss (likely broken)"
+        if any(math.isnan(v) or math.isinf(v) for v in result.values() if isinstance(v, float)):
+            return False, "NaN or Inf detected in metrics"
+        return True, "Minibench passed"
+    except Exception as e:
+        return False, f"Minibench crashed: {e}"
+```
+
+**Verification:** Inject a known-broken method (always returns `torch.tensor(0.0)` for penalty); confirm it fails with "Method never produced non-zero regularization loss."
+
+---
+
+### Task 4.4 — Fix the generative director's leading prompt
+
+The current prompt frames standard methods as exhausted failures and demands a novel proposal. This biases toward novelty without diagnostic reasoning.
+
+**Replace the proposal prompt with a two-step structure:**
+
+```python
+_DIAGNOSIS_PROMPT = """
+You are diagnosing why a continual learning experiment has failed.
+Given the failure pattern below, classify the most likely root cause:
+(a) hyperparameter mis-specification — the algorithm is correct but parameters are wrong
+(b) architecture limitation — the backbone is too small or wrong for this task
+(c) dataset characteristic — the data distribution is not matched to the method's assumptions
+(d) algorithmic limitation — the method itself cannot address this failure mode
+
+Failure pattern: {failure_summary}
+Governor metrics: E={energy:.4f}, σ={sigma:.4f}, ρ={rho:.4f}
+History of failures: {failure_history}
+
+Respond with a JSON object: {{"root_cause": "<a|b|c|d>", "reasoning": "<1-2 sentences>"}}
+"""
+
+_PROPOSAL_PROMPT = """
+Root cause identified as: {root_cause} — {reasoning}
+Given this root cause, propose ONE experiment design that directly addresses it.
+If root cause is (a) or (b): return {{"action": "tune_hyperparameters", "suggestion": "..."}}
+If root cause is (c) or (d): propose a specific algorithmic or dataset modification.
+"""
+```
+
+**Verification:** Inject a failure summary where the root cause is obviously hyperparameter mis-specification; confirm the Director returns `{action: "tune_hyperparameters"}` rather than proposing a new method family.
+
+---
+
+### Task 4.5 — Fix smoke-tier synthetic benchmarks
+
+The smoke-tier vision benchmark generates trivial geometric patterns (vertical stripe, horizontal stripe, diagonal) as "images". These are plumbing tests, not evidence.
+
+**Changes to `tar_lab/multimodal_payloads.py`:**
+- Add `is_synthetic_smoke_bench: true` flag to all result JSONs generated by this benchmark.
+- Relabel the benchmark in `tar_lab/science_profiles.py` from `"canonical_ready"` to `"smoke_only"`.
+
+**Changes to `tar_lab/validation.py`:**
+- Add a check: if `result.is_synthetic_smoke_bench == true`, override trust tier to `smoke_only` regardless of other conditions.
+- Exclude from any evidence collection used for publication.
+
+**Verification:** Run smoke benchmark; confirm result JSON has `is_synthetic_smoke_bench: true` and `trust_tier: "smoke_only"`.
+
+---
+
+### Task 4.6 — Fix silent benchmark tier downgrade
+
+When a canonical-tier benchmark is unavailable the system silently runs a lower tier and reports the result without disclosure.
+
+**Changes to `tar_lab/backend_factory.py` and result schemas:**
+```python
+class ExperimentResult(BaseModel):
+    # ... existing fields
+    tier_requested: str = "canonical"
+    tier_executed: str = "canonical"
+    tier_downgrade_reason: Optional[str] = None
+
+    @property
+    def tier_downgraded(self) -> bool:
+        return self.tier_requested != self.tier_executed
+```
+
+In the orchestrator, when a tier downgrade occurs:
+```python
+if tier_executed != tier_requested:
+    result.tier_downgrade_reason = f"Requested {tier_requested}; downgraded to {tier_executed}: {reason}"
+    alerts.log(AlertSeverity.WARNING, f"Benchmark tier downgraded: {result.tier_downgrade_reason}")
+    # Flag as publication-blocking
+    result.publication_allowed = False
+```
+
+**Verification:** Request a canonical-tier benchmark that is unavailable; confirm result JSON has `tier_downgraded: true` and `publication_allowed: false`.
+
+---
+
+### Task 4.7 — Replace keyword-based domain classifier
+
+`tar_lab/science_profiles.py` assigns domain labels via keyword scoring ("quantum" → +5.0). This is brittle and was traced as a contributing factor to the financial literature contamination.
+
+**Replacement approach:**
+
+Build a training set of 50 problem statements from existing frontier problems, labeled with their correct domain. Train a logistic regression classifier:
+
+```python
+from sklearn.linear_model import LogisticRegression
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.pipeline import Pipeline
+from sklearn.calibration import CalibratedClassifierCV
+
+def build_domain_classifier(training_examples: list[tuple[str, str]]) -> Pipeline:
+    """
+    training_examples: [(problem_statement, domain_label), ...]
+    Returns a calibrated classifier that outputs probabilities per domain.
+    """
+    texts, labels = zip(*training_examples)
+    clf = Pipeline([
+        ("tfidf", TfidfVectorizer(ngram_range=(1, 2), max_features=5000)),
+        ("classifier", CalibratedClassifierCV(LogisticRegression(C=1.0))),
+    ])
+    clf.fit(texts, labels)
+    return clf
+```
+
+The classifier outputs a calibrated probability distribution over domains. Report the top domain with its confidence. If max confidence < 0.5, flag as "ambiguous domain" and request human classification.
+
+**Validation:** Hold out 10 labeled examples; confirm classifier achieves >80% accuracy. Save classifier as `tar_state/models/domain_classifier.pkl`.
+
+**Verification:** Re-classify the financial portfolio optimization gap entries; confirm they receive domain "finance_economics" with high confidence and are filtered by the domain allowlist from Task 0.6.
+
+---
+
+### Task 4.8 — Wire ActiveLearner to orchestrator startup
+
+`knowledge_graph.json` has `"entries": []` because `LiteratureBrain.start()` is never called from the main operational loop.
+
+**Fix in `tar_lab/orchestrator.py`** (or the equivalent startup path):
+```python
+# In TAROrchestrator.__init__ or a startup hook:
+from literature import LiteratureBrain
+
+def _start_literature_brain(self) -> None:
+    db_path = self.store.state_dir / "literature" / "literature_graph.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    self._literature_brain = LiteratureBrain(db_path=str(db_path))
+    self._literature_brain.start()  # Launches background daemon thread
+    self._log("Literature brain started; active learner running.")
+
+# Call from startup:
+self._start_literature_brain()
+```
+
+After wiring: verify that within one active learner cycle (≤4 hours), new papers are ingested and the knowledge graph begins populating.
+
+**Verification:** `knowledge_graph.json` has at least 10 entries after 4 hours of operation. `brain.corpus_summary()` returns a non-zero paper count.
+
+---
+
+### Task 4.9 — Initialize the self-improvement anchor pack
+
+`tar_state/self_improvement/` is empty. `SelfImprovementEngine.initialize_anchor_pack()` has never been called. The improvement gate has no baseline reference.
+
+```python
+from tar_lab.self_improvement import SelfImprovementEngine
+
+engine = SelfImprovementEngine(workspace_root=workspace)
+# Use current eval results as the baseline
+engine.initialize_anchor_pack(
+    pack_path="tar_state/eval_packs/baseline_eval_items.jsonl",
+    run_manifest_path="tar_state/manifests/baseline_eval_run.json",
+    baseline_mean_score=0.82,       # from current best operator eval
+    baseline_overclaim_rate=0.0,    # no overclaims in baseline
+)
+```
+
+Store the anchor manifest in `tar_state/self_improvement/anchor_manifest.json`. Commit to git.
+
+Add health check assertion (Task 6.7): if anchor manifest is absent at startup, log WARNING "Self-improvement gating is inactive — anchor pack not initialized."
+
+**Verification:** `tar_state/self_improvement/anchor_manifest.json` exists; `engine.is_initialized()` returns True.
+
+---
+
+### Task 4.10 — Fix the floating-point equality bug in self-improvement gate
+
+`self_improvement.py` line ~167: `if probe_overclaim_rate != 0.0`
+
+This is a floating-point equality comparison on a rate derived from division. Any non-zero floating-point rounding will cause this to incorrectly flag valid adapters.
+
+**Fix:**
+```python
+_FLOAT_TOLERANCE = 1e-9
+
+# Before:
+if probe_overclaim_rate != 0.0:
+    return False, "overclaim_detected"
+
+# After:
+if probe_overclaim_rate > _FLOAT_TOLERANCE:
+    return False, f"overclaim_detected: rate={probe_overclaim_rate:.6f}"
+```
+
+Apply the same tolerance to all floating-point comparisons in `self_improvement.py`.
+
+**Verification:** Pass in a probe_overclaim_rate of 1e-15 (rounding noise); confirm it is accepted. Pass in 0.001; confirm it is rejected.
+
+---
+
+### Task 4.11 — Implement power-analysis-based sample size selection in the pre-registration gate
+
+When an experiment is pre-registered, automatically compute the required sample size:
+
+```python
+from statsmodels.stats.power import TTestOneSamplePower
+import math
+
+def required_seeds(target_effect_size_d: float, 
+                   alpha: float = 0.05, 
+                   power: float = 0.80) -> int:
+    analysis = TTestOneSamplePower()
+    n = analysis.solve_power(
+        effect_size=target_effect_size_d, 
+        alpha=alpha, 
+        power=power, 
+        alternative='smaller'
+    )
+    return max(5, math.ceil(n))
+
+# In pre-registration gate:
+if pre_reg.required_seeds > MAX_AFFORDABLE_SEEDS:
+    experiment.publication_grade = "exploration_grade"
+    experiment.notes.append(
+        f"Underpowered: requires {pre_reg.required_seeds} seeds for {power*100:.0f}% power "
+        f"at d={pre_reg.min_detectable_effect_d}; budget allows {MAX_AFFORDABLE_SEEDS}. "
+        f"Results cannot be cited in publication as evidence."
+    )
+```
+
+**Verification:** Pre-register a hypothesis with d=0.3 (small effect): `required_seeds` returns 90+. Pre-register with d=2.0 (very large effect): returns 5. Both enter the queue correctly but with different `publication_grade` values.
+
+---
+
+### Task 4.12 — Fix the invariant violations in TCL
+
+`ThermalMemory.penalty()` accumulates positive terms but the assert is missing. While in practice the penalty is always ≥ 0 (sum of non-negative values), an assertion documents the invariant for contributors.
+
+```python
+# In ThermalMemory.penalty():
+total_penalty = torch.zeros(1, device=device)
+# ... accumulation loop ...
+assert float(total_penalty.item()) >= 0.0, \
+    f"TCL penalty is negative: {float(total_penalty.item())}. " \
+    f"This indicates a numerical error in importance or drift computation."
+return total_penalty
+```
+
+**Add unit test in `tests/test_tcl.py`:**
+```python
+@pytest.mark.parametrize("importance_val,drift_val", [
+    (0.0, 1.0),   # zero importance
+    (1.0, 0.0),   # zero drift
+    (0.0, 0.0),   # both zero
+    (1.0, 1.0),   # both positive
+])
+def test_penalty_always_nonnegative(importance_val, drift_val):
+    model = _make_model()
+    memory = ThermalMemory()
+    # Manually inject a checkpoint with controlled importance and weights
+    # ... setup ...
+    penalty = memory.penalty(model)
+    assert float(penalty.item()) >= 0.0
+```
+
+**Verification:** All four parametrized test cases pass.
+
+---
+
+**Phase 4 exit gate — ALL must be true:**
+- [ ] Single shared `compute_ci95()` function; all four files import it
+- [ ] TCL device placement fixed; CUDA unit test passes (or skipped on CPU-only)
+- [ ] Method synthesizer runs minibench after sandbox; broken methods rejected
+- [ ] Generative director has two-step diagnosis/proposal prompt; rejection path working
+- [ ] Smoke benchmarks flagged as `trust_tier: "smoke_only"` 
+- [ ] Benchmark tier downgrade disclosed in result JSON; publication blocked on downgrade
+- [ ] Domain classifier replaces keyword scoring; financial entries correctly classified
+- [ ] `LiteratureBrain.start()` called at orchestrator startup; knowledge graph populating
+- [ ] Self-improvement anchor pack initialized; `anchor_manifest.json` committed to git
+- [ ] Float equality bug fixed with `_FLOAT_TOLERANCE`
+- [ ] Power-analysis-based sample size in pre-registration gate; exploration_grade label applied
+- [ ] TCL penalty invariant asserted; all parametrized tests passing
+
+**What Phase 4 unlocks:** Phase 8 (research automation enhancements) can begin.
+
+---
+
+*Stage 3 complete — Phases 3 and 4 with 19 tasks (3.1–3.7, 4.1–4.12)*
