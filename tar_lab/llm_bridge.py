@@ -28,6 +28,104 @@ _overloaded_until: float = 0.0
 _overload_lock = threading.Lock()
 
 
+# ── Budget enforcement ─────────────────────────────────────────────────────────
+
+class BudgetExceededError(RuntimeError):
+    """Session API budget is exhausted. Restart daemon or increase TAR_API_BUDGET_USD."""
+    pass
+
+
+class BudgetTracker:
+    """
+    Thread-safe session-level API cost tracker.
+    Resets on process restart (session-scoped).
+
+    Configure via environment:
+      TAR_API_BUDGET_USD  — total budget (default $5.00)
+
+    Claude pricing (USD per 1M tokens, approximate 2026 rates):
+      claude-opus-4*   : $15 input / $75 output
+      claude-sonnet-4* : $3  input / $15 output
+      claude-haiku-4*  : $1  input / $5  output
+    """
+    _PRICING: dict[str, tuple[float, float]] = {
+        "opus":   (15.0, 75.0),
+        "sonnet": (3.0,  15.0),
+        "haiku":  (1.0,   5.0),
+    }
+    _FALLBACK_HAIKU = "claude-haiku-4-5-20251001"
+    _WARN_AT  = 0.80   # degrade to haiku at 80% spent
+    _BLOCK_AT = 1.00   # hard block at 100%
+
+    def __init__(self) -> None:
+        self._lock    = threading.Lock()
+        self.budget   = float(os.environ.get("TAR_API_BUDGET_USD", "5.00"))
+        self.spent    = 0.0
+        self.calls    = 0
+        self.degraded = 0
+
+    def _price(self, model: str) -> tuple[float, float]:
+        m = model.lower()
+        for key, price in self._PRICING.items():
+            if key in m:
+                return price
+        return self._PRICING["sonnet"]
+
+    def record(self, model: str, input_tokens: int, output_tokens: int) -> None:
+        inp, out = self._price(model)
+        cost = (input_tokens * inp + output_tokens * out) / 1_000_000
+        with self._lock:
+            self.spent += cost
+            self.calls += 1
+
+    def check(self, requested_model: str) -> str:
+        """
+        Returns the model to actually use.
+        Raises BudgetExceededError if fully blocked.
+        Downgrades to haiku if in warn zone.
+        """
+        import logging
+        with self._lock:
+            fraction = self.spent / max(self.budget, 0.001)
+        if fraction >= self._BLOCK_AT:
+            raise BudgetExceededError(
+                f"TAR API budget exhausted: ${self.spent:.4f} of ${self.budget:.2f} used. "
+                f"Set TAR_API_BUDGET_USD env var or restart to reset."
+            )
+        if fraction >= self._WARN_AT:
+            logging.getLogger("tar.budget").warning(
+                f"API budget {fraction*100:.0f}% used (${self.spent:.4f}/${self.budget:.2f}). "
+                f"Downgrading {requested_model!r} → {self._FALLBACK_HAIKU!r}"
+            )
+            with self._lock:
+                self.degraded += 1
+            return self._FALLBACK_HAIKU
+        return requested_model
+
+    def status(self) -> dict:
+        with self._lock:
+            fraction = self.spent / max(self.budget, 0.001)
+            return {
+                "budget_usd":     round(self.budget, 2),
+                "spent_usd":      round(self.spent, 4),
+                "remaining_usd":  round(max(0.0, self.budget - self.spent), 4),
+                "fraction":       round(fraction, 4),
+                "calls":          self.calls,
+                "degraded_calls": self.degraded,
+                "state": "ok"       if fraction < self._WARN_AT else
+                         "degraded" if fraction < self._BLOCK_AT else
+                         "blocked",
+            }
+
+
+_budget = BudgetTracker()
+
+
+def get_budget_status() -> dict:
+    """Public accessor for dashboard /api/budget endpoint."""
+    return _budget.status()
+
+
 def _is_overloaded() -> bool:
     with _overload_lock:
         return time.time() < _overloaded_until
@@ -73,6 +171,7 @@ def call_claude(
     tag: str = "llm_bridge",
 ) -> str:
     """Call Claude; return '' on failure or missing key. Never raises."""
+    import logging
     try:
         import anthropic  # type: ignore
     except ImportError:
@@ -83,6 +182,11 @@ def call_claude(
     if _is_overloaded():
         return ""  # API overloaded backoff active — skip silently
     try:
+        model = _budget.check(model)
+    except BudgetExceededError as _bge:
+        logging.getLogger("tar.budget").error(str(_bge))
+        return ""
+    try:
         client = anthropic.Anthropic(api_key=api_key)
         kwargs: dict[str, Any] = {
             "model": model,
@@ -92,6 +196,8 @@ def call_claude(
         if system:
             kwargs["system"] = system
         resp = client.messages.create(**kwargs)
+        if hasattr(resp, "usage") and resp.usage:
+            _budget.record(model, resp.usage.input_tokens, resp.usage.output_tokens)
         return resp.content[0].text.strip()
     except Exception as exc:
         msg = str(exc)
