@@ -1706,11 +1706,13 @@ def api_logs():
     if log_dir.exists():
         for p in sorted(log_dir.glob("*.log")):
             logs.append({"name": p.stem, "size_kb": int(p.stat().st_size / 1024),
-                         "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%H:%M:%S")})
+                         "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%H:%M:%S"),
+                         "age_s": round(_age_s(p))})
     for p in extra:
         if p.exists():
             logs.append({"name": p.stem, "size_kb": int(p.stat().st_size / 1024),
-                         "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%H:%M:%S")})
+                         "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%H:%M:%S"),
+                         "age_s": round(_age_s(p))})
     return jsonify(logs)
 
 
