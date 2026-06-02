@@ -1,19 +1,19 @@
 {
-  "status": "blocked",
-  "compile_status": "blocked",
-  "updated_at": "2026-05-27T15:04:23.049924+00:00",
+  "status": "active",
+  "compile_status": "pending",
+  "updated_at": "2026-06-02T20:30:00.000000+00:00",
   "progress": {
-    "stage": "blocked",
+    "stage": "active",
     "pct": 67,
-    "label": "4/6 experiments complete - draft waiting on evidence (1 active)",
+    "label": "Awaiting HPC replication from PhD rehab queue — no orphaned blockers",
     "sections_complete_count": 0,
     "sections_total": 7,
     "experiments_complete_count": 4,
     "experiments_total": 6,
-    "compile_status": "blocked"
+    "compile_status": "pending"
   },
   "project_id": "tcl-hpc-validation-paper",
-  "title": "Tcl Hpc Validation Paper",
+  "title": "tcl-hpc-validation-paper",
   "readiness": "outline_now",
   "truth_status": "supported",
   "director_recommendation": "Anchor every manuscript in the external problem 'Low-Tuning Continual Learning for Production ML'. Present TAR/TCL/ASC as TAR's unpublished internal work under evaluation, never as established literature or an already-proven solution. Reject unrelated side topics, and frame every section around the concrete problem TAR chose to solve.",
@@ -22,16 +22,11 @@
   ],
   "experiment_ids": [
     "claim_validation_hpc_suite",
-    "cross_backbone_generalization_vit",
     "cross_dataset_generalization_cifar100",
     "director-hyperparameter-robustness-alpha-probe",
-    "director-hyperparameter-robustness-lambda-probe",
-    "harder_domain_split_tinyimagenet"
+    "director-hyperparameter-robustness-lambda-probe"
   ],
-  "waiting_for_experiments": [
-    "cross_backbone_generalization_vit",
-    "harder_domain_split_tinyimagenet"
-  ],
+  "waiting_for_experiments": [],
   "sections_planned": [
     "abstract",
     "s1_introduction",
@@ -42,5 +37,6 @@
     "s6_conclusion"
   ],
   "tex_path": "C:\\Users\\cgard\\TAR\\Thermodynamic-Continual-Learning-delivered\\paper\\tcl-hpc-validation-paper\\main.tex",
-  "pdf_path": ""
+  "pdf_path": "",
+  "descope_note": "2026-06-02: cross_backbone_generalization_vit (ViT training hardware-infeasible on GTX 1650 4GB; out of scope for CIFAR-10 forgetting claim) and harder_domain_split_tinyimagenet (domain-shift evidence; HPC replication in PhD rehab queue is the correct evidence) both descoped. Paper unblocks when HPC replication (n=20) completes."
 }

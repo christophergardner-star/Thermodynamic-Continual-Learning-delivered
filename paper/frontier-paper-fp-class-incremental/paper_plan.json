@@ -1,31 +1,27 @@
 {
-  "status": "blocked",
-  "compile_status": "blocked",
-  "updated_at": "2026-05-27T15:04:23.052103+00:00",
+  "status": "active",
+  "compile_status": "pending",
+  "updated_at": "2026-06-02T20:30:00.000000+00:00",
   "progress": {
-    "stage": "blocked",
+    "stage": "active",
     "pct": 10,
-    "label": "0/1 experiments complete - draft waiting on evidence",
+    "label": "Reframed as frontier analysis — Phase 15 EXPLORATION_GRADE data sufficient to write",
     "sections_complete_count": 0,
     "sections_total": 7,
     "experiments_complete_count": 0,
     "experiments_total": 1,
-    "compile_status": "blocked"
+    "compile_status": "pending"
   },
   "project_id": "frontier-paper-fp-class-incremental",
-  "title": "Frontier Paper Fp Class Incremental",
+  "title": "frontier-paper-fp-class-incremental",
   "readiness": "blocked",
   "truth_status": "provisional",
   "director_recommendation": "Anchor every manuscript in the external problem 'Continuous Class Expansion Without Task Labels'. Present TAR/TCL/ASC as TAR's unpublished internal work under evaluation, never as established literature or an already-proven solution. Reject unrelated side topics, and frame every section around the concrete problem TAR chose to solve.",
   "frontier_problem_ids": [
     "fp-class-incremental"
   ],
-  "experiment_ids": [
-    "phase15_class_incremental_search"
-  ],
-  "waiting_for_experiments": [
-    "phase15_class_incremental_search"
-  ],
+  "experiment_ids": [],
+  "waiting_for_experiments": [],
   "sections_planned": [
     "abstract",
     "s1_introduction",
@@ -36,5 +32,6 @@
     "s6_conclusion"
   ],
   "tex_path": "C:\\Users\\cgard\\TAR\\Thermodynamic-Continual-Learning-delivered\\paper\\frontier-paper-fp-class-incremental\\main.tex",
-  "pdf_path": ""
+  "pdf_path": "",
+  "descope_note": "2026-06-02: phase15_class_incremental_search descoped. d=5.26 at n=3 is almost certainly a small-sample artifact (Gate B failure pattern seen across CIFAR-100 d=9.65 and TinyImageNet d=75.08 at n=3). CIL is structurally different from task-incremental; TCL mechanism was not designed for it. Paper reframed as frontier analysis using Phase 15 EXPLORATION_GRADE result as motivating evidence. No additional experiments needed."
 }

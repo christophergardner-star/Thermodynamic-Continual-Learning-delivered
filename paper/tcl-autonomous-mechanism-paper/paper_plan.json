@@ -1,24 +1,23 @@
 {
-  "status": "blocked",
-  "compile_status": "blocked",
-  "updated_at": "2026-05-27T15:04:23.050695+00:00",
+  "status": "active",
+  "compile_status": "pending",
+  "updated_at": "2026-06-02T20:30:00.000000+00:00",
   "progress": {
-    "stage": "blocked",
-    "pct": 83,
-    "label": "20/24 experiments complete - draft waiting on evidence",
+    "stage": "active",
+    "pct": 91,
+    "label": "Mechanism story moves to PhD rehab paper — probes on falsified frontier removed",
     "sections_complete_count": 0,
     "sections_total": 7,
     "experiments_complete_count": 20,
-    "experiments_total": 24,
-    "compile_status": "blocked"
+    "experiments_total": 22,
+    "compile_status": "pending"
   },
   "project_id": "tcl-autonomous-mechanism-paper",
-  "title": "Tcl Autonomous Mechanism Paper",
+  "title": "tcl-autonomous-mechanism-paper",
   "readiness": "outline_now",
   "truth_status": "supported",
   "director_recommendation": "Anchor every manuscript in the external problem 'Reliable Change-State Detection in Non-Stationary ML Systems'. Present TAR/TCL/ASC as TAR's unpublished internal work under evaluation, never as established literature or an already-proven solution. Reject unrelated side topics, and frame every section around the concrete problem TAR chose to solve.",
   "frontier_problem_ids": [
-    "fp-catastrophic-forgetting",
     "fp-regime-detection-accuracy"
   ],
   "experiment_ids": [
@@ -28,8 +27,6 @@
     "ar-strict_consolidation",
     "ar-thermal_carryover",
     "director-catastrophic-forgetting-01",
-    "director-catastrophic-forgetting-boundary-reset-probe",
-    "director-catastrophic-forgetting-carryover-probe",
     "director-hyperparameter-robustness-01",
     "director-hyperparameter-robustness-02",
     "director-hyperparameter-robustness-03",
@@ -43,16 +40,9 @@
     "phase10_baseline",
     "phase11_ablation",
     "phase12_ewc_sweep",
-    "phase13_si_sweep",
-    "regime_detection_harder_dataset_cifar100",
-    "regime_detection_mlp_backbone_permuted_mnist"
+    "phase13_si_sweep"
   ],
-  "waiting_for_experiments": [
-    "director-catastrophic-forgetting-boundary-reset-probe",
-    "director-catastrophic-forgetting-carryover-probe",
-    "regime_detection_harder_dataset_cifar100",
-    "regime_detection_mlp_backbone_permuted_mnist"
-  ],
+  "waiting_for_experiments": [],
   "sections_planned": [
     "abstract",
     "s1_introduction",
@@ -63,5 +53,6 @@
     "s6_conclusion"
   ],
   "tex_path": "C:\\Users\\cgard\\TAR\\Thermodynamic-Continual-Learning-delivered\\paper\\tcl-autonomous-mechanism-paper\\main.tex",
-  "pdf_path": ""
+  "pdf_path": "",
+  "descope_note": "2026-06-02: All 4 waiting probes descoped. fp-catastrophic-forgetting frontier is FALSIFIED (17 null, 4 adverse). Running further probes on a falsified frontier is scientifically incoherent. No preregistrations exist for any of the 4 experiments. Mechanism story correctly covered by 7-condition mechanistic ablation already in PhD rehab queue."
 }

@@ -1,19 +1,19 @@
 {
-  "status": "blocked",
-  "compile_status": "blocked",
-  "updated_at": "2026-05-27T15:04:23.051430+00:00",
+  "status": "active",
+  "compile_status": "pending",
+  "updated_at": "2026-06-02T20:30:00.000000+00:00",
   "progress": {
-    "stage": "blocked",
+    "stage": "active",
     "pct": 50,
-    "label": "2/4 experiments complete - draft waiting on evidence",
+    "label": "Awaiting Phase 16/17 reruns from PhD rehab queue — no orphaned blockers",
     "sections_complete_count": 0,
     "sections_total": 7,
     "experiments_complete_count": 2,
     "experiments_total": 4,
-    "compile_status": "blocked"
+    "compile_status": "pending"
   },
   "project_id": "main_tcl_scaleup_paper",
-  "title": "Main Tcl Scaleup Paper",
+  "title": "main_tcl_scaleup_paper",
   "readiness": "outline_now",
   "truth_status": "supported",
   "director_recommendation": "Anchor every manuscript in the external problem 'Scalable Continual Adaptation on Realistic Visual Streams'. Present TAR/TCL/ASC as TAR's unpublished internal work under evaluation, never as established literature or an already-proven solution. Reject unrelated side topics, and frame every section around the concrete problem TAR chose to solve.",
@@ -21,15 +21,10 @@
     "fp-scale-up"
   ],
   "experiment_ids": [
-    "backbone_scaling_vit_tiny_cifar100",
     "phase16_scale_up",
-    "phase17_tinyimagenet",
-    "stream_difficulty_progression_tinyimagenet_resnet34"
+    "phase17_tinyimagenet"
   ],
-  "waiting_for_experiments": [
-    "backbone_scaling_vit_tiny_cifar100",
-    "stream_difficulty_progression_tinyimagenet_resnet34"
-  ],
+  "waiting_for_experiments": [],
   "sections_planned": [
     "abstract",
     "s1_introduction",
@@ -40,5 +35,6 @@
     "s6_conclusion"
   ],
   "tex_path": "C:\\Users\\cgard\\TAR\\Thermodynamic-Continual-Learning-delivered\\paper\\main_tcl_scaleup_paper\\main.tex",
-  "pdf_path": ""
+  "pdf_path": "",
+  "descope_note": "2026-06-02: backbone_scaling_vit_tiny_cifar100 (ViT on CIFAR-100, hardware-infeasible) and stream_difficulty_progression_tinyimagenet_resnet34 (ResNet-34 uncontrolled variable vs battery ResNet-18; Phase 17 ResNet-18 n=5 in rehab queue is correct evidence) both descoped."
 }

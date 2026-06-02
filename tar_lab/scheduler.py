@@ -133,7 +133,7 @@ class ProblemStudyScheduler:
                 for entry in self.store.iter_problem_schedules()
                 if self._is_due(entry, now_dt)
             ],
-            key=lambda item: (-item.priority, item.next_run_at, item.created_at),
+            key=lambda item: (-(item.priority or 0), item.next_run_at, item.created_at),
         )
         completed_ids: list[str] = []
         rescheduled_ids: list[str] = []
