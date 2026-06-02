@@ -2840,28 +2840,122 @@ function renderResearch() {
    ══════════════════════════════════════════════════════════ */
 function renderLiterature() {
   renderApiError('lit-status', 'literature', 'llm_insights');
-  const lit = S.data.literature || {};
-  $('lit-status').innerHTML = `<div class="kv-grid">
-    <span class="kv-k">Papers analysed</span><span class="kv-v">${esc(String(lit.total_papers||lit.papers_analysed||'—'))}</span>
-    <span class="kv-k">Verified sources</span><span class="kv-v">${esc(String(lit.verified_sources||'—'))}</span>
-    <span class="kv-k">Last sync</span><span class="kv-v">${fmtShort(lit.last_sync||lit.last_updated)}</span>
-    <span class="kv-k">Domain</span><span class="kv-v">${esc(lit.primary_domain||'—')}</span>
+  const lit     = S.data.literature  || {};
+  const summary = lit.summary        || {};
+  const srcHealth = lit.source_health || {};
+  const lkSum   = (lit.learned_knowledge || {}).summary || {};
+  const topDoms = Array.isArray(lkSum.top_learning_domains) ? lkSum.top_learning_domains : [];
+
+  // ── Ingestion Status ───────────────────────────────────────────────────────
+  const totalPapers = lit.total_papers   || summary.literature_total_papers || '—';
+  const verified    = lit.verified_sources || summary.external_verified_sources || '—';
+  const weak        = lit.weak_sources   || summary.external_weak_sources   || '—';
+  const connected   = lit.connected_topics || summary.connected_topic_count   || '—';
+  const claimsN     = lit.learned_claims || summary.learned_claim_count      || '—';
+  const lastSync    = lit.last_sync      || summary.last_literature_sync     || lit.timestamp || '';
+  const statStr     = lit.source_status  || summary.status || '—';
+  const statTone    = statStr === 'ok' ? 'green' : statStr === 'degraded' ? 'amber' : 'dim';
+
+  const srcRows = Object.entries(srcHealth).map(([src, h]) => {
+    if (typeof h !== 'object') return '';
+    const tone = h.ok ? 'green' : 'red';
+    return `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:3px 6px;font-size:11.5px">${esc(src)}</td>
+      <td style="padding:3px 6px">${dotHtml(tone)} <span style="font-size:10px;color:var(--${tone})">${h.ok?'ok':'error'}</span></td>
+      <td style="padding:3px 6px;text-align:right;font-family:var(--font-mono);font-size:11px">${h.ingested||0}</td>
+      <td style="padding:3px 6px;font-size:10px;color:var(--red);max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc((h.last_error||'').substring(0,40))}</td>
+    </tr>`;
+  }).join('');
+
+  $('lit-status').innerHTML = `
+    <div class="kv-grid" style="margin-bottom:12px">
+      <span class="kv-k">Papers analysed</span><span class="kv-v" style="color:var(--green);font-weight:600">${esc(String(totalPapers))}</span>
+      <span class="kv-k">Verified sources</span><span class="kv-v">${esc(String(verified))}</span>
+      <span class="kv-k">Weak sources</span><span class="kv-v" style="color:var(--dim)">${esc(String(weak))}</span>
+      <span class="kv-k">Connected topics</span><span class="kv-v">${esc(String(connected))}</span>
+      <span class="kv-k">Learned claims</span><span class="kv-v">${esc(String(claimsN))}</span>
+      <span class="kv-k">Last sync</span><span class="kv-v">${fmtShort(lastSync)||'—'}</span>
+      <span class="kv-k">Status</span><span class="kv-v"><span class="badge ${statTone}" style="font-size:10px">${esc(statStr)}</span></span>
+    </div>
+    ${topDoms.length ? `<div style="margin-bottom:12px">
+      <div style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px">Active domains</div>
+      ${topDoms.slice(0,6).map(d=>`<span class="badge blue" style="margin:2px;font-size:10px">${esc(d)}</span>`).join('')}
+    </div>` : ''}
+    ${srcRows ? `<div style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px">Source health</div>
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr style="border-bottom:1px solid var(--border)">
+        <th style="text-align:left;padding:2px 6px;color:var(--dim);font-size:10px;font-weight:600">SOURCE</th>
+        <th style="text-align:left;padding:2px 6px;color:var(--dim);font-size:10px;font-weight:600">STATUS</th>
+        <th style="text-align:right;padding:2px 6px;color:var(--dim);font-size:10px;font-weight:600">INGESTED</th>
+        <th style="text-align:left;padding:2px 6px;color:var(--dim);font-size:10px;font-weight:600">ERROR</th>
+      </tr></thead>
+      <tbody>${srcRows}</tbody>
+    </table>` : ''}`;
+
+  // ── Conflicts (source errors + last_errors) ────────────────────────────────
+  const lastErrors = Array.isArray(lit.last_errors) ? lit.last_errors : [];
+  const srcErrors  = Object.entries(srcHealth)
+    .filter(([,h]) => typeof h === 'object' && !h.ok && h.last_error)
+    .map(([src,h]) => `${src}: ${h.last_error}`);
+  const allConflicts = [
+    ...lastErrors.map(e => typeof e === 'string' ? e : JSON.stringify(e)),
+    ...srcErrors,
+  ];
+  $('lit-conflicts').innerHTML = allConflicts.length
+    ? allConflicts.slice(0,5).map(c=>`<div class="warning-banner">${esc(String(c).substring(0,150))}</div>`).join('')
+    : '<div class="empty-state">No conflicts detected ✓</div>';
+
+  // ── LLM Insights (4 categories) ───────────────────────────────────────────
+  const ins       = S.data.llm_insights || {};
+  const gaps      = Array.isArray(ins.gap_signals)            ? ins.gap_signals            : [];
+  const claims_v  = Array.isArray(ins.claim_verifications)    ? ins.claim_verifications    : [];
+  const expEvals  = Array.isArray(ins.experiment_evaluations) ? ins.experiment_evaluations : [];
+  const syntheses = Array.isArray(ins.frontier_syntheses)     ? ins.frontier_syntheses     : [];
+  const rationale = ins.scheduler_rationale || '';
+
+  let insHtml = '';
+  if (rationale) insHtml += `<div class="card" style="margin-bottom:8px">
+    <div class="section-head" style="margin:0 0 4px">Scheduler Rationale</div>
+    <div style="font-size:12px;color:var(--muted);line-height:1.55">${esc(rationale.substring(0,300))}</div>
   </div>`;
 
-  const conflicts = Array.isArray(lit.conflicts) ? lit.conflicts : [];
-  $('lit-conflicts').innerHTML = conflicts.length
-    ? conflicts.slice(0,5).map(c => `<div class="warning-banner">${esc(typeof c === 'string' ? c : (c.description||JSON.stringify(c)))}</div>`).join('')
-    : '<div class="empty-state">No conflicts detected</div>';
+  if (gaps.length) insHtml += `<div class="card" style="margin-bottom:8px">
+    <div class="section-head" style="margin:0 0 6px">Gap Signals (${gaps.length})</div>
+    ${gaps.slice(0,4).map(g=>`<div class="alert-item" style="align-items:flex-start">
+      ${dotHtml('blue')}
+      <span class="alert-msg" style="font-size:11.5px">
+        <strong>${esc(g.frontier_id||'')}</strong>
+        ${g.priority_delta!=null?`<span style="color:var(--green);margin-left:6px">+${fmtN(g.priority_delta,1)}</span>`:''}
+        ${Array.isArray(g.signals)&&g.signals.length?`<span style="color:var(--dim);font-size:10.5px;display:block;margin-top:2px">${esc(g.signals[0].substring(0,100))}</span>`:''}
+      </span>
+    </div>`).join('')}
+  </div>`;
 
-  const insights = S.data.llm_insights || {};
-  const items = Array.isArray(insights.insights) ? insights.insights : (Array.isArray(insights) ? insights : []);
-  $('lit-insights').innerHTML = items.length
-    ? `<div class="card">${items.slice(0,8).map(i => `
-        <div class="alert-item">
-          ${dotHtml('teal')}
-          <span class="alert-msg" style="font-size:12px">${esc(typeof i === 'string' ? i : (i.insight||i.text||JSON.stringify(i)).substring(0,200))}</span>
-        </div>`).join('')}</div>`
-    : '<div class="empty-state">No LLM insights available</div>';
+  if (claims_v.length) insHtml += `<div class="card" style="margin-bottom:8px">
+    <div class="section-head" style="margin:0 0 6px">Claim Verifications (${claims_v.length})</div>
+    ${claims_v.slice(0,3).map(c=>`<div class="alert-item">
+      ${dotHtml('teal')}
+      <span class="alert-msg" style="font-size:11.5px">${esc((typeof c==='string'?c:(c.task_id||(c.verification||'').substring(0,80)||JSON.stringify(c))).substring(0,100))}</span>
+    </div>`).join('')}
+  </div>`;
+
+  if (expEvals.length) insHtml += `<div class="card" style="margin-bottom:8px">
+    <div class="section-head" style="margin:0 0 6px">Experiment Evaluations (${expEvals.length})</div>
+    ${expEvals.slice(0,3).map(e=>`<div class="alert-item">
+      ${dotHtml('amber')}
+      <span class="alert-msg" style="font-size:11.5px">${esc((typeof e==='string'?e:(e.evaluation||e.summary||JSON.stringify(e))).substring(0,100))}</span>
+    </div>`).join('')}
+  </div>`;
+
+  if (syntheses.length) insHtml += `<div class="card">
+    <div class="section-head" style="margin:0 0 6px">Frontier Syntheses (${syntheses.length})</div>
+    ${syntheses.slice(0,3).map(s=>`<div class="alert-item">
+      ${dotHtml('green')}
+      <span class="alert-msg" style="font-size:11.5px">${esc((typeof s==='string'?s:(s.synthesis||s.summary||JSON.stringify(s))).substring(0,100))}</span>
+    </div>`).join('')}
+  </div>`;
+
+  $('lit-insights').innerHTML = insHtml || '<div class="empty-state">No LLM insights available</div>';
 }
 
 /* ══════════════════════════════════════════════════════════

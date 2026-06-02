@@ -2442,11 +2442,27 @@ def api_literature():
     payload = _jload(_WS / "tar_state" / "literature" / "evidence_ingest_state.json") or {}
     try:
         from tar_evidence_ingest import normalize_literature_payload
-
         normalized = normalize_literature_payload(payload)
-        return jsonify(normalized)
     except Exception:
-        return jsonify(payload)
+        normalized = payload
+    # Add top-level shortcut fields so the frontend can read them without navigating nested dicts
+    summary     = normalized.get("summary", {}) if isinstance(normalized, dict) else {}
+    lk_summary  = ((normalized.get("learned_knowledge") or {}).get("summary") or {})
+    top_domains = lk_summary.get("top_learning_domains", [])
+    src_health  = normalized.get("source_health", {}) or {}
+    healthy_src = sum(1 for h in src_health.values() if isinstance(h, dict) and h.get("ok"))
+    return jsonify({
+        **(normalized if isinstance(normalized, dict) else {}),
+        "total_papers":      summary.get("literature_total_papers", 0),
+        "verified_sources":  summary.get("external_verified_sources", 0),
+        "weak_sources":      summary.get("external_weak_sources", 0),
+        "last_sync":         summary.get("last_literature_sync", normalized.get("timestamp", "")),
+        "primary_domain":    top_domains[0] if top_domains else "",
+        "connected_topics":  summary.get("connected_topic_count", 0),
+        "learned_claims":    summary.get("learned_claim_count", 0),
+        "healthy_sources":   healthy_src,
+        "source_status":     summary.get("status", ""),
+    })
 
 
 # ── scheduler ─────────────────────────────────────────────────────────────────
