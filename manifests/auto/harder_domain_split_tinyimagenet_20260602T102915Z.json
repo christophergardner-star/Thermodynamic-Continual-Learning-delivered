@@ -1,0 +1,31 @@
+{
+  "authorised_by": "TAR Director (autonomous)",
+  "content_hash": "22d83b11e414037900f8903c9ecba1ddee6bd966b357ac5996b3c9cf17b86809",
+  "created_at": "2026-06-02T10:29:15.407087+00:00",
+  "experiments": [
+    {
+      "allowed_datasets": [
+        "split_tinyimagenet"
+      ],
+      "allowed_methods": [
+        "tcl"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1,
+        2,
+        3
+      ],
+      "experiment_id": "harder_domain_split_tinyimagenet",
+      "name": "Low-tuning continual learning on realistic domain shift (split TinyImageNet)",
+      "notes": "Auto-generated manifest for autonomous run. Spec description: (none)",
+      "run_limit": 1,
+      "time_limit_h": 12.0
+    }
+  ],
+  "global_time_limit_h": 16.0,
+  "manifest_id": "manifest-auto-harder_domain_split_tinyimagenet-20260602T102915Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "purpose": "Autonomously generated manifest for experiment 'harder_domain_split_tinyimagenet' (Low-tuning continual learning on realistic domain shift (split TinyImageNet)). Project: tcl-hpc-validation-paper. Dataset: split_tinyimagenet, method: tcl, seeds: [42, 0, 1, 2, 3]."
+}
