@@ -1182,6 +1182,7 @@ const S = {
   logName: '',
   chatHistory: [],
   sortCol: {},
+  phase2: {},
 };
 
 /* ── Utilities ───────────────────────────────────────────── */
@@ -1369,6 +1370,7 @@ const ENDPOINTS = {
   breakthroughs:     '/api/breakthroughs',
   director_proposals: '/api/director_proposals',
   budget:             '/api/budget',
+  phase2_status:      '/api/phase2/status',
 };
 
 async function loadEndpoint(key) {
@@ -1430,7 +1432,8 @@ function renderHeader() {
     $('hdr-gpu-txt').textContent = 'unavailable';
   }
 
-  // Running count
+  // Running count — queue is the single source of truth (bridge keeps Phase 2
+  // processes synced into experiment_queue.json, so no separate phase2 add)
   const running = Number(exps.running || 0);
   $('hdr-run-txt').textContent = running + ' running';
   const rb = $('badge-running');
@@ -1492,6 +1495,7 @@ function renderObs() {
 
   // Metrics strip
   const experiments = Array.isArray(exps.experiments) ? exps.experiments : [];
+  // Queue is single source of truth — bridge keeps Phase 2 processes in sync
   const running = experiments.filter(e => (e.stage||e.status) === 'running').length;
   const queued  = experiments.filter(e => ['queued','planned','pending'].includes(e.stage||e.status)).length;
   const done    = experiments.filter(e => (e.stage||e.status) === 'complete').length;
@@ -1577,18 +1581,42 @@ function renderObs() {
   renderPhase2Launcher();
 
   setupEpochPoll();
+  setupPhase2Poll();
 }
 
 function renderPhase2Launcher() {
   const el = $('obs-phase2-launcher');
   if (!el) return;
   const scripts = [
-    {key:'run_hpc_replication',        label:'HPC Replication n=20',           phase:'2.1', desc:'Pre-registered single-hypothesis, n=20 seeds'},
-    {key:'run_hyperparameter_selection',label:'Fair Joint HP Selection',        phase:'2.6', desc:'seed=999 validation split, lock HPs before reruns'},
-    {key:'phase16_cifar100_rerun',     label:'CIFAR-100 n=5 Rerun',            phase:'2.3', desc:'5 seeds, 7 methods including DER++ and LwF'},
-    {key:'phase17_tinyimagenet_rerun', label:'TinyImageNet n=5 Rerun',         phase:'2.2', desc:'5 seeds, 7 methods, pre-registered'},
-    {key:'run_mechanistic_ablation',   label:'7-Condition Mechanistic Ablation',phase:'3.1', desc:'Full ablation with TCL anchor-frozen and warmup variants'},
+    {key:'run_hpc_replication',         label:'HPC Replication n=20',            phase:'2.1', desc:'Pre-registered single-hypothesis, n=20 seeds'},
+    {key:'run_hyperparameter_selection', label:'Fair Joint HP Selection',         phase:'2.6', desc:'seed=999 validation split, lock HPs before reruns'},
+    {key:'phase16_cifar100_rerun',       label:'CIFAR-100 n=5 Rerun',            phase:'2.3', desc:'5 seeds, 7 methods including DER++ and LwF'},
+    {key:'phase17_tinyimagenet_rerun',   label:'TinyImageNet n=5 Rerun',         phase:'2.2', desc:'5 seeds, 7 methods, pre-registered'},
+    {key:'run_mechanistic_ablation',     label:'7-Condition Mechanistic Ablation',phase:'3.1', desc:'Full ablation with TCL anchor-frozen and warmup variants'},
   ];
+
+  function statusBadge(entry) {
+    if (!entry || entry.status === 'idle') return '<span style="color:var(--dim);font-size:11px">idle</span>';
+    if (entry.alive) {
+      const elapsed = entry.started_at ? fmtAge(Math.round((Date.now() - new Date(entry.started_at)) / 1000)) : '?';
+      return `<span style="display:inline-flex;align-items:center;gap:5px">
+        <span class="dot green pulse" style="width:8px;height:8px;flex-shrink:0"></span>
+        <span style="font-size:11px;color:var(--green)">running · PID ${esc(String(entry.pid))} · ${esc(elapsed)}</span>
+      </span>`;
+    }
+    return '<span style="font-size:11px;color:var(--muted)">✓ complete</span>';
+  }
+
+  function actionBtn(key, label, entry) {
+    if (!entry || entry.status === 'idle') {
+      return `<button class="btn sm green-btn" onclick="launchPhase2('${esc(key)}','${esc(label)}')">▶ Launch</button>`;
+    }
+    if (entry.alive) {
+      return `<button class="btn sm" disabled style="opacity:.45;cursor:not-allowed">⏳ Running</button>`;
+    }
+    return `<button class="btn sm" style="background:var(--amber);color:#000" onclick="launchPhase2('${esc(key)}','${esc(label)}')">↺ Re-run</button>`;
+  }
+
   el.innerHTML = `<div style="font-size:11.5px;color:var(--muted);margin-bottom:10px">
     Pre-registered GPU experiments — scripts written, not yet executed. HP Selection must run first.
   </div>
@@ -1597,14 +1625,19 @@ function renderPhase2Launcher() {
       <th style="text-align:left;padding:4px 6px;color:var(--muted);font-weight:600;font-size:10.5px">PHASE</th>
       <th style="text-align:left;padding:4px 6px;color:var(--muted);font-weight:600;font-size:10.5px">EXPERIMENT</th>
       <th style="text-align:left;padding:4px 6px;color:var(--muted);font-weight:600;font-size:10.5px">DESCRIPTION</th>
+      <th style="text-align:left;padding:4px 6px;color:var(--muted);font-weight:600;font-size:10.5px">STATUS</th>
       <th style="padding:4px 6px"></th>
     </tr></thead>
-    <tbody>${scripts.map(s => `<tr style="border-bottom:1px solid var(--border)">
-      <td style="padding:6px;font-family:var(--font-mono);color:var(--blue)">${esc(s.phase)}</td>
-      <td style="padding:6px;font-weight:600">${esc(s.label)}</td>
-      <td style="padding:6px;color:var(--muted);font-size:11.5px">${esc(s.desc)}</td>
-      <td style="padding:6px"><button class="btn sm green-btn" onclick="launchPhase2('${esc(s.key)}','${esc(s.label)}')">▶ Launch</button></td>
-    </tr>`).join('')}</tbody>
+    <tbody>${scripts.map(s => {
+      const st = S.phase2[s.key] || {};
+      return `<tr style="border-bottom:1px solid var(--border);cursor:pointer" onclick="openPhase2Drawer('${esc(s.key)}')">
+        <td style="padding:6px;font-family:var(--font-mono);color:var(--blue)">${esc(s.phase)}</td>
+        <td style="padding:6px;font-weight:600">${esc(s.label)}</td>
+        <td style="padding:6px;color:var(--muted);font-size:11.5px">${esc(s.desc)}</td>
+        <td style="padding:6px">${statusBadge(st)}</td>
+        <td style="padding:6px" onclick="event.stopPropagation()">${actionBtn(s.key, s.label, st)}</td>
+      </tr>`;
+    }).join('')}</tbody>
   </table>`;
 }
 
@@ -1618,7 +1651,106 @@ async function launchPhase2(scriptKey, label) {
     if (r.not_found) { toast('Script not yet written: ' + scriptKey, 'err'); return; }
     if (!r.ok) { toast('Launch failed: ' + (r.error||'?'), 'err'); return; }
     toast('Launched PID ' + r.pid + ': ' + label);
+    // Immediate status refresh — don't wait for the 10 s poll cycle
+    setTimeout(async () => {
+      try {
+        S.phase2 = await api('/api/phase2/status');
+        renderPhase2Launcher();
+        renderHeader();
+      } catch(_) {}
+    }, 800);
   } catch(e) { toast('Launch error: ' + e.message, 'err'); }
+}
+
+function setupPhase2Poll() {
+  // Guard: only wire one interval per page load
+  if (setupPhase2Poll._wired) return;
+  setupPhase2Poll._wired = true;
+  async function tick() {
+    try {
+      S.phase2 = await api('/api/phase2/status');
+      renderPhase2Launcher();
+      renderHeader();
+    } catch(_) {}
+  }
+  tick();
+  setInterval(tick, 10_000);
+}
+
+const _P2_SCRIPT_META = {
+  run_hpc_replication:         {label:'HPC Replication n=20',            phase:'2.1', desc:'Pre-registered single-hypothesis, n=20 seeds, SPRT early stop'},
+  run_hyperparameter_selection:{label:'Fair Joint HP Selection',          phase:'2.6', desc:'seed=999 validation split — lock HPs before all reruns'},
+  phase16_cifar100_rerun:      {label:'CIFAR-100 n=5 Rerun',             phase:'2.3', desc:'5 seeds, 7 methods including DER++ and LwF'},
+  phase17_tinyimagenet_rerun:  {label:'TinyImageNet n=5 Rerun',          phase:'2.2', desc:'5 seeds, 7 methods, pre-registered'},
+  run_mechanistic_ablation:    {label:'7-Condition Mechanistic Ablation', phase:'3.1', desc:'Full ablation with TCL anchor-frozen and warmup variants'},
+};
+
+function openPhase2Drawer(key) {
+  const meta = _P2_SCRIPT_META[key] || {label: key, phase: '?', desc: ''};
+
+  function statusSection() {
+    const st = S.phase2[key] || {};
+    if (st.alive) {
+      const elapsed = st.started_at ? fmtAge(Math.round((Date.now() - new Date(st.started_at)) / 1000)) : '?';
+      return `<div class="kv-grid">
+        <span class="kv-k">Status</span><span class="kv-v" style="color:var(--green)">● running</span>
+        <span class="kv-k">PID</span><span class="kv-v mono">${esc(String(st.pid))}</span>
+        <span class="kv-k">Elapsed</span><span class="kv-v">${esc(elapsed)}</span>
+        <span class="kv-k">Started</span><span class="kv-v">${fmtDate(st.started_at)}</span>
+        <span class="kv-k">Log</span><span class="kv-v mono" style="font-size:10px;word-break:break-all">${esc(st.log_path||'—')}</span>
+      </div>`;
+    }
+    if (st.started_at) {
+      return `<div class="kv-grid">
+        <span class="kv-k">Status</span><span class="kv-v" style="color:var(--muted)">✓ complete</span>
+        <span class="kv-k">PID</span><span class="kv-v mono">${esc(String(st.pid||'—'))}</span>
+        <span class="kv-k">Started</span><span class="kv-v">${fmtDate(st.started_at)}</span>
+        <span class="kv-k">Log</span><span class="kv-v mono" style="font-size:10px;word-break:break-all">${esc(st.log_path||'—')}</span>
+      </div>`;
+    }
+    return `<div style="color:var(--dim);font-size:12px">Not yet launched</div>`;
+  }
+
+  S.drawerItem = 'phase2:' + key;
+  if (S._p2DrawerTimer) { clearInterval(S._p2DrawerTimer); S._p2DrawerTimer = null; }
+
+  openDrawer(`
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+      <strong style="font-size:14px">${esc(meta.label)}</strong>
+    </div>
+    <div class="drawer-sub">Phase ${esc(meta.phase)} — ${esc(meta.desc)}</div>
+
+    <h2>Status</h2>
+    <div id="p2d-status">${statusSection()}</div>
+
+    <h2>Live Log <span id="p2d-mtime" style="font-size:10px;color:var(--dim);font-weight:400"></span></h2>
+    <div class="terminal" id="p2d-log" style="height:300px;font-size:10.5px;overflow-y:auto">
+      <span style="color:var(--dim)">Loading…</span>
+    </div>
+  `);
+
+  function refreshLog() {
+    if (!$('main').classList.contains('drawer-open') || S.drawerItem !== 'phase2:' + key) {
+      clearInterval(S._p2DrawerTimer); S._p2DrawerTimer = null; return;
+    }
+    // Refresh status block
+    const statusEl = $('p2d-status');
+    if (statusEl) statusEl.innerHTML = statusSection();
+    // Fetch log tail
+    api('/api/phase2/log/' + encodeURIComponent(key)).then(d => {
+      const logEl = $('p2d-log');
+      const mtimeEl = $('p2d-mtime');
+      if (!logEl) return;
+      const lines = Array.isArray(d.lines) ? d.lines : [];
+      const atBottom = logEl.scrollHeight - logEl.scrollTop <= logEl.clientHeight + 30;
+      logEl.innerHTML = lines.length ? lines.map(logLine).join('\n') : '<span style="color:var(--dim)">(no log yet)</span>';
+      if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+      if (mtimeEl && d.mtime) mtimeEl.textContent = d.mtime;
+    }).catch(() => {});
+  }
+
+  refreshLog();
+  S._p2DrawerTimer = setInterval(refreshLog, 3000);
 }
 
 function renderObsBudget() {
@@ -1679,11 +1811,21 @@ function renderObsQueue(experiments) {
   const running = experiments.filter(e => (e.stage||e.status||'') === 'running');
   const total   = queued.length;
 
+  const firstQueued = queued.find(e => (e.stage||e.status||'').toLowerCase() === 'queued');
+  const anyRunning  = running.length > 0 ||
+                      Object.values(S.phase2||{}).some(e => e.alive);
   let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
     <span style="font-size:11px;color:var(--muted)">${total} queued · ${running.length} running</span>
-    ${total > 0
-      ? `<button class="btn sm danger" id="flush-queue-btn" onclick="confirmFlushQueue()">⊗ Flush Queue</button>`
-      : `<button class="btn sm" onclick="navTo('experiments')">View all →</button>`}
+    <div style="display:flex;gap:5px">
+      ${firstQueued
+        ? `<button class="btn sm green-btn" id="run-next-btn"
+              ${anyRunning ? 'disabled style="opacity:.45;cursor:not-allowed"' : `onclick="runNextQueued('${esc(firstQueued.id)}','${esc((firstQueued.name||firstQueued.id).substring(0,50))}')"`}>
+              ▶ Run Next</button>`
+        : ''}
+      ${total > 0
+        ? `<button class="btn sm danger" id="flush-queue-btn" onclick="confirmFlushQueue()">⊗ Flush Queue</button>`
+        : `<button class="btn sm" onclick="navTo('experiments')">View all →</button>`}
+    </div>
   </div>`;
 
   if (!experiments.length) {
@@ -1709,6 +1851,10 @@ function renderObsQueue(experiments) {
       </span>
       <span style="display:flex;align-items:center;gap:4px;flex-shrink:0">
         <span class="badge ${tone}" style="font-size:10px">${esc(stage)}</span>
+        ${stage === 'queued' && !anyRunning
+          ? `<button class="btn sm green-btn" style="padding:2px 6px;font-size:10px"
+                onclick="event.stopPropagation();runNextQueued('${esc(exp.id)}','${esc((exp.name||exp.id).substring(0,50))}')"
+                title="Launch this experiment now">▶</button>` : ''}
         ${!isRun ? `<button class="btn sm danger" style="padding:2px 6px;font-size:10px"
             onclick="event.stopPropagation();cancelQueueItem('${esc(exp.id)}','${esc((exp.name||exp.id).substring(0,40))}')">✕</button>` : ''}
       </span>
@@ -1758,6 +1904,26 @@ async function cancelQueueItem(expId, name) {
     if (S.view === 'experiments') renderExps();
   } catch(e) {
     toast('Cancel failed: ' + e.message, 'err');
+  }
+}
+
+async function runNextQueued(expId, name) {
+  if (!confirm(`Launch "${name}"?\n\nThis starts the experiment via ExperimentOrchestrator using Python 3.11 (CUDA). It will run in the background and update the queue status automatically.`)) return;
+  const btn = $('run-next-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Starting…'; }
+  try {
+    const url = expId ? '/api/queue/launch/' + encodeURIComponent(expId) : '/api/queue/run_next';
+    const r = await api(url, {method:'POST'});
+    if (!r.ok) { toast('Launch failed: ' + (r.error||'?'), 'err'); return; }
+    toast('▶ Started: ' + (r.name || name));
+    // Refresh queue and phase2 status after 1.5s to show updated state
+    setTimeout(async () => {
+      await Promise.all([loadEndpoint('experiments'), (async () => { try { S.phase2 = await api('/api/phase2/status'); } catch(_){} })()]);
+      renderObs();
+    }, 1500);
+  } catch(e) {
+    toast('Launch error: ' + e.message, 'err');
+    if (btn) { btn.disabled = false; btn.textContent = '▶ Run Next'; }
   }
 }
 
@@ -2355,9 +2521,20 @@ function renderReview() {
     : normal.length ? normal.map(r => renderReviewItem(r, false)).join('')
     : '<div class="empty-state">No items awaiting review ✓</div>';
 
-  $('review-questions').innerHTML = questions.length
-    ? questions.map(q => renderQuestionItem(q)).join('')
-    : '<div class="empty-state">No pending questions</div>';
+  const pendingQs  = questions.filter(q => !q.status || q.status === 'awaiting_human_answer');
+  const answeredQs = questions.filter(q => q.status === 'answered');
+  let qHtml = '';
+  if (pendingQs.length) {
+    qHtml += `<div style="font-size:11px;color:var(--amber);font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">
+      ⏳ ${pendingQs.length} decision${pendingQs.length > 1 ? 's' : ''} required — delays here block the research pipeline
+    </div>` + pendingQs.map(q => renderQuestionItem(q)).join('');
+  }
+  if (answeredQs.length) {
+    qHtml += `<div style="font-size:11px;color:var(--dim);font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin:${pendingQs.length ? '16px' : '0'} 0 8px">
+      ✓ Resolved (${answeredQs.length})
+    </div>` + answeredQs.slice(0, 8).map(q => renderQuestionItem(q)).join('');
+  }
+  $('review-questions').innerHTML = qHtml || '<div class="empty-state">No pending questions ✓</div>';
 
   $('review-done').innerHTML = done.length
     ? done.slice(0,5).map(r => `<div class="card" style="margin-bottom:6px;opacity:.7">
@@ -2392,28 +2569,76 @@ function renderReviewItem(r, urgent) {
 }
 
 function renderQuestionItem(q) {
-  const id = q.question_id || q.id;
-  const slug_id = (id||'').replace(/[^a-zA-Z0-9]/g, '_');
-  const opts = Array.isArray(q.options) ? q.options : [];
-  return `<div class="review-item waiting">
-    <strong style="font-size:13px">${esc((q.question||q.title||id||'').substring(0,120))}</strong>
-    <div style="font-size:11.5px;color:var(--muted);margin-top:4px">${esc((q.context||'').substring(0,300))}</div>
-    ${opts.length ? `<div style="margin-top:10px;display:flex;flex-direction:column;gap:4px">
-      ${opts.map((o,i) => `<label style="display:flex;gap:8px;align-items:center;font-size:12.5px;cursor:pointer">
-        <input type="radio" name="qopt-${slug_id}" value="${esc(typeof o === 'string' ? o : o.value||o.label||String(i))}">
-        ${esc(typeof o === 'string' ? o : o.label||o.value||String(o))}
-      </label>`).join('')}
-      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;cursor:pointer">
-        <input type="radio" name="qopt-${slug_id}" value="__other__"> Other:
-        <input type="text" id="q-custom-${slug_id}" class="filter-input" style="flex:1;padding:3px 6px" placeholder="Type answer…">
+  const id      = q.question_id || q.id || '';
+  const slug_id = id.replace(/[^a-zA-Z0-9]/g, '_');
+  const opts    = Array.isArray(q.options) ? q.options : [];
+  const isAnswered = q.status === 'answered' || (!!(q.answer && q.answer.length));
+  const recommended  = q.recommended_default || '';
+  const questionText = q.question_text || q.question || q.title || id;
+  const whyBlocks    = q.why_this_blocks_progress || q.context || '';
+  const linked       = Array.isArray(q.linked_proposal_ids) ? q.linked_proposal_ids : [];
+  const qType        = q.question_type || '';
+  const typeLabel    = ({rerun_required:'Paper Blocked', scientific_scope:'Frontier Scope'})[qType] || qType;
+  const typeTone     = ({rerun_required:'amber', scientific_scope:'blue'})[qType] || 'dim';
+
+  if (isAnswered) {
+    return `<div class="review-item" style="opacity:.65;border-left:3px solid var(--green);margin-bottom:6px;padding:8px 10px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
+        <span class="badge green" style="font-size:10px">✓ answered</span>
+        ${typeLabel ? `<span class="badge ${typeTone}" style="font-size:10px">${esc(typeLabel)}</span>` : ''}
+        <span style="font-size:12px;font-weight:600;color:var(--muted)">${esc(questionText.substring(0,100))}</span>
+      </div>
+      <div style="font-size:11.5px;color:var(--muted)">
+        Answer: <strong style="color:var(--green)">${esc(q.answer)}</strong>
+        ${q.answer_notes ? ` <span style="color:var(--dim)">— ${esc(q.answer_notes.substring(0,80))}</span>` : ''}
+      </div>
+    </div>`;
+  }
+
+  return `<div class="review-item waiting" style="border-left:3px solid var(--amber);margin-bottom:12px">
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+      <span class="badge amber" style="font-size:10px">⏳ awaiting decision</span>
+      ${typeLabel ? `<span class="badge ${typeTone}" style="font-size:10px">${esc(typeLabel)}</span>` : ''}
+    </div>
+
+    <strong style="font-size:13px;line-height:1.5;display:block;margin-bottom:8px">${esc(questionText)}</strong>
+
+    ${whyBlocks ? `<div style="font-size:11.5px;color:var(--muted);margin-bottom:10px;padding:8px 10px;background:rgba(255,255,255,0.03);border-radius:4px;border:1px solid var(--border)">
+      <div style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Why this blocks progress</div>
+      ${esc(whyBlocks)}
+    </div>` : ''}
+
+    ${linked.length ? `<div style="font-size:11px;color:var(--dim);margin-bottom:10px">
+      Linked: ${linked.slice(0,6).map(l => `<span class="badge dim" style="font-size:10px;margin-right:3px">${esc(String(l).substring(0,50))}</span>`).join('')}
+    </div>` : ''}
+
+    ${opts.length ? `<div style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">
+      ${opts.map(o => {
+        const val   = typeof o === 'string' ? o : (o.value || o.label || String(o));
+        const label = typeof o === 'string' ? o : (o.label || o.value || String(o));
+        const isRec = recommended && val === recommended;
+        return `<label style="display:flex;gap:8px;align-items:flex-start;font-size:12.5px;cursor:pointer;padding:7px 10px;border-radius:4px;border:1px solid ${isRec ? 'var(--amber)' : 'var(--border)'};background:${isRec ? 'rgba(255,180,0,0.06)' : 'transparent'}">
+          <input type="radio" name="qopt-${slug_id}" value="${esc(val)}" style="margin-top:2px;flex-shrink:0">
+          <span style="flex:1">
+            ${esc(label)}
+            ${isRec ? `<span style="font-size:10px;color:var(--amber);margin-left:8px">★ TAR recommends</span>` : ''}
+          </span>
+        </label>`;
+      }).join('')}
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;cursor:pointer;padding:7px 10px;border-radius:4px;border:1px solid var(--border)">
+        <input type="radio" name="qopt-${slug_id}" value="__other__" style="flex-shrink:0">
+        <span style="flex-shrink:0">Other:</span>
+        <input type="text" id="q-custom-${slug_id}" class="filter-input" style="flex:1;padding:3px 6px" placeholder="Type custom answer…">
       </label>
     </div>` : ''}
-    <textarea class="review-notes" id="q-notes-${slug_id}" placeholder="Notes…"></textarea>
+
+    <textarea class="review-notes" id="q-notes-${slug_id}" placeholder="Rationale / notes (optional — helps TAR understand your decision)…" style="margin-bottom:10px;min-height:52px"></textarea>
+
     <div class="review-actions">
-      <button class="btn primary" onclick="submitAnswer('${esc(id)}','${slug_id}')">Submit Answer</button>
+      <button class="btn green-btn" onclick="submitAnswer('${esc(id)}','${slug_id}')">✓ Submit Decision</button>
       <button class="btn" id="rec-btn-${slug_id}" onclick="fetchRecommendation('${esc(id)}','${slug_id}')">✦ Ask TAR</button>
     </div>
-    <div id="rec-out-${slug_id}" style="margin-top:8px;font-size:12px;color:var(--muted);display:none;line-height:1.55;border-left:2px solid var(--border-s);padding-left:10px"></div>
+    <div id="rec-out-${slug_id}" style="margin-top:8px;font-size:12px;color:var(--muted);display:none;line-height:1.55;border-left:2px solid var(--amber);padding-left:10px;white-space:pre-wrap"></div>
   </div>`;
 }
 

@@ -2347,6 +2347,24 @@ def api_human_review_answer(question_id: str):
     )
     if updated is None:
         return jsonify({"error": f"Unknown question id: {question_id}"}), 404
+
+    # Trigger director re-evaluation in background so pipeline reacts to the decision
+    def _resync() -> None:
+        try:
+            # Force director state refresh — this causes it to re-read human_review_state.json
+            _director_state(force_refresh=True)
+        except Exception:
+            pass
+        try:
+            # Also try the explicit sync function if it exists
+            from tar_research_director import sync_human_review_from_director_state
+            sync_human_review_from_director_state(_WS)
+        except Exception:
+            pass
+
+    import threading
+    threading.Thread(target=_resync, daemon=True, name="hr-resync").start()
+
     return jsonify({"ok": True, "updated": updated, "state": _human_review_payload()})
 
 
@@ -2499,6 +2517,70 @@ def api_experiment_inject():
         return jsonify({"ok": True, "experiment_id": created.id, "name": created.name})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+@app.route("/api/queue/run_next", methods=["POST"])
+def api_queue_run_next():
+    """Launch the highest-priority pending experiment via ExperimentOrchestrator in a background thread."""
+    import threading
+    # Guard: refuse if a Phase 2 panel subprocess is alive (same GPU, 4 GB VRAM)
+    if _any_phase2_alive():
+        alive = [k for k, e in _load_phase2_pids().items() if e.get("pid")]
+        return jsonify({"ok": False, "error": f"Phase 2 GPU process already running: {', '.join(alive)}. Wait for it to finish."}), 409
+    try:
+        from tar_experiment_orchestrator import ExperimentOrchestrator
+        orch = ExperimentOrchestrator(_WS)
+        pending = orch.get_pending()
+        if not pending:
+            return jsonify({"ok": False, "error": "No pending experiments in queue"}), 400
+        running = orch.get_running()
+        if running:
+            return jsonify({"ok": False, "error": f"Already running: {getattr(running[0],'name',str(running[0]))}"}), 409
+        next_spec = pending[0]
+
+        def _run():
+            try:
+                ExperimentOrchestrator(_WS).run_next()
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, daemon=True).start()
+        return jsonify({"ok": True, "name": next_spec.name, "id": next_spec.id, "runner_key": getattr(next_spec, "runner_key", "")})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/queue/launch/<exp_id>", methods=["POST"])
+def api_queue_launch_by_id(exp_id: str):
+    """Launch a specific experiment by queue ID in a background thread."""
+    import threading
+    # Guard: refuse if a Phase 2 panel subprocess is alive (same GPU, 4 GB VRAM)
+    if _any_phase2_alive():
+        alive = [k for k, e in _load_phase2_pids().items() if e.get("pid")]
+        return jsonify({"ok": False, "error": f"Phase 2 GPU process already running: {', '.join(alive)}. Wait for it to finish."}), 409
+    try:
+        from tar_experiment_orchestrator import ExperimentOrchestrator
+        orch = ExperimentOrchestrator(_WS)
+        running = orch.get_running()
+        if running:
+            return jsonify({"ok": False, "error": f"Already running: {getattr(running[0],'name',str(running[0]))}"}), 409
+        pending = orch.get_pending()
+        match = next((s for s in pending if s.id == exp_id), None)
+        if match is None:
+            return jsonify({"ok": False, "error": f"Experiment {exp_id!r} not found in pending queue"}), 404
+
+        spec = match
+
+        def _run():
+            try:
+                ExperimentOrchestrator(_WS)._execute(spec)  # noqa: SLF001
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, daemon=True).start()
+        return jsonify({"ok": True, "name": spec.name, "id": spec.id, "runner_key": getattr(spec, "runner_key", "")})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 @app.route("/api/queue/flush", methods=["POST"])
@@ -4110,9 +4192,175 @@ def _save_phase2_pids(data: dict) -> None:
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+# ── Phase 2 ↔ Orchestrator bridge ────────────────────────────────────────────
+
+# Maps Phase 2 panel script_key → orchestrator runner_key
+_SCRIPT_TO_RUNNER_KEY: dict[str, str] = {
+    "run_hpc_replication":          "hpc_replication_phase2",
+    "phase16_cifar100_rerun":       "phase16_cifar100_rerun",
+    "phase17_tinyimagenet_rerun":   "phase17_tinyimagenet_rerun",
+    "run_hyperparameter_selection": "hp_selection",
+    "run_mechanistic_ablation":     "mechanistic_ablation_7c",
+}
+
+
+def _update_queue_for_phase2(script_key: str, pid: int, started_at: str, status: str) -> bool:
+    """
+    Write status/stage/pid into the matching experiment_queue.json entry so
+    the orchestrator and queue panel always see the correct live state.
+    Called on every Phase 2 process start, status poll, and exit.
+    """
+    runner_key = _SCRIPT_TO_RUNNER_KEY.get(script_key)
+    if not runner_key:
+        return False
+    queue_path = _WS / "tar_state" / "experiment_queue.json"
+    if not queue_path.exists():
+        return False
+    try:
+        data = json.loads(queue_path.read_text(encoding="utf-8"))
+        changed = False
+        for exp in data.get("experiments", []):
+            if exp.get("runner_key") == runner_key:
+                exp["status"] = status
+                exp["stage"]  = status
+                exp["pid"]    = pid
+                if status == "running":
+                    exp["started_at"] = started_at
+                elif status in ("complete", "failed"):
+                    exp["completed_at"] = datetime.now(timezone.utc).isoformat()
+                    exp["pid"] = 0
+                changed = True
+                break
+        if changed:
+            tmp = queue_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            os.replace(tmp, queue_path)
+        return changed
+    except Exception:
+        return False
+
+
+def _any_phase2_alive() -> bool:
+    """Return True if any Phase 2 subprocess is currently alive per psutil."""
+    try:
+        import psutil as _ps
+        for entry in _load_phase2_pids().values():
+            pid = entry.get("pid")
+            if pid and _ps.pid_exists(int(pid)):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _sync_phase2_progress(script_key: str) -> None:
+    """Read the script's checkpoint file and push seeds_done into experiment_queue.json progress."""
+    runner_key = _SCRIPT_TO_RUNNER_KEY.get(script_key)
+    if not runner_key:
+        return
+    # Per-script checkpoint locations and field mappings
+    _CHECKPOINTS: dict[str, tuple[Path, str, int]] = {
+        # script_key: (checkpoint_path, seeds_run_field, seeds_total)
+        "run_hpc_replication": (
+            _WS / "tar_state" / "comparisons" / "hpc_replication_checkpoint.json",
+            "seeds_run", 20,
+        ),
+    }
+    entry = _CHECKPOINTS.get(script_key)
+    if not entry:
+        return
+    ckpt_path, seeds_field, seeds_total = entry
+    if not ckpt_path.exists():
+        return
+    try:
+        ckpt = json.loads(ckpt_path.read_text(encoding="utf-8"))
+        seeds_done = int(ckpt.get(seeds_field, 0))
+    except Exception:
+        return
+    queue_path = _WS / "tar_state" / "experiment_queue.json"
+    if not queue_path.exists():
+        return
+    try:
+        data = json.loads(queue_path.read_text(encoding="utf-8"))
+        changed = False
+        for exp in data.get("experiments", []):
+            if exp.get("runner_key") == runner_key:
+                prev = (exp.get("progress") or {}).get("seeds_done", -1)
+                if prev != seeds_done:  # only write when changed
+                    exp.setdefault("progress", {})
+                    exp["progress"]["seeds_done"]  = seeds_done
+                    exp["progress"]["seeds_total"] = seeds_total
+                    changed = True
+                break
+        if changed:
+            tmp = queue_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            os.replace(tmp, queue_path)
+    except Exception:
+        pass
+
+
+def _start_phase2_watcher() -> None:
+    """
+    Start a daemon thread that polls phase2_pids.json every 30 s.
+    When a tracked PID exits it marks the corresponding experiment_queue.json
+    entry as 'complete' and clears the PID from phase2_pids.json.
+    Guard-flagged so it starts exactly once per Flask process.
+    """
+    if getattr(_start_phase2_watcher, "_started", False):
+        return
+    _start_phase2_watcher._started = True  # type: ignore[attr-defined]
+
+    import threading
+
+    def _watch() -> None:
+        while True:
+            time.sleep(30)
+            try:
+                import psutil as _ps
+            except ImportError:
+                continue
+            try:
+                pids = _load_phase2_pids()
+                dirty = False
+                for script_key, entry in list(pids.items()):
+                    pid = entry.get("pid")
+                    if not pid:
+                        continue
+                    try:
+                        alive = _ps.pid_exists(int(pid))
+                    except Exception:
+                        alive = True  # conservative — don't falsely mark complete
+                    if alive:
+                        _sync_phase2_progress(script_key)
+                    if not alive:
+                        _update_queue_for_phase2(
+                            script_key, 0,
+                            entry.get("started_at", ""),
+                            "complete",
+                        )
+                        pids[script_key] = {
+                            **entry,
+                            "pid": None,
+                            "completed_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        dirty = True
+                if dirty:
+                    _save_phase2_pids(pids)
+            except Exception:
+                pass
+
+    threading.Thread(target=_watch, daemon=True, name="phase2-watcher").start()
+
+
 @app.route("/api/phase2/status")
 def api_phase2_status():
-    """Return live status of all Phase 2 script processes."""
+    """Return live status of all Phase 2 script processes.
+    Also reconciles experiment_queue.json so the orchestrator always sees
+    the correct running state, and starts the background PID watcher.
+    """
+    _start_phase2_watcher()  # idempotent — one thread per Flask process
+
     try:
         import psutil as _ps
         has_psutil = True
@@ -4134,6 +4382,11 @@ def api_phase2_status():
             "alive": alive,
             "status": "running" if alive else ("complete" if entry.get("started_at") else "idle"),
         }
+        # Bridge: keep experiment_queue.json in sync with actual process state
+        if alive:
+            _update_queue_for_phase2(key, int(pid), entry.get("started_at", ""), "running")
+            _sync_phase2_progress(key)  # push checkpoint seeds_done into queue progress
+
     # Add idle entries for scripts not yet started
     for key in _PHASE2_SCRIPTS:
         if key not in results:
@@ -4157,7 +4410,7 @@ def api_phase2_launch():
     # Use Python 3.11 — only version with working CUDA PyTorch on this machine
     py_exec = Path(_PHASE2_PY) if Path(_PHASE2_PY).exists() else __import__("sys").executable
 
-    # Check if already running
+    # Guard 1: already running via Phase 2 panel
     pids = _load_phase2_pids()
     existing = pids.get(script_key, {})
     if existing.get("pid"):
@@ -4165,6 +4418,31 @@ def api_phase2_launch():
             import psutil as _ps
             if _ps.pid_exists(int(existing["pid"])):
                 return jsonify({"ok": False, "error": f"Already running (PID {existing['pid']}). Wait for it to finish."}), 409
+        except Exception:
+            pass
+
+    # Guard 2: any other Phase 2 script alive (GPU contention on GTX 1650 / 4 GB VRAM)
+    for other_key, other_entry in pids.items():
+        if other_key == script_key:
+            continue
+        other_pid = other_entry.get("pid")
+        if other_pid:
+            try:
+                import psutil as _ps
+                if _ps.pid_exists(int(other_pid)):
+                    return jsonify({"ok": False, "error": f"Another Phase 2 script is already running: {other_key} (PID {other_pid}). Only one GPU experiment at a time."}), 409
+            except Exception:
+                pass
+
+    # Guard 3: any experiment running via orchestrator in experiment_queue.json
+    queue_path = _WS / "tar_state" / "experiment_queue.json"
+    if queue_path.exists():
+        try:
+            q_data = json.loads(queue_path.read_text(encoding="utf-8"))
+            for exp in q_data.get("experiments", []):
+                if (exp.get("status") == "running" or exp.get("stage") == "running") \
+                        and int(exp.get("pid", 0) or 0) > 0:
+                    return jsonify({"ok": False, "error": f"Orchestrator experiment already running: {exp.get('name')}"}), 409
         except Exception:
             pass
 
@@ -4182,19 +4460,42 @@ def api_phase2_launch():
                 start_new_session=True,
             )
 
-        # Track PID
+        started_at = datetime.now(timezone.utc).isoformat()
+
+        # Track PID in phase2_pids.json
         pids[script_key] = {
             "pid": proc.pid,
             "script": _PHASE2_SCRIPTS[script_key],
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": started_at,
             "log_path": str(log_path),
             "python": str(py_exec),
         }
         _save_phase2_pids(pids)
 
+        # Bridge: mark matching experiment_queue.json entry as running
+        _update_queue_for_phase2(script_key, proc.pid, started_at, "running")
+
+        # Ensure watcher is alive to clean up when the process exits
+        _start_phase2_watcher()
+
         return jsonify({"ok": True, "pid": proc.pid, "script": _PHASE2_SCRIPTS[script_key], "log": str(log_path)})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/phase2/log/<key>")
+def api_phase2_log(key: str):
+    """Return the last 120 lines of a Phase 2 script log for live drawer tailing."""
+    if key not in _PHASE2_SCRIPTS:
+        return jsonify({"error": "Unknown key"}), 404
+    pids = _load_phase2_pids()
+    entry = pids.get(key, {})
+    log_path = Path(entry["log_path"]) if entry.get("log_path") else None
+    if not log_path or not log_path.exists():
+        log_path = _WS / "tar_state" / "logs" / f"phase2_{key}.log"
+    lines = _tail(log_path, 120) if log_path.exists() else ["(no log yet — script has not been launched)"]
+    mtime = datetime.fromtimestamp(log_path.stat().st_mtime).strftime("%H:%M:%S") if log_path.exists() else ""
+    return jsonify({"key": key, "lines": lines, "mtime": mtime, "path": str(log_path)})
 
 
 @app.route("/api/health")

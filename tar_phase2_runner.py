@@ -29,9 +29,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 _REPO = Path(__file__).resolve().parent
+_PY311 = Path(r"C:\Users\cgard\AppData\Local\Programs\Python\Python311\python.exe")
 _VENV_PYTHON = _REPO.parent / ".venv" / "Scripts" / "python.exe"
 if not _VENV_PYTHON.exists():
-    _VENV_PYTHON = Path(sys.executable)
+    # Python311 is the only env with working CUDA torch on this machine
+    _VENV_PYTHON = _PY311 if _PY311.exists() else Path(sys.executable)
 
 _TAR_STATE = Path(r"E:\TAR\Thermodynamic-Continual-Learning-delivered\tar_state")
 
