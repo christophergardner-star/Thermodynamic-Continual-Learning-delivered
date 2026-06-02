@@ -217,6 +217,7 @@ class ResearchDirector:
             active_research_paths,
             knowledge_domains,
         )
+        self._apply_answered_questions(frontier_directives, paper_directives)
         experiment_directives = self._build_experiment_directives(
             frontier_directives,
             paper_directives,
@@ -2363,6 +2364,39 @@ class ResearchDirector:
         if profile.get("runner_key"):
             exp_entry["runner_key"] = str(profile["runner_key"])
         return [exp_entry]
+
+    def _apply_answered_questions(
+        self,
+        frontier_directives: list[dict],
+        paper_directives: list[dict],
+    ) -> None:
+        """Apply human-answered questions as overrides on directive path_status and priority."""
+        from tar_lab.human_review import load_human_review_state
+        try:
+            state = load_human_review_state(self.workspace)
+        except Exception:
+            return
+        answered = [q for q in state.get("questions", []) if str(q.get("status", "")) == "answered"]
+        if not answered:
+            return
+        frontier_by_id = {str(d.get("problem_id", "")): d for d in frontier_directives}
+        paper_by_id = {str(d.get("paper_id", "")): d for d in paper_directives}
+        for q in answered:
+            qtype = str(q.get("question_type", ""))
+            answer = str(q.get("answer", ""))
+            fid = str(q.get("frontier_problem_id", ""))
+            if qtype == "scientific_scope" and fid in frontier_by_id:
+                if answer == "pause_this_frontier":
+                    frontier_by_id[fid]["path_status"] = "out_of_scope"
+                elif answer == "collect_more_external_evidence_first":
+                    if frontier_by_id[fid].get("path_status") == "active":
+                        frontier_by_id[fid]["path_status"] = "incubating"
+            elif qtype == "rerun_required":
+                qid = str(q.get("question_id", ""))
+                parts = qid.split(":")
+                paper_id = parts[2] if len(parts) >= 4 else ""
+                if paper_id and paper_id in paper_by_id and answer == "deprioritise_paper":
+                    paper_by_id[paper_id]["priority_score"] = 0.0
 
     def _build_experiment_directives(
         self,

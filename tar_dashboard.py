@@ -2385,12 +2385,6 @@ def api_human_review_answer(question_id: str):
             _director_state(force_refresh=True)
         except Exception:
             pass
-        try:
-            # Also try the explicit sync function if it exists
-            from tar_research_director import sync_human_review_from_director_state
-            sync_human_review_from_director_state(_WS)
-        except Exception:
-            pass
 
     import threading
     threading.Thread(target=_resync, daemon=True, name="hr-resync").start()
@@ -3851,6 +3845,190 @@ def api_llm_insights():
         "gap_signals": gap_signals,
         "available": bool(llm_insights or scheduler_rationale or gap_signals),
     })
+
+
+@app.route("/api/self_improvement")
+def api_self_improvement():
+    """Self-improvement pipeline state — cycle, delta, signals, anchor, adapter, hardware."""
+    import os, hashlib, torch
+    from pathlib import Path
+
+    si_dir = _WS / "tar_state" / "self_improvement"
+
+    # ── Cycle (latest) ──────────────────────────────────────
+    cycles_dir = si_dir / "cycles"
+    cycle = {}
+    if cycles_dir.exists():
+        cycle_files = sorted(cycles_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if cycle_files:
+            cycle = _jload(cycle_files[0]) or {}
+
+    # ── Delta (latest) ──────────────────────────────────────
+    deltas_dir = si_dir / "deltas"
+    delta = {}
+    if deltas_dir.exists():
+        delta_files = sorted(deltas_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if delta_files:
+            delta = _jload(delta_files[0]) or {}
+
+    # ── Signals summary ─────────────────────────────────────
+    signals_dir = si_dir / "signals"
+    signals_summary = {"total": 0, "by_kind": {}, "mean_quality": 0.0, "any_overclaim": False, "items": []}
+    if signals_dir.exists():
+        items = []
+        kinds: dict[str, int] = {}
+        quality_sum = 0.0
+        any_overclaim = False
+        for f in sorted(signals_dir.glob("*.json")):
+            sig = _jload(f) or {}
+            if not sig:
+                continue
+            kind = sig.get("kind", "unknown")
+            kinds[kind] = kinds.get(kind, 0) + 1
+            q = sig.get("quality_score", 0.0)
+            quality_sum += q
+            if sig.get("overclaim_present"):
+                any_overclaim = True
+            items.append({
+                "signal_id": sig.get("signal_id", f.stem),
+                "kind": kind,
+                "quality_score": q,
+                "overclaim_present": sig.get("overclaim_present", False),
+                "anchor_pack_overlap": sig.get("anchor_pack_overlap", False),
+                "created_at": sig.get("created_at", ""),
+            })
+        signals_summary = {
+            "total": len(items),
+            "by_kind": kinds,
+            "mean_quality": round(quality_sum / len(items), 3) if items else 0.0,
+            "any_overclaim": any_overclaim,
+            "items": items,
+        }
+
+    # ── Anchor manifest ─────────────────────────────────────
+    anchor_path = si_dir / "anchor_manifest.json"
+    anchor = _jload(anchor_path) or {}
+    anchor_integrity = False
+    if anchor:
+        try:
+            pack_path = _WS / anchor.get("pack_path", "")
+            run_manifest_path = pack_path / "run_manifest.json"
+            if run_manifest_path.exists():
+                content = run_manifest_path.read_bytes()
+                computed = hashlib.sha256(content).hexdigest()
+                anchor_integrity = (computed == anchor.get("run_manifest_hash_sha256", ""))
+        except Exception:
+            anchor_integrity = False
+    anchor["integrity_ok"] = anchor_integrity
+
+    # ── Adapter / serving ───────────────────────────────────
+    active_adapter = _jload(_WS / "tar_state" / "serving" / "active_adapter.json") or {}
+    serving = _jload(_WS / "tar_state" / "operator_serving.json") or {}
+    adapter_path_str = active_adapter.get("adapter_path", "")
+    files_exist = bool(adapter_path_str and (_WS / adapter_path_str).exists())
+    adapter_info = {
+        "retrain_id": active_adapter.get("retrain_id", ""),
+        "adapter_path": adapter_path_str,
+        "files_exist": files_exist,
+        "base_model": active_adapter.get("base_model_id", ""),
+        "deployed_at": active_adapter.get("deployed_at", ""),
+        "serving_mode": serving.get("mode", "base"),
+    }
+
+    # ── Hardware ────────────────────────────────────────────
+    required_vram = 14.0
+    try:
+        cuda_ok = torch.cuda.is_available()
+        if cuda_ok:
+            props = torch.cuda.get_device_properties(0)
+            vram_gb = round(props.total_memory / 1e9, 1)
+            gpu_name = torch.cuda.get_device_name(0)
+        else:
+            vram_gb, gpu_name = 0.0, "none"
+    except Exception:
+        cuda_ok, vram_gb, gpu_name = False, 0.0, "error"
+    watchdog_state = _jload(si_dir / "hardware_watchdog_state.json") or {}
+    hardware_info = {
+        "cuda_available": cuda_ok,
+        "gpu_name": gpu_name,
+        "vram_gb": vram_gb,
+        "required_vram_gb": required_vram,
+        "sufficient": cuda_ok and vram_gb >= required_vram,
+        "watchdog_fired": watchdog_state.get("fired", False),
+        "watchdog_last_check": watchdog_state.get("last_check", ""),
+    }
+
+    # ── Policy ──────────────────────────────────────────────
+    policy = {
+        "min_delta_signals": 20,
+        "min_diversity_score": 0.4,
+        "max_auto_cycles": 5,
+        "max_consecutive_gate_failures": 3,
+        "overclaim_hard_limit": 0.0,
+        "min_mean_score_floor": 0.4,
+    }
+
+    # ── Readiness summary ───────────────────────────────────
+    sig_ok = signals_summary["total"] >= policy["min_delta_signals"]
+    div_ok = (len(signals_summary["by_kind"]) / 5.0) >= policy["min_diversity_score"]
+    anch_ok = anchor_integrity
+    hw_ok = hardware_info["sufficient"]
+    blocker = None
+    if not sig_ok:
+        blocker = f"insufficient_signals ({signals_summary['total']}/{policy['min_delta_signals']})"
+    elif not div_ok:
+        blocker = f"insufficient_diversity ({len(signals_summary['by_kind'])} kinds, need 2+)"
+    elif not anch_ok:
+        blocker = "anchor_integrity_failed"
+    elif not hw_ok:
+        blocker = f"insufficient_vram ({hardware_info['vram_gb']}GB / {required_vram}GB required)"
+
+    # ── Active preregistration ───────────────────────────────
+    active_prereg = _jload(_WS / "tar_state" / "active_preregistration.json") or {}
+
+    return jsonify({
+        "cycle": cycle,
+        "delta": delta,
+        "signals": signals_summary,
+        "anchor": anchor,
+        "adapter": adapter_info,
+        "hardware": hardware_info,
+        "policy": policy,
+        "readiness": {
+            "signals_ok": sig_ok,
+            "diversity_ok": div_ok,
+            "anchor_ok": anch_ok,
+            "hardware_ok": hw_ok,
+            "can_train": sig_ok and div_ok and anch_ok and hw_ok,
+            "blocker": blocker,
+        },
+        "active_preregistration": active_prereg,
+    })
+
+
+@app.route("/api/self_improvement/dry_run", methods=["POST"])
+def api_self_improvement_dry_run():
+    """Trigger a dry-run of the Cycle 2 launcher (no GPU needed)."""
+    import subprocess, sys
+    launcher = _WS / ".." / "run_self_improvement_cycle2.py"
+    # Try delivered dir first
+    launcher2 = _WS / "run_self_improvement_cycle2.py"
+    script = launcher2 if launcher2.exists() else launcher
+    if not script.exists():
+        return jsonify({"ok": False, "error": "launcher script not found"}), 404
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), "--dry-run"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return jsonify({
+            "ok": result.returncode == 0,
+            "exit_code": result.returncode,
+            "stdout": result.stdout[-3000:],
+            "stderr": result.stderr[-1000:],
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 def _build_tar_intelligence_context() -> str:
