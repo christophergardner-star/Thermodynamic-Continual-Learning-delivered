@@ -2437,6 +2437,33 @@ def api_coordination():
     })
 
 
+@app.route("/api/literature/refresh", methods=["POST"])
+def api_literature_refresh():
+    """Trigger a fast literature ingestion cycle in a background thread."""
+    import threading
+
+    def _run() -> None:
+        try:
+            from tar_evidence_ingest import ExternalEvidenceIngestor
+            ingestor = ExternalEvidenceIngestor(_WS)
+            ingestor.run_once(force=True, cycle="fast")
+        except Exception as exc:
+            pass  # errors visible in literature state file
+
+    if getattr(api_literature_refresh, "_running", False):
+        return jsonify({"ok": False, "error": "Refresh already in progress"}), 409
+    api_literature_refresh._running = True  # type: ignore[attr-defined]
+
+    def _wrap():
+        try:
+            _run()
+        finally:
+            api_literature_refresh._running = False  # type: ignore[attr-defined]
+
+    threading.Thread(target=_wrap, daemon=True, name="lit-refresh").start()
+    return jsonify({"ok": True, "message": "Fast literature sync started in background (~30s)"})
+
+
 @app.route("/api/literature")
 def api_literature():
     payload = _jload(_WS / "tar_state" / "literature" / "evidence_ingest_state.json") or {}
