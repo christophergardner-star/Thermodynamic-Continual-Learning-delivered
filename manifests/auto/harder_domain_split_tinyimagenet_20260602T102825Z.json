@@ -1,0 +1,31 @@
+{
+  "authorised_by": "TAR Director (autonomous)",
+  "content_hash": "2164a29d56753cd29659f5cdc7ee96f634656a984230294f33cb4f60f2df9529",
+  "created_at": "2026-06-02T10:28:25.712398+00:00",
+  "experiments": [
+    {
+      "allowed_datasets": [
+        "split_tinyimagenet"
+      ],
+      "allowed_methods": [
+        "tcl"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1,
+        2,
+        3
+      ],
+      "experiment_id": "harder_domain_split_tinyimagenet",
+      "name": "Low-tuning continual learning on realistic domain shift (split TinyImageNet)",
+      "notes": "Auto-generated manifest for autonomous run. Spec description: This experiment tests a variant of the Thermodynamic Continual Learning mechanism on Split-TinyImageNet. The goal is to measure whether the proposed change to the thermal regime controller improves the plasticity-stability trade-off compared to the pre-registered TCL baseline.",
+      "run_limit": 1,
+      "time_limit_h": 12.0
+    }
+  ],
+  "global_time_limit_h": 16.0,
+  "manifest_id": "manifest-auto-harder_domain_split_tinyimagenet-20260602T102825Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "purpose": "Autonomously generated manifest for experiment 'harder_domain_split_tinyimagenet' (Low-tuning continual learning on realistic domain shift (split TinyImageNet)). Project: harder_domain_split_tinyimagenet-tinyimagenet-v1. Dataset: split_tinyimagenet, method: tcl, seeds: [42, 0, 1, 2, 3]."
+}
