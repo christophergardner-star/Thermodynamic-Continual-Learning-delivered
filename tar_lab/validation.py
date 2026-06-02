@@ -17,6 +17,10 @@ from tar_lab.result_artifacts import (
 from tar_lab.runtime_ledger import find_runtime_conflicts
 
 
+class PreRegistrationMissingError(Exception):
+    """Raised when a confirmatory experiment lacks a pre-registration record."""
+
+
 TRUST_TRUSTED_RERUN = "trusted_rerun_with_env"
 TRUST_TRUSTED_MANUAL = "trusted_manual_controlled"
 TRUST_CORRECTED_INTERNAL = "corrected_recomputation_no_env"
@@ -123,6 +127,59 @@ def _has_invalid_number(value: Any) -> bool:
     if isinstance(value, (list, tuple)):
         return any(_has_invalid_number(v) for v in value)
     return False
+
+
+def _check_gate_4_preregistration(
+    workspace: Path,
+    experiment_id: str,
+    *,
+    trust_tier: str,
+) -> None:
+    """
+    Gate 4: Confirmatory experiments must have a pre-registration record
+    committed to git before data collection began.
+
+    Only enforced for trust_tier='trusted_rerun' or higher. Exploration-grade
+    experiments (smoke, pilot) are exempt.
+
+    Reference: Nosek et al. (2018) "The preregistration revolution"
+    """
+    EXEMPT_TIERS = {"smoke_only", "exploration_grade", "legacy_pre_rail"}
+    if trust_tier in EXEMPT_TIERS:
+        return  # Exempt tiers do not require pre-registration
+
+    # Look for pre-registration record in tar_state/autonomous_research/preregistration.json
+    # OR in tar_state/preregistrations/{experiment_id}.json
+    prereg_paths = [
+        workspace / "tar_state" / "preregistrations" / f"{experiment_id}.json",
+        workspace / "tar_state" / "autonomous_research" / "preregistration.json",
+    ]
+
+    for path in prereg_paths:
+        if path.exists():
+            try:
+                import json as _json
+                data = _json.loads(path.read_text(encoding="utf-8"))
+                # Handle both single record and dict of records
+                if isinstance(data, dict):
+                    if data.get("experiment_id") == experiment_id:
+                        return  # Found valid pre-registration
+                    # Check if it's a registry dict
+                    if experiment_id in data:
+                        return
+                elif isinstance(data, list):
+                    if any(r.get("experiment_id") == experiment_id for r in data):
+                        return
+            except Exception:
+                pass
+
+    # Not found — raise gate failure
+    raise PreRegistrationMissingError(
+        f"Gate 4 failed: experiment '{experiment_id}' has no pre-registration record. "
+        f"Trust tier '{trust_tier}' requires pre-registration before data collection. "
+        f"Create tar_state/preregistrations/{experiment_id}.json with a PreRegistrationRecord "
+        f"and commit it to git BEFORE running this experiment."
+    )
 
 
 def validate_execution_request(
@@ -280,6 +337,20 @@ def validate_result_artifact(
                 seed_count = len(seeds) if isinstance(seeds, (list, dict)) else 0
         if seed_count < 5:
             issues.append(f"insufficient_seeds_for_publication: {seed_count} < 5")
+    # Gate 4: pre-registration check for confirmatory experiments.
+    experiment_id = str(trust.get("logical_name", "") or "")
+    preregistration_gate_checked = bool(experiment_id)
+    preregistration_gate_passed = False
+    if preregistration_gate_checked:
+        try:
+            _check_gate_4_preregistration(
+                workspace,
+                experiment_id,
+                trust_tier=str(trust.get("trust_tier", "") or ""),
+            )
+            preregistration_gate_passed = True
+        except PreRegistrationMissingError as exc:
+            issues.append(f"preregistration_missing: {exc}")
     return {
         "schema": "tar_result_validation_v1",
         "validated_at": _now_iso(),
@@ -293,6 +364,8 @@ def validate_result_artifact(
             "numbers_sane": "invalid_number_detected_nan_or_inf" not in issues,
             "publication_allowed": bool(trust["publication_allowed"]),
         },
+        "preregistration_gate_checked": preregistration_gate_checked,
+        "preregistration_gate_passed": preregistration_gate_passed,
         "issues": issues,
         "ok": not issues,
     }

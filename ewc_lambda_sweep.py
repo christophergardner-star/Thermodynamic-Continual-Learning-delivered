@@ -120,21 +120,29 @@ else:
 
 # ── statistical helpers ───────────────────────────────────────────────────────
 def mann_whitney_u(a, b):
-    na, nb = len(a), len(b)
-    u = sum(1 for x in a for y in b if x < y) + 0.5 * sum(1 for x in a for y in b if x == y)
-    mu = na * nb / 2
-    su = max(((na * nb * (na + nb + 1)) / 12) ** 0.5, 1e-8)
-    z  = (u - mu) / su
-    p  = float(2 * (1 - 0.5 * (1 + math.erf(abs(z) / math.sqrt(2)))))
-    return float(u), float(p)
+    """Mann-Whitney U via stat_utils (scipy mannwhitneyu); erf fallback preserved."""
+    try:
+        from tar_lab.stat_utils import compare_methods_independent
+        result = compare_methods_independent(a, b, alternative='less')
+        return result.statistic_nonparametric, result.p_nonparametric
+    except Exception:
+        # Fallback: original erf-based implementation
+        na, nb = len(a), len(b)
+        u = sum(1 for x in a for y in b if x < y) + 0.5 * sum(1 for x in a for y in b if x == y)
+        mu = na * nb / 2
+        su = max(((na * nb * (na + nb + 1)) / 12) ** 0.5, 1e-8)
+        z  = (u - mu) / su
+        p  = float(2 * (1 - 0.5 * (1 + math.erf(abs(z) / math.sqrt(2)))))
+        return float(u), float(p)
 
 def cohens_d(a, b):
     na, nb = len(a), len(b)
+    if na < 2 or nb < 2: return 0.0
     ma, mb = mean(a), mean(b)
-    va = sum((x - ma) ** 2 for x in a) / max(na - 1, 1)
-    vb = sum((x - mb) ** 2 for x in b) / max(nb - 1, 1)
+    va = sum((x - ma) ** 2 for x in a) / (na - 1)
+    vb = sum((x - mb) ** 2 for x in b) / (nb - 1)
     pooled = math.sqrt(((na - 1) * va + (nb - 1) * vb) / max(na + nb - 2, 1))
-    return (ma - mb) / max(pooled, 1e-8)
+    return (ma - mb) / max(pooled, 1e-12)
 
 PRIMARY = "mean_forgetting"
 METHODS = ["tcl", "ewc", "si", "sgd_baseline"]
@@ -198,6 +206,18 @@ for m in METHODS:
     accs = [canonical[(m, s)]["final_mean_accuracy"] for s in SEEDS if (m, s) in canonical]
     print(f"  {m} (n={len(vals)}): forgetting={mean(vals):.4f}±{std(vals):.4f}  acc={mean(accs):.4f}")
 
+# ── Bonferroni correction over pairwise p-values ──────────────────────────────
+bonferroni_results = {}
+try:
+    from tar_lab.stat_utils import bonferroni_correct as _bonferroni_correct
+    _p_vals = list(pairwise_pvalues.values())
+    _p_keys = list(pairwise_pvalues.keys())
+    if _p_vals:
+        _bc = _bonferroni_correct(_p_vals, alpha=0.05)
+        bonferroni_results = dict(zip(_p_keys, _bc.significant))
+except Exception:
+    pass
+
 # ── write sweep result ────────────────────────────────────────────────────────
 result_id = uuid4().hex
 sweep_out = Path(workspace) / "tar_state" / "comparisons" / f"lambda_sweep_{result_id}.json"
@@ -219,6 +239,7 @@ sweep_data = {
     "method_stds": method_stds,
     "pairwise_pvalues": pairwise_pvalues,
     "pairwise_effect_sizes": pairwise_effect_sizes,
+    "bonferroni_significant": bonferroni_results,
     "tcl_is_significantly_better": tcl_better,
     "tcl_is_significantly_worse": tcl_worse,
     "honest_assessment": honest_assessment,

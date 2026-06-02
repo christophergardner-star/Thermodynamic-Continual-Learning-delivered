@@ -2016,6 +2016,46 @@ class LiveDockerTestReport(StrictModel):
     error: Optional[str] = None
 
 
+class PreRegistrationRecord(StrictModel):
+    """
+    Pre-registration document for a confirmatory experiment.
+
+    Must be committed to git BEFORE the manifest is generated and data
+    collection begins. Any post-hoc change requires a documented amendment
+    commit. Pre-registration prevents selective inference by fixing the
+    analysis plan in advance.
+
+    Reference: Nosek et al. (2018) "The preregistration revolution"
+    PNAS 115(11):2600-2606.
+    """
+    experiment_id: str = Field(..., description="Must match the experiment's ExperimentSpec.id")
+    registered_at: str = Field(..., description="ISO 8601 timestamp, committed BEFORE data collection")
+    hypothesis: str = Field(..., description="Precise, falsifiable, one-directional statement")
+    primary_outcome: str = Field(..., description="'mean_forgetting' | 'mean_accuracy' | 'both'")
+    min_detectable_effect_d: float = Field(..., gt=0.0, description="Pre-specified MDE, not observed")
+    required_seeds: int = Field(..., ge=3, description="From power analysis at target power")
+    alpha: float = Field(default=0.05, gt=0.0, lt=1.0)
+    power_target: float = Field(default=0.80, gt=0.0, lt=1.0)
+    test_type: str = Field(
+        default="wilcoxon_signed_rank",
+        description="'wilcoxon_signed_rank' | 'mann_whitney_u' | 'paired_t_test'"
+    )
+    comparison_direction: str = Field(
+        default="less",
+        description="'less' (TCL < comparator, i.e. TCL has lower forgetting)"
+    )
+    stopping_rule: str = Field(..., description="What constitutes a null result")
+    bonferroni_k: int = Field(default=1, ge=1, description="Number of simultaneous comparisons")
+    amendment_log: List[str] = Field(
+        default_factory=list,
+        description="Timestamped notes for any post-registration changes"
+    )
+
+    @property
+    def bonferroni_threshold(self) -> float:
+        return self.alpha / self.bonferroni_k
+
+
 class ExperimentBackendSpec(StrictModel):
     backend_id: str
     summary: str

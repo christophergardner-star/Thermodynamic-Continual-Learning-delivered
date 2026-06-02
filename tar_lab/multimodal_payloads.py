@@ -616,12 +616,30 @@ def _jaf(accuracy: float, forgetting: float) -> float:
 
 
 def _paired_t_stats(values: list[float]) -> tuple[float, float, float]:
+    """
+    Returns (t_stat, p_value, effect_size).
+
+    Primary path: stat_utils.compare_methods_paired (Wilcoxon non-parametric +
+    paired t-test; t-distribution CI on deltas). The returned p_value is the
+    *parametric* t-test p-value to preserve the existing API contract for callers.
+
+    Fallback: original scipy.stats.ttest_1samp then pure-Python normal approximation.
+    """
     deltas = list(values)
     if not deltas:
         return 0.0, 1.0, 0.0
     try:
+        from tar_lab.stat_utils import compare_methods_paired as _cmp_paired
+        a = deltas
+        b = [0.0] * len(a)
+        _res = _cmp_paired(a, b, alternative='less')
+        effect_size = abs(_res.cohens_d)
+        # Return parametric p-value to keep existing API (callers expect ttest p)
+        return _res.statistic_parametric, _res.p_parametric, effect_size
+    except Exception:
+        pass
+    try:
         from scipy import stats as _scipy_stats
-
         t_stat, p_value = _scipy_stats.ttest_1samp(deltas, 0.0)
         effect_size = abs(_mean(deltas)) / max(_std(deltas), 1e-12)
         return float(t_stat), float(p_value), float(effect_size)
@@ -632,7 +650,7 @@ def _paired_t_stats(values: list[float]) -> tuple[float, float, float]:
             return 0.0, 1.0 if abs(mean_delta) <= 1e-12 else 0.0, 0.0
         stderr = sample_std / math.sqrt(max(len(deltas), 1))
         t_stat = mean_delta / max(stderr, 1e-12)
-        # Normal approximation fallback.
+        # t-distribution CI fallback (normal approximation for p-value only).
         p_value = 2.0 * (1.0 - 0.5 * (1.0 + math.erf(abs(t_stat) / math.sqrt(2.0))))
         effect_size = abs(mean_delta) / max(sample_std, 1e-12)
         return float(t_stat), float(p_value), float(effect_size)

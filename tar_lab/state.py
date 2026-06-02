@@ -148,6 +148,7 @@ class TARStateStore:
         self.alerts_path = self.state_dir / "alerts.jsonl"
         self.runtime_heartbeat_path = self.state_dir / "runtime_heartbeat.json"
         self.manifests_dir = self.state_dir / "manifests"
+        self.preregistrations_dir = self.state_dir / "preregistrations"
         self.metrics_log_path = self.logs_dir / "thermo_metrics.jsonl"
         self.audit_log_path = self.logs_dir / "activity_audit.log"
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -164,6 +165,7 @@ class TARStateStore:
         self.build_attestations_dir.mkdir(parents=True, exist_ok=True)
         self.literature_dir.mkdir(parents=True, exist_ok=True)
         self.literature_manifests_dir.mkdir(parents=True, exist_ok=True)
+        self.preregistrations_dir.mkdir(parents=True, exist_ok=True)
         self._lock: threading.RLock = threading.RLock()
 
     def _atomic_write_text(self, path: Path, content: str) -> None:

@@ -228,6 +228,156 @@ def _compute_forgetting(acc_matrix: list[list[float]]) -> float:
         forgetting.append(max(0.0, peak - final))
     return sum(forgetting) / len(forgetting) if forgetting else 0.0
 
+
+def compute_transfer_metrics(
+    acc_matrix: list[list[float]],
+    random_baseline: float = 0.1,
+) -> dict:
+    """
+    Compute backward transfer (BWT), forward transfer (FWT), and intransigence
+    index from the accuracy matrix.
+
+    Storage convention (ragged upper-triangular):
+      acc_matrix[t] has (T - t) entries.
+      acc_matrix[t][0]  = accuracy of task t immediately after training it  (diagonal).
+      acc_matrix[t][-1] = accuracy of task t after all T tasks are trained  (final column).
+
+    BWT  — Lopez-Paz & Ranzato (2017):
+      BWT = (1/(T-1)) * sum_{t=0}^{T-2} (final_t - diag_t)
+      Negative BWT indicates catastrophic forgetting.
+
+    FWT  — Lopez-Paz & Ranzato (2017):
+      FWT = (1/T) * sum_{t=0}^{T-1} (diag_t - random_baseline)
+
+    Intransigence Index — Chaudhry et al. (2018):
+      Fraction of tasks 0..T-2 with > 5 % forgetting at the end of training.
+
+    Parameters
+    ----------
+    acc_matrix      : ragged list as produced by _run_one_seed
+    random_baseline : expected accuracy of a random classifier (default 0.1 for
+                      10-class tasks; adjust for other class counts)
+
+    Returns
+    -------
+    dict with keys: bwt, fwt, intransigence_index, forgetting_per_task, n_tasks
+    """
+    T = len(acc_matrix)
+    _zero = {
+        "bwt": 0.0,
+        "fwt": 0.0,
+        "intransigence_index": 0.0,
+        "forgetting_per_task": [],
+        "n_tasks": T,
+    }
+    if T < 2:
+        return _zero
+
+    # Diagonal: acc_matrix[t][0] — accuracy right after training task t
+    # Final col: acc_matrix[t][-1] — accuracy after all tasks
+    diag  = [acc_matrix[t][0]  for t in range(T)]
+    final = [acc_matrix[t][-1] for t in range(T)]
+
+    # BWT: average over tasks 0..T-2 (exclude the last task — no subsequent tasks)
+    bwt_terms = [final[t] - diag[t] for t in range(T - 1)]
+    bwt = sum(bwt_terms) / (T - 1)
+
+    # FWT: average over all tasks
+    fwt_terms = [diag[t] - random_baseline for t in range(T)]
+    fwt = sum(fwt_terms) / T
+
+    # Forgetting per task (0..T-2) — non-negative
+    forgetting_per_task = [max(0.0, diag[t] - final[t]) for t in range(T - 1)]
+
+    # Intransigence index: fraction of old tasks with > 5 % forgetting
+    n_old = len(forgetting_per_task)
+    intransigence_index = (
+        sum(1 for f in forgetting_per_task if f > 0.05) / max(n_old, 1)
+    )
+
+    return {
+        "bwt":                round(bwt, 4),
+        "fwt":                round(fwt, 4),
+        "intransigence_index": round(intransigence_index, 4),
+        "forgetting_per_task": [round(f, 4) for f in forgetting_per_task],
+        "n_tasks":             T,
+    }
+
+
+@torch.no_grad()
+def compute_per_task_ece(
+    model: nn.Module,
+    task_test_loaders: list,
+    device: torch.device,
+    trained_up_to_task: int,
+    n_bins: int = 15,
+) -> list[float]:
+    """
+    Compute Expected Calibration Error (ECE) for each task seen so far.
+
+    ECE = sum_b |acc_b - conf_b| * |B_b| / N
+    where B_b is the set of samples whose max-softmax confidence falls in bin b.
+
+    Reference: Guo et al. (2017) "On Calibration of Modern Neural Networks".
+
+    Parameters
+    ----------
+    model               : trained nn.Module
+    task_test_loaders   : list of DataLoader, one per task
+    device              : torch.device
+    trained_up_to_task  : evaluate tasks 0..trained_up_to_task (inclusive)
+    n_bins              : number of uniform confidence bins over [0, 1]
+
+    Returns
+    -------
+    list of ECE floats (rounded to 4 dp), one entry per evaluated task
+    """
+    model.eval()
+    ece_list: list[float] = []
+    bin_edges = [k / n_bins for k in range(n_bins + 1)]  # n_bins+1 boundaries
+
+    for task_idx in range(trained_up_to_task + 1):
+        loader = task_test_loaders[task_idx]
+        all_conf:    list[float] = []
+        all_correct: list[bool]  = []
+
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            logits = model(x)                             # (B, C)
+            probs  = F.softmax(logits, dim=-1)            # (B, C)
+            conf, pred = probs.max(dim=-1)                # (B,), (B,)
+            correct = (pred == y)                         # (B,) bool
+
+            all_conf.extend(conf.cpu().tolist())
+            all_correct.extend(correct.cpu().tolist())
+
+        N = len(all_conf)
+        if N == 0:
+            ece_list.append(0.0)
+            continue
+
+        ece = 0.0
+        for b in range(n_bins):
+            lo, hi = bin_edges[b], bin_edges[b + 1]
+            # Include upper bound only for the last bin to avoid missing samples
+            # with confidence exactly 1.0
+            if b < n_bins - 1:
+                in_bin = [i for i in range(N) if lo <= all_conf[i] < hi]
+            else:
+                in_bin = [i for i in range(N) if lo <= all_conf[i] <= hi]
+
+            if not in_bin:
+                continue
+
+            acc_b  = sum(all_correct[i] for i in in_bin) / len(in_bin)
+            conf_b = sum(all_conf[i]    for i in in_bin) / len(in_bin)
+            ece   += abs(acc_b - conf_b) * len(in_bin) / N
+
+        ece_list.append(round(ece, 4))
+
+    model.train()
+    return ece_list
+
 # ---------------------------------------------------------------------------
 # Single-seed training
 # ---------------------------------------------------------------------------
@@ -306,11 +456,27 @@ def _run_one_seed(
     final_accs = [acc_matrix[t][-1] for t in range(n_tasks) if acc_matrix[t]]
     mean_accuracy = sum(final_accs) / len(final_accs) if final_accs else 0.0
 
+    # --- NEW: transfer metrics and ECE ---
+    transfer_metrics = compute_transfer_metrics(acc_matrix)
+    ece_trajectory = compute_per_task_ece(
+        model,
+        task_test_loaders,
+        device,
+        trained_up_to_task=len(task_test_loaders) - 1,
+    )
+
     return {
         "mean_forgetting":     mean_forgetting,
         "mean_accuracy":       mean_accuracy,
         "final_accs_per_task": final_accs,
         "acc_matrix":          [list(row) for row in acc_matrix],
+        # Transfer metrics (Lopez-Paz & Ranzato 2017; Chaudhry et al. 2018)
+        "bwt":                 transfer_metrics["bwt"],
+        "fwt":                 transfer_metrics["fwt"],
+        "intransigence_index": transfer_metrics["intransigence_index"],
+        "forgetting_per_task": transfer_metrics["forgetting_per_task"],
+        # Calibration trajectory — ECE per task after final training
+        "ece_trajectory":      ece_trajectory,
     }
 
 # ---------------------------------------------------------------------------
@@ -405,9 +571,16 @@ def run_generic_benchmark(
         forgetting_list.append(res["mean_forgetting"])
         accuracy_list.append(res["mean_accuracy"])
         seed_results.append({
-            "seed":      seed,
-            "forgetting": res["mean_forgetting"],
-            "accuracy":  res["mean_accuracy"],
+            "seed":                seed,
+            "forgetting":          res["mean_forgetting"],
+            "accuracy":            res["mean_accuracy"],
+            # Transfer metrics
+            "bwt":                 res["bwt"],
+            "fwt":                 res["fwt"],
+            "intransigence_index": res["intransigence_index"],
+            "forgetting_per_task": res["forgetting_per_task"],
+            # Calibration
+            "ece_trajectory":      res["ece_trajectory"],
         })
 
         log_fn(

@@ -3,6 +3,12 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Iterable, Optional
 
+try:
+    from tar_lab.stat_utils import compute_ci95 as _compute_ci95, bonferroni_correct as _bonferroni_correct
+except ImportError:
+    _compute_ci95 = None
+    _bonferroni_correct = None
+
 from tar_lab.schemas import (
     BenchmarkExecutionStatisticalSummary,
     BenchmarkMetricStatistic,
@@ -67,10 +73,22 @@ def build_benchmark_statistical_summary(
         mean = float(metrics[primary_metric])
         ci95_low = None
         ci95_high = None
+        _ci_method = None
         if std_dev is not None and sample_count > 1:
-            margin = 1.96 * (std_dev / math.sqrt(sample_count))
+            # Use t-distribution critical value (correct for small n) instead of z=1.96.
+            # Raw values list is not available at this call site; only mean/std/n.
+            try:
+                from scipy.stats import t as _t_sc
+                df = sample_count - 1
+                t_crit = float(_t_sc.ppf(0.975, df=df)) if df > 0 else 1.96
+            except ImportError:
+                t_crit = 1.96
+            margin = t_crit * (std_dev / math.sqrt(sample_count))
             ci95_low = mean - margin
             ci95_high = mean + margin
+            _ci_method = "t_distribution"
+        if _ci_method is not None:
+            notes.append(f"ci_method={_ci_method} (df={sample_count - 1})")
         metric_summaries.append(
             BenchmarkMetricStatistic(
                 metric_name=primary_metric,

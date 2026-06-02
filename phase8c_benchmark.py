@@ -21,24 +21,30 @@ EPOCHS = 15
 
 def mean(v):   return sum(v) / len(v)
 def std(v):
+    n = len(v)
+    if n < 2: return 0.0
     m = mean(v)
-    return math.sqrt(sum((x - m) ** 2 for x in v) / max(len(v) - 1, 1))
+    return math.sqrt(sum((x - m)**2 for x in v) / (n - 1))  # ddof=1
 
 
-# ── paired t-test (one-sample t on deltas) ────────────────────────────────────
-def paired_t(deltas):
-    n = len(deltas)
-    m = mean(deltas)
-    s = std(deltas)
-    if s < 1e-12 or n < 2:
-        return float("nan"), float("nan")
-    t = m / (s / math.sqrt(n))
+# ── paired test: t + Wilcoxon signed-rank via stat_utils ─────────────────────
+def paired_test(deltas):
+    """Returns (t_stat, p_t, wilcoxon_stat, p_wilcoxon) via stat_utils."""
     try:
-        from scipy import stats as _stats
-        p = float(_stats.ttest_1samp(deltas, 0).pvalue)
-    except ImportError:
-        p = float("nan")
-    return t, p
+        from tar_lab.stat_utils import compare_methods_paired
+        a = deltas  # paired differences vs 0
+        b = [0.0] * len(a)
+        result = compare_methods_paired(a, b, alternative='less')
+        return (result.statistic_parametric, result.p_parametric,
+                result.statistic_nonparametric, result.p_nonparametric)
+    except Exception:
+        # Fallback to original scipy
+        import scipy.stats as sc
+        try:
+            t, p = sc.ttest_1samp(deltas, 0, alternative='less')
+        except TypeError:
+            t, p = sc.ttest_1samp(deltas, 0)
+        return t, p, None, None
 
 
 def cohens_d(deltas):
@@ -84,7 +90,9 @@ tcl_acc   = [r["tcl_acc"] for r in results]
 sgd_acc   = [r["sgd_acc"] for r in results]
 
 mean_delta = mean(deltas)
-t_stat, p_val = paired_t(deltas)
+t_stat, p_val_parametric, wilcoxon_stat, p_val_nonparametric = paired_test(deltas)
+# Primary p-value: nonparametric (Wilcoxon) when available, t-test otherwise
+p_val = p_val_nonparametric if p_val_nonparametric is not None else p_val_parametric
 d_stat = cohens_d(deltas)
 n_tcl_better = sum(1 for d in deltas if d < 0)
 
@@ -134,21 +142,36 @@ print(f"\n{verdict}")
 # ── write result ──────────────────────────────────────────────────────────────
 out = Path(workspace) / "tar_state" / "comparisons" / "phase8c_benchmark.json"
 out.parent.mkdir(parents=True, exist_ok=True)
+_aggregate = {
+    "mean_delta":            mean_delta,
+    "t_stat":                t_stat,
+    "p_val":                 p_val,
+    "p_val_parametric":      p_val_parametric,
+    "p_val_nonparametric":   p_val_nonparametric,
+    "wilcoxon_stat":         wilcoxon_stat,
+    "cohens_d":              d_stat,
+    "n_tcl_better":          n_tcl_better,
+    "tcl_forgetting_mean":   mean(tcl_forg),
+    "tcl_forgetting_std":    std(tcl_forg),
+    "sgd_forgetting_mean":   mean(sgd_forg),
+    "sgd_forgetting_std":    std(sgd_forg),
+}
+try:
+    from tar_lab.stat_utils import bayesian_evidence as _bayesian_evidence
+    _bev = _bayesian_evidence(deltas)
+    _aggregate["bayesian_p_tcl_better"] = _bev.posterior_p_better
+    _aggregate["bayesian_mean_delta"]   = _bev.posterior_mean_delta
+    _aggregate["bayesian_ci95_low"]     = _bev.credible_interval_95[0]
+    _aggregate["bayesian_ci95_high"]    = _bev.credible_interval_95[1]
+    _aggregate["bayesian_interpretation"] = _bev.interpretation
+except Exception:
+    pass
+
 out.write_text(json.dumps({
     "seeds":       SEEDS,
     "epochs":      EPOCHS,
     "results":     results,
-    "aggregate": {
-        "mean_delta":  mean_delta,
-        "t_stat":      t_stat,
-        "p_val":       p_val,
-        "cohens_d":    d_stat,
-        "n_tcl_better": n_tcl_better,
-        "tcl_forgetting_mean": mean(tcl_forg),
-        "tcl_forgetting_std":  std(tcl_forg),
-        "sgd_forgetting_mean": mean(sgd_forg),
-        "sgd_forgetting_std":  std(sgd_forg),
-    },
+    "aggregate":   _aggregate,
     "verdict": verdict,
     "completed_at": datetime.utcnow().isoformat(),
 }, indent=2, default=str))
