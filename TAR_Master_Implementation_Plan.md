@@ -3298,4 +3298,261 @@ Format: JSON with fields: hypothesis, design, expected_effect_size, novelty_just
 
 ---
 
-*Stage 5 complete — Phases 7, 8, and 9 with 29 tasks (7.1–7.13, 8.1–8.5, 9.1–9.5)*
+---
+
+## PHASE 10 — LONG-TERM PROGRAMME (6–18 months)
+**Duration:** Ongoing — begins after Paper 1 submission
+**Track:** All tracks
+**Owner:** Lead Researcher
+**Objective:** Leverage the corrected TAR infrastructure and the scientific credibility from Paper 1 to pursue two additional high-impact papers and a substantially upgraded autonomous system.
+
+---
+
+### Task 10.1 — Prototype TCL-for-LLMs (Paper 2)
+
+**Priority:** HIGH — this is the genuinely novel second contribution
+
+ASC (Adversarial Self-Consistency) is not novel as a standalone contribution — it rediscovers Mean Teacher. But the combination of TCL's gradient-EMA importance weighting with ASC's EMA target creates a genuinely new method: task-aware continual fine-tuning for language models.
+
+**Architecture:**
+
+```python
+class TCLforLLMs:
+    """
+    Task-aware continual fine-tuning for language models.
+    Combines TCL gradient-EMA importance with ASC EMA target anchor.
+    
+    Key insight: ASC's EMA target model provides a natural anchor for
+    TCL's importance weighting — the frozen EMA target IS the task-T reference.
+    """
+    def __init__(self, model: nn.Module, ema_beta: float = 0.99,
+                 lambda_tcl: float = 1.0):
+        self.model = model
+        # EMA target (from ASC) serves as the importance anchor
+        self.ema_target = copy.deepcopy(model)
+        self.importance = ThermalImportance(model, ema_beta=ema_beta)
+        self.memory = ThermalMemory(max_tasks=5)
+        self.regularizer = TCLRegularizer(self.memory, lambda_tcl=lambda_tcl)
+    
+    def fine_tune_task(self, task_id: int, loader, criterion, epochs: int = 3):
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=2e-5)
+        for epoch in range(epochs):
+            for x, y in loader:
+                optimizer.zero_grad()
+                # Task loss
+                task_loss = criterion(self.model(x), y)
+                task_loss.backward()
+                self.importance.accumulate(self.model)
+                # Forgetting protection (from TCL)
+                reg_loss = self.regularizer.penalty(self.model)
+                if self.memory.num_tasks > 0:
+                    reg_loss.backward()
+                optimizer.step()
+                # Update EMA target (from ASC)
+                self._update_ema_target()
+        # Commit: EMA target becomes the anchor for next task
+        self.memory.commit(self.model, self.importance, task_id)
+```
+
+**Target benchmarks:** Sequential fine-tuning on WikiText-103 domain splits (3–5 sequential domains). Comparison: full fine-tuning (catastrophic forgetting), LoRA only, LoRA + EWC, LoRA + TCL-for-LLMs. Primary metric: forgetting of domain-1 perplexity after fine-tuning on domain-5.
+
+**Target venue:** NeurIPS 2027 or ICML 2027. Target paper length: 8 pages.
+
+**Verification:** Prototype produces non-trivial results (TCL-for-LLMs forgetting < full fine-tuning) on a 3-domain WikiText split. Code committed to `feature/tcl-llms` branch.
+
+---
+
+### Task 10.2 — Execute Paper 2 experimental programme
+
+**Priority:** MEDIUM — begins after Paper 1 is submitted
+
+Following the same rigorous framework from the master plan:
+- Pre-register hypotheses (Task 1.4 framework)
+- Power analysis before committing seed count (Task 1.3 / 4.11 framework)
+- Fair joint hyperparameter tuning on held-out split
+- All baselines: full fine-tuning, LoRA, LoRA + EWC, LoRA + SI, LoRA + DER++ (replay), LoRA + TCL-for-LLMs
+- BWT, FWT, per-domain perplexity trajectory (analogues of Task 1.8/1.9 for LLMs)
+- Bayesian credible intervals
+
+**Note:** Paper 2 inherits the full statistical and evaluation rigour from Phase 1 of this plan. No shortcuts.
+
+**Verification:** `honest_evidence_inventory.json` has Paper 2 entries with all fields populated.
+
+---
+
+### Task 10.3 — Execute Paper 3: TAR as autonomous research system
+
+**Priority:** LOW (depends on Paper 1 first) — HIGH if Paper 1 succeeds and results are clean
+
+Paper 3 is not about continual learning — it is about TAR itself as an autonomous research system that identifies reproducible findings.
+
+**The paper's core argument:**
+> "We describe TAR, an autonomous research system that runs pre-registered experiments, enforces statistical rigour, correctly identifies a falsified frontier (fp-catastrophic-forgetting, 17 null results), and produces two reproducible positive findings through a closed-loop experimental process. We demonstrate that autonomous systems can conduct reproducible science under human governance constraints."
+
+**Required evidence:**
+- Audit trail showing TAR's decisions improved evidence quality over time
+- Quantified false-positive rate reduction (Phase 0–1 vs Phase 10+ results)
+- The Goodhart Canary results (Task 6.9) showing Director behaviour over time
+- The mechanism-isolation ablation engine (Task 8.1) catching false positives
+- Total cost accounting: GPU hours, API costs, wall-clock time to each discovery
+
+**Target venue:** AutoML@ICML 2027 or NeurIPS Datasets & Benchmarks 2027.
+
+**Verification:** Cost accounting document exists in `tar_state/papers/paper_3_cost_accounting.json`. Audit trail analysis complete.
+
+---
+
+### Task 10.4 — Plan TAR v2.0 architecture
+
+**Priority:** MEDIUM — based on learnings from the full programme
+
+After Paper 1 is submitted and all Phase 7 engineering work is complete, a planned architectural upgrade addresses the remaining fundamental limitations:
+
+**Planned improvements for TAR v2.0:**
+
+| Component | Current | v2.0 |
+|---|---|---|
+| State management | 23 JSON files | SQLite (Task 7.1) |
+| Experiment scheduling | Single-GPU polling | RunPod + local (Task 7.12) |
+| Literature intelligence | Orphaned ActiveLearner | Wired + populated (Task 9) |
+| Director | Rule-based + LLM | Literature-grounded + calibrated confidence (Task 9.5) |
+| Self-improvement | Never run | Running with holdout gate (Tasks 6.11–6.13) |
+| Paper authoring | God-class | 4-module pipeline (Task 7.11) |
+| Governance | File-based flags | Ed25519-signed + audit chain (Tasks 6.1–6.4) |
+
+v2.0 target: a system that can autonomously propose, pre-register, execute, replicate, and write up a CL finding with no human intervention beyond the 24-hour veto window.
+
+**Verification:** Architecture design document in `tar_state/papers/tar_v2_architecture.md`. At least one end-to-end cycle completed with zero human intervention (beyond veto window).
+
+---
+
+**Phase 10 exit gate:**
+- [ ] TCL-for-LLMs prototype showing non-trivial results on a 3-domain benchmark
+- [ ] Paper 2 pre-registered; experimental programme underway
+- [ ] Paper 3 scoping document complete; audit trail analysis begun
+- [ ] TAR v2.0 architecture document committed
+
+---
+
+## PART IV — MASTER TIMELINE
+
+```
+DAY 1:
+      E0: Emergency security (credentials rotated, history cleaned)
+
+WEEK  1   2   3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18  19  20
+      ├───Phase 0: Triage + Ground Truth (2w)──┤
+      ├───Phase 7: Engineering (6w, parallel)──────────────────────────────┤
+      ├───Phase 9: Literature Infrastructure (4w, parallel)───────────┤
+                    ├───Phase 1: Statistical Foundations (3w)────────────┤
+                    ├───Phase 4: Code Quality (4w, parallel)────────────────────┤
+                          ├───Phase 2: Experimental Rigour (8w)─────────────────────────────┤
+                          ├───Phase 3: Mechanistic Clarity (8w, parallel)────────────────────────┤
+                          ├───Phase 6: Governance + Safety (6w, parallel)────────────────────────┤
+                          ├───Phase 8: Research Automation (6w, parallel)────────────────────────┤
+                                    ├───Phase 5: Paper Pipeline (12w)────────────────────────────────────────────┤
+
+MONTH  5    6    7    8    9    10   11   12
+              ↑Paper 1 submission (ContinualAI@NeurIPS, target Sept 1)
+                         ↑ICLR 2027 abstract (if HPC replicates)
+                              ├───Phase 10: Long-term programme───────────────────────────►
+```
+
+**Critical path (Track A — science → paper):**
+`E0 (day 1) → Phase 0 (weeks 1–2) → Phase 1 (weeks 2–5) → Phase 2 (weeks 3–12) → Phase 5 (weeks 12–20) → SUBMISSION`
+
+**Parallel tracks:**
+- **Track B (engineering):** `Phase 0 → Phase 4 → Phase 7` — can run in parallel with all Track A phases
+- **Track C (automation):** `Phase 0 → Phase 9 → Phase 8 → Phase 6` — can run in parallel with Track A
+
+**Key milestone dates (from 2026-06-02 start):**
+
+| Milestone | Target date | Blocking for |
+|---|---|---|
+| E0 complete (credentials rotated) | 2026-06-02 | Everything |
+| Phase 0 complete (triage done) | 2026-06-16 | Phases 1, 4, 7, 9 |
+| Phase 1 complete (statistics fixed) | 2026-07-07 | Phase 2 experiments |
+| Phase 2 HPC replication result | 2026-07-21 | Paper framing decision |
+| Phase 2 full reruns (P16, P17) | 2026-08-11 | Paper 1 results table |
+| Phase 5 draft complete | 2026-08-25 | External review |
+| Paper 1 submission | 2026-09-01 | ✓ |
+| ICLR 2027 abstract | 2026-10-01 | (stretch goal) |
+
+---
+
+## PART V — RISK REGISTER
+
+### Risk 1: HPC replication fails (p>0.05 at n=20 seeds)
+
+**Probability:** Medium (30%). The original result was from an underpowered 5-hypothesis battery.
+**Impact:** Critical — removes the strongest single finding.
+**Trigger:** d < 0.3 at n=20 seeds, or SPRT boundary accepts H0.
+**Contingency:**
+- Pivot: submit Paper 1 based on Phase 10 (TCL vs EWC, CIFAR-10) as the primary result
+- Frame as "directional improvement that requires further replication" with transparent statistical disclosure
+- Add Phase 10 rerun with n=10 seeds for additional power
+- Target ContinualAI@NeurIPS 2026 workshop (4-page format, lower bar for directional results)
+
+### Risk 2: Phase 10 result also fails to replicate
+
+**Probability:** Low (10%). Phase 10 was a controlled rerun; the result is genuine but may not survive Bonferroni.
+**Impact:** Severe — no positive result for Paper 1.
+**Trigger:** Phase 10 rerun at n=10 seeds shows p>0.0125 (Bonferroni threshold).
+**Contingency:**
+- Pivot to the Phase 11 ablation as the primary contribution: "We show that EWC's performance deteriorates when the governor mechanism is active, and that the penalty component alone (0.143 vs 0.219 forgetting) is sufficient. We replicate EWC's canonical result and provide a controlled ablation."
+- This is publishable as a null-result + mechanism ablation at a workshop.
+
+### Risk 3: GTX 1650 hardware failure
+
+**Probability:** Low (15% over 20 weeks given high utilisation at 87%).
+**Impact:** High — all Phase 2 experiments blocked.
+**Trigger:** Card overheats (>90°C consistently), CUDA errors on basic operations, physical failure.
+**Contingency:**
+- Activate RunPod executor (Task 7.12) — have it ready by week 2
+- RunPod A40 (24GB VRAM): ~£0.70/hour. Phase 2 experiments: ~80 GPU hours = ~£56 total
+- All experiment checkpoints should be periodically saved to E: drive (not C: only)
+
+### Risk 4: DER++ outperforms TCL
+
+**Probability:** Medium (35%). Replay methods consistently beat regularization-only methods in the literature at moderate memory budgets.
+**Impact:** Medium — changes the paper's positioning but not its validity.
+**Trigger:** DER++ (mem=200) achieves lower forgetting than TCL on CIFAR-10 or TinyImageNet.
+**Contingency:**
+- Report the result honestly — this is what the experiment was designed to test
+- Reframe: "TCL outperforms regularization baselines (EWC, SI) and is competitive with replay-based DER++ while requiring zero memory buffer"
+- This is a legitimate and publishable finding — TCL as a memory-free alternative to replay
+
+### Risk 5: Paper cannot be finished by September 1
+
+**Probability:** Medium (25%). Writing under time pressure with ongoing experiments is difficult.
+**Impact:** Medium — workshop deadline missed; ICLR 2027 abstract becomes primary target.
+**Trigger:** Draft not compiled by August 18 (allowing 2 weeks for review).
+**Contingency:**
+- Pre-write abstract and introduction in Week 6 (before all experiments complete)
+- Use `tar_author.py` for methods and results sections; edit heavily
+- Seek one external collaborator from ContinualAI Slack/Discord by Week 3 for co-authorship or review
+- ICLR 2027 abstract deadline (~October 2026) is 5 weeks after the NeurIPS deadline — viable fallback
+
+### Risk 6: Governor repair (Path B) is unresolvable
+
+**Probability:** High (50%). The regime detector has never fired in any production run. The root cause may be a fundamental mismatch between the theoretical design and the implementation.
+**Impact:** Low (already planned for in Path A) — simply changes the paper's mechanism claim.
+**Trigger:** 2-week investigation from Task 2.7 does not produce a configuration where the governor activates.
+**Contingency:**
+- Execute Path A immediately: disable governor by default, document in ablation section
+- The paper's contribution is unchanged: gradient-EMA elastic penalty reduces forgetting
+- Limitations section explicitly states: "The thermodynamic regime detection mechanism did not activate in our experimental configurations."
+
+### Risk 7: Knowledge graph fails to populate
+
+**Probability:** Low (15%). The ActiveLearner is wired in Task 4.8 but external API calls (Semantic Scholar, Papers With Code) may fail.
+**Impact:** Medium — related work section must be written manually.
+**Trigger:** `brain.corpus_summary()` returns zero after 48 hours.
+**Contingency:**
+- Manually ingest the 15 essential papers (Task 9.3) using `literature_engine.py` directly
+- Write the related work section from the 15-paper BibTeX file without semantic search
+- Fix the API integration issue separately as a non-blocking task
+
+---
+
+*Stage 6 complete — Phase 10, master timeline, risk register*
