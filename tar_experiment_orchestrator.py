@@ -2034,6 +2034,19 @@ class ExperimentOrchestrator:
             return self._run_phase17_suite(spec)
         if spec.runner_key == "hpc_claim_validation_suite":
             return self._run_hpc_validation_suite(spec)
+        # ── PhD Rehabilitation Plan Phase 2/3 pre-registered experiments ─────────
+        if spec.runner_key == "hp_selection":
+            return self._run_phase2_hp_selection(spec)
+        if spec.runner_key == "hpc_replication_phase2":
+            return self._run_phase2_hpc_replication(spec)
+        if spec.runner_key == "mechanistic_ablation_7c":
+            return self._run_phase2_mechanistic_ablation(spec)
+        if spec.runner_key == "phase16_cifar100_rerun":
+            return self._run_phase2_phase16_rerun(spec)
+        if spec.runner_key == "phase17_tinyimagenet_rerun":
+            return self._run_phase2_phase17_rerun(spec)
+        if spec.runner_key == "hpc_lambda_momentum_abl":
+            return self._run_phase2_hpc_lambda_momentum(spec)
         if spec.runner_key == "nlp_continual":
             return self._run_nlp_continual(spec)
         if spec.runner_key == "ood_eval":
@@ -2770,6 +2783,91 @@ class ExperimentOrchestrator:
             optimizer_backend=spec.optimizer_backend,
             optimizer_backend_config=spec.optimizer_backend_config,
             power_analysis=_compute_power_analysis(_suite_cohens_d, _suite_n),
+        )
+
+    # ── PhD Rehabilitation Plan Phase 2/3 dispatchers ────────────────────────
+
+    def _run_phase2_hp_selection(self, spec: ExperimentSpec) -> ExperimentResult:
+        from tar_phase2_runner import run_hp_selection
+        raw = run_hp_selection(
+            workspace=str(self.workspace),
+            progress_callback=lambda p: self.update_progress(spec.id, p),
+        )
+        return self._build_phase2_result(spec, raw)
+
+    def _run_phase2_hpc_replication(self, spec: ExperimentSpec) -> ExperimentResult:
+        from tar_phase2_runner import run_hpc_replication
+        raw = run_hpc_replication(
+            workspace=str(self.workspace),
+            progress_callback=lambda p: self.update_progress(spec.id, p),
+        )
+        return self._build_phase2_result(spec, raw)
+
+    def _run_phase2_mechanistic_ablation(self, spec: ExperimentSpec) -> ExperimentResult:
+        from tar_phase2_runner import run_mechanistic_ablation
+        conditions = list((spec.config_overrides or {}).get("conditions") or [])
+        raw = run_mechanistic_ablation(
+            workspace=str(self.workspace),
+            conditions=conditions or None,
+            progress_callback=lambda p: self.update_progress(spec.id, p),
+        )
+        return self._build_phase2_result(spec, raw)
+
+    def _run_phase2_phase16_rerun(self, spec: ExperimentSpec) -> ExperimentResult:
+        from tar_phase2_runner import run_phase16_cifar100_rerun
+        raw = run_phase16_cifar100_rerun(
+            workspace=str(self.workspace),
+            progress_callback=lambda p: self.update_progress(spec.id, p),
+        )
+        return self._build_phase2_result(spec, raw)
+
+    def _run_phase2_phase17_rerun(self, spec: ExperimentSpec) -> ExperimentResult:
+        from tar_phase2_runner import run_phase17_tinyimagenet_rerun
+        raw = run_phase17_tinyimagenet_rerun(
+            workspace=str(self.workspace),
+            progress_callback=lambda p: self.update_progress(spec.id, p),
+        )
+        return self._build_phase2_result(spec, raw)
+
+    def _run_phase2_hpc_lambda_momentum(self, spec: ExperimentSpec) -> ExperimentResult:
+        from tar_phase2_runner import run_hpc_lambda_momentum_ablation
+        raw = run_hpc_lambda_momentum_ablation(
+            workspace=str(self.workspace),
+            progress_callback=lambda p: self.update_progress(spec.id, p),
+        )
+        return self._build_phase2_result(spec, raw)
+
+    def _build_phase2_result(self, spec: ExperimentSpec, raw: dict) -> ExperimentResult:
+        """Build a minimal ExperimentResult from a Phase 2 runner return dict."""
+        rc = raw.get("returncode", 1)
+        verdict = raw.get("verdict", "ERROR" if rc != 0 else "COMPLETE")
+        result_json = raw.get("result_json") or {}
+        # Pull statistics from result JSON if available
+        p_val = raw.get("p_val") or result_json.get("p_val") or result_json.get("p_wilcoxon") or 1.0
+        cohens_d = raw.get("cohens_d") or result_json.get("cohens_d") or 0.0
+        tcl_forgetting = raw.get("tcl_mean_forgetting") or result_json.get("tcl_mean_forgetting") or 0.0
+        return ExperimentResult(
+            experiment_id=spec.id,
+            experiment_name=spec.name,
+            project_id=spec.project_id,
+            hypothesis_name=spec.hypothesis_name,
+            dataset=spec.dataset,
+            method=spec.method,
+            seeds=list(spec.seeds),
+            config_overrides=dict(spec.config_overrides or {}),
+            seed_results=[],
+            mean_forgetting=float(tcl_forgetting),
+            std_forgetting=0.0,
+            mean_accuracy=0.0,
+            std_accuracy=0.0,
+            baseline_forgetting=[],
+            mean_delta=0.0,
+            t_stat=0.0,
+            p_val=float(p_val),
+            cohens_d=float(cohens_d),
+            n_better=0,
+            verdict=verdict,
+            notes=f"Phase 2 runner: returncode={rc}  elapsed={raw.get('elapsed_s',0)}s",
         )
 
     def _build_validation_suite_result(self, spec: ExperimentSpec, raw: dict[str, Any]) -> ExperimentResult:
