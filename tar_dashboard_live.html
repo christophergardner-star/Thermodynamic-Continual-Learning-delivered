@@ -2705,11 +2705,22 @@ async function fetchRecommendation(questionId, slug_id) {
    ══════════════════════════════════════════════════════════ */
 function renderResearch() {
   renderApiError('res-director', 'director', 'scheduler', 'frontier', 'coordination');
-  // Director
-  const dir = S.data.director || {};
-  const paths = Array.isArray(dir.active_research_paths) ? dir.active_research_paths : [];
-  const agenda = Array.isArray(dir.experiment_agenda) ? dir.experiment_agenda : [];
-  const gaps = Array.isArray(dir.frontier_gap_status) ? dir.frontier_gap_status : [];
+  const dir   = S.data.director     || {};
+  const sched = S.data.scheduler    || {};
+  const coord = S.data.coordination || {};
+  const auto  = S.data.autonomous   || {};
+  const front = S.data.frontier     || {};
+
+  // ── Research Director ──────────────────────────────────────────────────────
+  const paths  = Array.isArray(dir.active_research_paths) ? dir.active_research_paths : [];
+  const agenda = Array.isArray(dir.experiment_agenda)     ? dir.experiment_agenda     : [];
+  // Experiment agenda: fall back to queued experiments when director agenda is empty
+  const queueExps = Array.isArray((S.data.experiments||{}).experiments)
+    ? (S.data.experiments.experiments).filter(e => ['queued','planned','running'].includes(e.stage||e.status||''))
+    : [];
+  const agendaItems = agenda.length ? agenda : queueExps.slice(0,5);
+  const agendaIsQueue = !agenda.length && agendaItems.length > 0;
+
   $('res-director').innerHTML = `
     <div class="card" style="margin-bottom:8px">
       <div class="section-head" style="margin:0 0 6px">Active Research Paths</div>
@@ -2721,68 +2732,104 @@ function renderResearch() {
         </div>`).join('') : '<div class="empty-state">No active paths</div>'}
     </div>
     <div class="card">
-      <div class="section-head" style="margin:0 0 6px">Experiment Agenda</div>
-      ${agenda.length ? agenda.slice(0,5).map(e => `
-        <div class="alert-item">
-          ${dotHtml('amber')}
-          <span class="alert-msg">${esc((e.title||e.id||e.hypothesis||'').substring(0,60))}</span>
-        </div>`).join('') : '<div class="empty-state">No agenda items</div>'}
+      <div class="section-head" style="margin:0 0 6px">
+        Experiment Agenda
+        ${agendaIsQueue ? `<span style="font-size:10px;color:var(--dim);font-weight:400;margin-left:6px">(from PhD rehab queue)</span>` : ''}
+      </div>
+      ${agendaItems.length ? agendaItems.map(e => {
+        const name = e.title||e.name||e.id||e.hypothesis||'';
+        const stage = e.stage||e.status||'';
+        const tone = stage==='running'?'green':stage==='queued'?'amber':'dim';
+        return `<div class="alert-item">
+          ${dotHtml(tone, stage==='running')}
+          <span class="alert-msg">${esc(name.substring(0,60))}</span>
+          ${stage ? `<span class="badge ${tone}" style="font-size:10px;margin-left:auto">${esc(stage)}</span>` : ''}
+        </div>`;
+      }).join('') : '<div class="empty-state" style="font-size:11.5px">No agenda items — director is in monitoring mode</div>'}
     </div>`;
 
-  // Scheduler
-  const sched = S.data.scheduler || {};
+  // ── Scheduler ─────────────────────────────────────────────────────────────
   const running_ids = Array.isArray(sched.running_ids) ? sched.running_ids : [];
   const holds = Array.isArray(sched.hold_reasons) ? sched.hold_reasons
-              : (sched.hold_reasons && typeof sched.hold_reasons === 'object') ? Object.entries(sched.hold_reasons).map(([k,v])=>({id:k,reason:v})) : [];
+              : (sched.hold_reasons && typeof sched.hold_reasons === 'object')
+                ? Object.entries(sched.hold_reasons).map(([k,v])=>({id:k,reason:v})) : [];
+  const nextId = sched.next_experiment_id || sched.next_to_run || '';
+  const rationale = sched.rationale || '';
   $('res-scheduler').innerHTML = `
     <div class="card" style="margin-bottom:8px">
       <div class="section-head" style="margin:0 0 6px">Running</div>
-      ${running_ids.length ? running_ids.map(id => `<div class="alert-item">${dotHtml('green','pulse')}<span class="alert-msg mono" style="font-size:11px">${esc(String(id))}</span></div>`).join('')
-        : '<div style="color:var(--dim);font-size:12px">None</div>'}
+      ${running_ids.length
+        ? running_ids.map(id => `<div class="alert-item">${dotHtml('green','pulse')}<span class="alert-msg mono" style="font-size:11px">${esc(String(id))}</span></div>`).join('')
+        : '<div style="color:var(--dim);font-size:12px">None via orchestrator</div>'}
     </div>
     <div class="card" style="margin-bottom:8px">
       <div class="section-head" style="margin:0 0 6px">Next to Run</div>
-      <div style="font-size:12px;color:var(--muted)">${esc(String(sched.next_experiment_id || sched.next_to_run || '—'))}</div>
+      <div style="font-size:12px;color:var(--muted)">${esc(nextId || '—')}</div>
+      ${sched.vram_used_gb != null ? `<div style="font-size:11px;color:var(--dim);margin-top:4px">VRAM: ${fmtN(sched.vram_used_gb,1)}/${fmtN(sched.vram_total_gb,1)} GB</div>` : ''}
     </div>
-    <div class="card">
+    <div class="card" style="margin-bottom:8px">
       <div class="section-head" style="margin:0 0 6px">Hold Reasons</div>
-      ${holds.length ? holds.slice(0,5).map(h => `
+      ${holds.length ? holds.slice(0,3).map(h => `
         <div class="alert-item">
           ${dotHtml('amber')}
-          <span class="alert-msg" style="font-size:11.5px">${esc((h.id||h.experiment_id||'').substring(0,30))}: ${esc((h.reason||h.message||String(h)).substring(0,60))}</span>
+          <span class="alert-msg" style="font-size:11.5px">${esc((h.id||h.experiment_id||'').substring(0,25))}: ${esc((h.reason||h.message||String(h)).substring(0,55))}</span>
         </div>`).join('') : '<div style="color:var(--dim);font-size:12px">No holds</div>'}
-    </div>`;
+    </div>
+    ${rationale ? `<div class="card"><div class="section-head" style="margin:0 0 4px">Scheduler Rationale</div><div style="font-size:11.5px;color:var(--muted);line-height:1.5">${esc(rationale.substring(0,280))}</div></div>` : ''}`;
 
-  // Frontier
+  // ── Frontier Gaps ─────────────────────────────────────────────────────────
+  // Read from S.data.frontier (correct source), not dir.frontier_gap_status
+  const gaps = Array.isArray(front.frontier_gap_status) ? front.frontier_gap_status
+             : Array.isArray(dir.frontier_gap_status)   ? dir.frontier_gap_status : [];
   $('res-frontier').innerHTML = gaps.length
     ? `<div class="card">
-        ${gaps.slice(0,8).map(g => `
-          <div class="alert-item">
-            ${dotHtml(statusTone(g.status||''))}
-            <span class="alert-msg" style="font-size:11.5px">${esc((g.title||g.id||'').substring(0,55))}</span>
-            ${g.confidence != null ? `<span class="alert-ts mono">${fmtN(g.confidence,2)}</span>` : ''}
-          </div>`).join('')}
+        ${gaps.slice(0,8).map(g => {
+          const tone = {active:'green', provisional:'amber', falsified:'red', unknown:'dim'}[g.status] || statusTone(g.status||'');
+          const readiness = g.readiness || '';
+          return `<div class="alert-item" style="padding:5px 2px">
+            ${dotHtml(tone)}
+            <span class="alert-msg" style="font-size:11.5px;flex:1">${esc((g.title||g.id||'').substring(0,48))}</span>
+            ${g.status ? `<span class="badge ${tone}" style="font-size:9px">${esc(g.status)}</span>` : ''}
+            ${readiness ? `<span style="font-size:10px;color:var(--dim);margin-left:4px">${esc(readiness)}</span>` : ''}
+          </div>`;
+        }).join('')}
       </div>`
-    : '<div class="empty-state">No frontier gap data</div>';
+    : '<div class="empty-state">No frontier data — awaiting director cycle</div>';
 
-  // Coordination
-  const coord = S.data.coordination || {};
-  const auto  = S.data.autonomous   || {};
+  // ── Coordination & Autonomous ─────────────────────────────────────────────
+  const phase2Running = Array.isArray(auto.phase2_running) ? auto.phase2_running : [];
   $('res-coord').innerHTML = `<div class="grid-2">
     <div class="card">
       <div class="section-head" style="margin:0 0 6px">Coordination State</div>
       <div class="kv-grid">
-        <span class="kv-k">Mode</span><span class="kv-v">${esc(coord.mode||coord.status||'—')}</span>
-        <span class="kv-k">Lock holder</span><span class="kv-v">${esc(coord.lock_holder||'—')}</span>
-        <span class="kv-k">Last event</span><span class="kv-v">${esc(coord.last_event||'—')}</span>
+        <span class="kv-k">Mode</span>
+        <span class="kv-v">${esc(coord.mode || coord.status || '—')}</span>
+        <span class="kv-k">Active paper</span>
+        <span class="kv-v mono" style="font-size:11px">${esc((coord.lock_holder||coord.current_paper_id||'—').substring(0,40))}</span>
+        <span class="kv-k">Paper status</span>
+        <span class="kv-v">${esc(coord.last_event||coord.current_paper_status||'—')}</span>
+        <span class="kv-k">Paths active</span>
+        <span class="kv-v">${coord.paths_active != null ? coord.paths_active : (coord.active_path_ids||[]).length || '—'}</span>
+        <span class="kv-k">Papers blocked</span>
+        <span class="kv-v" style="${(coord.papers_blocked||0)>0?'color:var(--amber)':''}">${coord.papers_blocked != null ? coord.papers_blocked : (coord.blocked_paper_ids||[]).length || '—'}</span>
+        ${coord.summary ? `<span class="kv-k" style="grid-column:1/-1;color:var(--dim);font-size:11px;padding-top:4px">${esc(String(coord.summary).substring(0,120))}</span>` : ''}
       </div>
     </div>
     <div class="card">
       <div class="section-head" style="margin:0 0 6px">Autonomous Research</div>
       <div class="kv-grid">
-        <span class="kv-k">Status</span><span class="kv-v">${esc(auto.status||'—')}</span>
-        <span class="kv-k">Phase</span><span class="kv-v">${esc(String(auto.current_phase||'—'))}</span>
-        <span class="kv-k">Cycle count</span><span class="kv-v">${esc(String(auto.cycle_count||'—'))}</span>
+        <span class="kv-k">Status</span>
+        <span class="kv-v" style="${auto.status==='running'?'color:var(--green)':''}">${dotHtml(auto.status==='running'?'green':'amber', auto.status==='running')} ${esc(auto.status||'—')}</span>
+        <span class="kv-k">Phase</span>
+        <span class="kv-v">${esc(String(auto.current_phase||'—'))}</span>
+        <span class="kv-k">Hypotheses</span>
+        <span class="kv-v">${auto.cycle_count != null ? auto.cycle_count : '—'}</span>
+        ${phase2Running.length ? `
+        <span class="kv-k">GPU scripts</span>
+        <span class="kv-v" style="color:var(--green)">${phase2Running.map(k=>esc(k)).join(', ')}</span>` : ''}
+        ${auto.daemon_timestamp ? `
+        <span class="kv-k">Daemon ping</span>
+        <span class="kv-v" style="font-size:11px;color:var(--dim)">${fmtShort(auto.daemon_timestamp)}</span>` : ''}
       </div>
     </div>
   </div>`;

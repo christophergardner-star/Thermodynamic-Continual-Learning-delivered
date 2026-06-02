@@ -2228,13 +2228,43 @@ def api_autonomous():
             })
         results.append(entry)
     summary = _jload(_AR / "summary.json") or {}
-    return jsonify({"hypotheses": results, "summary": summary})
+    # Augment with live daemon status for the Research State view
+    daemon = _jload(_WS / "tar_state" / "living_research_daemon.json") or {}
+    phase2_pids = _load_phase2_pids()
+    phase2_running = [k for k, e in phase2_pids.items() if e.get("pid")]
+    try:
+        import psutil as _ps
+        phase2_running = [k for k in phase2_running if _ps.pid_exists(int(phase2_pids[k]["pid"]))]
+    except Exception:
+        pass
+    return jsonify({
+        "hypotheses": results,
+        "summary": summary,
+        "status": "running" if (daemon.get("status") == "running" or phase2_running) else "idle",
+        "current_phase": "Phase 2 — GPU Experiments" if phase2_running else daemon.get("current_phase", "—"),
+        "cycle_count": daemon.get("cycle_count", 0) or summary.get("total_hypotheses_tested", 0),
+        "phase2_running": phase2_running,
+        "daemon_pid": daemon.get("pid"),
+        "daemon_timestamp": daemon.get("timestamp", ""),
+    })
 
 
 # ── frontier problems ─────────────────────────────────────────────────────────
 @app.route("/api/frontier")
 def api_frontier():
-    return jsonify(_frontier_with_directives())
+    # _frontier_with_directives() returns a list of enriched problem dicts
+    problems = _frontier_with_directives()
+    gap_status = [
+        {
+            "id":         p.get("problem_id") or p.get("id", ""),
+            "title":      p.get("title") or p.get("name", ""),
+            "status":     p.get("truth_status") or p.get("status", ""),
+            "readiness":  p.get("readiness", ""),
+            "confidence": p.get("confidence_score") or p.get("priority_score"),
+        }
+        for p in problems if isinstance(p, dict)
+    ]
+    return jsonify({"problems": problems, "frontier_gap_status": gap_status})
 
 
 @app.route("/api/research_director")
@@ -2385,7 +2415,26 @@ def api_alerts():
 
 @app.route("/api/coordination")
 def api_coordination():
-    return jsonify(_jload(_WS / "tar_state" / "research_coordination_state.json") or {})
+    raw = _jload(_WS / "tar_state" / "research_coordination_state.json") or {}
+    blocked = raw.get("blocked_paper_ids", [])
+    active_paths = raw.get("active_path_ids", [])
+    active_exps = raw.get("active_experiment_ids", [])
+    paper_id = raw.get("current_paper_id", "")
+    paper_status = raw.get("current_paper_status", "")
+    # Derive mode from coordination context
+    mode = "phd_rehabilitation" if "tcl_phd_rehabilitation" in str(raw) else (
+           "blocked" if blocked else "autonomous")
+    # Derive lock_holder and last_event for frontend compatibility
+    return jsonify({
+        **raw,
+        "mode":          mode,
+        "lock_holder":   paper_id or "—",
+        "last_event":    paper_status or "—",
+        "papers_blocked": len(blocked),
+        "paths_active":  len(active_paths),
+        "exps_active":   len(active_exps),
+        "blocked_names": blocked[:4],
+    })
 
 
 @app.route("/api/literature")
