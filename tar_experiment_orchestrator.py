@@ -368,6 +368,22 @@ def _compute_power_analysis(
     return base
 
 
+# ── audit log ─────────────────────────────────────────────────────────────────
+
+def _append_audit(workspace: Path, event: str, detail: dict) -> None:
+    """Append-only audit record. Never raises — audit failure must never block execution."""
+    try:
+        import json as _json, os as _os
+        from datetime import datetime as _dt, timezone as _tz
+        record = {"ts": _dt.now(_tz.utc).isoformat(), "pid": _os.getpid(), "event": event, **detail}
+        audit_path = workspace / "tar_state" / "audit.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("a", encoding="utf-8") as fh:
+            fh.write(_json.dumps(record) + "\n")
+    except Exception:
+        pass
+
+
 # ── orchestrator ──────────────────────────────────────────────────────────────
 class ExperimentOrchestrator:
     """
@@ -1620,6 +1636,10 @@ class ExperimentOrchestrator:
                 f"auto-generating manifest for '{spec.id}'."
             )
             self._auto_generate_manifest(spec)
+            _append_audit(self.workspace, "manifest_auto_generated", {
+                "manifest_id": str(getattr(self._active_manifest, "manifest_id", "") or ""),
+                "experiment_id": spec.id,
+            })
         else:
             try:
                 self._active_manifest.assert_experiment_authorised(spec.id)
@@ -1627,6 +1647,10 @@ class ExperimentOrchestrator:
                     f"[manifest_gate] '{spec.id}' authorised by manifest "
                     f"'{self._active_manifest.manifest_id}'"
                 )
+                _append_audit(self.workspace, "manifest_authorized", {
+                    "manifest_id": str(getattr(self._active_manifest, "manifest_id", "") or ""),
+                    "experiment_id": spec.id,
+                })
             except ManifestGateError as exc:
                 if not self._autonomous:
                     self._log(f"[manifest_gate] {exc}")
@@ -1644,6 +1668,10 @@ class ExperimentOrchestrator:
                     f"auto-generating new manifest."
                 )
                 self._auto_generate_manifest(spec)
+                _append_audit(self.workspace, "manifest_auto_generated", {
+                    "manifest_id": str(getattr(self._active_manifest, "manifest_id", "") or ""),
+                    "experiment_id": spec.id,
+                })
 
         validation = validate_execution_request(
             self.workspace,
@@ -1691,6 +1719,12 @@ class ExperimentOrchestrator:
         spec.error      = ""
         spec.progress   = {"seeds_done": 0, "seeds_total": len(spec.seeds),
                            "tasks_done": 0, "latest_accs": [], "forgetting_so_far": []}
+        _append_audit(self.workspace, "experiment_start", {
+            "experiment_id": spec.id,
+            "dataset": spec.dataset,
+            "method": spec.method,
+            "seeds": list(spec.seeds),
+        })
         lease = acquire_runtime_lease(
             self.workspace,
             component_id=f"orchestrator:{spec.id}",
@@ -1753,6 +1787,10 @@ class ExperimentOrchestrator:
                 completion_reason="experiment completed successfully",
                 extra_patch={"result_path": spec.result_path, "verdict": result.verdict},
             )
+            _append_audit(self.workspace, "experiment_complete", {
+                "experiment_id": spec.id,
+                "verdict": str(result.verdict) if hasattr(result, "verdict") else "?",
+            })
             self._log(f"[execute] DONE  {spec.id}  {result.verdict}"
                       f"  forgetting={result.mean_forgetting:.4f}  ({elapsed/3600:.1f}h)")
 
@@ -1809,6 +1847,10 @@ class ExperimentOrchestrator:
                 completion_reason=str(exc),
                 extra_patch={"elapsed_s": elapsed},
             )
+            _append_audit(self.workspace, "experiment_failed", {
+                "experiment_id": spec.id,
+                "error": str(exc)[:200],
+            })
             self._log(f"[execute] FAILED  {spec.id}: {exc}")
             self._log(traceback.format_exc())
             self._archive_terminal_experiment(spec, reason="failed")

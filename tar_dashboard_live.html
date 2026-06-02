@@ -874,7 +874,9 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
           <div class="loading-state">Loading…</div>
         </div>
 
-        <div class="section-head">Queue State</div>
+        <div class="section-head" style="display:flex;align-items:center;justify-content:space-between">
+          Queue State
+        </div>
         <div class="card" id="obs-queue">
           <div class="loading-state">Loading…</div>
         </div>
@@ -933,6 +935,14 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
 
         <div class="section-head">Active Experiments</div>
         <div id="obs-active-exps">
+          <div class="loading-state">Loading…</div>
+        </div>
+
+        <div class="section-head">API Budget</div>
+        <div id="obs-budget" class="card"></div>
+
+        <div class="section-head">Phase 2 — GPU Experiments</div>
+        <div class="card" id="obs-phase2-launcher">
           <div class="loading-state">Loading…</div>
         </div>
       </div>
@@ -1045,6 +1055,10 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
   <section class="view" id="view-review">
     <div class="view-title">Human Review</div>
     <div class="view-sub">Items waiting for your decision. Delays here block the experiment queue. Resolve urgent items first.</div>
+    <div class="section-head">Director Proposals — Veto Window</div>
+    <div id="review-director-proposals">
+      <div class="loading-state">Loading…</div>
+    </div>
     <div id="review-urgent"></div>
     <div class="section-head" style="margin-top:4px">Pending Questions</div>
     <div id="review-questions"></div>
@@ -1353,6 +1367,8 @@ const ENDPOINTS = {
   validation:        '/api/validation',
   narration:         '/api/narrate',
   breakthroughs:     '/api/breakthroughs',
+  director_proposals: '/api/director_proposals',
+  budget:             '/api/budget',
 };
 
 async function loadEndpoint(key) {
@@ -1377,11 +1393,11 @@ async function loadAll(opts = {}) {
 
 async function loadViewData(view) {
   const map = {
-    obs:        ['status','hardware','experiments','alerts','processes','log','logs','runpod','review','papers','narration','breakthroughs'],
+    obs:        ['status','hardware','experiments','alerts','processes','log','logs','runpod','review','papers','narration','breakthroughs','director_proposals','budget'],
     experiments:['experiments'],
     evidence:   ['phases','results','validation'],
     papers:     ['papers','author'],
-    review:     ['review'],
+    review:     ['review','director_proposals'],
     research:   ['director','scheduler','frontier','coordination','autonomous'],
     literature: ['literature','llm_insights'],
     system:     ['logs','processes'],
@@ -1509,18 +1525,8 @@ function renderObs() {
   }
   $('obs-hw').innerHTML = hwHtml;
 
-  // Queue steps
-  const steps = Array.isArray(status.queue_steps) ? status.queue_steps : [];
-  $('obs-queue').innerHTML = steps.length
-    ? steps.map(s => {
-        const t = statusTone(s.status);
-        return `<div class="alert-item">
-          ${dotHtml(t)}
-          <span class="alert-msg">${esc(s.n)}. ${esc(s.label)}</span>
-          <span class="alert-ts">${esc(s.status)}</span>
-        </div>`;
-      }).join('')
-    : '<div class="empty-state">No queue steps</div>';
+  // Queue — use live experiments list for richer data
+  renderObsQueue(experiments);
 
   // Processes
   renderObsProcs();
@@ -1563,7 +1569,72 @@ function renderObs() {
 
   // Active experiments
   renderObsActiveExps(experiments);
+
+  // API Budget
+  renderObsBudget();
+
+  // Phase 2 launcher
+  renderPhase2Launcher();
+
   setupEpochPoll();
+}
+
+function renderPhase2Launcher() {
+  const el = $('obs-phase2-launcher');
+  if (!el) return;
+  const scripts = [
+    {key:'run_hpc_replication',        label:'HPC Replication n=20',           phase:'2.1', desc:'Pre-registered single-hypothesis, n=20 seeds'},
+    {key:'run_hyperparameter_selection',label:'Fair Joint HP Selection',        phase:'2.6', desc:'seed=999 validation split, lock HPs before reruns'},
+    {key:'phase16_cifar100_rerun',     label:'CIFAR-100 n=5 Rerun',            phase:'2.3', desc:'5 seeds, 7 methods including DER++ and LwF'},
+    {key:'phase17_tinyimagenet_rerun', label:'TinyImageNet n=5 Rerun',         phase:'2.2', desc:'5 seeds, 7 methods, pre-registered'},
+    {key:'run_mechanistic_ablation',   label:'7-Condition Mechanistic Ablation',phase:'3.1', desc:'Full ablation with TCL anchor-frozen and warmup variants'},
+  ];
+  el.innerHTML = `<div style="font-size:11.5px;color:var(--muted);margin-bottom:10px">
+    Pre-registered GPU experiments — scripts written, not yet executed. HP Selection must run first.
+  </div>
+  <table style="width:100%;border-collapse:collapse;font-size:12px">
+    <thead><tr style="border-bottom:1px solid var(--border)">
+      <th style="text-align:left;padding:4px 6px;color:var(--muted);font-weight:600;font-size:10.5px">PHASE</th>
+      <th style="text-align:left;padding:4px 6px;color:var(--muted);font-weight:600;font-size:10.5px">EXPERIMENT</th>
+      <th style="text-align:left;padding:4px 6px;color:var(--muted);font-weight:600;font-size:10.5px">DESCRIPTION</th>
+      <th style="padding:4px 6px"></th>
+    </tr></thead>
+    <tbody>${scripts.map(s => `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:6px;font-family:var(--font-mono);color:var(--blue)">${esc(s.phase)}</td>
+      <td style="padding:6px;font-weight:600">${esc(s.label)}</td>
+      <td style="padding:6px;color:var(--muted);font-size:11.5px">${esc(s.desc)}</td>
+      <td style="padding:6px"><button class="btn sm green-btn" onclick="launchPhase2('${esc(s.key)}','${esc(s.label)}')">▶ Launch</button></td>
+    </tr>`).join('')}</tbody>
+  </table>`;
+}
+
+async function launchPhase2(scriptKey, label) {
+  if (!confirm('Launch: ' + label + '?\n\nThis starts a background GPU process. Make sure the queue is clear and HP Selection has been run before launching reruns.')) return;
+  try {
+    const r = await api('/api/phase2/launch', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({script: scriptKey}),
+    });
+    if (r.not_found) { toast('Script not yet written: ' + scriptKey, 'err'); return; }
+    if (!r.ok) { toast('Launch failed: ' + (r.error||'?'), 'err'); return; }
+    toast('Launched PID ' + r.pid + ': ' + label);
+  } catch(e) { toast('Launch error: ' + e.message, 'err'); }
+}
+
+function renderObsBudget() {
+  const el = $('obs-budget');
+  if (!el) return;
+  const b = S.data.budget || {};
+  if (!b.budget_usd) { el.innerHTML = '<div style="color:var(--dim);font-size:12px">Budget data unavailable</div>'; return; }
+  const pct = Math.round((b.fraction||0)*100);
+  const tone = b.state === 'blocked' ? 'red' : b.state === 'degraded' ? 'amber' : 'green';
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <span style="font-size:12px">$${(b.spent_usd||0).toFixed(4)} / $${(b.budget_usd||5).toFixed(2)}</span>
+      ${badgeHtml(b.state||'ok', tone)}
+    </div>
+    <div class="prog-track" style="height:6px"><div class="prog-fill ${tone}" style="width:${pct}%;background:var(--${tone})"></div></div>
+    <div style="font-size:10.5px;color:var(--muted);margin-top:4px">${b.calls||0} calls · $${(b.remaining_usd||0).toFixed(4)} remaining${b.state==='degraded'?' · degraded to Haiku':b.state==='blocked'?' · ALL LLM CALLS BLOCKED':''}</div>`;
 }
 
 function metricCell(value, label, colour) {
@@ -1602,6 +1673,95 @@ function renderObsAlerts() {
   }).join('');
 }
 
+/* ── Queue panel with click-to-detail + flush ──────────── */
+function renderObsQueue(experiments) {
+  const queued  = experiments.filter(e => ['queued','planned','pending','stalled'].includes((e.stage||e.status||'').toLowerCase()));
+  const running = experiments.filter(e => (e.stage||e.status||'') === 'running');
+  const total   = queued.length;
+
+  let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <span style="font-size:11px;color:var(--muted)">${total} queued · ${running.length} running</span>
+    ${total > 0
+      ? `<button class="btn sm danger" id="flush-queue-btn" onclick="confirmFlushQueue()">⊗ Flush Queue</button>`
+      : `<button class="btn sm" onclick="navTo('experiments')">View all →</button>`}
+  </div>`;
+
+  if (!experiments.length) {
+    $('obs-queue').innerHTML = html + '<div class="empty-state">Queue is empty</div>';
+    return;
+  }
+
+  const showList = [...running, ...queued].slice(0, 10);
+  html += showList.map((exp, i) => {
+    const stage = exp.stage || exp.status || 'unknown';
+    const tone  = statusTone(stage);
+    const isRun = stage === 'running';
+    const prog  = exp.progress || {};
+    const sd = Number(prog.seeds_done||0), st = Number(prog.seeds_total||Array.isArray(exp.seeds)?exp.seeds.length:0);
+    return `<div class="alert-item" style="cursor:pointer;border-bottom:1px solid var(--border);padding:7px 2px"
+        data-exp-json="${esc(JSON.stringify(exp))}"
+        onclick="openDetail('experiment', JSON.parse(this.dataset.expJson))">
+      <span style="font-family:var(--font-mono);font-size:10px;color:var(--dim);width:18px;flex-shrink:0">${i+1}</span>
+      ${dotHtml(tone, isRun)}
+      <span class="alert-msg" style="flex:1">
+        <span style="display:block;font-size:12px;font-weight:${isRun?'600':'400'}">${esc((exp.name||exp.id||'').substring(0,55))}</span>
+        ${isRun && st > 0 ? `<span style="display:block;margin-top:2px">${seedPips(sd, st, sd)}</span>` : ''}
+      </span>
+      <span style="display:flex;align-items:center;gap:4px;flex-shrink:0">
+        <span class="badge ${tone}" style="font-size:10px">${esc(stage)}</span>
+        ${!isRun ? `<button class="btn sm danger" style="padding:2px 6px;font-size:10px"
+            onclick="event.stopPropagation();cancelQueueItem('${esc(exp.id)}','${esc((exp.name||exp.id).substring(0,40))}')">✕</button>` : ''}
+      </span>
+    </div>`;
+  }).join('');
+
+  if (experiments.length > 10) {
+    html += `<div style="text-align:center;padding:6px 0;font-size:11px;color:var(--dim);cursor:pointer" onclick="navTo('experiments')">
+      + ${experiments.length - 10} more — view all →</div>`;
+  }
+
+  $('obs-queue').innerHTML = html;
+}
+
+async function confirmFlushQueue() {
+  const queued = (S.data.experiments?.experiments || [])
+    .filter(e => ['queued','planned','pending','stalled'].includes((e.stage||e.status||'').toLowerCase()));
+  if (!queued.length) { toast('Queue is already empty'); return; }
+
+  if (!confirm(`Flush ${queued.length} queued experiment${queued.length !== 1 ? 's' : ''} from the queue?\n\nRunning experiments are NOT affected. Flushed items are archived to experiment_queue_archive.json and can be recovered.\n\nThis clears the path for new planned experiments.`)) return;
+
+  const btn = $('flush-queue-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Flushing…'; }
+  try {
+    const result = await api('/api/queue/flush', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({stages_to_flush: ['queued','planned','stalled','pending']}),
+    });
+    toast(`✓ Flushed ${result.flushed} experiment${result.flushed !== 1 ? 's' : ''}. ${result.kept} kept (running).`);
+    await loadEndpoint('experiments');
+    renderObs();
+    if (S.view === 'experiments') renderExps();
+  } catch(e) {
+    toast('Flush failed: ' + e.message, 'err');
+    if (btn) { btn.disabled = false; btn.textContent = '⊗ Flush Queue'; }
+  }
+}
+
+async function cancelQueueItem(expId, name) {
+  if (!confirm(`Remove "${name}" from the queue?\n\nThis cannot be undone from the UI (check experiment_queue_archive.json to restore).`)) return;
+  try {
+    await api('/api/queue/cancel/' + encodeURIComponent(expId), {method:'POST'});
+    toast('Removed: ' + name);
+    await loadEndpoint('experiments');
+    renderObs();
+    if (S.view === 'experiments') renderExps();
+  } catch(e) {
+    toast('Cancel failed: ' + e.message, 'err');
+  }
+}
+
+/* ── Breakthroughs — clickable with full detail ─────────── */
 function renderObsBreakthroughs() {
   const data = S.data.breakthroughs || {};
   const items = Array.isArray(data.breakthroughs) ? data.breakthroughs
@@ -1610,16 +1770,101 @@ function renderObsBreakthroughs() {
     $('obs-breakthroughs').innerHTML = '<div class="empty-state" style="padding:8px">No breakthroughs recorded</div>';
     return;
   }
-  $('obs-breakthroughs').innerHTML = `<div class="card">${items.slice(0,5).map(b => {
+  $('obs-breakthroughs').innerHTML = `<div class="card">${items.slice(0,8).map(b => {
     const title = b.title || b.name || b.experiment_id || '—';
-    const ts    = b.timestamp || b.discovered_at || '';
     const tone  = b.evidence_strength === 'strong' ? 'green' : 'teal';
-    return `<div class="alert-item">
+    return `<div class="alert-item" style="cursor:pointer;padding:7px 2px"
+        data-bt-json="${esc(JSON.stringify(b))}"
+        onclick="openDetail('breakthrough', JSON.parse(this.dataset.btJson))">
       ${dotHtml(tone)}
-      <span class="alert-msg" style="color:var(--${tone})">${esc(title.substring(0,70))}</span>
-      <span class="alert-ts">${fmtShort(ts)}</span>
+      <span class="alert-msg">
+        <span style="display:block;font-size:12px;font-weight:600;color:var(--${tone})">${esc(title.substring(0,65))}</span>
+        <span style="display:block;font-size:10.5px;color:var(--muted);margin-top:2px">
+          ${b.dataset ? esc(b.dataset) + ' · ' : ''}
+          ${b.p_val != null ? 'p=' + fmtN(b.p_val,4) + ' · ' : ''}
+          ${b.cohens_d != null ? 'd=' + fmtN(b.cohens_d,2) + ' · ' : ''}
+          ${b.n_better != null ? b.n_better + '/5 seeds' : ''}
+        </span>
+      </span>
+      <span style="font-size:10px;color:var(--dim);flex-shrink:0">${fmtShort(b.found_at||b.timestamp)}</span>
     </div>`;
   }).join('')}</div>`;
+}
+
+/* ── Breakthrough detail page ───────────────────────────── */
+// Register 'breakthrough' type in renderDetailPage
+const _origRenderDetailPage = renderDetailPage;
+function renderDetailPage(type, d) {
+  if (type === 'breakthrough') renderBreakthroughDetail(d);
+  else _origRenderDetailPage(type, d);
+}
+
+function renderBreakthroughDetail(b) {
+  const title = b.title || b.name || b.experiment_id || 'Breakthrough';
+  const tone  = b.evidence_strength === 'strong' ? 'green' : 'teal';
+
+  $('dp-crumb').innerHTML = `<span>Observatory</span> &rsaquo; <span>Breakthroughs</span> &rsaquo; <strong>${esc(title.substring(0,50))}</strong>`;
+  $('dp-title').textContent = title;
+  $('dp-badges').innerHTML = badgeHtml(b.evidence_strength || 'signal', tone) + '&nbsp;' + badgeHtml('DIRECTIONAL — replication required','amber');
+
+  $('dp-body').innerHTML = `
+    <div class="warning-banner" style="margin-bottom:16px">
+      <strong>⚠ Directional result only.</strong> This result emerged from an autonomous experiment battery and has NOT been independently replicated.
+      p=${b.p_val != null ? fmtN(b.p_val,4) : '?'} does not survive Bonferroni correction for a multi-hypothesis battery.
+      Pre-registered replication at n≥20 is required before any publication claim.
+    </div>
+
+    <div class="stat-grid" style="margin-bottom:16px">
+      ${sDC('p-value', b.p_val != null ? fmtN(b.p_val,4) : '—', Number(b.p_val) < 0.05 ? 'amber' : 'red', 'uncorrected — Bonferroni not passed')}
+      ${sDC("Cohen's d", b.cohens_d != null ? fmtN(b.cohens_d,2) : '—', Number(b.cohens_d) > 0.8 ? 'good' : '', 'effect size')}
+      ${sDC('Δ Forgetting', b.mean_delta != null ? fmtN(b.mean_delta,4) : '—', Number(b.mean_delta) < 0 ? 'good' : 'red', 'mean delta')}
+      ${sDC('Mean forgetting', b.mean_forgetting != null ? fmtN(b.mean_forgetting,4) : '—', '', '')}
+      ${sDC('Seeds better', b.n_better != null ? b.n_better + '/5' : '—', Number(b.n_better) >= 5 ? 'good' : 'amber', '')}
+      ${sDC('Dataset', b.dataset || '—', '', '')}
+      ${sDC('Found at', b.found_at ? fmtShort(b.found_at) : '—', '', '')}
+      ${sDC('Source', b.source || '—', '', '')}
+    </div>
+
+    <div class="dp-2col">
+      <div class="dp-section">
+        <div class="dp-section-head">What this finding shows</div>
+        <div class="dp-section-body">
+          <div class="kv-grid">
+            <span class="kv-k">Name</span><span class="kv-v">${esc(b.name||'—')}</span>
+            <span class="kv-k">Project ID</span><span class="kv-v">${esc(b.project_id||'—')}</span>
+            <span class="kv-k">Notification ID</span><span class="kv-v" style="font-size:10px;word-break:break-all">${esc(b.notification_id||'—')}</span>
+          </div>
+          ${b.notes ? `<p style="margin-top:10px;font-size:12.5px;color:var(--muted);line-height:1.65">${esc(b.notes)}</p>` : ''}
+          ${b.summary ? `<p style="margin-top:10px;font-size:12.5px;color:var(--muted);line-height:1.65">${esc(b.summary)}</p>` : ''}
+        </div>
+      </div>
+
+      <div class="dp-section">
+        <div class="dp-section-head">Required next steps</div>
+        <div class="dp-section-body">
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div class="verdict-block dir">
+              <strong style="display:block;color:var(--amber);margin-bottom:4px">1. Pre-register replication</strong>
+              Run n=20 additional seeds as a pre-registered single-hypothesis test (no Bonferroni correction needed for a registered confirmatory study).
+            </div>
+            <div class="verdict-block dir">
+              <strong style="display:block;color:var(--amber);margin-bottom:4px">2. Verify seed set</strong>
+              Confirm seeds match canonical [42,0,1,2,3] before comparing with Phase 10 results.
+            </div>
+            <div class="verdict-block dir">
+              <strong style="display:block;color:var(--amber);margin-bottom:4px">3. Do not cite until confirmed</strong>
+              paper_citation_allowed = false until replication completes.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-links">
+      ${b.project_id ? `<button class="btn sm" onclick="closeDetail();navTo('papers')">○ View Papers</button>` : ''}
+      <button class="btn sm" onclick="closeDetail();navTo('evidence')">⟁ View Evidence</button>
+      <button class="btn sm" onclick="closeDetail();navTo('experiments')">⬡ Run Replication</button>
+    </div>`;
 }
 
 function renderObsProcs() {
@@ -1694,7 +1939,7 @@ function renderObsActiveExps(experiments) {
   $('obs-active-exps').innerHTML = active.map(exp => {
     const prog = exp.progress || {};
     const sd = Number(prog.seeds_done||0), st = Number(prog.seeds_total||0);
-    return `<div class="card" style="margin-bottom:8px;cursor:pointer" data-exp-json="${esc(JSON.stringify(exp))}" onclick="openExpDrawer(this.dataset.expJson)">
+    return `<div class="card" style="margin-bottom:8px;cursor:pointer" data-exp-json="${esc(JSON.stringify(exp))}" onclick="openDetail('experiment', JSON.parse(this.dataset.expJson))">
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
         ${dotHtml('green','pulse')}
         <strong style="font-size:12.5px">${esc((exp.name||exp.id||'').substring(0,50))}</strong>
@@ -1775,7 +2020,7 @@ function renderExps() {
     const prog  = exp.progress || {};
     const md = Number(prog.methods_done||0), mt = Number(prog.methods_total||0);
     const seeds = Array.isArray(exp.seeds) ? exp.seeds.length : (exp.n_seeds||'?');
-    return `<tr data-exp-stage="${esc(stage)}" data-exp-name="${esc((exp.name||exp.id||'').toLowerCase())}" data-exp-dataset="${esc((exp.dataset||'').toLowerCase())}" data-exp-method="${esc((exp.method||'').toLowerCase())}" data-exp-json="${esc(JSON.stringify(exp))}" onclick="openExpDrawer(this.dataset.expJson)">
+    return `<tr data-exp-stage="${esc(stage)}" data-exp-name="${esc((exp.name||exp.id||'').toLowerCase())}" data-exp-dataset="${esc((exp.dataset||'').toLowerCase())}" data-exp-method="${esc((exp.method||'').toLowerCase())}" data-exp-json="${esc(JSON.stringify(exp))}" onclick="openDetail('experiment', JSON.parse(this.dataset.expJson))">
       <td><span class="dot ${tone}${tone==='green'?' pulse':''}"></span> <span style="color:var(--${tone||'muted'})">${esc(stage)}</span></td>
       <td>
         <div style="font-weight:600;font-size:12.5px">${esc((exp.name||exp.id||'').substring(0,55))}</div>
@@ -1880,7 +2125,7 @@ function renderEvidence() {
       const pVal = r.p_value_uncorrected ?? r.p_value ?? r.p_val ?? r.vs_ewc_p;
       const dVal = r.cohens_d ?? r.d ?? r.vs_ewc_d;
       const delta = r.mean_delta_forgetting ?? r.mean_delta ?? r.delta;
-      return `<tr data-verdict="${normalizeVerdict(verd)}" data-ev-json="${esc(JSON.stringify(r))}" onclick="openEvidenceDrawer(this.dataset.evJson)">
+      return `<tr data-verdict="${normalizeVerdict(verd)}" data-ev-json="${esc(JSON.stringify(r))}" onclick="openDetail('phase', JSON.parse(this.dataset.evJson))">
         <td class="mono">${esc(String(r.phase||r.experiment_id||'—'))}</td>
         <td>${esc(r.dataset||'—')}</td>
         <td style="font-size:11.5px">${esc(r.method_comparison||r.label||'—')}</td>
@@ -1951,18 +2196,20 @@ function renderPapers() {
       const tone = status.includes('error')||status.includes('fail') ? 'red'
                  : status.includes('draft') ? 'amber'
                  : status.includes('pub') ? 'green' : 'dim';
-      const waiting = Number(p.waiting_experiment_count || 0);
-      return `<tr>
-        <td><div style="font-weight:600;font-size:12.5px">${esc((p.title||p.paper_id||'Untitled').substring(0,70))}</div>
-            <div class="mono" style="font-size:10.5px;color:var(--dim)">${esc(p.paper_id||p.project_id||'')}</div></td>
+      const waiting = Number(p.waiting_for_experiments || p.waiting_experiment_count || 0);
+      const pct = Number(p.progress_pct||0);
+      return `<tr data-paper-json="${esc(JSON.stringify(p))}" onclick="openDetail('paper', JSON.parse(this.dataset.paperJson))" style="cursor:pointer">
+        <td>
+          <div style="font-weight:600;font-size:12.5px">${esc((p.title||p.paper_id||p.project_id||'Untitled').substring(0,70))}</div>
+          <div class="mono" style="font-size:10.5px;color:var(--dim)">${esc(p.paper_id||p.project_id||'')}</div>
+        </td>
         <td>${badgeHtml(status, tone)}</td>
-        <td>—</td>
+        <td>${miniProgress(pct, 100, Math.round(pct)+'%')}</td>
         <td>${badgeHtml(p.compile_status||'—','dim')}</td>
         <td>${waiting > 0 ? badgeHtml(waiting + ' exp.','amber') : '—'}</td>
-        <td>${p.pdf_path ? `<a href="/serve/paper/${esc(p.paper_id)}/main.pdf" target="_blank" class="btn sm">PDF</a>` : '—'}</td>
-        <td style="display:flex;gap:4px;flex-wrap:wrap">
-          <button class="btn sm green-btn" onclick="approveForWebsite('${esc(p.paper_id||p.project_id)}')">✓ Approve Web</button>
-          <button class="btn sm danger" onclick="returnToAuthor('${esc(p.paper_id||p.project_id)}')">↩ Return</button>
+        <td onclick="event.stopPropagation()">${p.serve_pdf || p.has_pdf ? `<a href="${esc(p.serve_pdf||'/serve/paper/'+encodeURIComponent(p.project_id||p.paper_id)+'/main.pdf')}" target="_blank" class="btn sm" onclick="event.stopPropagation()">PDF ↗</a>` : '<span style="color:var(--dim)">—</span>'}</td>
+        <td onclick="event.stopPropagation()" style="display:flex;gap:4px;flex-wrap:wrap">
+          <button class="btn sm danger" onclick="event.stopPropagation();returnToAuthor('${esc(p.paper_id||p.project_id)}')">↩ Return</button>
         </td>
       </tr>`;
     }).join('');
@@ -1996,9 +2243,99 @@ async function returnToAuthor(paperId) {
 }
 
 /* ══════════════════════════════════════════════════════════
+   DIRECTOR PROPOSALS
+   ══════════════════════════════════════════════════════════ */
+function renderDirectorProposals() {
+  const data = S.data.director_proposals || {};
+  const proposals = Array.isArray(data.proposals) ? data.proposals : [];
+  const pending = proposals.filter(p => p.status === 'pending_veto');
+  const done    = proposals.filter(p => p.status !== 'pending_veto');
+  const container = $('review-director-proposals');
+  if (!container) return;
+
+  if (!pending.length && !done.length) {
+    container.innerHTML = `<div class="empty-state">No Director proposals — autonomous mode is idle or veto window not yet active.</div>`;
+    return;
+  }
+
+  function timeLeft(auto_approve_at) {
+    if (!auto_approve_at) return '—';
+    const diff = new Date(auto_approve_at) - new Date();
+    if (diff <= 0) return 'auto-approving…';
+    const h = Math.floor(diff/3600000), m = Math.floor((diff%3600000)/60000);
+    return h + 'h ' + m + 'm remaining';
+  }
+
+  container.innerHTML = pending.length
+    ? pending.map(p => `
+      <div class="review-item waiting" style="border-left-color:var(--amber)">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+          <div style="flex:1">
+            <div style="font-weight:600;font-size:13px">${esc(p.experiment_name||p.experiment_id||'?')}</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:2px">
+              ${esc(p.frontier_problem_id||'')} · pri ${esc(String(p.priority||'?'))}
+            </div>
+            ${p.context_why ? `<div style="font-size:11.5px;color:var(--muted);margin-top:6px;line-height:1.55">${esc(p.context_why.substring(0,200))}</div>` : ''}
+            <div style="font-size:11px;color:var(--amber);margin-top:6px">
+              ⏱ ${timeLeft(p.auto_approve_at)} · proposed ${fmtShort(p.proposed_at)}
+            </div>
+          </div>
+          <div>${badgeHtml('pending veto','amber')}</div>
+        </div>
+        <textarea class="review-notes" id="veto-reason-${esc(p.experiment_id.replace(/[^a-z0-9]/gi,'_'))}" placeholder="Veto reason (optional)…"></textarea>
+        <div class="review-actions">
+          <button class="btn green-btn" onclick="approveProposal('${esc(p.experiment_id)}')">✓ Approve Now</button>
+          <button class="btn danger" onclick="vetoProposal('${esc(p.experiment_id)}')">✗ Veto</button>
+        </div>
+      </div>`).join('')
+    : '<div class="card" style="color:var(--muted);font-size:12px;padding:10px">All Director proposals resolved.</div>';
+
+  // Append done items as collapsed
+  if (done.length) {
+    container.innerHTML += `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:11px;color:var(--dim);padding:6px 0">${done.length} resolved proposals</summary>
+    ${done.map(p => `<div class="card" style="margin-top:6px;opacity:.65">
+      <div style="display:flex;gap:8px;align-items:center">
+        ${badgeHtml(p.status,'dim')}
+        <span style="font-size:12px">${esc((p.experiment_name||p.experiment_id||'').substring(0,60))}</span>
+        <span style="margin-left:auto;font-size:11px;color:var(--dim)">${fmtShort(p.vetoed_at||p.proposed_at)}</span>
+      </div>
+      ${p.veto_reason ? `<div style="font-size:11px;color:var(--muted);margin-top:4px">${esc(p.veto_reason)}</div>` : ''}
+    </div>`).join('')}
+    </details>`;
+  }
+}
+
+async function vetoProposal(expId) {
+  const slug = expId.replace(/[^a-z0-9]/gi,'_');
+  const reason = ($('veto-reason-' + slug)||{}).value || '';
+  if (!confirm('Veto "' + expId + '"? This blocks it from running until manually re-approved.')) return;
+  try {
+    await api('/api/director_proposals/veto/' + encodeURIComponent(expId), {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({reason}),
+    });
+    toast('Vetoed: ' + expId);
+    await loadEndpoint('director_proposals');
+    renderReview();
+    renderHeader();
+  } catch(e) { toast('Veto failed: ' + e.message,'err'); }
+}
+
+async function approveProposal(expId) {
+  try {
+    await api('/api/director_proposals/approve/' + encodeURIComponent(expId), {method:'POST'});
+    toast('Approved early: ' + expId);
+    await loadEndpoint('director_proposals');
+    renderReview();
+    renderHeader();
+  } catch(e) { toast('Approve failed: ' + e.message,'err'); }
+}
+
+/* ══════════════════════════════════════════════════════════
    HUMAN REVIEW VIEW
    ══════════════════════════════════════════════════════════ */
 function renderReview() {
+  renderDirectorProposals();
   if (renderApiError('review-urgent', 'review')) return;
   const data = S.data.review || {};
   // API shape: { claim_reviews:[...], questions:[...] } OR { pending:[...], questions:[...], completed:[...] }
@@ -2527,6 +2864,402 @@ function setupRunpodPoll() {
     await loadEndpoint('runpod');
     if (S.view === 'obs') renderObsRunPod();
   }, 10000);
+}
+
+/* ══════════════════════════════════════════════════════════
+   FULL-PAGE DETAIL SYSTEM
+   ══════════════════════════════════════════════════════════ */
+
+function openDetail(type, dataObj) {
+  S._detailType = type;
+  S._detailData = dataObj;
+  const page = $('detail-page');
+  page.classList.add('open');
+  page.scrollTop = 0;
+  history.pushState({detail:type}, '', '#detail-' + type);
+  renderDetailPage(type, dataObj);
+}
+
+function closeDetail() {
+  $('detail-page').classList.remove('open');
+  if (history.state && history.state.detail) history.back();
+}
+
+window.addEventListener('popstate', () => {
+  if (!location.hash.startsWith('#detail-')) {
+    $('detail-page').classList.remove('open');
+  }
+});
+
+function renderDetailPage(type, d) {
+  if (type === 'experiment') renderExpDetail(d);
+  else if (type === 'phase')  renderPhaseDetail(d);
+  else if (type === 'paper')  renderPaperDetail(d);
+}
+
+/* ─── Experiment Detail ──────────────────────────────────── */
+function renderExpDetail(exp) {
+  const stage = exp.stage || exp.status || 'unknown';
+  const tone  = statusTone(stage);
+  const prog  = exp.progress || {};
+  const seeds = Array.isArray(exp.seeds) ? exp.seeds : [];
+  const sd = Number(prog.seeds_done||0), st = Number(prog.seeds_total || seeds.length || 0);
+  const md = Number(prog.methods_done||0), mt = Number(prog.methods_total||0);
+  const hwb = exp.hardware_budget || {};
+
+  $('dp-crumb').innerHTML = `<span>Experiments</span> &rsaquo; <strong>${esc((exp.name||exp.id||'').substring(0,50))}</strong>`;
+  $('dp-title').textContent = exp.name || exp.id || 'Experiment';
+  $('dp-badges').innerHTML = badgeHtml(stage, tone) + (exp.priority ? '&nbsp;' + badgeHtml('pri ' + exp.priority, 'dim') : '');
+
+  const logPromise = api('/api/experiment/' + encodeURIComponent(exp.id) + '/log').catch(() => ({lines:[]}));
+
+  $('dp-body').innerHTML = `
+    <div class="dp-3col">
+      <div class="dp-section">
+        <div class="dp-section-head">Experiment</div>
+        <div class="dp-section-body">
+          <div class="kv-grid">
+            <span class="kv-k">ID</span><span class="kv-v">${esc(exp.id||'—')}</span>
+            <span class="kv-k">Status</span><span class="kv-v">${badgeHtml(stage,tone)}</span>
+            <span class="kv-k">Dataset</span><span class="kv-v">${esc(exp.dataset||'—')}</span>
+            <span class="kv-k">Method</span><span class="kv-v">${esc(exp.method||'—')}</span>
+            <span class="kv-k">Priority</span><span class="kv-v">${esc(String(exp.priority||'—'))}</span>
+            <span class="kv-k">Seeds</span><span class="kv-v">${esc(seeds.join(', ')||'—')}</span>
+            <span class="kv-k">Started</span><span class="kv-v">${fmtDate(exp.started_at)}</span>
+            <span class="kv-k">Est. runtime</span><span class="kv-v">${exp.est_h != null ? fmtN(exp.est_h,1)+' h' : '—'}</span>
+            <span class="kv-k">ETA remaining</span><span class="kv-v">${prog.eta_remaining_h != null ? fmtAge(Number(prog.eta_remaining_h)*3600) : '—'}</span>
+            <span class="kv-k">Avg / seed</span><span class="kv-v">${prog.avg_per_seed_h != null ? fmtN(prog.avg_per_seed_h,2)+' h' : '—'}</span>
+          </div>
+        </div>
+      </div>
+      <div class="dp-section">
+        <div class="dp-section-head">Scientific Context</div>
+        <div class="dp-section-body">
+          <div class="kv-grid" style="margin-bottom:${exp.context_why?'10px':'0'}">
+            <span class="kv-k">Frontier</span><span class="kv-v">${esc(exp.frontier_problem_id||'—')}</span>
+          </div>
+          ${exp.context_why ? `<p style="font-size:12.5px;color:var(--muted);line-height:1.65;margin-bottom:10px"><strong style="color:var(--text);display:block;margin-bottom:4px">Why this experiment</strong>${esc(exp.context_why)}</p>` : ''}
+          ${exp.projected_outcome ? `<p style="font-size:12.5px;color:var(--muted);line-height:1.65"><strong style="color:var(--text);display:block;margin-bottom:4px">Projected outcome</strong>${esc(exp.projected_outcome)}</p>` : ''}
+        </div>
+      </div>
+      <div class="dp-section">
+        <div class="dp-section-head">Hardware</div>
+        <div class="dp-section-body">
+          <div class="kv-grid">
+            <span class="kv-k">VRAM req.</span><span class="kv-v">${hwb.vram_gb != null ? hwb.vram_gb+' GB' : '—'}</span>
+            <span class="kv-k">CPU cores</span><span class="kv-v">${hwb.cpu_cores != null ? hwb.cpu_cores : '—'}</span>
+            <span class="kv-k">Result path</span><span class="kv-v" style="word-break:break-all;font-size:10.5px">${esc(exp.result_path||'—')}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dp-section">
+      <div class="dp-section-head">Progress
+        <span style="font-weight:400;text-transform:none;letter-spacing:0">${sd}/${st} seeds · ${md}/${mt} method-runs</span>
+      </div>
+      <div class="dp-section-body">
+        <div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap;margin-bottom:${Array.isArray(prog.method_summaries)&&prog.method_summaries.length?'14px':'0'}">
+          <div>
+            <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Seeds</div>
+            ${seedPips(sd, st, sd)}
+          </div>
+          ${mt > 0 ? `<div style="flex:1;min-width:200px">
+            <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Method-runs</div>
+            ${miniProgress(md, mt, md+'/'+mt)}
+          </div>` : ''}
+          ${prog.current_method ? `<div class="kv-grid">
+            <span class="kv-k">Current method</span><span class="kv-v">${esc(prog.current_method)}</span>
+            <span class="kv-k">Current seed</span><span class="kv-v">${esc(String(prog.current_seed??'—'))}</span>
+          </div>` : ''}
+        </div>
+        ${Array.isArray(prog.method_summaries) && prog.method_summaries.length ? `
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr><th>Seed</th><th>Method</th><th>Forgetting</th><th>Accuracy</th></tr></thead>
+              <tbody>${prog.method_summaries.map(ms => `<tr>
+                <td class="mono">${esc(String(ms.seed))}</td>
+                <td>${esc(ms.method)}</td>
+                <td class="mono right" style="color:var(--green)">${fmtN(ms.forgetting,4)}</td>
+                <td class="mono right">${fmtN(ms.accuracy,4)}</td>
+              </tr>`).join('')}</tbody>
+            </table>
+          </div>` : ''}
+      </div>
+    </div>
+
+    <div class="dp-section">
+      <div class="dp-section-head">Live Log
+        <button class="btn sm" onclick="refreshExpLog('${esc(exp.id)}')">↻ Reload</button>
+      </div>
+      <div style="padding:0">
+        <div class="terminal" id="exp-detail-log" style="height:320px;border-radius:0;border:none;border-top:1px solid var(--border)">Loading log…</div>
+      </div>
+    </div>
+
+    <div class="detail-links">
+      ${exp.frontier_problem_id ? `<button class="btn sm" onclick="closeDetail();navTo('research')">◎ Research State</button>` : ''}
+      <button class="btn sm" onclick="closeDetail();navTo('evidence')">⟁ Evidence</button>
+      <button class="btn sm" onclick="closeDetail();navTo('papers')">○ Papers</button>
+    </div>`;
+
+  logPromise.then(d => {
+    const el = $('exp-detail-log');
+    if (!el) return;
+    const lines = Array.isArray(d.lines) ? d.lines : (Array.isArray(d) ? d : []);
+    el.innerHTML = lines.length ? lines.map(logLine).join('\n') : '<span style="color:var(--dim)">No log lines available</span>';
+    el.scrollTop = el.scrollHeight;
+  });
+}
+
+async function refreshExpLog(expId) {
+  const el = $('exp-detail-log');
+  if (!el) return;
+  el.innerHTML = '<span style="color:var(--dim)">Reloading…</span>';
+  try {
+    const d = await api('/api/experiment/' + encodeURIComponent(expId) + '/log');
+    const lines = Array.isArray(d.lines) ? d.lines : (Array.isArray(d) ? d : []);
+    el.innerHTML = lines.length ? lines.map(logLine).join('\n') : '<span style="color:var(--dim)">No log lines</span>';
+    el.scrollTop = el.scrollHeight;
+  } catch(e) { el.innerHTML = `<span class="log-err">Error: ${esc(e.message)}</span>`; }
+}
+
+/* ─── Phase / Evidence Detail ────────────────────────────── */
+function renderPhaseDetail(r) {
+  const verd = r.honest_verdict || r.verdict || r.verdict_key || '—';
+  const pVal = r.p_value_uncorrected ?? r.p_value ?? r.p_val ?? r.vs_ewc_p;
+  const dVal = r.cohens_d ?? r.d ?? r.vs_ewc_d;
+  const delta = r.mean_delta_forgetting ?? r.mean_delta ?? r.delta;
+  const bonfOk = r.bonferroni_significant === true || (r.vs_ewc_p != null && r.vs_ewc_p < 0.0125);
+  const power = r.achieved_power_pct;
+  const verdU = verd.toUpperCase();
+  const verdCls = verdU.includes('PUB') ? 'pub' : verdU === 'DIRECTIONAL' ? 'dir' : verdU.includes('EXPL') ? 'exp' : verdU === 'FALSIFIED' ? 'fls' : '';
+
+  $('dp-crumb').innerHTML = `<span>Evidence &amp; Results</span> &rsaquo; <strong>Phase ${esc(String(r.phase||r.id||''))}</strong>`;
+  $('dp-title').textContent = r.title || r.label || ('Phase ' + (r.phase||r.id||''));
+  $('dp-badges').innerHTML = verdictHtml(verd);
+
+  $('dp-body').innerHTML = `
+    <div class="stat-grid">
+      ${sDC('p-value', pVal != null ? fmtN(pVal,4) : '—', pVal != null && pVal < 0.0125 ? 'good' : pVal != null && pVal < 0.05 ? 'amber' : 'red', 'uncorrected')}
+      ${sDC("Cohen's d", dVal != null ? fmtN(dVal,2) : '—', dVal != null && dVal > 0.8 ? 'good' : '', dVal != null ? (dVal > 1.2 ? 'very large' : dVal > 0.8 ? 'large' : dVal > 0.5 ? 'medium' : 'small') : '')}
+      ${sDC('Δ Forgetting', delta != null ? (delta > 0 ? '+' : '') + fmtN(delta,4) : '—', delta != null && delta < 0 ? 'good' : 'red', delta != null && delta < 0 ? 'TCL better' : delta != null ? 'TCL worse' : '')}
+      ${sDC('TCL Forgetting', r.tcl_forgetting != null ? fmtN(r.tcl_forgetting,4) : '—', '', '')}
+      ${sDC('TCL Accuracy', r.tcl_accuracy != null ? fmtN(r.tcl_accuracy,4) : '—', '', '')}
+      ${sDC('n seeds', r.n_seeds != null ? String(r.n_seeds) : '5', '', '')}
+      ${sDC('Power', power != null ? fmtN(power,1)+'%' : '—', Number(power) >= 80 ? 'good' : Number(power) >= 50 ? 'amber' : 'red', power != null ? (Number(power) >= 80 ? 'adequate' : 'underpowered') : '')}
+      ${sDC('Bonferroni', bonfOk ? '✓ PASS' : '✗ FAIL', bonfOk ? 'good' : 'red', (r.bonferroni_k ? 'k='+r.bonferroni_k : 'k=4') + ', α=' + (r.bonferroni_threshold||0.0125))}
+    </div>
+
+    <div class="dp-2col">
+      <div>
+        <div class="dp-section">
+          <div class="dp-section-head">Experiment Metadata</div>
+          <div class="dp-section-body">
+            <div class="kv-grid">
+              <span class="kv-k">Phase</span><span class="kv-v">${esc(String(r.phase||'—'))}</span>
+              <span class="kv-k">Dataset</span><span class="kv-v">${esc(r.dataset||'—')}</span>
+              <span class="kv-k">Backbone</span><span class="kv-v">${esc(r.backbone||'ResNet-18')}</span>
+              <span class="kv-k">Comparison</span><span class="kv-v">${esc(r.method_comparison||r.label||'—')}</span>
+              <span class="kv-k">Direction</span><span class="kv-v">${esc(r.direction||'—')}</span>
+              <span class="kv-k">Seeds TCL better</span><span class="kv-v">${esc(String(r.n_seeds_tcl_better||'—'))}</span>
+              <span class="kv-k">Completed</span><span class="kv-v">${fmtDate(r.completed_at)}</span>
+              <span class="kv-k">Trust tier</span><span class="kv-v">${esc(r.trust_tier||r.source_kind||'—')}</span>
+            </div>
+          </div>
+        </div>
+        <div class="dp-section">
+          <div class="dp-section-head">Statistical Corrections</div>
+          <div class="dp-section-body">
+            <div class="kv-grid">
+              <span class="kv-k">Bonferroni k</span><span class="kv-v">${esc(String(r.bonferroni_k||4))}</span>
+              <span class="kv-k">Family threshold</span><span class="kv-v">p &lt; ${esc(String(r.bonferroni_threshold||0.0125))}</span>
+              <span class="kv-k">Result</span><span class="kv-v">${bonfOk ? badgeHtml('SIGNIFICANT','green') : badgeHtml('NOT SIGNIFICANT','red')}</span>
+              <span class="kv-k">Seeds confirm</span><span class="kv-v">${esc(String(r.n_seeds_tcl_better||'—'))} / ${esc(String(r.n_seeds||5))}</span>
+              <span class="kv-k">Power @ n</span><span class="kv-v">${power != null ? fmtN(power,1)+'%' : '—'}</span>
+              <span class="kv-k">n for 80% power</span><span class="kv-v">${esc(String(r.seeds_needed_80pct_power||'—'))}</span>
+              <span class="kv-k">n for 90% power</span><span class="kv-v">${esc(String(r.seeds_needed_90pct_power||'—'))}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="dp-section">
+          <div class="dp-section-head">Honest Verdict</div>
+          <div class="dp-section-body">
+            <div style="margin-bottom:10px">${verdictHtml(verd)}</div>
+            <div class="verdict-block ${verdCls}">
+              ${esc(r.honest_verdict_detail || r.notes || r.verdict || '(No detail available)')}
+            </div>
+            ${r.paper_citation_allowed === false
+              ? `<div class="warning-banner err" style="margin-top:8px"><strong>Citation NOT allowed.</strong>${r.paper_citation_caveat ? ' '+esc(r.paper_citation_caveat) : ''}</div>`
+              : r.paper_citation_allowed === true
+              ? `<div class="warning-banner ok" style="margin-top:8px">✓ Citation allowed.${r.paper_citation_caveat ? ' '+esc(r.paper_citation_caveat) : ''}</div>`
+              : ''}
+          </div>
+        </div>
+        <div class="dp-section">
+          <div class="dp-section-head">Publication Gates</div>
+          <div class="dp-section-body">
+            <div class="kv-grid">
+              <span class="kv-k">Gate A (n≥5)</span><span class="kv-v">${gateHtml(r.publication_allowed_gate_a)}</span>
+              <span class="kv-k">Gate B (trust)</span><span class="kv-v">${gateHtml(r.publication_allowed_gate_b)}</span>
+              <span class="kv-k">Paper citation</span><span class="kv-v">${gateHtml(r.paper_citation_allowed)}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    ${r.notes ? `<div class="dp-section">
+      <div class="dp-section-head">Notes</div>
+      <div class="dp-section-body" style="color:var(--muted);font-size:12.5px;line-height:1.65">${esc(r.notes)}</div>
+    </div>` : ''}
+
+    <div class="detail-links">
+      <button class="btn sm" onclick="closeDetail();navTo('papers')">○ Papers citing this</button>
+      <button class="btn sm" onclick="closeDetail();navTo('research')">◎ Research State</button>
+      <button class="btn sm" onclick="closeDetail();navTo('experiments')">⬡ Experiments</button>
+    </div>`;
+}
+
+function sDC(label, value, tone, sub) {
+  return `<div class="stat-cell">
+    <div class="stat-label">${esc(label)}</div>
+    <div class="stat-value ${tone||''}">${esc(String(value))}</div>
+    ${sub ? `<div class="stat-sub">${esc(sub)}</div>` : ''}
+  </div>`;
+}
+
+function gateHtml(v) {
+  if (v === true)  return badgeHtml('✓ pass','green');
+  if (v === false) return badgeHtml('✗ fail','red');
+  return badgeHtml('—','dim');
+}
+
+/* ─── Paper Detail ──────────────────────────────────────── */
+function renderPaperDetail(p) {
+  const status = p.status || p.compile_status || 'unknown';
+  const tone = status.includes('error')||status.includes('fail') ? 'red'
+             : status.includes('draft') ? 'amber'
+             : status.includes('pub') ? 'green' : 'dim';
+  const pct = Number(p.progress_pct||0);
+  const secs = ['Abstract','Introduction','Related Work','Method','Experiments','Analysis','Limitations','Conclusion'];
+  const stages = [
+    {label:'Draft',   cls: pct > 0  ? 'done' : 'active'},
+    {label:'Compile', cls: p.compile_status === 'success' ? 'done' : p.compile_status ? 'active' : ''},
+    {label:'Review',  cls: p.status === 'approved' ? 'done' : p.status === 'awaiting_review' ? 'active' : ''},
+    {label:'Submit',  cls: p.status === 'submitted' ? 'done' : ''},
+  ];
+
+  $('dp-crumb').innerHTML = `<span>Papers</span> &rsaquo; <strong>${esc((p.title||p.project_id||'').substring(0,60))}</strong>`;
+  $('dp-title').textContent = p.title || p.project_id || 'Paper';
+  $('dp-badges').innerHTML = badgeHtml(status, tone);
+
+  $('dp-body').innerHTML = `
+    <div class="pipeline-steps">
+      ${stages.map(s => `<div class="pipe-step ${s.cls}">
+        <div class="ps-label">${esc(s.label)}</div>
+        <div class="ps-val" style="color:${s.cls==='done'?'var(--green)':s.cls==='active'?'var(--blue)':'var(--dim)'}">
+          ${s.cls === 'done' ? '✓ Done' : s.cls === 'active' ? '● Active' : '–'}
+        </div>
+      </div>`).join('')}
+    </div>
+
+    <div class="dp-2col">
+      <div>
+        <div class="dp-section">
+          <div class="dp-section-head">Paper Metadata</div>
+          <div class="dp-section-body">
+            <div class="kv-grid">
+              <span class="kv-k">Project ID</span><span class="kv-v">${esc(p.project_id||p.paper_id||'—')}</span>
+              <span class="kv-k">Status</span><span class="kv-v">${badgeHtml(status,tone)}</span>
+              <span class="kv-k">Compile</span><span class="kv-v">${badgeHtml(p.compile_status||'—','dim')}</span>
+              <span class="kv-k">Progress</span><span class="kv-v">${pct}% — ${esc(p.progress_label||'—')}</span>
+              <span class="kv-k">Generated</span><span class="kv-v">${fmtDate(p.generated_at)}</span>
+              <span class="kv-k">Waiting exps.</span><span class="kv-v">${esc(String(p.waiting_for_experiments||0))}</span>
+              <span class="kv-k">Total exps.</span><span class="kv-v">${esc(String(p.total_experiments||'—'))}</span>
+            </div>
+          </div>
+        </div>
+        <div class="dp-section">
+          <div class="dp-section-head">Key Results</div>
+          <div class="dp-section-body">
+            <div class="kv-grid">
+              <span class="kv-k">Mean forgetting</span><span class="kv-v">${p.mean_forgetting != null ? fmtN(p.mean_forgetting,4) : '—'}</span>
+              <span class="kv-k">Mean delta</span><span class="kv-v">${p.mean_delta != null ? fmtN(p.mean_delta,4) : '—'}</span>
+              <span class="kv-k">p-value</span><span class="kv-v">${p.p_val != null ? fmtN(p.p_val,4) : '—'}</span>
+              <span class="kv-k">Verdict</span><span class="kv-v">${verdictHtml(p.verdict||'—')}</span>
+            </div>
+          </div>
+        </div>
+        <div class="dp-section">
+          <div class="dp-section-head">Section Status (${Math.round(pct/100*secs.length)}/${secs.length} drafted)</div>
+          <div class="dp-section-body" style="padding:0">
+            <table>
+              <thead><tr><th>#</th><th>Section</th><th>Status</th></tr></thead>
+              <tbody>${secs.map((s,i) => {
+                const done = pct > (i/secs.length)*100;
+                return `<tr>
+                  <td class="mono">${i+1}</td>
+                  <td style="font-size:12px">${esc(s)}</td>
+                  <td>${done ? badgeHtml('drafted','green') : badgeHtml('pending','dim')}</td>
+                </tr>`;
+              }).join('')}</tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="dp-section">
+          <div class="dp-section-head">Downloads</div>
+          <div class="dp-section-body">
+            <div style="display:flex;flex-direction:column;gap:10px">
+              ${p.has_pdf || p.serve_pdf
+                ? `<a href="${esc(p.serve_pdf||'/serve/paper/'+encodeURIComponent(p.project_id||p.paper_id)+'/main.pdf')}" target="_blank" class="btn primary">📄 Open PDF</a>`
+                : `<div style="padding:10px;text-align:center;color:var(--dim);font-size:12px;border:1px dashed var(--border);border-radius:var(--r)">PDF not yet compiled</div>`}
+              ${p.serve_tex ? `<a href="${esc(p.serve_tex)}" target="_blank" class="btn">📝 Download LaTeX (.tex)</a>` : ''}
+            </div>
+          </div>
+        </div>
+        <div class="dp-section">
+          <div class="dp-section-head">Actions</div>
+          <div class="dp-section-body">
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <label style="font-size:11.5px;color:var(--muted)">Reason for returning (optional)</label>
+              <textarea id="paper-detail-reason" class="review-notes" placeholder="e.g. Limitations section needs governor non-activation acknowledgement…" style="min-height:60px"></textarea>
+              <button class="btn danger" onclick="paperDetailReturn('${esc(p.project_id||p.paper_id)}')">↩ Return to Author</button>
+              <button class="btn" onclick="syncWebsite()">⟳ Sync Website</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="detail-links">
+      <button class="btn sm" onclick="closeDetail();navTo('evidence')">⟁ Evidence basis</button>
+      <button class="btn sm" onclick="closeDetail();navTo('review')">⚑ Review Queue</button>
+    </div>`;
+}
+
+async function paperDetailReturn(paperId) {
+  const reason = ($('paper-detail-reason')||{}).value || '';
+  try {
+    await api('/api/paper/return-to-author/' + encodeURIComponent(paperId), {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({reason}),
+    });
+    toast('Returned to author');
+    await loadEndpoint('papers');
+    renderPapers();
+  } catch(e) { toast('Error: ' + e.message, 'err'); }
+}
+
+async function syncWebsite() {
+  try {
+    await api('/api/website/sync_research', {method:'POST'});
+    toast('Website synced');
+  } catch(e) { toast('Sync failed: ' + e.message, 'err'); }
 }
 
 /* ══════════════════════════════════════════════════════════

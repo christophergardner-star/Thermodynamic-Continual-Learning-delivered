@@ -2501,6 +2501,97 @@ def api_experiment_inject():
         return jsonify({"ok": False, "error": str(exc)}), 400
 
 
+@app.route("/api/queue/flush", methods=["POST"])
+def api_queue_flush():
+    """Remove all non-running experiments from the queue and archive them.
+
+    POST body (optional JSON):
+      { "stages_to_flush": ["queued","planned","stalled","pending"] }
+
+    Returns:
+      { "ok": True, "flushed": N, "kept": M, "archive_path": "..." }
+    """
+    payload = request.get_json(silent=True) or {}
+    stages_to_flush = set(payload.get("stages_to_flush") or ["queued", "planned", "stalled", "pending"])
+
+    queue_path   = _WS / "tar_state" / "experiment_queue.json"
+    archive_path = _WS / "tar_state" / "experiment_queue_archive.json"
+
+    try:
+        data = _jload(queue_path) or {}
+        if not isinstance(data, dict):
+            data = {}
+        experiments = data.get("experiments", [])
+        if not isinstance(experiments, list):
+            experiments = []
+
+        keep    = [e for e in experiments if str(e.get("stage", e.get("status", ""))).lower() not in stages_to_flush]
+        flushed = [e for e in experiments if str(e.get("stage", e.get("status", ""))).lower() in stages_to_flush]
+
+        # Append flushed experiments to the archive (create if missing)
+        arch_data = _jload(archive_path) or {}
+        if not isinstance(arch_data, dict):
+            arch_data = {}
+        arch_list = arch_data.get("experiments", [])
+        if not isinstance(arch_list, list):
+            arch_list = []
+        arch_list.extend(flushed)
+        arch_data["experiments"] = arch_list
+        arch_data["last_flush"]  = datetime.now(timezone.utc).isoformat()
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        archive_path.write_text(json.dumps(arch_data, indent=2), encoding="utf-8")
+
+        # Write cleaned queue back
+        data["experiments"] = keep
+        data["saved_at"]    = datetime.now(timezone.utc).isoformat()
+        queue_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        return jsonify({
+            "ok": True,
+            "flushed": len(flushed),
+            "kept": len(keep),
+            "archive_path": str(archive_path),
+            "flushed_ids": [e.get("id", "?") for e in flushed],
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/queue/cancel/<exp_id>", methods=["POST"])
+def api_queue_cancel(exp_id: str):
+    """Remove a single queued (non-running) experiment from the queue."""
+    queue_path   = _WS / "tar_state" / "experiment_queue.json"
+    archive_path = _WS / "tar_state" / "experiment_queue_archive.json"
+    try:
+        data = _jload(queue_path) or {}
+        experiments = data.get("experiments", []) if isinstance(data, dict) else []
+        target = [e for e in experiments if str(e.get("id","")) == exp_id]
+        rest   = [e for e in experiments if str(e.get("id","")) != exp_id]
+        if not target:
+            return jsonify({"ok": False, "error": "Experiment not found or already running"}), 404
+        stage = str(target[0].get("stage", target[0].get("status", ""))).lower()
+        if stage == "running":
+            return jsonify({"ok": False, "error": "Cannot cancel a running experiment"}), 400
+
+        arch_data = _jload(archive_path) or {}
+        if not isinstance(arch_data, dict):
+            arch_data = {}
+        arch_list = arch_data.get("experiments", [])
+        if not isinstance(arch_list, list):
+            arch_list = []
+        arch_list.extend(target)
+        arch_data["experiments"] = arch_list
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        archive_path.write_text(json.dumps(arch_data, indent=2), encoding="utf-8")
+
+        data["experiments"] = rest
+        data["saved_at"]    = datetime.now(timezone.utc).isoformat()
+        queue_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return jsonify({"ok": True, "cancelled": exp_id})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 @app.route("/api/processes")
 def api_processes():
     hw_path = _WS / "tar_state" / "hardware_state.json"
@@ -3941,6 +4032,104 @@ def serve_paper(relpath: str):
             mime = mimetypes.guess_type(str(candidate))[0] or "application/octet-stream"
             return send_file(str(candidate), mimetype=mime, as_attachment=False)
     return abort(404)
+
+
+# ── Phase 6 governance endpoints ─────────────────────────────────────────────
+
+@app.route("/api/director_proposals")
+def api_director_proposals():
+    """Director-proposed experiments pending human veto window."""
+    try:
+        from tar_lab.human_review import load_director_proposals
+        proposals = load_director_proposals(_WS)
+    except Exception:
+        path = _WS / "tar_state" / "director_proposals.json"
+        try:
+            proposals = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+            if not isinstance(proposals, list):
+                proposals = []
+        except Exception:
+            proposals = []
+    pending = [p for p in proposals if p.get("status") == "pending_veto"]
+    return jsonify({"proposals": proposals, "pending_count": len(pending), "total": len(proposals)})
+
+
+@app.route("/api/director_proposals/veto/<exp_id>", methods=["POST"])
+def api_veto_proposal(exp_id: str):
+    body = request.get_json(silent=True) or {}
+    reason = str(body.get("reason", "")).strip()
+    try:
+        from tar_lab.human_review import veto_director_proposal
+        ok = veto_director_proposal(_WS, exp_id, reason)
+        return jsonify({"ok": ok, "vetoed": exp_id})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/director_proposals/approve/<exp_id>", methods=["POST"])
+def api_approve_proposal(exp_id: str):
+    try:
+        from tar_lab.human_review import approve_director_proposal
+        ok = approve_director_proposal(_WS, exp_id)
+        return jsonify({"ok": ok, "approved": exp_id})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/budget")
+def api_budget():
+    """Session-level API cost budget status."""
+    try:
+        from tar_lab.llm_bridge import get_budget_status
+        return jsonify(get_budget_status())
+    except Exception as exc:
+        return jsonify({"state": "unknown", "error": str(exc), "spent_usd": 0, "budget_usd": 5.0})
+
+
+@app.route("/api/phase2/launch", methods=["POST"])
+def api_phase2_launch():
+    """Launch a pre-registered Phase 2 GPU experiment script."""
+    body = request.get_json(silent=True) or {}
+    script_key = str(body.get("script", "")).strip()
+    SCRIPTS = {
+        "run_hpc_replication":          "run_hpc_replication.py",
+        "phase16_cifar100_rerun":       "phase16_cifar100_rerun.py",
+        "phase17_tinyimagenet_rerun":   "phase17_tinyimagenet_rerun.py",
+        "run_hyperparameter_selection": "run_hyperparameter_selection.py",
+        "run_mechanistic_ablation":     "run_mechanistic_ablation.py",
+    }
+    if script_key not in SCRIPTS:
+        return jsonify({"ok": False, "error": f"Unknown script. Allowed: {list(SCRIPTS)}"}), 400
+    script_path = _REPO / SCRIPTS[script_key]
+    if not script_path.exists():
+        return jsonify({"ok": False, "error": f"Script not yet written: {SCRIPTS[script_key]}", "not_found": True}), 404
+    import subprocess, sys as _sys
+    try:
+        proc = subprocess.Popen(
+            [_sys.executable, str(script_path)],
+            cwd=str(_REPO), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        return jsonify({"ok": True, "pid": proc.pid, "script": SCRIPTS[script_key]})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/health")
+def api_health():
+    """System health check. Add ?fresh=true to regenerate."""
+    report_path = _WS / "tar_state" / "health_report.json"
+    if request.args.get("fresh", "").lower() == "true" or not report_path.exists():
+        try:
+            import subprocess, sys as _sys
+            subprocess.run(
+                [_sys.executable, str(_REPO / "tar_health_check.py")],
+                cwd=str(_REPO), timeout=30, capture_output=True,
+            )
+        except Exception:
+            pass
+    data = _jload(report_path) or {"error": "Not generated yet. Hit /api/health?fresh=true"}
+    return jsonify(data)
 
 
 # ── hardware monitor startup ──────────────────────────────────────────────────
