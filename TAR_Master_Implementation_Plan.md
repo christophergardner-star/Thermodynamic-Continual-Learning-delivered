@@ -2431,4 +2431,871 @@ class AdapterMonitor:
 
 ---
 
-*Stage 4 complete — Phases 5 and 6 with 19 tasks (5.1–5.6, 6.1–6.13)*
+---
+
+## PHASE 7 — ENGINEERING INFRASTRUCTURE
+**Duration:** 4–6 weeks (overlaps with Phases 2–5, begins after Phase 0)
+**Track:** B (Code & Engineering)
+**Owner:** Systems Engineer
+**Objective:** Bring operational infrastructure from development-grade to a standard that supports reliable, reproducible, long-term autonomous operation.
+
+---
+
+### Task 7.1 — Add GitHub Actions CI/CD pipeline
+
+**Priority:** CRITICAL — 482 tests provide zero protection without an automated runner
+
+No CI means broken code can be pushed and tests only run when someone remembers to run them manually. The six uncommitted governance files ran for months with no test enforcement.
+
+**Create `.github/workflows/ci.yml`:**
+```yaml
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run detect-secrets
+        run: detect-secrets scan --baseline .secrets.baseline
+      - name: Run tests
+        run: pytest --tb=short -q --timeout=120
+      - name: Coverage report
+        run: pytest --cov=tar_lab --cov-report=term-missing --cov-fail-under=65
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+      - run: pip install flake8 mypy
+      - run: flake8 tar_lab/ --max-line-length=120 --ignore=E501,W503
+      - run: mypy tar_lab/ --ignore-missing-imports --no-strict-optional
+```
+
+**Block merges to `main` unless CI passes.** Add branch protection rules in GitHub repository settings.
+
+**Verification:** Push a commit that breaks a test; confirm CI fails and merge is blocked. Push a commit with a secret pattern; confirm detect-secrets blocks it.
+
+---
+
+### Task 7.2 — Pin all dependency versions and generate a lock file
+
+`requirements.txt` has no version pins. Every install resolves to latest, making the system non-reproducible across machines and times.
+
+**Process:**
+1. Create `requirements-core.txt` (daemon operation, no ML):
+   ```
+   pydantic>=2.5,<3.0
+   fastapi>=0.110,<0.120
+   uvicorn>=0.27,<0.30
+   flask>=3.0,<4.0
+   anthropic>=0.25,<0.40
+   ```
+
+2. Create `requirements-research.txt` (ML experimentation):
+   ```
+   torch==2.3.1
+   torchvision==0.18.1
+   transformers==4.41.2
+   scikit-learn==1.5.0
+   scipy==1.13.0
+   ```
+
+3. Create `requirements-dev.txt` (testing and development):
+   ```
+   pytest==8.2.0
+   pytest-cov==5.0.0
+   detect-secrets==1.4.0
+   pre-commit==3.7.0
+   mypy==1.10.0
+   ```
+
+4. Run `pip freeze > requirements.lock` after confirming all tests pass with pinned versions.
+5. Commit `requirements.lock`. CI uses `pip install -r requirements.lock` for reproducibility.
+
+**Remove unused packages:** Three PDF parsing libraries (choose primary: PyMuPDF), quantum (PennyLane — move to optional), RL (Gymnasium — move to optional).
+
+**Verification:** On a clean virtualenv, `pip install -r requirements.lock && pytest` succeeds with all tests passing.
+
+---
+
+### Task 7.3 — Pin the Docker base image digest
+
+`Dockerfile.experiment` uses `FROM python:3.13.3-slim` without a digest. Docker registries can re-tag images, making builds non-reproducible.
+
+```dockerfile
+# Get the current digest:
+# docker inspect python:3.13.3-slim --format='{{index .RepoDigests 0}}'
+
+FROM python:3.13.3-slim@sha256:<actual-digest-here>
+
+# Add build-time health check
+RUN python -c "import torch; print('PyTorch:', torch.__version__)" \
+    && python -c "import numpy; print('NumPy:', numpy.__version__)"
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD python -c "import torch" || exit 1
+```
+
+Generate and commit a Software Bill of Materials (SBOM):
+```bash
+docker sbom python:3.13.3-slim@sha256:<digest> --format spdx-json > docker_sbom.json
+```
+
+**Verification:** Build the image twice from the same Dockerfile; confirm both builds produce identical layer hashes.
+
+---
+
+### Task 7.4 — Replace Flask development server with Gunicorn
+
+`tar_dashboard.py` runs Flask's built-in development server — single-threaded, not thread-safe, explicitly documented as "not for production."
+
+**Changes:**
+1. Add `gunicorn>=22.0,<23.0` to `requirements-core.txt`.
+2. Create `tar_dashboard_wsgi.py`:
+   ```python
+   from tar_dashboard import app
+   # gunicorn tar_dashboard_wsgi:app --workers 2 --bind 127.0.0.1:7860
+   ```
+3. Update `START_TAR.bat`:
+   ```batch
+   REM Before:
+   start /B pythonw tar_dashboard.py
+   REM After:
+   start /B pythonw -m gunicorn tar_dashboard_wsgi:app --workers 2 --bind 127.0.0.1:7860 --log-file logs/dashboard.log
+   ```
+4. Add `SIGTERM` handler in `tar_dashboard.py`:
+   ```python
+   import signal
+   def _handle_shutdown(signum, frame):
+       logger.info("Dashboard shutting down gracefully...")
+       sys.exit(0)
+   signal.signal(signal.SIGTERM, _handle_shutdown)
+   ```
+5. Add `/readiness` and `/liveness` endpoints:
+   ```python
+   @app.route("/readiness")
+   def readiness():
+       return {"status": "ready", "timestamp": utc_now_iso()}, 200
+
+   @app.route("/liveness")
+   def liveness():
+       return {"status": "alive"}, 200
+   ```
+
+**Verification:** Start dashboard with Gunicorn; make 10 concurrent requests to `/status`; confirm all succeed (previously single-threaded Flask would serialize them).
+
+---
+
+### Task 7.5 — Add fsync to all critical JSONL append operations
+
+`state.py`'s `_safe_jsonl_append()` calls `flush()` but not `fsync()`. On Linux and Windows, `flush()` pushes data to the OS buffer but does not guarantee disk write. A power failure between `flush()` and actual disk write silently loses the appended line.
+
+**Fix in `tar_lab/state.py`:**
+```python
+def _safe_jsonl_append(self, path: Path, data: dict) -> None:
+    with self._lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(data) + "\n")
+            f.flush()
+            os.fsync(f.fileno())  # ADD THIS — guarantees durability
+```
+
+Apply the same pattern to all JSONL write operations in `tar_lab/result_artifacts.py` (already has fsync in canonical_registry path — verify and make consistent).
+
+**Verification:** Use a test that kills the process immediately after `flush()` but before `fsync()`; confirm data loss occurs without fsync and does NOT occur with fsync.
+
+---
+
+### Task 7.6 — Implement JSONL rotation and archival
+
+11 JSONL append-only log files grow without bound. `research_intel.jsonl` is already 7.97MB after 6 months.
+
+**Implementation:**
+```python
+def rotate_jsonl_if_needed(path: Path, max_size_mb: float = 50.0) -> None:
+    """Rotate JSONL file monthly or when it exceeds max_size_mb."""
+    if not path.exists():
+        return
+    size_mb = path.stat().st_size / (1024 * 1024)
+    if size_mb < max_size_mb:
+        return
+    # Rotate to dated archive
+    month_stamp = datetime.now().strftime("%Y-%m")
+    archive_path = path.parent / f"{path.stem}_{month_stamp}.jsonl.gz"
+    with open(path, "rb") as f_in:
+        with gzip.open(archive_path, "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out)
+    path.unlink()  # Remove original; start fresh
+    path.touch()   # Create empty file for new appends
+```
+
+**Files requiring rotation:** `research_intel.jsonl`, `project_priority_records.jsonl`, `evidence_debt_records.jsonl`, `project_staleness_records.jsonl`, `portfolio_decisions.jsonl`, `research_decisions.jsonl`, `claim_verdicts.jsonl`, and 4 others.
+
+Rotation runs as part of the daily health check (Task 6.7). Alert when any file exceeds 50MB (warn) or 500MB (critical).
+
+**Verification:** Pad `research_intel.jsonl` to 51MB; run health check; confirm rotation creates archive and starts fresh file.
+
+---
+
+### Task 7.7 — Implement schema versioning and migration framework
+
+No JSON state file carries a version field that is checked on read. Renaming or removing a Pydantic field causes silent data loss.
+
+**Add `_schema_version` to all persistent Pydantic models:**
+```python
+class ExperimentSpec(BaseModel):
+    _schema_version: str = "v2"   # Increment on any breaking change
+    # ... existing fields
+```
+
+**Implement a migration registry:**
+```python
+MIGRATIONS: dict[str, dict[str, Callable]] = {
+    "ExperimentSpec": {
+        ("v1", "v2"): _migrate_experiment_spec_v1_to_v2,
+    },
+    "FrontierProblem": {
+        ("v1", "v2"): _migrate_frontier_problem_v1_to_v2,
+    },
+}
+
+def load_with_migration(path: Path, model_class: type[BaseModel]) -> BaseModel:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    file_version = raw.get("_schema_version", "v1")
+    current_version = model_class.model_fields["_schema_version"].default
+    if file_version != current_version:
+        migration_key = (file_version, current_version)
+        migration_fn = MIGRATIONS.get(model_class.__name__, {}).get(migration_key)
+        if migration_fn:
+            raw = migration_fn(raw)
+            audit_log("SCHEMA_MIGRATION", {"file": str(path), "from": file_version, "to": current_version})
+        else:
+            raise SchemaMigrationError(f"No migration from {file_version} to {current_version} for {model_class.__name__}")
+    return model_class.model_validate(raw)
+```
+
+**Verification:** Create a v1 JSON file with the old schema; confirm `load_with_migration()` applies the migration and returns a valid v2 object. Confirm missing migration raises `SchemaMigrationError`.
+
+---
+
+### Task 7.8 — Back up ChromaDB on a weekly schedule
+
+The vector memory store at `tar_state/memory/` (ChromaDB embedded database) is not backed up anywhere. If the E: drive fails, all literature embeddings from 1,513 papers are permanently lost.
+
+**Weekly backup job (add to `tar_watchdog.py` or a separate scheduled task):**
+```python
+def backup_chromadb(workspace: Path, backup_root: Path) -> Path:
+    memory_dir = workspace / "tar_state" / "memory"
+    if not memory_dir.exists():
+        return None
+    timestamp = datetime.now().strftime("%Y%m%d")
+    backup_path = backup_root / f"chromadb_backup_{timestamp}.tar.gz"
+    with tarfile.open(backup_path, "w:gz") as tar:
+        tar.add(memory_dir, arcname="memory")
+    # Keep only last 4 weekly backups
+    _prune_old_backups(backup_root, pattern="chromadb_backup_*.tar.gz", keep=4)
+    return backup_path
+```
+
+**Backup target:** A secondary location — ideally a different drive than E:, or uploaded to S3 (Task 7.9).
+
+Add a health check assertion (Task 6.7): if the most recent ChromaDB backup is >8 days old, raise WARNING.
+
+**Verification:** Run backup; confirm `chromadb_backup_YYYYMMDD.tar.gz` exists. Simulate restore from backup; confirm knowledge graph is accessible.
+
+---
+
+### Task 7.9 — Replace FTP publishing with S3 or SFTP
+
+`sync_research.py` uses cleartext FTP (credentials in plaintext, no retry, blocks main thread, no verification after upload).
+
+**Replacement with S3 (boto3):**
+```python
+import boto3
+from botocore.exceptions import ClientError
+import time
+
+def push_to_s3(local_path: Path, bucket: str, key: str,
+               max_retries: int = 3) -> bool:
+    s3 = boto3.client("s3")  # credentials from environment
+    for attempt in range(max_retries):
+        try:
+            s3.upload_file(str(local_path), bucket, key)
+            # Verify remote checksum
+            response = s3.head_object(Bucket=bucket, Key=key)
+            remote_etag = response["ETag"].strip('"')
+            local_md5 = md5_file(local_path)
+            if remote_etag != local_md5:
+                raise ValueError(f"Checksum mismatch after upload")
+            return True
+        except ClientError as e:
+            wait = 5 * (2 ** attempt)
+            time.sleep(wait)
+    return False
+```
+
+Run uploads in a background thread so the main polling loop is never blocked.
+
+**SFTP alternative (if S3 is not available):** Use `paramiko` with the host key verified, not trusted on first connection.
+
+**Verification:** Upload a test file; confirm it exists in S3 with matching checksum. Kill upload mid-transfer; confirm retry succeeds.
+
+---
+
+### Task 7.10 — Add tar_api.py authentication enforcement and input validation
+
+The API key is optional — if `TAR_API_KEY` is not set, the entire API is unauthenticated. Path parameters are not validated.
+
+**Authentication fix:**
+```python
+# In tar_api.py startup:
+api_key = os.environ.get("TAR_API_KEY")
+if not api_key:
+    raise RuntimeError(
+        "TAR_API_KEY environment variable is required. "
+        "Set it before starting the API server.")
+
+def _require_api_key(x_api_key: str = Header(...)):
+    if x_api_key != api_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return x_api_key
+```
+
+**Input validation:**
+```python
+PROJECT_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,100}$')
+
+@app.get("/projects/{project_id}")
+async def get_project(
+    project_id: str,
+    _: str = Depends(_require_api_key)
+) -> dict:
+    if not PROJECT_ID_PATTERN.match(project_id):
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+    # ... proceed safely
+```
+
+**Sanitize error responses** — no backend command names or internal tracebacks:
+```python
+@app.exception_handler(Exception)
+async def generic_error_handler(request, exc):
+    error_id = uuid4().hex[:8]
+    logger.error(f"[{error_id}] Unhandled error: {exc}", exc_info=True)
+    return JSONResponse(status_code=500, content={"error": f"Internal error [{error_id}]"})
+```
+
+**Verification:** Make request without API key; confirm 401. Pass `project_id=../../etc/passwd`; confirm 400. Trigger an internal error; confirm response contains only `error_id`, not a stack trace.
+
+---
+
+### Task 7.11 — Refactor tar_author.py into focused modules
+
+`tar_author.py` is 6,437 lines — a god-class combining evidence collection, LaTeX generation, citation handling, bibliography management, originality auditing, and compilation. It cannot be unit-tested, is difficult to understand, and cannot be reused across different research domains.
+
+**Split into four focused modules:**
+
+```
+tar_author/
+├── __init__.py          (imports from submodules; backward compatible)
+├── engine.py            (orchestration, evidence loading, phase gating — ~500 lines)
+├── sections.py          (per-section LaTeX generation, domain-agnostic prompts — ~1200 lines)
+├── citations.py         (citation validation, bibliography, dedup — ~700 lines)
+└── compiler.py          (LaTeX compilation, PDF generation, error handling — ~400 lines)
+```
+
+**Parameterize all prompts:** Remove hardcoded TCL-specific numbers and CL-specific references. Every prompt should accept domain, method_name, and dataset as parameters so the authoring pipeline generalises to Paper 2 (TCL-for-LLMs) and Paper 3 (TAR system).
+
+**Minimum test coverage for each module:** At least one unit test per public function. Total new tests: ~20.
+
+**Verification:** Run `pytest tests/test_tar_author*.py`; all tests pass. Import `from tar_author import AuthorEngine` in a new context without errors.
+
+---
+
+### Task 7.12 — Add RunPod executor wrapper
+
+The GTX 1650 (4GB VRAM) is saturated. Phase 2 requires running 5-seed experiments that each need 3.5GB VRAM — cannot run in parallel locally. RunPod A40 (24GB VRAM) enables 6× batch sizes and parallel seed execution.
+
+**Add `RemoteExecutor` to `tar_lab/backend_factory.py`:**
+```python
+class RunPodExecutor:
+    """Translates local experiment launch to RunPod serverless API call."""
+    
+    def __init__(self, api_key: str, pod_type: str = "AMPERE_16"):
+        self.api_key = api_key
+        self.pod_type = pod_type
+    
+    def launch(self, plan: ExperimentLaunchPlan) -> RunPodJobRecord:
+        """Submit experiment to RunPod; return job ID for status polling."""
+        import runpod
+        runpod.api_key = self.api_key
+        job = runpod.run(
+            endpoint_id=self._get_or_create_endpoint(),
+            input={
+                "command": plan.command,
+                "config": plan.config,
+                "output_dir": plan.output_dir,
+            }
+        )
+        return RunPodJobRecord(job_id=job["id"], plan=plan)
+    
+    def poll_status(self, job_id: str) -> str:
+        """Returns: running | completed | failed"""
+        import runpod
+        status = runpod.status(job_id)
+        return status["status"].lower()
+    
+    def retrieve_results(self, job_record: RunPodJobRecord) -> Path:
+        """Download results from RunPod storage to local path."""
+        # ... download from S3 or RunPod storage
+```
+
+**Configuration in `tar_state/runpod_config.json`** (credentials from environment, not file):
+```json
+{
+  "enabled": true,
+  "pod_type": "NVIDIA A40",
+  "max_concurrent_jobs": 3,
+  "cost_limit_usd_per_day": 25.0
+}
+```
+
+**Verification:** Submit a 5-minute smoke test experiment to RunPod; confirm it runs, produces results, and downloads correctly.
+
+---
+
+### Task 7.13 — Add Prometheus metrics export and alerting
+
+Three metrics matter operationally: `experiments_running`, `gpu_vram_free_gb`, `daemon_cycle_latency_ms`.
+
+**Add `/metrics` endpoint to `tar_dashboard.py`:**
+```python
+from prometheus_client import Gauge, Counter, generate_latest, CONTENT_TYPE_LATEST
+
+EXPERIMENTS_RUNNING = Gauge("tar_experiments_running", "Number of active experiments")
+GPU_VRAM_FREE = Gauge("tar_gpu_vram_free_gb", "Free GPU VRAM in GB")
+DAEMON_CYCLE_LATENCY = Gauge("tar_daemon_cycle_latency_ms", "Last daemon cycle duration in ms")
+
+@app.route("/metrics")
+def metrics():
+    # Update gauges from hardware_state.json
+    hw = _load_hardware_state()
+    GPU_VRAM_FREE.set(hw.get("gpu", {}).get("vram_free_gb", 0))
+    EXPERIMENTS_RUNNING.set(len(hw.get("processes", [])))
+    return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
+```
+
+**Alert rules (Prometheus AlertManager or simple threshold polling):**
+```yaml
+# alerts.yml
+- alert: GPUMemoryLow
+  expr: tar_gpu_vram_free_gb < 0.3
+  for: 5m
+  annotations:
+    summary: "GPU VRAM critically low — experiment may OOM"
+
+- alert: DaemonCycleStalled
+  expr: tar_daemon_cycle_latency_ms > 120000
+  for: 3m
+  annotations:
+    summary: "Daemon cycle taking >2 minutes — possible deadlock"
+```
+
+**Verification:** GPU VRAM drops below 0.3GB (simulate by filling VRAM); confirm alert fires within 5 minutes.
+
+---
+
+**Phase 7 exit gate — ALL must be true:**
+- [ ] GitHub Actions CI running on every push; merge blocked on failure
+- [ ] `requirements.lock` committed with exact pins; clean install + all tests pass
+- [ ] Docker image pinned to digest; SBOM generated and committed
+- [ ] Gunicorn serving dashboard; `/readiness` and `/liveness` endpoints present
+- [ ] `os.fsync()` in all JSONL append paths (confirmed by code search)
+- [ ] JSONL rotation running; health check alerts on >50MB files
+- [ ] Schema versioning field on all persistent models; migration registry in place
+- [ ] ChromaDB weekly backup running; restore tested
+- [ ] FTP replaced with S3/SFTP; retry and checksum verification working
+- [ ] `TAR_API_KEY` required; input validation on all path parameters; sanitized error responses
+- [ ] `tar_author.py` split into 4 focused modules; all new tests passing
+- [ ] RunPod executor wrapper functional; smoke test experiment submitted
+- [ ] Prometheus `/metrics` endpoint live; at least two alert rules configured
+
+---
+
+## PHASE 8 — RESEARCH AUTOMATION ENHANCEMENTS
+**Duration:** 4–6 weeks (begins after Phase 4)
+**Track:** C (Automation & Governance)
+**Owner:** Lead Researcher / Algorithm Engineer
+**Objective:** Upgrade the autonomous research loop from "fast idea generator" to "rigorous scientific discoverer." Prevent false positives, break local optima, ground proposals in literature.
+
+---
+
+### Task 8.1 — Implement the mechanism-isolation ablation engine
+
+**Priority:** HIGH — the most important addition to the research automation architecture
+
+When a hypothesis claims a specific mechanism (e.g., "elastic anchoring via gradient-EMA reduces drift"), the system should automatically generate an orthogonal ablation: disable the claimed mechanism, test if performance degrades.
+
+**Implementation in `tar_lab/generative_director.py`:**
+```python
+def _generate_mechanism_knockout(self, hypothesis: Hypothesis) -> Optional[ExperimentSpec]:
+    """Parse hypothesis rationale for mechanism names; generate a knockout ablation."""
+    mechanisms = self._extract_mechanisms_from_rationale(hypothesis.rationale)
+    if not mechanisms:
+        return None
+    
+    # For each claimed mechanism, propose disabling it
+    knockout_configs = []
+    for mechanism in mechanisms:
+        if mechanism == "gradient_ema_importance":
+            knockout_configs.append({"use_importance_weighting": False})
+        elif mechanism == "elastic_penalty":
+            knockout_configs.append({"lambda_tcl": 0.0})
+        elif mechanism == "per_task_anchor":
+            knockout_configs.append({"freeze_sigma_star": True, "anchor_at_init": True})
+    
+    return ExperimentSpec(
+        name=f"knockout_{hypothesis.experiment_id}",
+        hypothesis=f"Disabling [{', '.join(mechanisms)}] should eliminate the effect from {hypothesis.experiment_id}",
+        config_overrides=knockout_configs[0] if knockout_configs else {},
+        pre_registration=PreRegistrationRecord(
+            hypothesis=f"If {hypothesis.experiment_id}'s improvement is due to {mechanisms[0]}, "
+                       f"disabling it should restore baseline forgetting.",
+            min_detectable_effect_d=0.5,
+            required_seeds=5,
+            stopping_rule="If knockout forgetting matches baseline ± CI95, mechanism confirmed absent.",
+        ),
+        mechanism_knockout_of=hypothesis.experiment_id,
+    )
+```
+
+**Gate:** Hypotheses are only marked "mechanism_confirmed" in the evidence inventory after the corresponding knockout experiment is complete and shows statistically significant degradation.
+
+**Verification:** Pass a hypothesis with `rationale` containing "gradient_ema_importance drives the improvement"; confirm a knockout experiment is automatically generated and queued.
+
+---
+
+### Task 8.2 — Implement cross-failure clustering and hypothesis-space escape
+
+**Priority:** MEDIUM — breaks the local failure-mode loop
+
+TAR currently caches each failure diagnosis independently. If 5 experiments fail on "gradient explosion," the system diagnoses it 5 times independently.
+
+**Implementation in `tar_living_research.py`:**
+```python
+class FailureClusterer:
+    CLUSTER_TRIGGER = 3   # failures before escape prompt fires
+    SIMILARITY_THRESHOLD = 0.75  # cosine similarity for clustering
+    
+    def _cluster_recent_failures(self, workspace: Path, window_hours: int = 168) -> dict[str, list]:
+        """Group recent failures by semantic category."""
+        recent = self._load_recent_failures(workspace, window_hours)
+        embeddings = [self._embed(f.diagnosis) for f in recent]
+        clusters = {}
+        for i, failure in enumerate(recent):
+            placed = False
+            for cluster_label, cluster_members in clusters.items():
+                if cosine_similarity(embeddings[i], cluster_members[0]["embedding"]) > self.SIMILARITY_THRESHOLD:
+                    clusters[cluster_label].append({"failure": failure, "embedding": embeddings[i]})
+                    placed = True
+                    break
+            if not placed:
+                clusters[failure.diagnosis[:50]] = [{"failure": failure, "embedding": embeddings[i]}]
+        return clusters
+    
+    def check_and_escape(self, workspace: Path) -> Optional[str]:
+        """Returns an escape prompt if stuck in a failure mode cluster."""
+        clusters = self._cluster_recent_failures(workspace)
+        for label, members in clusters.items():
+            if len(members) >= self.CLUSTER_TRIGGER:
+                return self._build_escape_prompt(label, len(members))
+        return None
+    
+    def _build_escape_prompt(self, failure_mode: str, count: int) -> str:
+        return (
+            f"We have failed {count} consecutive times on: '{failure_mode}'. "
+            f"This failure mode has been diagnosed {count} times — it is systemic, not random. "
+            f"Propose a fundamentally different approach that avoids this failure mode entirely. "
+            f"Do NOT propose another variant of the same approach."
+        )
+```
+
+**Verification:** Inject 3 failures with identical diagnoses; confirm escape prompt fires and a structurally different experiment family is proposed.
+
+---
+
+### Task 8.3 — Add pre-synthesis literature grounding
+
+**Priority:** MEDIUM — prevents synthesising code that already exists in the literature
+
+Before generating any method code, the synthesizer should query the knowledge graph: "Does any paper implement mechanism X on dataset Y?"
+
+```python
+def _check_literature_before_synthesis(self, idea: str, workspace: Path) -> dict:
+    """Query knowledge graph for existing implementations of the proposed idea."""
+    kg = KnowledgeGraph.load(workspace)
+    if not kg.has_entries():
+        return {"grounded": False, "reason": "Knowledge graph empty — run Phase 9"}
+    
+    # Semantic search for similar methods
+    idea_embedding = self._embed(idea)
+    similar_papers = kg.search_mechanisms(idea_embedding, top_k=5)
+    
+    if similar_papers:
+        return {
+            "grounded": True,
+            "similar_papers": [p.title for p in similar_papers[:3]],
+            "recommendation": (
+                f"Found {len(similar_papers)} similar papers. "
+                f"Build on these rather than re-implementing. "
+                f"Cite them in the method description."
+            ),
+        }
+    return {"grounded": True, "similar_papers": [], "recommendation": "No prior implementations found — genuinely novel."}
+```
+
+**Add a 60-second literature check before `maybe_synthesize_for_spec()` proceeds.**
+
+**Verification:** Ask for synthesis of "elastic weight consolidation with EMA"; confirm the system finds the EWC paper and recommends building on it rather than re-implementing.
+
+---
+
+### Task 8.4 — Fix Director/Strategist/Scout epistemological gaps
+
+**Priority:** MEDIUM
+
+Three specific prompt engineering fixes identified by the research automation expert:
+
+**4a. Director pivot logic:** The current pivot fires after exactly 3 consecutive fail-fast events. Replace with failure-mode-specific pivots (Task 8.2 handles this).
+
+**4b. Strategist memory gap:** The Strategist prompt only receives the Director's policy — not the evidence bundle or contradiction review. Add evidence summary to Strategist context:
+```python
+_STRATEGIST_PROMPT_ADDITION = """
+Current evidence notes:
+{evidence_summary}
+
+Contradiction alerts (if any):
+{contradiction_alerts}
+
+Do NOT propose hyperparameters that have already been tested if they produced the same failure.
+"""
+```
+
+**4c. Known-unknown routing:** If a hypothesis requires grounding in prior work that is NOT in the knowledge graph, the system should route to literature synthesis BEFORE the Director proposes experiments:
+```python
+def _should_route_to_literature_first(self, frontier_problem: FrontierProblem) -> bool:
+    kg = KnowledgeGraph.load(self.workspace)
+    coverage = kg.domain_coverage(frontier_problem.primary_domain_id)
+    return coverage < 0.5  # Route to literature if <50% of domain is covered
+```
+
+**Verification (4b):** Inject a contradiction alert into the evidence bundle; confirm the Strategist prompt includes it and the proposed hyperparameters avoid the contradicted configuration.
+
+---
+
+### Task 8.5 — Upgrade Director hierarchy prompt quality
+
+**Priority:** MEDIUM
+
+The Director has three role prompts (RuleDirector, RuleStrategist, RuleScout) that are currently hardcoded with arbitrary thresholds.
+
+**Three targeted improvements:**
+
+**5a. Failure streak threshold:** Change from hardcoded `failure_streak >= 5` to an adaptive threshold based on the failure mode's historical frequency. If a failure mode historically occurs 30% of the time, require more than 5 failures before pivoting (otherwise, you'd pivot on normal statistical variation).
+
+**5b. Memory integration depth:** Currently `_memory_aware_hyperparameters()` extracts alpha/eta candidates from prior runs. Extend to also extract: methods that consistently outperformed on similar datasets, class orderings that produced stable training, batch sizes that avoided OOM.
+
+**5c. Confidence calibration:** Director proposals currently have no uncertainty estimate. Add `confidence: float` (0–1) to all Director outputs. If confidence < 0.5, automatically route to a literature synthesis step before proceeding.
+
+**Verification:** Director proposes an experiment with `confidence: 0.4`; confirm the system routes to literature synthesis before accepting the proposal.
+
+---
+
+**Phase 8 exit gate — ALL must be true:**
+- [ ] Mechanism-isolation ablation engine generates knockout experiments for hypothesis with named mechanisms
+- [ ] Cross-failure clustering fires escape prompt after 3 same-category failures
+- [ ] Literature grounding check runs before all synthesis attempts
+- [ ] Strategist prompt includes evidence summary and contradiction alerts
+- [ ] Known-unknown routing to literature synthesis when domain coverage < 50%
+- [ ] Director outputs include calibrated confidence; low-confidence routed to literature
+- [ ] All changes covered by at least one new test each
+
+---
+
+## PHASE 9 — LITERATURE & KNOWLEDGE INFRASTRUCTURE
+**Duration:** 2–4 weeks (begins after Phase 4 — ActiveLearner wired in Task 4.8)
+**Track:** C (Automation & Governance)
+**Owner:** Lead Researcher
+**Objective:** Fully activate the literature intelligence layer that has been built but never run. Populate the knowledge graph. Build the 15-paper citation base required for Paper 1.
+
+---
+
+### Task 9.1 — Verify ActiveLearner is running and ingesting papers
+
+Task 4.8 wired `LiteratureBrain.start()` to the orchestrator. This task verifies the result.
+
+**Verification steps:**
+1. Check `tar_state/literature/manifests/` contains recent ingest manifests (< 4 hours old)
+2. Run `brain.corpus_summary()` — should return non-zero paper count
+3. Check `knowledge_graph.json` (or the underlying SQLite db) has entries
+4. Run a test query: "Find papers about elastic weight consolidation" — should return ≥ 3 results
+
+If any step fails, diagnose why the background thread stopped and fix the root cause.
+
+**Verification:** `brain.corpus_summary()` returns `{"papers": N, "claims": M, "domains": K}` where all three are > 0.
+
+---
+
+### Task 9.2 — Build the knowledge graph schema and run initial population
+
+The knowledge graph schema from the enhancement report defines 6 node types and 7 edge types (Paper, Mechanism, Claim, Dataset, Benchmark, Domain + typed edges). Implement this schema in the SQLite database that backs ChromaDB, or as a separate `knowledge_graph.db`.
+
+**Population script:** `tar_lab/knowledge_graph_builder.py`
+
+```python
+def build_knowledge_graph_from_corpus(workspace: Path) -> KGStats:
+    """One-time script to extract KG entries from all ingested papers."""
+    kg = KnowledgeGraph.connect(workspace)
+    papers = load_all_paper_artifacts(workspace)
+    
+    for paper in papers:
+        # Add paper node
+        kg.upsert_paper(paper)
+        # Extract and add mechanism mentions
+        mechanisms = extract_mechanisms(paper.claims)
+        for mechanism in mechanisms:
+            kg.upsert_mechanism(mechanism, introduced_by=paper.id)
+        # Add claim nodes with contradiction edges
+        for claim in paper.claims:
+            kg.upsert_claim(claim)
+            existing = kg.find_contradicting_claims(claim)
+            for contradiction in existing:
+                kg.add_edge(claim.id, contradiction.id, "contradicts")
+    return kg.stats()
+```
+
+Run on all 1,513 ingested papers. Expected runtime: 2–4 hours (LLM extraction calls for each paper).
+
+**Verification:** `kg.stats()` returns `{papers: ~1513, mechanisms: ~500+, claims: ~5000+, domains: 10+}`.
+
+---
+
+### Task 9.3 — Build the 15-paper essential citation base
+
+The enhancement report identified 15 papers that any 2026 CL paper must cite. Download, ingest, and verify all 15 are in the knowledge graph.
+
+| # | Paper | Year | ArXiv / DOI |
+|---|---|---|---|
+| 1 | Kirkpatrick et al. — EWC | 2017 | arXiv:1612.00796 |
+| 2 | Zenke et al. — Synaptic Intelligence | 2017 | PMLR:pmlr-v70-zenke17a |
+| 3 | Li & Hoiem — LwF | 2016 | arXiv:1606.09282 |
+| 4 | Buzzega et al. — DER++ | 2020 | NeurIPS 2020 |
+| 5 | Rebuffi et al. — iCaRL | 2017 | arXiv:1611.07725 |
+| 6 | Lopez-Paz & Ranzato — GEM | 2017 | arXiv:1706.08840 |
+| 7 | Chaudhry et al. — A-GEM | 2019 | arXiv:1812.00420 |
+| 8 | Wang et al. — DualPrompt | 2022 | arXiv:2204.04799 |
+| 9 | Wang et al. — L2P | 2022 | arXiv:2112.08654 |
+| 10 | Rusu et al. — Progressive NN | 2016 | arXiv:1606.04671 |
+| 11 | Javed & White — BWT/FWT | 2019 | arXiv:1905.12588 |
+| 12 | Martens & Grosse — K-FAC | 2015 | arXiv:1503.05671 |
+| 13 | Amari — Natural Gradient | 1998 | Neural Computation |
+| 14 | McCloskey & Cohen — Interference | 1989 | Psychology of Learning |
+| 15 | Chaudhuri et al. — CL survey | 2019 | arXiv:1904.07734 |
+
+For each: download PDF (via Semantic Scholar API), ingest via `literature_engine.py`, verify it appears in `knowledge_graph.json`, add to `tar_state/literature/essential_citations.bib` in BibTeX format.
+
+**Verification:** `kg.query("papers_by_title", "Overcoming Catastrophic Forgetting")` returns the EWC paper. All 15 papers have BibTeX entries in `essential_citations.bib`.
+
+---
+
+### Task 9.4 — Implement claim-level novelty detection
+
+Current novelty detection uses keyword matching. Replace with claim-level semantic search:
+
+```python
+def is_claim_novel(proposed_claim: str, workspace: Path,
+                   similarity_threshold: float = 0.75) -> dict:
+    """
+    Check if a proposed experimental claim is genuinely novel.
+    Uses SPECTER2 embeddings + KG claim index.
+    """
+    kg = KnowledgeGraph.connect(workspace)
+    proposed_embedding = embed_text(proposed_claim)
+    
+    similar_claims = kg.search_claims(proposed_embedding, top_k=10)
+    
+    if not similar_claims:
+        return {"novel": True, "confidence": 0.9, "similar_papers": []}
+    
+    max_similarity = max(c.similarity for c in similar_claims)
+    if max_similarity > similarity_threshold:
+        return {
+            "novel": False,
+            "confidence": max_similarity,
+            "similar_claims": [c.text for c in similar_claims[:3]],
+            "similar_papers": [c.paper_title for c in similar_claims[:3]],
+            "recommendation": f"Most similar to: '{similar_claims[0].paper_title}' ({max_similarity:.0%} similar). "
+                              f"Consider how your work differs from this.",
+        }
+    
+    return {"novel": True, "confidence": 1 - max_similarity,
+            "similar_papers": [c.paper_title for c in similar_claims[:3]]}
+```
+
+**Integrate into the Director:** Before any experiment is queued with a novelty claim, run `is_claim_novel()`. If `novel: False`, add to the hypothesis: "This claim is similar to [paper]. Explicitly justify how your approach differs."
+
+**Verification:** Pass the claim "EWC reduces catastrophic forgetting in sequential task learning"; confirm `novel: False` with high similarity to the EWC paper. Pass "gradient-EMA temporal smoothing reduces Fisher estimation bias"; confirm `novel: True`.
+
+---
+
+### Task 9.5 — Implement literature-aware Director proposal generation
+
+Replace the current Director (which generates proposals without literature context) with a literature-grounded variant:
+
+```python
+_LITERATURE_AWARE_DIRECTOR_PROMPT = """
+You are proposing a continual learning experiment.
+
+LITERATURE CONTEXT:
+Current SOTA for {dataset} ({metric}):
+{sota_table}
+
+Most relevant papers to this frontier:
+{relevant_papers}
+
+Papers that CONTRADICT our current hypothesis:
+{contradicting_papers}
+
+TASK:
+Propose ONE experiment that:
+1. Advances beyond the current SOTA in a specific, measurable way
+2. Does not replicate an already-published experiment (verified: {novelty_check})
+3. Tests a hypothesis that the contradicting papers above cannot explain
+4. Is achievable within {gpu_budget_hours} GPU hours
+
+Format: JSON with fields: hypothesis, design, expected_effect_size, novelty_justification
+"""
+```
+
+**Verification:** Generate a Director proposal; confirm the output JSON includes `novelty_justification` and `expected_effect_size`. Confirm the SOTA table is populated from the knowledge graph, not hardcoded.
+
+---
+
+**Phase 9 exit gate — ALL must be true:**
+- [ ] `brain.corpus_summary()` returns non-zero counts for papers, claims, domains
+- [ ] Knowledge graph schema implemented; initial population complete on all 1,513 papers
+- [ ] All 15 essential papers in KG; BibTeX file exists with all 15 entries
+- [ ] Claim-level novelty detection functional; EWC claim correctly identified as non-novel
+- [ ] Literature-aware Director proposal includes SOTA table and novelty justification
+
+**What Phase 9 unlocks:** Phase 5 (related work section) can be written from KG. Phase 8 literature grounding becomes functional.
+
+---
+
+*Stage 5 complete — Phases 7, 8, and 9 with 29 tasks (7.1–7.13, 8.1–8.5, 9.1–9.5)*
