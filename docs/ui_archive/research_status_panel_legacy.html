@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Research Status Panel</title>
+  <style>
+    body { font-family: Consolas, monospace; margin: 2rem; background: #10161d; color: #d9e2ec; }
+    pre { background: #18222d; padding: 1rem; border-radius: 8px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>Research Status Panel</h1>
+  <p>Point this at the workspace that contains <code>status.json</code>, <code>training_manifest.json</code>, and <code>corpus_manifest.json</code>.</p>
+  <pre id="payload">Loading...</pre>
+  <script>
+    fetch("/v1/research/status")
+      .then(r => r.json())
+      .then(data => { document.getElementById("payload").textContent = JSON.stringify(data, null, 2); })
+      .catch(err => { document.getElementById("payload").textContent = String(err); });
+  </script>
+</body>
+</html>
