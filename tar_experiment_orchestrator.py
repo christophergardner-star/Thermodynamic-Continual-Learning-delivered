@@ -1715,7 +1715,7 @@ class ExperimentOrchestrator:
         spec.status     = EXP_RUNNING
         spec.stage      = STAGE_RUNNING
         spec.started_at = datetime.now(timezone.utc).isoformat()
-        spec.pid        = os.getpid()
+        spec.pid        = 0  # in-process: no subprocess PID to track; lease owns the running state
         spec.error      = ""
         spec.progress   = {"seeds_done": 0, "seeds_total": len(spec.seeds),
                            "tasks_done": 0, "latest_accs": [], "forgetting_so_far": []}
