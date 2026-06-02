@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # ── Path setup ────────────────────────────────────────────────────────────────
-_REPO = Path(__file__).resolve().parent / "Thermodynamic-Continual-Learning-delivered"
+_REPO = Path(__file__).resolve().parent
 _TAR_STATE = Path(r"E:\TAR\Thermodynamic-Continual-Learning-delivered\tar_state")
 
 sys.path.insert(0, str(_REPO))
@@ -124,7 +124,7 @@ def _build_cifar10_tasks(seed: int):
         T.Normalize(CIFAR10_MEAN, CIFAR10_STD),
     ])
 
-    cache_dir = str(_REPO.parent / "dataset_artifacts" / "cifar10")
+    cache_dir = str(_REPO / "dataset_artifacts" / "cifar10")
     train_full = torchvision.datasets.CIFAR10(root=cache_dir, train=True,
                                                download=True, transform=train_tf)
     test_full = torchvision.datasets.CIFAR10(root=cache_dir, train=False,

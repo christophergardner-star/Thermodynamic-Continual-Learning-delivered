@@ -150,7 +150,7 @@ def _build_cifar10_tasks(seed: int):
         T.Normalize(CIFAR10_MEAN, CIFAR10_STD),
     ])
 
-    cache_dir = str(_REPO.parent / "dataset_artifacts" / "cifar10")
+    cache_dir = str(_REPO / "dataset_artifacts" / "cifar10")
     train_full = torchvision.datasets.CIFAR10(
         root=cache_dir, train=True, download=True, transform=train_tf
     )
