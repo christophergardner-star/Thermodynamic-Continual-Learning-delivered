@@ -18,6 +18,49 @@ from tar_lab.schemas import CrossDomainBridgeRecord, ResearchDocument, ResearchI
 
 
 ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
+
+# Domains and keywords that indicate financial/economics content — excluded from CL research
+_BLOCKED_ARXIV_CATEGORIES = frozenset({
+    "q-fin",      # Quantitative Finance (top-level)
+    "econ",       # Economics (top-level)
+    "q-fin.PM",   # Portfolio Management
+    "q-fin.TR",   # Trading and Market Microstructure
+    "q-fin.RM",   # Risk Management
+    "q-fin.CP",   # Computational Finance
+})
+
+_BLOCKED_CONTENT_KEYWORDS = frozenset({
+    "portfolio optimization", "mean-variance", "skewness-kurtosis",
+    "portfolio allocation", "asset allocation", "option pricing",
+    "stochastic volatility", "risk-return", "sharpe ratio",
+    "coskewness", "cokurtosis", "quartic objective",
+    "econometric", "quantitative finance", "hedge fund",
+    "derivative pricing", "black-scholes",
+})
+
+_ALLOWED_PRIMARY_DOMAINS = frozenset({
+    "cs.LG", "cs.AI", "cs.CV", "cs.CL", "cs.NE", "cs.RO",
+    "stat.ML", "cond-mat.stat-mech", "quant-ph", "math.OC",
+})
+
+
+def _is_research_domain_acceptable(doc: "ResearchDocument") -> bool:
+    """Return False if the document is financial/economics content outside CL scope."""
+    # Block by arXiv category tags
+    for tag in doc.tags:
+        tag_clean = tag.strip()
+        # Match exact category or any subcategory of a blocked top-level domain
+        if tag_clean in _BLOCKED_ARXIV_CATEGORIES:
+            return False
+        if any(tag_clean.startswith(blocked + ".") for blocked in _BLOCKED_ARXIV_CATEGORIES):
+            return False
+    # Block by content keywords in title + summary
+    combined = (doc.title + " " + doc.summary).lower()
+    if any(kw in combined for kw in _BLOCKED_CONTENT_KEYWORDS):
+        return False
+    return True
+
+
 _CROSS_DOMAIN_VOCAB = {
     "entropy",
     "gradient",
@@ -71,6 +114,9 @@ class ResearchIngestor:
                     }
                 )
                 continue
+
+        # Remove financial/economics contamination before deduplication
+        docs = [d for d in docs if _is_research_domain_acceptable(d)]
 
         deduped: dict[str, ResearchDocument] = {}
         for doc in docs:

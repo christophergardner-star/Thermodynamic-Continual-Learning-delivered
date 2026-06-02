@@ -20,6 +20,7 @@ from typing import Any
 
 from tar_lab.phase_catalog import iter_phase_catalog_entries
 from tar_lab.human_review import sync_human_review_from_director_state
+from tar_lab.state import acquire_file_lock
 from tar_lab.result_artifacts import (
     read_advisory_verdict,
     read_statistics,
@@ -346,7 +347,8 @@ class ResearchDirector:
         }
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            with acquire_file_lock(self.state_path):
+                self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except OSError:
             return payload
         try:
@@ -360,7 +362,8 @@ class ResearchDirector:
                 "question_count": len(human_review.get("questions", [])),
                 "claim_review_count": len(human_review.get("claim_reviews", [])),
             }
-            self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            with acquire_file_lock(self.state_path):
+                self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except OSError:
             return payload
         except Exception as exc:

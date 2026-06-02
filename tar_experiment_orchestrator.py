@@ -56,6 +56,7 @@ from tar_lab.runtime_ledger import (
     release_runtime_lease,
 )
 from tar_lab.validation import build_validation_state, validate_execution_request
+from tar_lab.state import acquire_file_lock
 
 try:
     import psutil as _psutil
@@ -431,6 +432,13 @@ class ExperimentOrchestrator:
         from manual mode is that the authoring step is done by the Director
         rather than by a human.
 
+        IMPORTANT: Autonomous mode generates and git-commits manifests
+        without a human writing them. Each commit is permanent and auditable
+        via `git log`. This path REQUIRES execution_enabled.flag to be
+        present in tar_state/ — the watchdog will not start experiments
+        without it. Removing execution_enabled.flag halts all autonomous
+        experiment submission immediately.
+
         False (the default) preserves pre-autonomous behaviour: any missing
         or non-authorising manifest raises ManifestGateError immediately.
         """
@@ -572,8 +580,9 @@ class ExperimentOrchestrator:
             "experiments": [asdict(s) for s in self._order()],
         }
         tmp = self._queue_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        os.replace(tmp, self._queue_path)
+        with acquire_file_lock(self._queue_path):
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            os.replace(tmp, self._queue_path)
         self._refresh_experiment_library()
 
     def _reload_from_disk(self) -> None:
@@ -622,8 +631,9 @@ class ExperimentOrchestrator:
             "experiments": records,
         }
         tmp = self._archive_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        os.replace(tmp, self._archive_path)
+        with acquire_file_lock(self._archive_path):
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(tmp, self._archive_path)
 
     def _get_archived_spec(self, experiment_id: str) -> ExperimentSpec | None:
         if not experiment_id:
@@ -705,7 +715,7 @@ class ExperimentOrchestrator:
             pass
 
     def _order(self) -> list[ExperimentSpec]:
-        return sorted(self._specs.values(), key=lambda s: (s.priority, s.submitted_at))
+        return sorted(self._specs.values(), key=lambda s: (s.priority if s.priority is not None else 999, s.submitted_at))
 
     def _heartbeat_is_fresh(self, experiment_id: str, threshold_s: float = 120.0) -> bool:
         """Return True if the experiment's heartbeat file was updated within threshold_s seconds.
@@ -805,6 +815,29 @@ class ExperimentOrchestrator:
 
     def _mark_stalled(self, spec: ExperimentSpec, reason: str) -> bool:
         changed = False
+        # Best-effort: send SIGTERM/taskkill to any tracked subprocess PID before zeroing it,
+        # so orphaned children do not persist after the parent has disappeared.
+        _tracked_pid = spec.pid or 0
+        if not _tracked_pid:
+            # Fall back to runtime_context if pid field is empty
+            try:
+                _tracked_pid = int((spec.runtime_context or {}).get("subprocess_pid", 0) or 0)
+            except Exception:
+                _tracked_pid = 0
+        if _tracked_pid:
+            try:
+                import os as _os
+                import subprocess as _sp
+                if _os.name == "nt":
+                    _sp.run(
+                        ["taskkill", "/PID", str(_tracked_pid), "/F"],
+                        capture_output=True, timeout=5,
+                    )
+                else:
+                    import signal as _signal
+                    _os.kill(_tracked_pid, _signal.SIGTERM)
+            except Exception:
+                pass  # best-effort cleanup; do not crash reconciliation
         if spec.status != EXP_PENDING:
             spec.status = EXP_PENDING
             changed = True

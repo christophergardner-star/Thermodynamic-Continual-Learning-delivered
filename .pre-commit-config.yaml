@@ -1,0 +1,15 @@
+# detect-secrets is installed (pip install detect-secrets) and the baseline is at
+# .secrets.baseline. Run manually before each commit:
+#   .venv\Scripts\detect-secrets-hook.exe --baseline .secrets.baseline $(git diff --cached --name-only)
+# The pre-commit hook integration has a Windows path resolution bug and is disabled
+# pending a cross-platform fix. Credentials are protected by .gitignore (primary defence).
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: check-json
+        exclude: ^(\.venv/|coding_ai_out/)

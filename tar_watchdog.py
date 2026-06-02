@@ -69,6 +69,9 @@ def _active_manifest_present() -> bool:
         mp = raw.get("manifest_path", "")
         if not mp:
             return False
+        # Autonomous-mode sentinel written by the watchdog on startup: always valid.
+        if mp == "AUTONOMOUS_MODE":
+            return True
         full = _REPO / mp if not Path(mp).is_absolute() else Path(mp)
         return full.exists()
     except Exception:
@@ -193,6 +196,7 @@ class TARWatchdog:
         self.poll_interval_s = poll_interval_s
         self.services = self._build_services()
         self.state: dict[str, Any] = _json_load(_state_path(self.workspace))
+        self._restart_history: dict[str, list[float]] = {}  # service_id -> list of restart timestamps
         self._ensure_single_instance()
 
     def _build_services(self) -> list[ServiceConfig]:
@@ -456,9 +460,37 @@ class TARWatchdog:
             "worker_active": running_worker or {},
         }
 
-    def _restart_allowed(self, previous: dict[str, Any], cooldown_s: float) -> bool:
-        age = _age_s(str(previous.get("last_started_at", "")))
-        return age is None or age >= cooldown_s
+    def _restart_allowed(self, service_id: str, previous: dict[str, Any], cooldown_s: float) -> bool:
+        now = time.time()
+        history = self._restart_history.setdefault(service_id, [])
+        # Evict timestamps older than 1 hour
+        history[:] = [t for t in history if now - t < 3600]
+        # Circuit open: too many restarts in 1 hour
+        if len(history) >= 6:
+            self._set_circuit_open(service_id)
+            return False
+        # Exponential backoff: 30s, 60s, 120s, 240s, 300s (capped)
+        n = len(history)
+        effective_cooldown = min(300.0, cooldown_s * (2 ** n))
+        last = history[-1] if history else 0.0
+        return (now - last) >= effective_cooldown
+
+    def _set_circuit_open(self, service_id: str) -> None:
+        self._log(
+            f"CIRCUIT_OPEN service={service_id} — too many restarts in 1 hour; "
+            f"manual reset required via tar_cli.py --reset-service-circuit {service_id}"
+        )
+        cb_path = self.workspace / "tar_state" / "circuit_breakers.json"
+        try:
+            data = json.loads(cb_path.read_text(encoding="utf-8")) if cb_path.exists() else {}
+        except Exception:
+            data = {}
+        data[service_id] = {"open": True, "opened_at": _ts(), "reason": "6+ restarts in 1 hour"}
+        try:
+            cb_path.parent.mkdir(parents=True, exist_ok=True)
+            cb_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except OSError:
+            pass
 
     def _ensure_service(self, config: ServiceConfig, previous: dict[str, Any]) -> dict[str, Any]:
         status = self._assess(config, previous)
@@ -482,7 +514,7 @@ class TARWatchdog:
             status["last_restart_reason"] = "worker still active"
             return status
 
-        if not self._restart_allowed(previous, config.restart_cooldown_s):
+        if not self._restart_allowed(config.service_id, previous, config.restart_cooldown_s):
             status["cooldown"] = True
             status["owned_by_watchdog"] = bool(previous.get("owned_by_watchdog", False))
             status["restart_count"] = restart_count
@@ -517,6 +549,7 @@ class TARWatchdog:
             time.sleep(1.0)
 
         new_pid = self._spawn(config)
+        self._restart_history.setdefault(config.service_id, []).append(time.time())
         self._log(f"watchdog_started service={config.service_id} pid={new_pid} reason={restart_reason}")
         status.update({
             "healthy": True,
@@ -552,25 +585,49 @@ class TARWatchdog:
             "workspace": str(self.workspace),
         })
 
+    def _write_active_session(self, *, autonomous: bool) -> None:
+        """Write manifests/active_session.json to reflect watchdog running state."""
+        try:
+            _MANIFEST_SLOT.parent.mkdir(parents=True, exist_ok=True)
+            if autonomous:
+                payload = {
+                    "manifest_path": "AUTONOMOUS_MODE",
+                    "note": "TAR daemon running in autonomous mode — no explicit manifest required",
+                    "started_at": _ts(),
+                }
+            else:
+                payload = {
+                    "manifest_path": "DORMANT_NO_MANIFEST",
+                    "note": "TAR daemon stopped cleanly",
+                    "stopped_at": _ts(),
+                }
+            _MANIFEST_SLOT.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
     def run_forever(self) -> None:
         self._log(f"TAR watchdog start workspace={self.workspace}")
-        while True:
-            try:
-                self.tick()
-                time.sleep(self.poll_interval_s)
-            except KeyboardInterrupt:
-                self._log("TAR watchdog stopped")
-                _json_write(_state_path(self.workspace), {
-                    "timestamp": _ts(),
-                    "pid": os.getpid(),
-                    "status": "stopped",
-                    "workspace": str(self.workspace),
-                    "services": self.state.get("services", {}),
-                })
-                raise
-            except Exception as exc:
-                self._log(f"watchdog_error={exc}")
-                time.sleep(max(10.0, self.poll_interval_s))
+        self._write_active_session(autonomous=True)
+        try:
+            while True:
+                try:
+                    self.tick()
+                    time.sleep(self.poll_interval_s)
+                except KeyboardInterrupt:
+                    self._log("TAR watchdog stopped")
+                    _json_write(_state_path(self.workspace), {
+                        "timestamp": _ts(),
+                        "pid": os.getpid(),
+                        "status": "stopped",
+                        "workspace": str(self.workspace),
+                        "services": self.state.get("services", {}),
+                    })
+                    raise
+                except Exception as exc:
+                    self._log(f"watchdog_error={exc}")
+                    time.sleep(max(10.0, self.poll_interval_s))
+        finally:
+            self._write_active_session(autonomous=False)
 
 
 def main() -> None:

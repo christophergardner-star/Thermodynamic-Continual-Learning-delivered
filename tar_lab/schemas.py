@@ -262,7 +262,7 @@ class ContinualLearningBenchmarkConfig(StrictModel):
     ewc_lambda: float = 1000.0   # Phase 12 sweep best; 100.0 is significantly worse (p=0.019)
     si_c: float = 0.01           # Phase 13 sweep best; 0.1 causes universal collapse on CIFAR-10
     si_xi: float = 0.001
-    tcl_governor_enabled: bool = True
+    tcl_governor_enabled: bool = False
     # Dimensionality-weighted L2 penalty: after each task TCL anchors the
     # trunk weights and penalises drift scaled by the task's anchor D_PR.
     # Higher D_PR = more structured representation = stronger penalty.

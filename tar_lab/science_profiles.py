@@ -24,6 +24,20 @@ from tar_lab.schemas import (
 from tar_lab.benchmark_stats import default_recommended_seed_runs, default_statistical_validation_required
 
 
+_FINANCIAL_KEYWORDS = frozenset({
+    "portfolio", "mean-variance", "asset allocation", "quantitative finance",
+    "econometric", "option pricing", "hedge fund", "risk-return",
+    "portfolio optimization", "sharpe ratio", "coskewness", "cokurtosis",
+    "derivative pricing", "black-scholes", "stochastic volatility",
+})
+
+
+def _is_financial_domain(text: str) -> bool:
+    """Return True if the text contains financial/economics keywords outside CL scope."""
+    lower = text.lower()
+    return any(kw in lower for kw in _FINANCIAL_KEYWORDS)
+
+
 def _slugify(text: str, max_len: int = 48) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return (slug or "problem")[:max_len].rstrip("-")
@@ -300,6 +314,12 @@ class ScienceProfileRegistry:
         benchmark_tier: BenchmarkTier = "validation",
         requested_benchmark: Optional[str] = None,
     ) -> ProblemResolutionReport:
+        if _is_financial_domain(problem):
+            raise ValueError(
+                f"Problem rejected: financial/economics domain detected. "
+                f"TAR only accepts continual-learning research problems. "
+                f"Problem: {problem!r}"
+            )
         prompt = problem.lower()
         best_profile = self.get("generic_ml")
         best_score = -1.0

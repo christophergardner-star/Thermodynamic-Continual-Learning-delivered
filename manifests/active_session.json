@@ -1,5 +1,1 @@
-﻿{
-    "manifest_path":  "DORMANT_NO_MANIFEST",
-    "note":  "TAR dormant for planned PC upgrade (C: drive replacement). Do not start execution services until resume_instructions in DORMANT.json are completed.",
-    "dormant_since":  "2026-05-30T09:08:44+01:00"
-}
+{"manifest_path": "manifests/auto/harder_domain_split_tinyimagenet_20260528T130946Z.json", "note": "Restored after planned downtime. TAR restarting - harder_domain_split_tinyimagenet queued to re-run from scratch."}

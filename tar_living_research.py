@@ -28,6 +28,7 @@ sys.path.insert(0, str(_REPO))
 
 from tar_queue_bridge import heartbeat_from_env
 from tar_storage import ensure_workspace_layout, resolve_workspace
+from tar_lab.state import acquire_file_lock
 from tar_experiment_orchestrator import (
     DATASET_CIFAR10,
     DATASET_CIFAR100,
@@ -477,13 +478,13 @@ def write_research_coordination_state(
     next_experiment_ids = [
         spec.id for spec in sorted(
             queued_like_specs,
-            key=lambda spec: (spec.priority, spec.submitted_at),
+            key=lambda spec: (spec.priority if spec.priority is not None else 999, spec.submitted_at),
         )[:12]
     ]
     active_experiment_ids = [
         spec.id for spec in sorted(
             active_specs,
-            key=lambda spec: (spec.priority, spec.submitted_at),
+            key=lambda spec: (spec.priority if spec.priority is not None else 999, spec.submitted_at),
         )
     ]
 
@@ -557,7 +558,8 @@ def write_research_coordination_state(
     path = _coordination_state_path(workspace)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        with acquire_file_lock(path):
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError:
         pass
     _sync_website_research_json(workspace, director_state)

@@ -1084,7 +1084,11 @@ class TAROrchestrator:
         return round(max(0.0, min(1.0, 1.0 - similarity)), 6)
 
     def _resolve_frontier_domain_profile(self, description: str) -> Optional[str]:
-        resolution = self.resolve_problem(description, benchmark_tier="validation")
+        try:
+            resolution = self.resolve_problem(description, benchmark_tier="validation")
+        except ValueError:
+            # Financial/economics domain rejected at the registry level — not a CL gap
+            return None
         if not resolution.matched_keywords:
             return None
         if resolution.confidence < 0.32:

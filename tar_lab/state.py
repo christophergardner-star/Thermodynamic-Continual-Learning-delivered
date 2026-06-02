@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Type, TypeVar
+from typing import Any, Dict, Generator, Iterable, List, Optional, Type, TypeVar
 
 _T = TypeVar("_T")
 
@@ -64,6 +66,28 @@ from tar_lab.schemas import (
     TrainingPayloadConfig,
     VerificationReport,
 )
+
+
+@contextlib.contextmanager
+def acquire_file_lock(path: Path, timeout_s: float = 10.0) -> Generator[None, None, None]:
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            fh = open(lock_path, "x")
+            fh.close()
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Could not acquire lock on {path} within {timeout_s}s")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
 
 
 def _utc_now() -> str:
