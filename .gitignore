@@ -25,3 +25,16 @@ tar_state/runpod_enabled.flag
 tar_state/runpod_suspended.flag
 tar_state/runpod_dryrun.flag
 tar_state/runpod_partial/
+
+# ── Secrets — never commit these ────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+publish_config.json
+*api_secrets*.json
+*_secrets.json
+*credentials*.json
+*_passwords.json
+*.key
+*.pem
+!tar_governance_public.pem
