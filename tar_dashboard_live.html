@@ -600,6 +600,176 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
 ::-webkit-scrollbar-track { background:transparent }
 ::-webkit-scrollbar-thumb { background:var(--border-s); border-radius:3px }
 ::-webkit-scrollbar-thumb:hover { background:var(--muted) }
+
+/* ── Detail overlay (full-page) ────────────────────────────── */
+#detail-page {
+  display:none;
+  position:fixed;
+  inset:0;
+  z-index:500;
+  background:var(--bg);
+  overflow-y:auto;
+}
+#detail-page.open { display:block }
+.dp-header {
+  position:sticky;
+  top:0;
+  background:var(--surface);
+  border-bottom:1px solid var(--border);
+  padding:0 24px;
+  height:48px;
+  display:flex;
+  align-items:center;
+  gap:12px;
+  z-index:10;
+}
+.dp-back {
+  background:none;
+  border:1px solid var(--border);
+  color:var(--muted);
+  padding:4px 10px;
+  border-radius:var(--r);
+  font-size:12px;
+  cursor:pointer;
+  white-space:nowrap;
+}
+.dp-back:hover { border-color:var(--border-s); color:var(--text) }
+.dp-crumb {
+  font-size:12px;
+  color:var(--dim);
+}
+.dp-crumb span { color:var(--muted) }
+.dp-crumb strong { color:var(--text) }
+.dp-title {
+  font-size:14px;
+  font-weight:700;
+  color:var(--text);
+  flex:1;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.dp-body {
+  max-width:1440px;
+  margin:0 auto;
+  padding:24px;
+}
+.dp-hero {
+  display:grid;
+  grid-template-columns:1fr 1fr 1fr;
+  gap:12px;
+  margin-bottom:20px;
+}
+.dp-section {
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--r-md);
+  overflow:hidden;
+  margin-bottom:16px;
+}
+.dp-section-head {
+  background:var(--raised);
+  border-bottom:1px solid var(--border);
+  padding:8px 14px;
+  font-size:10.5px;
+  font-weight:700;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--muted);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+}
+.dp-section-body { padding:14px }
+.dp-2col { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px }
+.dp-3col { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; margin-bottom:16px }
+
+/* Stat block — numbers for Evidence view */
+.stat-grid {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(130px,1fr));
+  gap:1px;
+  background:var(--border);
+  border:1px solid var(--border);
+  border-radius:var(--r-md);
+  overflow:hidden;
+  margin-bottom:16px;
+}
+.stat-cell {
+  background:var(--surface);
+  padding:12px 14px;
+}
+.stat-label {
+  font-size:10px;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  color:var(--muted);
+  margin-bottom:4px;
+}
+.stat-value {
+  font-family:var(--font-mono);
+  font-size:20px;
+  font-weight:700;
+  color:var(--text);
+  line-height:1.1;
+}
+.stat-value.good  { color:var(--green) }
+.stat-value.amber { color:var(--amber) }
+.stat-value.red   { color:var(--red) }
+.stat-value.blue  { color:var(--blue) }
+.stat-sub {
+  font-size:10.5px;
+  color:var(--dim);
+  margin-top:3px;
+}
+
+/* Pipeline stage steps */
+.pipeline-steps {
+  display:flex;
+  gap:0;
+  margin-bottom:16px;
+  border:1px solid var(--border);
+  border-radius:var(--r-md);
+  overflow:hidden;
+}
+.pipe-step {
+  flex:1;
+  padding:10px 12px;
+  border-right:1px solid var(--border);
+  text-align:center;
+}
+.pipe-step:last-child { border-right:none }
+.pipe-step .ps-label { font-size:10px; text-transform:uppercase; letter-spacing:.07em; color:var(--muted) }
+.pipe-step .ps-val { font-size:12px; font-weight:600; margin-top:3px }
+.pipe-step.done   { background:var(--green-bg) }
+.pipe-step.active { background:var(--blue-bg) }
+.pipe-step.fail   { background:var(--red-bg) }
+
+/* Verdict block */
+.verdict-block {
+  border-left:3px solid var(--border-s);
+  padding:10px 14px;
+  font-size:12.5px;
+  color:var(--muted);
+  line-height:1.65;
+  background:var(--raised);
+  border-radius:0 var(--r) var(--r) 0;
+  margin-bottom:12px;
+}
+.verdict-block.pub   { border-left-color:var(--green) }
+.verdict-block.dir   { border-left-color:var(--amber) }
+.verdict-block.exp   { border-left-color:var(--blue) }
+.verdict-block.fls   { border-left-color:var(--red) }
+
+/* Link row at bottom of detail pages */
+.detail-links {
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  padding:14px;
+  border-top:1px solid var(--border);
+  background:var(--raised);
+}
 </style>
 </head>
 <body>
@@ -969,6 +1139,17 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
 </div><!-- #main -->
 </div><!-- #shell -->
 
+<!-- ══ FULL-PAGE DETAIL OVERLAY ═══════════════════════════ -->
+<div id="detail-page">
+  <div class="dp-header">
+    <button class="dp-back" onclick="closeDetail()">← Back</button>
+    <div class="dp-crumb" id="dp-crumb"></div>
+    <div class="dp-title" id="dp-title"></div>
+    <div id="dp-badges" style="display:flex;gap:6px;flex-shrink:0"></div>
+  </div>
+  <div class="dp-body" id="dp-body"></div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -1060,12 +1241,21 @@ function badgeHtml(text, tone) {
   return `<span class="badge ${tone}">${esc(text)}</span>`;
 }
 
+function normalizeVerdict(v) {
+  const s = (v||'').toUpperCase();
+  if (s.includes('PUBLICATION_ALLOWED') || s === 'PUB' || s.includes('PUBLISHABLE')) return 'PUBLICATION_ALLOWED';
+  if (s.includes('DIRECTIONAL') || s === 'DIR') return 'DIRECTIONAL';
+  if (s.includes('EXPLORATION') || s === 'EXP') return 'EXPLORATION_GRADE';
+  if (s.includes('FALSIF') || s === 'FLS') return 'FALSIFIED';
+  return 'UNKNOWN';
+}
+
 function verdictHtml(v) {
-  const vstr = (v||'').toUpperCase();
-  if (vstr.includes('PUBLICATION_ALLOWED') || vstr === 'PUB') return `<span class="verd-PUB">PUBLICATION_ALLOWED</span>`;
-  if (vstr === 'DIRECTIONAL' || vstr === 'DIR') return `<span class="verd-DIR">DIRECTIONAL</span>`;
-  if (vstr.includes('EXPLORATION') || vstr === 'EXP') return `<span class="verd-EXP">EXPLORATION_GRADE</span>`;
-  if (vstr === 'FALSIFIED' || vstr === 'FLS') return `<span class="verd-FLS">FALSIFIED</span>`;
+  const key = normalizeVerdict(v);
+  if (key === 'PUBLICATION_ALLOWED') return `<span class="verd-PUB">PUBLICATION_ALLOWED</span>`;
+  if (key === 'DIRECTIONAL')         return `<span class="verd-DIR">DIRECTIONAL</span>`;
+  if (key === 'EXPLORATION_GRADE')   return `<span class="verd-EXP">EXPLORATION_GRADE</span>`;
+  if (key === 'FALSIFIED')           return `<span class="verd-FLS">FALSIFIED</span>`;
   return `<span class="verd-UNK">${esc(v||'—')}</span>`;
 }
 
@@ -1406,7 +1596,7 @@ function renderObsAlerts() {
                : (a.level||'').toLowerCase().includes('warn') ? 'amber' : '';
     return `<div class="alert-item">
       ${tone ? dotHtml(tone) : ''}
-      <span class="alert-msg" style="${tone?'color:var(--'+tone+')'':''}">${esc(msg)}</span>
+      <span class="alert-msg" style="${tone ? 'color:var(--' + tone + ')' : ''}">${esc(msg)}</span>
       <span class="alert-ts">${fmtShort(ts)}</span>
     </div>`;
   }).join('');
@@ -1450,7 +1640,9 @@ function renderObsProcs() {
 
 function renderObsReviewSummary() {
   const data = S.data.review || {};
-  const pending = Array.isArray(data.pending) ? data.pending : [];
+  const pending = Array.isArray(data.pending) ? data.pending
+                : Array.isArray(data.claim_reviews) ? data.claim_reviews.filter(r => !r.decision || r.decision === 'pending')
+                : [];
   const n = pending.length || Number(data.pending_count||0);
   if (!n) {
     $('obs-review-summary').innerHTML = `<div class="card" style="color:var(--dim);font-size:12px">No items awaiting review</div>`;
@@ -1470,9 +1662,9 @@ function renderObsReviewSummary() {
 
 function renderObsRunPod() {
   const rp = S.data.runpod || {};
-  const enabled = rp.enabled;
-  const active  = rp.active || rp.running;
-  const avail   = rp.available !== false;
+  const enabled = rp.mode === 'enabled' || rp.enabled === true;
+  const active  = rp.mode === 'active' || rp.active || rp.running;
+  const avail   = rp.api_key_set === true || rp.available !== false;
   let html = '';
   if (!avail) {
     html = '<div style="color:var(--dim);font-size:12px">RunPod not configured</div>';
@@ -1502,7 +1694,7 @@ function renderObsActiveExps(experiments) {
   $('obs-active-exps').innerHTML = active.map(exp => {
     const prog = exp.progress || {};
     const sd = Number(prog.seeds_done||0), st = Number(prog.seeds_total||0);
-    return `<div class="card" style="margin-bottom:8px;cursor:pointer" onclick="openExpDrawer(${JSON.stringify(JSON.stringify(exp))})">
+    return `<div class="card" style="margin-bottom:8px;cursor:pointer" data-exp-json="${esc(JSON.stringify(exp))}" onclick="openExpDrawer(this.dataset.expJson)">
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
         ${dotHtml('green','pulse')}
         <strong style="font-size:12.5px">${esc((exp.name||exp.id||'').substring(0,50))}</strong>
@@ -1583,7 +1775,7 @@ function renderExps() {
     const prog  = exp.progress || {};
     const md = Number(prog.methods_done||0), mt = Number(prog.methods_total||0);
     const seeds = Array.isArray(exp.seeds) ? exp.seeds.length : (exp.n_seeds||'?');
-    return `<tr data-exp-stage="${esc(stage)}" data-exp-name="${esc((exp.name||exp.id||'').toLowerCase())}" data-exp-dataset="${esc((exp.dataset||'').toLowerCase())}" data-exp-method="${esc((exp.method||'').toLowerCase())}" onclick="openExpDrawer(${JSON.stringify(JSON.stringify(exp))})">
+    return `<tr data-exp-stage="${esc(stage)}" data-exp-name="${esc((exp.name||exp.id||'').toLowerCase())}" data-exp-dataset="${esc((exp.dataset||'').toLowerCase())}" data-exp-method="${esc((exp.method||'').toLowerCase())}" data-exp-json="${esc(JSON.stringify(exp))}" onclick="openExpDrawer(this.dataset.expJson)">
       <td><span class="dot ${tone}${tone==='green'?' pulse':''}"></span> <span style="color:var(--${tone||'muted'})">${esc(stage)}</span></td>
       <td>
         <div style="font-weight:600;font-size:12.5px">${esc((exp.name||exp.id||'').substring(0,55))}</div>
@@ -1683,12 +1875,12 @@ function renderEvidence() {
     $('ev-tbody').innerHTML = `<tr><td colspan="9" class="empty-state">No phase results found</td></tr>`;
   } else {
     $('ev-tbody').innerHTML = rows.map(r => {
-      const verd = r.honest_verdict || r.verdict || '—';
-      const bonfOk = r.bonferroni_significant === true;
-      const pVal = r.p_value_uncorrected ?? r.p_value ?? r.p_val;
-      const dVal = r.cohens_d ?? r.d;
+      const verd = r.honest_verdict || r.verdict || r.verdict_key || '—';
+      const bonfOk = r.bonferroni_significant === true || (r.vs_ewc_p != null && r.vs_ewc_p < 0.0125);
+      const pVal = r.p_value_uncorrected ?? r.p_value ?? r.p_val ?? r.vs_ewc_p;
+      const dVal = r.cohens_d ?? r.d ?? r.vs_ewc_d;
       const delta = r.mean_delta_forgetting ?? r.mean_delta ?? r.delta;
-      return `<tr data-verdict="${esc(verd)}" onclick="openEvidenceDrawer(${JSON.stringify(JSON.stringify(r))})">
+      return `<tr data-verdict="${normalizeVerdict(verd)}" data-ev-json="${esc(JSON.stringify(r))}" onclick="openEvidenceDrawer(this.dataset.evJson)">
         <td class="mono">${esc(String(r.phase||r.experiment_id||'—'))}</td>
         <td>${esc(r.dataset||'—')}</td>
         <td style="font-size:11.5px">${esc(r.method_comparison||r.label||'—')}</td>
@@ -1715,8 +1907,8 @@ function renderEvidence() {
 
 function openEvidenceDrawer(jsonStr) {
   const r = JSON.parse(jsonStr);
-  const pVal = r.p_value_uncorrected ?? r.p_value ?? r.p_val;
-  const dVal = r.cohens_d ?? r.d;
+  const pVal = r.p_value_uncorrected ?? r.p_value ?? r.p_val ?? r.vs_ewc_p;
+  const dVal = r.cohens_d ?? r.d ?? r.vs_ewc_d;
   const delta = r.mean_delta_forgetting ?? r.mean_delta ?? r.delta;
   openDrawer(`
     <h2>${esc(r.label||r.experiment_id||'Result')}</h2>
@@ -1809,9 +2001,13 @@ async function returnToAuthor(paperId) {
 function renderReview() {
   if (renderApiError('review-urgent', 'review')) return;
   const data = S.data.review || {};
-  const pending = Array.isArray(data.pending) ? data.pending : [];
+  // API shape: { claim_reviews:[...], questions:[...] } OR { pending:[...], questions:[...], completed:[...] }
+  const allItems = Array.isArray(data.pending) ? data.pending
+                 : Array.isArray(data.claim_reviews) ? data.claim_reviews : [];
+  const pending   = allItems.filter(r => !r.decision || r.decision === 'pending' || r.status === 'pending');
+  const done      = Array.isArray(data.completed) ? data.completed
+                  : allItems.filter(r => r.decision && r.decision !== 'pending' && r.status !== 'pending');
   const questions = Array.isArray(data.questions) ? data.questions : [];
-  const done = Array.isArray(data.completed) ? data.completed : [];
 
   // Urgent items (blocking)
   const urgent = pending.filter(r => r.blocking || r.priority === 'urgent');
