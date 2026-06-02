@@ -4086,31 +4086,113 @@ def api_budget():
         return jsonify({"state": "unknown", "error": str(exc), "spent_usd": 0, "budget_usd": 5.0})
 
 
+_PHASE2_PY = r"C:\Users\cgard\AppData\Local\Programs\Python\Python311\python.exe"
+_PHASE2_SCRIPTS = {
+    "run_hpc_replication":          "run_hpc_replication.py",
+    "phase16_cifar100_rerun":       "phase16_cifar100_rerun.py",
+    "phase17_tinyimagenet_rerun":   "phase17_tinyimagenet_rerun.py",
+    "run_hyperparameter_selection": "run_hyperparameter_selection.py",
+    "run_mechanistic_ablation":     "run_mechanistic_ablation.py",
+}
+
+
+def _phase2_pids_path() -> Path:
+    return _WS / "tar_state" / "phase2_pids.json"
+
+
+def _load_phase2_pids() -> dict:
+    return _jload(_phase2_pids_path()) or {}
+
+
+def _save_phase2_pids(data: dict) -> None:
+    p = _phase2_pids_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+@app.route("/api/phase2/status")
+def api_phase2_status():
+    """Return live status of all Phase 2 script processes."""
+    try:
+        import psutil as _ps
+        has_psutil = True
+    except ImportError:
+        has_psutil = False
+
+    pids = _load_phase2_pids()
+    results = {}
+    for key, entry in pids.items():
+        pid = entry.get("pid")
+        alive = False
+        if pid and has_psutil:
+            try:
+                alive = _ps.pid_exists(int(pid))
+            except Exception:
+                alive = False
+        results[key] = {
+            **entry,
+            "alive": alive,
+            "status": "running" if alive else ("complete" if entry.get("started_at") else "idle"),
+        }
+    # Add idle entries for scripts not yet started
+    for key in _PHASE2_SCRIPTS:
+        if key not in results:
+            results[key] = {"status": "idle", "pid": None, "started_at": None, "alive": False}
+    return jsonify(results)
+
+
 @app.route("/api/phase2/launch", methods=["POST"])
 def api_phase2_launch():
-    """Launch a pre-registered Phase 2 GPU experiment script."""
+    """Launch a pre-registered Phase 2 GPU experiment using Python 3.11 (CUDA-enabled)."""
     body = request.get_json(silent=True) or {}
     script_key = str(body.get("script", "")).strip()
-    SCRIPTS = {
-        "run_hpc_replication":          "run_hpc_replication.py",
-        "phase16_cifar100_rerun":       "phase16_cifar100_rerun.py",
-        "phase17_tinyimagenet_rerun":   "phase17_tinyimagenet_rerun.py",
-        "run_hyperparameter_selection": "run_hyperparameter_selection.py",
-        "run_mechanistic_ablation":     "run_mechanistic_ablation.py",
-    }
-    if script_key not in SCRIPTS:
-        return jsonify({"ok": False, "error": f"Unknown script. Allowed: {list(SCRIPTS)}"}), 400
-    script_path = _REPO / SCRIPTS[script_key]
+
+    if script_key not in _PHASE2_SCRIPTS:
+        return jsonify({"ok": False, "error": f"Unknown script. Allowed: {list(_PHASE2_SCRIPTS)}"}), 400
+
+    script_path = _REPO / _PHASE2_SCRIPTS[script_key]
     if not script_path.exists():
-        return jsonify({"ok": False, "error": f"Script not yet written: {SCRIPTS[script_key]}", "not_found": True}), 404
-    import subprocess, sys as _sys
+        return jsonify({"ok": False, "error": f"Script not yet written: {_PHASE2_SCRIPTS[script_key]}", "not_found": True}), 404
+
+    # Use Python 3.11 — only version with working CUDA PyTorch on this machine
+    py_exec = Path(_PHASE2_PY) if Path(_PHASE2_PY).exists() else __import__("sys").executable
+
+    # Check if already running
+    pids = _load_phase2_pids()
+    existing = pids.get(script_key, {})
+    if existing.get("pid"):
+        try:
+            import psutil as _ps
+            if _ps.pid_exists(int(existing["pid"])):
+                return jsonify({"ok": False, "error": f"Already running (PID {existing['pid']}). Wait for it to finish."}), 409
+        except Exception:
+            pass
+
+    # Write log file so output is visible
+    log_path = _WS / "tar_state" / "logs" / f"phase2_{script_key}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    import subprocess
     try:
-        proc = subprocess.Popen(
-            [_sys.executable, str(script_path)],
-            cwd=str(_REPO), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        return jsonify({"ok": True, "pid": proc.pid, "script": SCRIPTS[script_key]})
+        with open(str(log_path), "w", encoding="utf-8") as log_fh:
+            proc = subprocess.Popen(
+                [str(py_exec), str(script_path)],
+                cwd=str(_REPO),
+                stdout=log_fh, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+
+        # Track PID
+        pids[script_key] = {
+            "pid": proc.pid,
+            "script": _PHASE2_SCRIPTS[script_key],
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "log_path": str(log_path),
+            "python": str(py_exec),
+        }
+        _save_phase2_pids(pids)
+
+        return jsonify({"ok": True, "pid": proc.pid, "script": _PHASE2_SCRIPTS[script_key], "log": str(log_path)})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 
