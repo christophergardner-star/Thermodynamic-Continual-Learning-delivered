@@ -1765,4 +1765,670 @@ def test_penalty_always_nonnegative(importance_val, drift_val):
 
 ---
 
-*Stage 3 complete — Phases 3 and 4 with 19 tasks (3.1–3.7, 4.1–4.12)*
+---
+
+## PHASE 5 — PAPER PIPELINE
+**Duration:** 8–12 weeks (begins after Phase 0 + Phase 1; parallel with Phases 2–3)
+**Track:** A (Science)
+**Owner:** Lead Researcher / Paper Author
+**Objective:** Produce one real, defensible, submission-ready manuscript by September 1, 2026 (ContinualAI@NeurIPS 2026 target). Nothing templated. Every claim traceable to `honest_evidence_inventory.json`.
+
+---
+
+### Task 5.1 — Commit to the correct framing before drafting begins
+
+**Priority:** CRITICAL — the wrong frame wastes weeks of writing
+
+**The framing decision (from expert consensus):**
+
+Do NOT frame as: "A new thermodynamic theory of catastrophic forgetting."
+DO frame as: "An empirical audit of EWC's failure mode with a controlled mechanistic replication."
+
+**The one-sentence paper identity:**
+> "We show that EWC's canonical hyperparameters systematically underfit activation heterogeneity in ResNet-18 architectures; continuous gradient-energy importance accumulation corrects this underfitting and reduces forgetting, with the effect attributable entirely to the importance weighting rather than thermodynamic regime detection."
+
+This framing is:
+- **Defensible:** the Phase 11 ablation data supports it
+- **Novel:** no paper has isolated EWC's hyperparameter sensitivity under controlled seed management
+- **Honest:** it explicitly states the governor does not contribute
+- **Citable:** EWC is the most-cited CL paper; an audit of its failure mode has broad relevance
+
+Write this framing decision into `tar_state/papers/paper_1_framing_decision.json` before any section is drafted.
+
+**Verification:** File exists; Lead Researcher has reviewed and approved the framing.
+
+---
+
+### Task 5.2 — Write the complete paper structure with section-by-section evidence mapping
+
+**Priority:** HIGH — do this before any section is drafted
+
+Map every claim in every section to its evidence source in `honest_evidence_inventory.json`:
+
+**Section 1 — Abstract (150 words):** Problem (EWC underperforms), approach (continuous EMA importance), result (Δ forgetting at corrected p-value), implication (importance weighting drives the improvement, not regime detection).
+
+**Section 2 — Introduction:** Catastrophic forgetting as a deployment problem → Current solutions (EWC, SI, replay, prompt-based) → The gap: EWC's snapshot Fisher underestimates gradient energy heterogeneity → Proposal: accumulate continuously → Contributions: (1) controlled EWC replication, (2) continuous importance estimator, (3) mechanism ablation.
+
+**Section 3 — Related Work:** [Requires knowledge graph from Phase 9.2] 15 essential papers mapped to 3 themes: (a) regularization-based CL, (b) Fisher information estimation, (c) evaluation methodology for CL.
+
+**Section 4 — Method:** ThermalImportance algorithm (Algorithm Box). ThermalMemory ring buffer. TCLRegularizer penalty. Fisher-EMA theorem (Task 3.2). Connection to EWC as limiting case.
+
+**Section 5 — Experiments:**
+- 5.1: Main comparison table (Phase 10 rerun with all baselines)
+- 5.2: Scale generalisation (Phase 16 CIFAR-100, Phase 17 TinyImageNet, 5 seeds each)
+- 5.3: Mechanistic ablation table (7 conditions from Task 3.1)
+- 5.4: HPC characterisation (Task 3.4) — if HPC replication succeeded
+
+**Section 6 — Analysis:** D_PR–forgetting correlation (Task 3.5). Power analysis table (Task 1.3). BWT/FWT across methods (Task 1.8).
+
+**Section 7 — Limitations:** Governor non-activation. Task-incremental only. Single backbone (ResNet-18). DER++ comparison (honest result). Bonferroni status of headline result.
+
+**Section 8 — Conclusion:** One paragraph. What was shown. What was not shown. What is next.
+
+Write `tar_state/papers/paper_1_section_evidence_map.json` listing the inventory entry IDs supporting each claim in each section.
+
+**Verification:** File exists; no section cites a result that is not in `honest_evidence_inventory.json`.
+
+---
+
+### Task 5.3 — Draft human-written sections (abstract, introduction, limitations, conclusion)
+
+**Priority:** HIGH — `tar_author.py` is a drafting aid, not a final author
+
+These four sections require human voice and strategic framing. `tar_author.py` drafts should be treated as raw material to be substantially edited.
+
+**Process:**
+1. Run `tar_author.py` section renderer for each section with the updated non-thermodynamic prompts (Task 3.3).
+2. Human edits each draft for: accurate framing, appropriate hedging, correct claim scope, natural academic voice.
+3. All numerical claims verified against `honest_evidence_inventory.json` before accepting.
+4. All citation keys verified against the bibliography before accepting.
+
+**Time allocation:**
+- Abstract: 2 hours (draft + 2 rounds of editing)
+- Introduction: 6 hours
+- Limitations: 3 hours
+- Conclusion: 2 hours
+
+**Verification:** Each section compiles without LaTeX errors; all numerical values match the evidence inventory; no thermodynamic framing language appears in final text.
+
+---
+
+### Task 5.4 — Build the comparison table and related work section from the knowledge graph
+
+**Priority:** HIGH — requires Phase 9 knowledge graph to be populated first
+
+**Standard NeurIPS CL comparison table format:**
+
+| Method | Split-CIFAR-10 Forgetting ↓ | Split-CIFAR-100 Forgetting ↓ | Split-TinyImageNet Forgetting ↓ | BWT ↑ | Source |
+|---|---|---|---|---|---|
+| SGD baseline | — | — | — | — | Our Phase 10 |
+| EWC (λ=1000) | — | — | — | — | Our Phase 10 rerun |
+| SI (c=0.01) | — | — | — | — | Our Phase 13 |
+| LwF (α=0.5) | — | — | — | — | Our Phase 10 rerun |
+| A-GEM (m=200) | — | — | — | — | Our Phase 10 rerun |
+| DER++ (m=200) | — | — | — | — | Our Phase 10 rerun |
+| TCL (ours) | — | — | — | — | Our Phase 10 rerun |
+
+Fill this table from Phase 2 results. All ±values use the t-distribution CI formula from Task 1.1. All significance values are Bonferroni-corrected (Task 1.2). Bayesian posterior probabilities (Task 1.10) are reported in parentheses.
+
+**Related work section:** Uses the knowledge graph (Phase 9) to identify: (a) the 3 most similar recent papers with explicit comparison, (b) the 5 foundational references (EWC, SI, LwF, DER++, GEM), (c) the 4 theoretical references (Fisher information, natural gradient, K-FAC, NTK).
+
+**Verification:** Table is complete with all methods; all values have CI95; related work section cites all 15 required papers from Phase 9.3.
+
+---
+
+### Task 5.5 — Compile, review, and submit
+
+**Priority:** CRITICAL
+
+**Compilation checklist:**
+- [ ] `pdflatex main.tex` succeeds without errors
+- [ ] PDF is 8 pages (ContinualAI workshop limit) or 9 pages + references (ICLR limit)
+- [ ] All figures have captions; all tables have captions
+- [ ] All numerical values in text match comparison JSONs
+- [ ] All citations have corresponding BibTeX entries
+- [ ] Supplementary material: (a) power analysis table, (b) BWT/FWT for all methods, (c) per-task ECE trajectories, (d) pre-registration documents, (e) code availability statement
+
+**External review:** Before submission, share the draft with at least one external person from the ContinualAI community (Discord/Slack) for feedback. Allow at least 1 week for feedback incorporation.
+
+**arXiv:** Post to arXiv simultaneously with submission, only after Phase 2 HPC replication result is confirmed.
+
+**Submission target:** ContinualAI@NeurIPS 2026 (estimated deadline: September 1, 2026). ICLR 2027 as stretch target (abstract deadline ~October 2026).
+
+**Verification:** Submission confirmation received. arXiv ID exists. Pre-registration documents are publicly linked from the paper.
+
+---
+
+### Task 5.6 — Plan and initiate the multi-paper strategy
+
+**Priority:** MEDIUM — concurrent with Phase 5 main work
+
+| Paper | Target venue | Key result needed | Current status |
+|---|---|---|---|
+| **Paper 1** | ContinualAI@NeurIPS 2026 | Phase 2 HPC replication or Phase 10 rerun | In preparation |
+| **Null-result brief** | NeurIPS brief or workshop | Phase 11 governor ablation | Data complete; write 4 pages |
+| **Paper 2: TCL-for-LLMs** | NeurIPS 2027 or ICML 2027 | TCL-LLM prototype (Phase 10.1) | Scoping done (Task 3.6) |
+| **Paper 3: TAR system** | AutoML@ICML 2027 | Paper 1 first; TAR audit trail | Requires Paper 1 |
+
+Begin drafting the null-result brief (governor ablation) in parallel with Paper 1. It is 4 pages and the data (Phase 11) is already available. This brief demonstrates rigorous negative result reporting and builds credibility.
+
+**Verification:** `tar_state/papers/paper_1_null_result_brief.tex` exists with at least an introduction and results table.
+
+---
+
+**Phase 5 exit gate — ALL must be true:**
+- [ ] Framing decision committed in writing before any drafting
+- [ ] Evidence map JSON exists mapping each claim to inventory entry
+- [ ] All four human-written sections drafted and reviewed
+- [ ] Comparison table complete; all results from Phase 2
+- [ ] Knowledge graph used for related work section
+- [ ] LaTeX compiles without errors; PDF produced
+- [ ] At least one external reviewer has provided feedback
+- [ ] arXiv ID exists or submission confirmation received
+- [ ] Null-result brief (governor) in draft form
+
+---
+
+## PHASE 6 — GOVERNANCE, SAFETY & LONG-TERM AUTONOMY
+**Duration:** 4–6 weeks (overlaps with Phases 3–5)
+**Track:** C (Automation & Governance)
+**Owner:** Lead Researcher / Systems Engineer
+**Objective:** Bring the autonomous research infrastructure to the standard where it can safely run unattended without producing false science, gaming metrics, or modifying its own governance.
+
+---
+
+### Task 6.1 — Cryptographically seal governance state files
+
+**Priority:** HIGH — governance files can currently be modified by any process with filesystem access
+
+**Implementation:**
+
+Generate a persistent Ed25519 keypair at system setup:
+```bash
+python -c "
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives import serialization
+key = ed25519.Ed25519PrivateKey.generate()
+# Write private key to protected location (NOT in repo, NOT in tar_state/)
+with open('C:/Users/cgard/.tar_keys/governance_private.pem', 'wb') as f:
+    f.write(key.private_bytes(serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption()))
+# Write public key to repo (safe to commit)
+with open('tar_governance_public.pem', 'wb') as f:
+    f.write(key.public_key().public_bytes(
+            serialization.Encoding.PEM, 
+            serialization.PublicFormat.SubjectPublicKeyInfo))
+"
+```
+
+When any governance file is written, append a signature block:
+```python
+def sign_governance_file(path: Path, private_key_path: Path) -> None:
+    content = path.read_bytes()
+    content_hash = hashlib.sha256(content).hexdigest()
+    # Sign the hash
+    sig = private_key.sign(content_hash.encode())
+    sig_path = path.with_suffix('.sig')
+    sig_path.write_bytes(sig)
+```
+
+When watchdog or manifest gate reads any governance file, verify signature before trusting:
+```python
+def verify_governance_file(path: Path, public_key_path: Path) -> bool:
+    content = path.read_bytes()
+    content_hash = hashlib.sha256(content).hexdigest()
+    sig = path.with_suffix('.sig').read_bytes()
+    try:
+        public_key.verify(sig, content_hash.encode())
+        return True
+    except Exception:
+        return False  # Fail-closed: treat as tampered
+```
+
+Files requiring signing: `stabilisation_mode.json`, `execution_policy.json`, `runtime_policy.json`, manifest files.
+
+**Verification:** Manually modify `stabilisation_mode.json` without re-signing; confirm watchdog refuses to load it and raises CRITICAL alert.
+
+---
+
+### Task 6.2 — Enforce execution_policy.json at code generation time
+
+`tar_state/policies/execution_policy.json` declares `"require_sandbox_for_generated_code": true` but the `ExecutionPolicyViolation` error class exists in `tar_lab/errors.py` with zero enforcement calls.
+
+**Add enforcement in `tar_lab/method_synthesizer.py`:**
+```python
+def _assert_policy_allows_execution(workspace: Path) -> None:
+    policy_path = workspace / "tar_state" / "policies" / "execution_policy.json"
+    if not policy_path.exists():
+        raise ExecutionPolicyViolation("execution_policy.json not found; cannot execute generated code")
+    if not verify_governance_file(policy_path, PUBLIC_KEY_PATH):
+        raise ExecutionPolicyViolation("execution_policy.json signature invalid; refusing to execute")
+    policy = json.loads(policy_path.read_text())
+    if policy.get("require_sandbox_for_generated_code", True):
+        # Verify Docker is available
+        if not _docker_available():
+            raise ExecutionPolicyViolation(
+                "execution_policy requires sandbox but Docker is unavailable. "
+                "Cannot execute generated code without sandbox.")
+```
+
+Call `_assert_policy_allows_execution(workspace)` before any synthesised method code is executed.
+
+**Verification:** Remove Docker; attempt to synthesise a method; confirm `ExecutionPolicyViolation` is raised with a clear message.
+
+---
+
+### Task 6.3 — Make Docker non-bypassable for experiment execution
+
+The `allow_host_fallback` path in `docker_runner.py` allows uncontrolled code to run on the host when Docker is unavailable.
+
+**Remove the fallback:**
+```python
+# In docker_runner.py, _execute_in_process():
+# BEFORE (unsafe):
+if not self._docker_available():
+    return self._execute_subprocess_fallback(command, env, output_dir)
+
+# AFTER (safe):
+if not self._docker_available():
+    raise ExecutionPolicyViolation(
+        "Docker required for experiment execution. "
+        "Subprocess fallback is disabled by execution_policy.json. "
+        "Install Docker or run experiments with run_intent='control'.")
+```
+
+Allow host execution only for: (a) daemon startup scripts, (b) health checks, (c) experiments explicitly marked `run_intent='control'` (plumbing tests).
+
+**Verification:** Stop Docker service; attempt to launch a research-grade experiment; confirm `ExecutionPolicyViolation` is raised, no subprocess falls back.
+
+---
+
+### Task 6.4 — Build a tamper-proof append-only audit log
+
+The current alert ring buffer (500 entries) loses history and is not tamper-evident.
+
+**Implementation:**
+
+Create `tar_state/audit.jsonl` as a permanent append-only log (never trimmed, gzip-rotated monthly):
+
+```python
+def audit_log(event_type: str, details: dict, workspace: Path) -> None:
+    """Append a tamper-evident audit event."""
+    audit_path = workspace / "tar_state" / "audit.jsonl"
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pid": os.getpid(),
+        "event_type": event_type,
+        "details": details,
+    }
+    # Include hash of previous entry for chain integrity
+    if audit_path.exists():
+        last_line = audit_path.read_text(encoding="utf-8").strip().split("\n")[-1]
+        entry["prev_hash"] = hashlib.sha256(last_line.encode()).hexdigest()[:16]
+    else:
+        entry["prev_hash"] = "genesis"
+    line = json.dumps(entry)
+    with open(audit_path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+```
+
+**Events to audit-log:**
+- Every manifest authorization
+- Every experiment start and stop
+- Every governance file write
+- Every verdict generation
+- Every claim promotion to breakthrough
+- Every self-improvement cycle gate decision
+
+**Monthly rotation:** A scheduled task compresses `audit.jsonl` to `audit_YYYY-MM.jsonl.gz` at month start.
+
+**Verification:** Run 10 experiment events; confirm `audit.jsonl` has 10 entries; manually modify an entry; run `verify_audit_chain()` which detects the break.
+
+---
+
+### Task 6.5 — Close the autonomous mode human-review bypass
+
+`human_review.py` has `_UniversalApproval` — a sentinel that returns True for any experiment in autonomous mode. This makes the human review layer non-functional in the mode where it matters most.
+
+**Replace with a genuine 24-hour veto window:**
+
+```python
+AUTO_APPROVE_HOURS = 24  # Configurable
+
+def approved_experiment_ids(workspace: Path) -> set[str]:
+    vs = load_validation_mode(workspace)
+    if vs.get("active"):
+        # Stabilisation mode: explicit approval only
+        return _load_explicit_approvals(workspace)
+    
+    # Autonomous mode: 24-hour veto window
+    state = load_human_review_state(workspace)
+    approved = set()
+    now = datetime.now(timezone.utc)
+    for proposal in state.get("proposals", []):
+        if proposal.get("status") == "approved":
+            approved.add(proposal["experiment_id"])
+            continue
+        # Auto-approve if veto window has elapsed
+        submitted_at = datetime.fromisoformat(proposal.get("created_at", ""))
+        hours_elapsed = (now - submitted_at).total_seconds() / 3600
+        if hours_elapsed >= AUTO_APPROVE_HOURS and proposal.get("status") == "pending_director_review":
+            proposal["status"] = "auto_approved"
+            proposal["auto_approved_at"] = now.isoformat()
+            approved.add(proposal["experiment_id"])
+    save_human_review_state(workspace, state)
+    return approved
+```
+
+**Operator notification:** When an experiment enters the 24-hour window, log: "Experiment X will auto-approve in Y hours. View at dashboard to veto."
+
+**Verification:** Submit an experiment; confirm it is NOT in the approved set immediately. Wait 24 hours (or mock the timestamp); confirm it then auto-approves. Manually veto an experiment; confirm it never auto-approves.
+
+---
+
+### Task 6.6 — Implement per-session API cost budget with hard stop
+
+`tar_author.py` calls Sonnet-4-6 with `max_tokens=4096` for each section, with no cost tracking or budget gate.
+
+**Add cost tracking to `model_router.py`:**
+```python
+SESSION_BUDGET_USD = 20.0  # Configurable per session
+HAIKU_FALLBACK_THRESHOLD = 0.8  # Fall back to Haiku at 80% of budget
+
+class SessionCostTracker:
+    def __init__(self, budget_usd: float = SESSION_BUDGET_USD):
+        self._budget = budget_usd
+        self._spent = 0.0
+        self._lock = threading.Lock()
+    
+    def record_call(self, model: str, tokens_in: int, tokens_out: int) -> float:
+        costs = {
+            "claude-sonnet-4-6": (0.003, 0.015),   # $/1k tokens in/out
+            "claude-haiku-4-5-20251001": (0.0008, 0.004),
+        }
+        rate = costs.get(model, (0.003, 0.015))
+        cost = (tokens_in * rate[0] + tokens_out * rate[1]) / 1000
+        with self._lock:
+            self._spent += cost
+            if self._spent >= self._budget * 2:
+                raise BudgetExceededError(f"Session cost ${self._spent:.2f} exceeded 2× budget ${self._budget:.2f}. All LLM calls blocked.")
+            if self._spent >= self._budget * HAIKU_FALLBACK_THRESHOLD:
+                return cost  # Signal to caller to use Haiku
+        return cost
+```
+
+**Per-section cost attribution in `tar_author.py`:** Log the cost of each LLM call per section to `tar_state/logs/authoring_costs.jsonl`.
+
+**Verification:** Set `SESSION_BUDGET_USD = 0.01`; make one API call; confirm Haiku fallback triggers. Set to 0.001; confirm `BudgetExceededError` is raised and logged.
+
+---
+
+### Task 6.7 — Establish the recurring integrity check routine
+
+Build `tar_health_check.py` as a comprehensive integrity suite. Run: (a) at every startup before execution, (b) daily at a fixed time, (c) on demand via `tar_cli.py --health-check`.
+
+**Checks to implement:**
+
+```
+1. SECURITY
+   - api_secrets.json does not exist in the repo
+   - publish_config.json does not exist in the repo
+   - .gitignore includes all secrets patterns
+
+2. GOVERNANCE
+   - All governance files committed to git
+   - All governance file signatures valid (Ed25519)
+   - execution_enabled.flag state matches active_session.json
+
+3. EVIDENCE INTEGRITY
+   - All canonical comparison results pass three-gate registry check
+   - honest_evidence_inventory.json exists and matches raw comparison JSONs
+   - No result has bonferroni_significant=true at a corrected p-value that fails the threshold
+
+4. SYSTEM STATE
+   - active_session.json reflects actual daemon state
+   - No orphan experiment PIDs in process_registry.json
+   - No stale leases (>24 hours old) in runtime_ledger.json
+   - GPU temperature within safe range (<85°C)
+   - API key reachable (ping with 10 tokens)
+
+5. STORAGE
+   - No JSONL file exceeds 100MB (warn) or 500MB (alert)
+   - ChromaDB accessible and non-corrupt
+   - Audit log chain integrity check passes
+
+6. DEPENDENCIES
+   - requirements.lock exists and is not stale (>30 days)
+   - Docker available and responsive
+   - ActiveLearner thread alive (knowledge graph populated in last 48h)
+```
+
+Output: `tar_state/health_report.json` with pass/fail for each check and recommended actions.
+
+**Verification:** Introduce a deliberate failure (delete `audit.jsonl`); run health check; confirm FAIL is recorded in the report.
+
+---
+
+### Task 6.8 — Implement the Prospective Frontier Seal
+
+**Priority:** HIGH — prevents gradual scope narrowing to easy problems
+
+Before any new research programme begins, create a signed manifest of approved frontier problems. No Director proposal can target a frontier outside the sealed set without a new human-approved manifest.
+
+```python
+class FrontierSeal(BaseModel):
+    seal_id: str
+    created_at: str
+    sealed_by: str               # git user.name
+    approved_frontier_ids: list[str]
+    signature: str               # Ed25519 signature of content
+    seal_rationale: str
+
+def create_frontier_seal(frontier_ids: list[str], workspace: Path) -> FrontierSeal:
+    seal = FrontierSeal(
+        seal_id=f"seal-{utc_stamp()}",
+        created_at=utc_now_iso(),
+        sealed_by=git_user_name(),
+        approved_frontier_ids=frontier_ids,
+        seal_rationale="Approved frontier set for current research programme",
+        signature="UNSIGNED",
+    )
+    # Sign and commit
+    seal.signature = sign_content(seal.model_dump_json())
+    path = workspace / "tar_state" / "frontier_seal.json"
+    path.write_text(seal.model_dump_json(indent=2))
+    git_add_and_commit(path, f"seal: lock frontier set {seal.seal_id}")
+    return seal
+```
+
+In the Director proposal generation: if a proposed experiment's `frontier_problem_id` is not in `frontier_seal.approved_frontier_ids`, reject it with a clear message: "Frontier X is not in the current sealed frontier set. Update the frontier seal to include it."
+
+**Verification:** Seal a set of 3 frontiers; attempt to propose an experiment on a fourth frontier; confirm rejection.
+
+---
+
+### Task 6.9 — Implement the Goodhart Canary
+
+**Priority:** HIGH — detects when the Director optimizes the rubric instead of science
+
+Every N weeks (configurable; default 4 weeks), partition linked experiments for each paper into:
+- **Publication set** (80%): used for Director training and proposal generation
+- **Holdout set** (20%): withheld; used only for periodic out-of-sample validation
+
+```python
+def run_goodhart_canary(workspace: Path, paper_id: str) -> dict:
+    """Run quarterly canary check: does Director perform on holdout?"""
+    pub_results = load_publication_set(workspace, paper_id)
+    holdout_results = load_holdout_set(workspace, paper_id)
+    
+    pub_score = mean([r["evidence_score"] for r in pub_results])
+    holdout_score = mean([r["evidence_score"] for r in holdout_results])
+    
+    gap = pub_score - holdout_score
+    if gap > 0.15:  # 15% gap threshold
+        audit_log("GOODHART_CANARY_TRIGGERED", {
+            "paper_id": paper_id,
+            "pub_score": pub_score,
+            "holdout_score": holdout_score,
+            "gap": gap,
+        }, workspace)
+        raise GoodhartAlert(
+            f"Director may be goodharting the publication rubric. "
+            f"Publication set score ({pub_score:.2f}) is {gap:.2f} above holdout "
+            f"({holdout_score:.2f}). Human audit required before next training cycle.")
+    return {"gap": gap, "status": "ok" if gap < 0.15 else "alert"}
+```
+
+**Verification:** Inject synthetic results where the Director consistently produces high-scoring pub-set results but low holdout scores; confirm `GoodhartAlert` is raised and logged.
+
+---
+
+### Task 6.10 — Implement the Immutable Director Snapshot
+
+**Priority:** HIGH — prevents the system from modifying its own governance during live operation
+
+When stabilisation mode is activated, take a signed snapshot of the Director weights and all governance code:
+
+```python
+def activate_stabilisation_with_snapshot(workspace: Path) -> SnapshotRecord:
+    """Call when entering stabilisation mode."""
+    git_hash = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo_root())
+    ).decode().strip()
+    
+    snapshot = SnapshotRecord(
+        snapshot_id=f"snapshot-{utc_stamp()}",
+        git_hash=git_hash,
+        director_state_hash=sha256_file(
+            workspace / "tar_state" / "research_director_state.json"
+        ),
+        governance_files_hash={
+            f: sha256_file(repo_root() / f)
+            for f in GOVERNANCE_FILES
+        },
+        activated_at=utc_now_iso(),
+        signature="UNSIGNED",
+    )
+    snapshot.signature = sign_content(snapshot.model_dump_json())
+    
+    snap_path = workspace / "tar_state" / "director_snapshot.json"
+    snap_path.write_text(snapshot.model_dump_json(indent=2))
+    git_add_and_commit(snap_path, f"snapshot: Director locked at {git_hash[:8]}")
+    return snapshot
+```
+
+During stabilisation: before any self-improvement cycle begins, verify that no governance file has changed from the snapshot. If any hash differs, raise `StabilisationGateMissingOverrideError` and require human review of the diff.
+
+**Verification:** Activate stabilisation; modify `tar_research_director.py`; attempt to start a self-improvement cycle; confirm the snapshot check fails and the cycle is blocked.
+
+---
+
+### Task 6.11 — Fix self-improvement pipeline: add holdout test set for gate evaluation
+
+The self-improvement gate currently evaluates on the anchor pack (same data used to define the baseline). This creates an evaluation/training set overlap.
+
+Add a fixed holdout set (`tar_state/self_improvement/holdout_eval_items.jsonl`) that:
+- Is never exposed to the Director during training
+- Is used exclusively for gate evaluation
+- Contains 20% of the baseline eval items, stratified by task family
+
+```python
+def evaluate_adapter_on_holdout(adapter_path: Path, workspace: Path) -> dict:
+    """Evaluate fine-tuned adapter on held-out items before deployment."""
+    holdout = load_jsonl(workspace / "tar_state/self_improvement/holdout_eval_items.jsonl")
+    # Run adapter inference on holdout
+    scores = run_eval(adapter_path, holdout)
+    return {
+        "holdout_mean_score": mean(scores),
+        "holdout_overclaim_rate": sum(1 for s in scores if s.get("overclaim")) / len(scores),
+        "n_items": len(scores),
+    }
+```
+
+Gate: adapter is only deployed if holdout_mean_score > anchor_mean_score AND holdout_overclaim_rate ≤ anchor_overclaim_rate.
+
+**Verification:** Train an adapter that overfits the training signal; confirm it fails the holdout gate even if it passes the anchor gate.
+
+---
+
+### Task 6.12 — Fix self-improvement mode collapse risk
+
+Diversity scoring in self-improvement is across signal `kinds`, not signal `content`. A thousand semantically identical signals that happen to have different kind labels pass the diversity filter.
+
+**Fix:** Add content-level deduplication using sentence embeddings:
+
+```python
+def _curate_signals_with_dedup(signals: list[SignalRecord], 
+                                min_cosine_distance: float = 0.3) -> list[SignalRecord]:
+    """Filter out near-duplicate signals regardless of kind."""
+    if not signals:
+        return []
+    embeddings = embed_signals([s.content for s in signals])
+    kept = [signals[0]]
+    kept_embeddings = [embeddings[0]]
+    for i, (sig, emb) in enumerate(zip(signals[1:], embeddings[1:]), 1):
+        # Check cosine distance from all kept signals
+        distances = [cosine_distance(emb, k_emb) for k_emb in kept_embeddings]
+        if min(distances) >= min_cosine_distance:
+            kept.append(sig)
+            kept_embeddings.append(emb)
+    return kept
+```
+
+**Verification:** Inject 20 semantically identical signals with different kind labels; confirm dedup reduces to 1–2 unique signals.
+
+---
+
+### Task 6.13 — Add self-improvement rollback mechanism
+
+If a deployed adapter causes regressions in subsequent experiment evaluations (Director proposes worse experiments, more false positives), there is no way to revert.
+
+**Add a monitoring period and rollback trigger:**
+
+```python
+class AdapterMonitor:
+    MONITORING_CYCLES = 5  # Evaluate for 5 experiment cycles
+    REGRESSION_THRESHOLD = 0.05  # 5% score drop triggers rollback
+    
+    def check_and_rollback_if_needed(self, workspace: Path) -> bool:
+        if not self._monitoring_complete():
+            return False  # Still in monitoring period
+        current_score = self._compute_recent_score()
+        baseline_score = self._load_anchor_score()
+        if current_score < baseline_score - self.REGRESSION_THRESHOLD:
+            self._rollback_to_base_model(workspace)
+            audit_log("ADAPTER_ROLLBACK", {
+                "reason": f"Score dropped {baseline_score - current_score:.3f} below baseline",
+                "cycles_monitored": self.MONITORING_CYCLES,
+            }, workspace)
+            return True
+        return False
+```
+
+**Verification:** Deploy an adapter that intentionally produces worse outputs; run 5 experiment cycles; confirm rollback triggers and previous model is restored.
+
+---
+
+**Phase 6 exit gate — ALL must be true:**
+- [ ] Ed25519 keypair generated; governance files signed; tampering detected on manual edit
+- [ ] `ExecutionPolicyViolation` raised when Docker unavailable for research experiments
+- [ ] Docker fallback path removed from research-grade experiment execution
+- [ ] `audit.jsonl` populated; chain integrity check passes
+- [ ] 24-hour auto-approve veto window replaces `_UniversalApproval`
+- [ ] Session API cost budget tracked; Haiku fallback at 80%; hard stop at 200%
+- [ ] Health check routine runs at startup and daily; `health_report.json` produced
+- [ ] Frontier Seal implemented and tested
+- [ ] Goodhart Canary implemented and tested
+- [ ] Immutable Director Snapshot created on stabilisation activation
+- [ ] Self-improvement holdout set in place
+- [ ] Content-level deduplication in self-improvement signal curation
+- [ ] Adapter rollback mechanism operational
+
+**What Phase 6 unlocks:** Full autonomous operation can resume with confidence. Phase 8 and 10 can proceed with reduced safety risk.
+
+---
+
+*Stage 4 complete — Phases 5 and 6 with 19 tasks (5.1–5.6, 6.1–6.13)*
