@@ -3555,4 +3555,266 @@ MONTH  5    6    7    8    9    10   11   12
 
 ---
 
-*Stage 6 complete — Phase 10, master timeline, risk register*
+---
+
+## PART VI — PUBLICATION STRATEGY
+
+### The framing decision (non-negotiable)
+
+Do NOT submit a paper that claims: "A thermodynamic theory of catastrophic forgetting." The regime detector never fires. The thermodynamic language is post-hoc narrative that does not match the mechanism.
+
+**DO submit a paper that claims:** "An empirical audit of EWC's failure mode, with a controlled mechanistic replication showing gradient-EMA importance accumulation reduces forgetting through the penalty component alone."
+
+**The one-sentence paper identity:**
+> "EWC's canonical hyperparameters systematically underfit activation heterogeneity in ResNet-18 architectures; continuous gradient-energy importance accumulation corrects this underfitting, with the benefit attributable entirely to the importance weighting and not to thermodynamic regime detection."
+
+### Reviewer pre-emptions (prepare these in advance)
+
+| Reviewer archetype | Objection | Pre-emption |
+|---|---|---|
+| Baseline Defender | "SI already beats TCL" | "SI at c=0.01 is near-degenerate. Phase 13 shows SI is hyperparameter-unstable across 4 tested values." |
+| Mechanist | "Where is the causal evidence for regime detection?" | "Phase 11 ablation: governor-alone is WORSE than SGD. The mechanism is the gradient-EMA penalty only. We explicitly disable the governor by default." |
+| Statistician | "n=5, p=0.019 fails Bonferroni" | "Phase 10 is a pre-registered controlled replication. The Bonferroni-corrected threshold is 0.0125; our result is directional, motivating Phase 11 mechanism ablation which has independent power." |
+| Scope Skeptic | "Split-CIFAR-10 is a toy" | "Split-CIFAR-10 forces method differences to surface. Phase 16/17 (CIFAR-100, TinyImageNet) show the same direction." |
+| CL Veteran | "Where is DualPrompt? L2P?" | "Prompt methods target class-incremental with high-capacity backbones. Our target is bandwidth-constrained task-incremental. Phase 15 (CIL) targets the prompt-based setting and is in preparation." |
+
+### Multi-paper roadmap
+
+| Paper | Venue | Target date | Core claim | Evidence required |
+|---|---|---|---|---|
+| **Paper 1** | ContinualAI@NeurIPS 2026 or ICLR 2027 | Sept 1, 2026 | Gradient-EMA penalty reduces forgetting; mechanism ablation | Phase 2 reruns at 5 seeds |
+| **Null-result brief** | NeurIPS workshop brief | Sept 1, 2026 | Governor mechanism does not activate or contribute | Phase 11 ablation (complete) |
+| **Paper 2** | NeurIPS/ICML 2027 | ~June 2027 | TCL-for-LLMs: EMA importance prevents LLM forgetting | Phase 10.1–10.2 |
+| **Paper 3** | AutoML@ICML 2027 | ~June 2027 | TAR system produces reproducible findings autonomously | Full programme audit trail |
+
+### Submission checklist for Paper 1
+
+Before hitting submit:
+- [ ] All numerical claims verified against `honest_evidence_inventory.json`
+- [ ] All citations verified in `essential_citations.bib` (15 papers from Phase 9.3)
+- [ ] Bonferroni-corrected p-values used throughout (not raw p-values)
+- [ ] BWT, FWT, intransigence reported for all methods
+- [ ] Per-task ECE trajectory included in supplementary
+- [ ] Pre-registration documents linked from paper
+- [ ] Code availability statement included
+- [ ] Governor described as "not activating in our experimental configuration" in limitations
+- [ ] DER++ comparison included and result honestly stated
+- [ ] External reviewer has seen the draft
+
+---
+
+## PART VII — MASTER TASK INVENTORY
+
+All 104 tasks with phase, priority, effort, and dependency:
+
+| Task ID | Phase | Description | Priority | Effort | Depends on |
+|---|---|---|---|---|---|
+| E0.1 | E0 | Rotate all exposed credentials | **CRITICAL** | 2h | Nothing |
+| E0.2 | E0 | Remove credentials from git history | **CRITICAL** | 1h | E0.1 |
+| E0.3 | E0 | Add .gitignore entries for secrets | CRITICAL | 30m | E0.2 |
+| E0.4 | E0 | Move credentials to environment variables | CRITICAL | 2h | E0.3 |
+| E0.5 | E0 | Add pre-commit secrets detection | HIGH | 1h | E0.3 |
+| 0.1 | 0 | Audit running TinyImageNet experiment | CRITICAL | ongoing | E0 |
+| 0.2 | 0 | Commit six governance files | CRITICAL | 4h | E0 |
+| 0.3 | 0 | Fix active_session.json stale state | HIGH | 2h | E0 |
+| 0.4 | 0 | Fix queue maintainer NoneType error | HIGH | 1h | E0 |
+| 0.5 | 0 | Build honest evidence inventory | CRITICAL | 4h | 0.1 |
+| 0.6 | 0 | Purge financial gap scan contamination | HIGH | 3h | E0 |
+| 0.7 | 0 | Fix watchdog restart loop circuit breaker | HIGH | 4h | E0 |
+| 0.8 | 0 | Fix process lifecycle (orphaned experiments) | HIGH | 6h | E0 |
+| 0.9 | 0 | Add lockfiles to shared state files | HIGH | 4h | E0 |
+| 0.10 | 0 | Disable governor by default | HIGH | 30m | E0 |
+| 1.1 | 1 | Replace z-critical with t-critical | CRITICAL | 3h | 0.5 |
+| 1.2 | 1 | Implement Bonferroni correction | CRITICAL | 3h | 1.1 |
+| 1.3 | 1 | Retrospective power analysis | HIGH | 3h | 1.1 |
+| 1.4 | 1 | Pre-registration protocol | HIGH | 6h | 1.1 |
+| 1.5 | 1 | Fix CIs for non-normality (Shapiro + bootstrap) | MEDIUM | 3h | 1.1 |
+| 1.6 | 1 | Implement Wilcoxon signed-rank as primary test | MEDIUM | 2h | 1.1 |
+| 1.7 | 1 | Add SPRT sequential testing boundary | HIGH | 3h | 1.2 |
+| 1.8 | 1 | Add BWT, FWT, intransigence metrics | CRITICAL | 1h | Phase 0 |
+| 1.9 | 1 | Add per-task ECE trajectory measurement | HIGH | 4h | Phase 0 |
+| 1.10 | 1 | Add Bayesian credible intervals | MEDIUM | 4h | 1.1 |
+| 2.1 | 2 | Replicate HPC with SPRT (n=25) | CRITICAL | 48h GPU | 1.4, 1.7 |
+| 2.2 | 2 | Rerun Phase 17 (TinyImageNet, 5 seeds) | HIGH | 16h GPU | 2.5, 2.6 |
+| 2.3 | 2 | Rerun Phase 16 (CIFAR-100, 5 seeds) | HIGH | 16h GPU | 2.5, 2.6 |
+| 2.4 | 2 | Implement and add DER++ to comparisons | HIGH | 4h + GPU | 2.6 |
+| 2.5 | 2 | Implement LwF and add to comparisons | CRITICAL | 2h + GPU | Phase 1 |
+| 2.6 | 2 | Fair joint hyperparameter tuning (seed=999) | HIGH | 8h GPU | Phase 1 |
+| 2.7 | 2 | Resolve regime-detection activation (Path B/A) | HIGH | 2w | 0.10 |
+| 2.8 | 2 | Formally close fp-catastrophic-forgetting | MEDIUM | 2h | 0.5 |
+| 2.9 | 2 | Implement and add GEM/A-GEM | HIGH | 4h + GPU | 2.6 |
+| 2.10 | 2 | Class-order Spearman confound audit | HIGH | 2h | Phase 1 |
+| 2.11 | 2 | BatchNorm task-boundary reset ablation | MEDIUM | 4h GPU | Phase 1 |
+| 2.12 | 2 | Verify weight initialization seed reproducibility | LOW | 1h | Phase 0 |
+| 2.13 | 2 | Re-analyse Phase 15 for Paper 2 scoping | LOW | 2h | Phase 1 |
+| 3.1 | 3 | 7-condition mechanistic ablation | HIGH | 14h GPU | 0.10, 2.6 |
+| 3.2 | 3 | Formalise Fisher-EMA theorem | HIGH | 8h | Phase 2 |
+| 3.3 | 3 | Reframe contribution; update tar_author.py | HIGH | 4h | 3.2 |
+| 3.4 | 3 | HPC lambda-vs-momentum ablation | HIGH | 4h GPU | 2.1 |
+| 3.5 | 3 | Build and test D_PR–forgetting correlation | MEDIUM | 4h | Phase 2 |
+| 3.6 | 3 | Assess ASC novelty; scope TCL-for-LLMs | MEDIUM | 3h | Phase 0 |
+| 3.7 | 3 | Prototype second-order importance (Hessian) | MEDIUM | 4h + GPU | Phase 1 |
+| 4.1 | 4 | Fix CI formula — shared utility function | CRITICAL | 2h | Phase 0 |
+| 4.2 | 4 | Fix TCL device placement edge cases | MEDIUM | 2h | Phase 0 |
+| 4.3 | 4 | Fix method synthesizer minibench validation | HIGH | 3h | Phase 0 |
+| 4.4 | 4 | Fix generative director leading prompt | HIGH | 3h | Phase 0 |
+| 4.5 | 4 | Fix smoke-tier synthetic benchmark labels | HIGH | 2h | Phase 0 |
+| 4.6 | 4 | Fix silent benchmark tier downgrade | HIGH | 3h | Phase 0 |
+| 4.7 | 4 | Replace keyword-based domain classifier | MEDIUM | 6h | Phase 0 |
+| 4.8 | 4 | Wire ActiveLearner to orchestrator startup | CRITICAL | 4h | Phase 0 |
+| 4.9 | 4 | Initialize self-improvement anchor pack | HIGH | 2h | Phase 0 |
+| 4.10 | 4 | Fix float equality bug in self-improvement gate | HIGH | 30m | Phase 0 |
+| 4.11 | 4 | Power-analysis sample size in pre-reg gate | HIGH | 3h | 1.3 |
+| 4.12 | 4 | Fix TCL penalty invariant; add assert + test | MEDIUM | 1h | Phase 0 |
+| 5.1 | 5 | Commit paper framing decision in writing | CRITICAL | 1h | Phase 3 |
+| 5.2 | 5 | Write section-by-section evidence map | CRITICAL | 4h | 5.1, 0.5 |
+| 5.3 | 5 | Draft human-written sections | HIGH | 13h | 5.2, Phase 2 |
+| 5.4 | 5 | Build comparison table + related work | HIGH | 6h | Phase 2, 9.2 |
+| 5.5 | 5 | Compile, external review, submit | CRITICAL | 8h | 5.3, 5.4 |
+| 5.6 | 5 | Plan and initiate multi-paper strategy | MEDIUM | 2h | 5.1 |
+| 6.1 | 6 | Cryptographically seal governance files | HIGH | 6h | Phase 0 |
+| 6.2 | 6 | Enforce execution_policy.json at code gen | HIGH | 4h | 6.1 |
+| 6.3 | 6 | Make Docker non-bypassable for experiments | HIGH | 2h | Phase 0 |
+| 6.4 | 6 | Build tamper-proof append-only audit log | HIGH | 6h | Phase 0 |
+| 6.5 | 6 | Close autonomous mode human-review bypass | HIGH | 6h | Phase 0 |
+| 6.6 | 6 | Per-session API cost budget with hard stop | HIGH | 4h | Phase 0 |
+| 6.7 | 6 | Recurring integrity check routine | MEDIUM | 8h | Phases 0, 6.1 |
+| 6.8 | 6 | Implement Prospective Frontier Seal | HIGH | 4h | 6.1 |
+| 6.9 | 6 | Implement Goodhart Canary | HIGH | 6h | Phase 0 |
+| 6.10 | 6 | Implement Immutable Director Snapshot | HIGH | 6h | 6.1 |
+| 6.11 | 6 | Self-improvement holdout test set | MEDIUM | 4h | 4.9 |
+| 6.12 | 6 | Self-improvement mode collapse (content dedup) | MEDIUM | 4h | 4.9 |
+| 6.13 | 6 | Self-improvement adapter rollback mechanism | MEDIUM | 4h | 4.9, 6.11 |
+| 7.1 | 7 | GitHub Actions CI/CD pipeline | CRITICAL | 4h | E0.5 |
+| 7.2 | 7 | Pin all dependencies + generate requirements.lock | HIGH | 6h | Phase 0 |
+| 7.3 | 7 | Pin Docker base image to digest | HIGH | 2h | Phase 0 |
+| 7.4 | 7 | Replace Flask dev server with Gunicorn | HIGH | 3h | Phase 0 |
+| 7.5 | 7 | Add fsync to all critical JSONL writes | HIGH | 2h | Phase 0 |
+| 7.6 | 7 | Implement JSONL rotation and archival | MEDIUM | 4h | Phase 0 |
+| 7.7 | 7 | Implement schema versioning + migration | MEDIUM | 12h | Phase 0 |
+| 7.8 | 7 | Back up ChromaDB weekly | MEDIUM | 3h | 4.8 |
+| 7.9 | 7 | Replace FTP with S3/SFTP | MEDIUM | 6h | E0.4 |
+| 7.10 | 7 | tar_api.py auth enforcement + input validation | HIGH | 4h | E0.4 |
+| 7.11 | 7 | Refactor tar_author.py into 4 modules | MEDIUM | 16h | Phase 4 |
+| 7.12 | 7 | Add RunPod executor wrapper | MEDIUM | 8h | Phase 0 |
+| 7.13 | 7 | Add Prometheus metrics + alerting | MEDIUM | 4h | Phase 7.4 |
+| 8.1 | 8 | Mechanism-isolation ablation engine | HIGH | 8h | Phase 4 |
+| 8.2 | 8 | Cross-failure clustering + escape | MEDIUM | 6h | Phase 4 |
+| 8.3 | 8 | Pre-synthesis literature grounding | MEDIUM | 4h | 9.2 |
+| 8.4 | 8 | Director/Strategist/Scout prompt fixes | MEDIUM | 4h | Phase 4 |
+| 8.5 | 8 | Director confidence calibration | MEDIUM | 4h | 9.5 |
+| 9.1 | 9 | Verify ActiveLearner running and ingesting | CRITICAL | 2h | 4.8 |
+| 9.2 | 9 | Build knowledge graph schema + initial population | HIGH | 8h | 9.1 |
+| 9.3 | 9 | Download and ingest 15 essential CL papers | CRITICAL | 4h | 9.1 |
+| 9.4 | 9 | Implement claim-level novelty detection | MEDIUM | 6h | 9.2 |
+| 9.5 | 9 | Literature-aware Director proposal generation | MEDIUM | 6h | 9.2, 9.4 |
+| 10.1 | 10 | Prototype TCL-for-LLMs | HIGH | 2w | Phase 5 done |
+| 10.2 | 10 | Paper 2 experimental programme | HIGH | ongoing | 10.1 |
+| 10.3 | 10 | Paper 3: TAR system scoping + evidence | MEDIUM | ongoing | Phase 5 done |
+| 10.4 | 10 | TAR v2.0 architecture planning | MEDIUM | 4h | Phase 7 done |
+
+**Total: 104 tasks across 12 phases.**
+
+---
+
+## PART VIII — MASTER SUCCESS CRITERIA
+
+### What a PhD examiner would accept (after all phases complete)
+
+**Defensible claim 1 — the mechanism paper:**
+> "Continuous gradient-energy EMA importance accumulation (CGEIA) produces a temporally-smoothed estimate of the diagonal Fisher information. On Split-CIFAR-10 (n=5 seeds, Holm-corrected p<0.025), this reduces catastrophic forgetting relative to EWC by [X]pp while maintaining equivalent accuracy. The effect is attributable entirely to the importance weighting; the thermodynamic regime-detection component does not activate in our configurations (documented in ablation). The effect generalises to Split-CIFAR-100 and Split-TinyImageNet (n=5 seeds each, Bonferroni-corrected p<0.05)."
+
+**Defensible claim 2 — if HPC replication succeeds:**
+> "A high-penalty variant of CGEIA with SGD momentum disabled reduces forgetting by ~50% relative to baseline CGEIA on Split-CIFAR-10 (n=25 seeds, pre-registered single hypothesis, p<0.05, d≥0.5). The improvement is primarily attributable to [lambda increase / momentum removal / both — resolved in Task 3.4]."
+
+**Honest limitations (must appear verbatim in paper):**
+- "The thermodynamic regime-detection LR adjustment does not activate in our experimental configurations (Phase 11 ablation; governor-alone < SGD). We therefore disable it by default and attribute all improvement to the gradient-EMA elastic penalty."
+- "Results are restricted to task-incremental settings where task IDs are provided at test time. Class-incremental performance is reported separately."
+- "The headline Phase 10 result (p=0.019, TCL vs EWC) does not survive Bonferroni correction at our 4-comparison threshold (α=0.0125). We treat it as a directional result motivating the mechanistic ablation."
+- "With DER++ included as a replay baseline, TCL [beats / does not beat] memory-free performance — the honest result from Phase 2.4."
+
+---
+
+## PART IX — WHAT MUST NEVER HAPPEN AGAIN
+
+**The ten failure modes this programme structurally prevents:**
+
+1. **Running experiments that cannot reach publication tier.** Every experiment now requires a pre-registered power analysis before queueing. If n_required > n_affordable, the experiment is marked `exploration_grade` and cannot be cited as evidence in a paper. (Tasks 1.4, 4.11)
+
+2. **Falsely attributing results to a mechanism that doesn't work.** The mechanistic ablation (Task 3.1) and the governor activation investigation (Task 2.7) ensure the paper's mechanism section describes what actually happens. The Mechanism-Isolation Ablation Engine (Task 8.1) enforces this for all future hypotheses. (Tasks 2.7, 3.1, 3.3, 8.1)
+
+3. **Post-hoc hyperparameter tuning of baselines.** Joint tuning on a held-out validation split (Task 2.6) eliminates the EWC λ=100→1000 retroactive adjustment. The pre-registration gate (Task 1.4) makes any post-hoc change require a documented amendment commit. (Tasks 2.6, 1.4)
+
+4. **Autonomous operation from unreviewed code.** The six uncommitted governance files (Task 0.2) are committed and reviewed. The Immutable Director Snapshot (Task 6.10) prevents the system from modifying its own governance during live operation. (Tasks 0.2, 6.10)
+
+5. **Calling underpowered results breakthroughs.** The honest evidence inventory (Task 0.5), Bonferroni correction (Task 1.2), and power analysis (Task 1.3) mean the system's internal claim status reflects what a reviewer would accept, not what the system wishes were true. (Tasks 0.5, 1.2, 1.3)
+
+6. **Credentials committed to a public repository.** Phase E0 rotates all exposed keys, removes them from git history, adds `.gitignore` protection, installs `detect-secrets` as a pre-commit hook, and moves all reads to environment variables. This class of error is structurally prevented going forward. (Tasks E0.1–E0.5)
+
+7. **Infrastructure failures silently contaminating results.** CI/CD (Task 7.1) catches broken code before merge. Pinned dependencies (Task 7.2) ensure the environment is reproducible. fsync on all JSONL writes (Task 7.5) ensures data is durable. Schema versioning (Task 7.7) prevents silent data loss on model changes. (Tasks 7.1, 7.2, 7.5, 7.7)
+
+8. **Subsystems designed but never activated running as dead code.** The ActiveLearner is wired (Task 4.8). The self-improvement anchor pack is initialized (Task 4.9). The knowledge graph is populated (Task 9.2). Future development must verify that each new subsystem has a call path from the operational loop before it is considered complete. (Tasks 4.8, 4.9, 9.2)
+
+9. **The Director goodharting the publication rubric instead of doing science.** The Goodhart Canary (Task 6.9) detects this by comparing publication-set performance to holdout performance on a quarterly basis. The Prospective Frontier Seal (Task 6.8) prevents scope creep to easy problems. (Tasks 6.8, 6.9)
+
+10. **Literature gap scans producing irrelevant results.** The domain classifier (Task 4.7), domain allowlist (Task 0.6), claim-level novelty detection (Task 9.4), and pre-synthesis literature grounding (Task 8.3) collectively prevent the system from proposing experiments based on financial portfolio optimization or other off-domain literature. (Tasks 0.6, 4.7, 8.3, 9.4)
+
+---
+
+## APPENDIX A — QUICK-START GUIDE (Day 1 actions)
+
+For the first working session after reading this plan, execute in this exact order:
+
+**Morning (2 hours):**
+1. Go to anthropic.com console → invalidate and regenerate the Anthropic API key
+2. Go to runpod.io → invalidate and regenerate the RunPod API key and S3 credentials
+3. Go to hosting panel → change FTP password
+4. Run `bfg --delete-files api_secrets.json` on the local repo
+5. Run `git push --force --all`
+6. Add `.gitignore` entries (Task E0.3) and commit
+
+**Afternoon (3 hours):**
+7. Add BWT/FWT metrics to `generic_cl_runner.py` (Task 1.8 — 1 hour)
+8. Implement LwF in `method_registry.py` (Task 2.5 — 2 hours)
+9. Set `use_governor=False` as default (Task 0.10 — 30 minutes)
+
+**End of Day 1:**
+10. Commit all six governance files (Task 0.2)
+11. Fix the queue maintainer NoneType error (Task 0.4)
+
+These 11 actions take one full working day and unlock: the knowledge graph populating (Task 4.8 can proceed), the honest evidence inventory build (Task 0.5 can proceed), and Phase 1 statistical fixes can begin the next morning.
+
+---
+
+## APPENDIX B — TASK DEPENDENCY GRAPH
+
+```
+E0.1 → E0.2 → E0.3 → E0.4 → E0.5
+                 ↓
+              Phase 0 (all tasks)
+                 ↓
+         ┌───────┴───────────┐
+     Phase 1               Phase 4
+    (statistics)          (code quality)
+         ↓                     ↓
+     Phase 2               Phase 7
+  (experiments)           (engineering)
+         ↓                     ↓
+     Phase 3               Phase 8
+    (theory)             (automation)
+         ↓                     
+     Phase 5               Phase 9
+      (paper)            (literature)
+         ↓                     ↓
+    SUBMISSION          feeds into Phase 5/8
+         ↓
+    Phase 10 (long-term)
+```
+
+**Parallel execution:** After Phase 0 exits, start Phases 1, 4, 7, and 9 simultaneously. Phase 6 can begin alongside Phase 4. Phase 8 can begin alongside Phase 7. The bottleneck is always Track A (science).
+
+---
+
+*TAR Master Implementation Plan — Complete*
+*10 phases | 104 tasks | 2 parallel tracks | Target: Paper 1 by September 1, 2026*
+*Sources: TAR_PhD_Rehabilitation_Plan.md + TAR_Enhancement_Report.md*
