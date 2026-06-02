@@ -108,6 +108,10 @@ BACKBONE_REGISTRY: dict[str, Callable[[int, torch.device], _CLModel]] = {
     "resnet18":  lambda nc, dev: _build_model("resnet18", nc, dev),
 }
 
+# Task 2.11 ablation: BatchNorm running statistics may leak cross-task information.
+# Set reset_bn_at_task_boundary=True to isolate each task's BN statistics.
+# Default=False preserves the existing behaviour (matching all prior experiments).
+
 # ---------------------------------------------------------------------------
 # Dataset helpers
 # ---------------------------------------------------------------------------
@@ -379,6 +383,27 @@ def compute_per_task_ece(
     return ece_list
 
 # ---------------------------------------------------------------------------
+# BatchNorm reset helper (Task 2.11 ablation)
+# ---------------------------------------------------------------------------
+
+def _reset_bn_running_stats(model: nn.Module) -> None:
+    """
+    Reset BatchNorm running mean and variance at task boundaries.
+
+    BatchNorm running statistics accumulate across tasks by default.
+    This creates an implicit memory: task T+1's batch normalization is
+    conditioned on statistics from tasks 0..T. Resetting at task boundaries
+    eliminates this confound for ablation studies.
+
+    Reference: Lomonaco et al. (2020), "CORe50: a New Dataset and
+    Benchmark for Continuous Object Recognition." — notes BN as a
+    source of cross-task information leakage.
+    """
+    for module in model.modules():
+        if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+            module.reset_running_stats()
+
+# ---------------------------------------------------------------------------
 # Single-seed training
 # ---------------------------------------------------------------------------
 
@@ -393,6 +418,7 @@ def _run_one_seed(
     device: torch.device,
     log_fn: Callable[[str], None],
     progress_callback: Callable[[dict], None] | None,
+    reset_bn_at_task_boundary: bool = False,
 ) -> dict:
     from tar_lab.method_registry import METHOD_REGISTRY
 
@@ -414,6 +440,8 @@ def _run_one_seed(
 
     for task_id, train_loader in enumerate(task_train_loaders):
         method.pre_task(task_id, model, device)
+        if reset_bn_at_task_boundary:
+            _reset_bn_running_stats(model)
 
         for epoch in range(epochs):
             model.train()
@@ -477,6 +505,8 @@ def _run_one_seed(
         "forgetting_per_task": transfer_metrics["forgetting_per_task"],
         # Calibration trajectory — ECE per task after final training
         "ece_trajectory":      ece_trajectory,
+        # Task 2.11 ablation flag — records which variant was run
+        "bn_reset_at_boundaries": reset_bn_at_task_boundary,
     }
 
 # ---------------------------------------------------------------------------
@@ -497,6 +527,7 @@ def run_generic_benchmark(
     prebuilt_task_train: list[DataLoader] | None = None,
     prebuilt_task_test:  list[DataLoader] | None = None,
     progress_callback:   Callable[[int, dict], None] | None = None,
+    reset_bn_at_task_boundary: bool = False,
 ) -> tuple[list[dict], list[float], list[float]]:
     """
     Run a continual-learning benchmark with a registered CLMethod.
@@ -566,6 +597,7 @@ def run_generic_benchmark(
             device        = device,
             log_fn        = log_fn,
             progress_callback = _cb,
+            reset_bn_at_task_boundary = reset_bn_at_task_boundary,
         )
 
         forgetting_list.append(res["mean_forgetting"])
@@ -581,6 +613,8 @@ def run_generic_benchmark(
             "forgetting_per_task": res["forgetting_per_task"],
             # Calibration
             "ece_trajectory":      res["ece_trajectory"],
+            # Task 2.11 ablation flag
+            "bn_reset_at_boundaries": res["bn_reset_at_boundaries"],
         })
 
         log_fn(

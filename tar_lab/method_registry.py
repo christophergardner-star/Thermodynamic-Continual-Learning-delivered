@@ -284,3 +284,383 @@ class DERPlusPlus(CLMethod):
 
     def regularization_loss(self, model: nn.Module) -> torch.Tensor:
         return torch.tensor(0.0)
+
+
+# ── Learning without Forgetting ────────────────────────────────────────────────
+
+@register_method("lwf")
+class LwFMethod(CLMethod):
+    """
+    Learning without Forgetting (Li & Hoiem, 2016).
+
+    Distills knowledge from the model snapshot taken after training task T into
+    the model during training on task T+1.  The distillation loss is a
+    temperature-scaled KL divergence between the new model's output
+    distribution and the frozen old model's output distribution:
+
+        L_distill = alpha * T^2 * KL( softmax(new/T) || softmax(old/T) )
+
+    The T^2 factor compensates for the gradient magnitude reduction caused by
+    temperature scaling: when logits are divided by T, the magnitude of the
+    softmax-input gradients is reduced by 1/T^2 relative to the T=1 case
+    (Hinton, Vinyals & Dean, 2015, "Distilling the Knowledge in a Neural
+    Network").  Multiplying by T^2 restores the effective gradient scale so
+    that the distillation signal is comparable to the cross-entropy loss
+    regardless of the chosen temperature.
+
+    Implementation notes
+    --------------------
+    * The old model snapshot is stored on CPU after each task to avoid
+      occupying GPU VRAM between tasks; it is moved to the active device
+      in pre_task() at the start of the next task.
+    * regularization_loss() returns 0.0; all knowledge-transfer cost is
+      computed in augmented_loss() to keep a clean gradient graph.
+    * augmented_loss() performs a *fresh* forward pass through the new model
+      (not reusing the CE forward pass) so that the distillation gradient
+      graph is independent.
+
+    Hyperparameters (set via config_overrides)
+    ------------------------------------------
+    lwf_alpha       : distillation weight (default 0.5)
+    lwf_temperature : softening temperature (default 2.0)
+
+    References
+    ----------
+    Li, Z. & Hoiem, D. (2016). Learning without Forgetting. ECCV 2016.
+    arXiv:1606.09282.
+
+    Hinton, G., Vinyals, O. & Dean, J. (2015). Distilling the Knowledge in a
+    Neural Network. NIPS 2015 Deep Learning Workshop. arXiv:1503.02531.
+    """
+
+    def __init__(self, config: Any) -> None:
+        super().__init__(config)
+        self.alpha       = float(getattr(config, "lwf_alpha",       0.5))
+        self.temperature = float(getattr(config, "lwf_temperature", 2.0))
+        self._old_model: nn.Module | None = None
+
+    def pre_task(self, task_id: int, model: nn.Module, device: torch.device) -> None:
+        """Move the previous-task snapshot to the active device before training begins."""
+        if task_id > 0 and self._old_model is not None:
+            self._old_model = self._old_model.to(device)
+
+    def regularization_loss(self, model: nn.Module) -> torch.Tensor:
+        """No parameter-space penalty; distillation is handled in augmented_loss."""
+        return torch.tensor(0.0)
+
+    def augmented_loss(
+        self,
+        model: nn.Module,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        task_id: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Compute the temperature-scaled KL distillation loss on the current batch.
+
+        Returns 0.0 for task 0 (no previous model exists).
+
+        The returned loss is non-zero and will trigger a second backward() in
+        the generic runner, accumulating distillation gradients into the same
+        .grad buffers as the cross-entropy backward.
+        """
+        if self._old_model is None or task_id == 0:
+            return torch.tensor(0.0, device=device)
+
+        x = x.to(device)
+
+        # Fresh forward pass through the *new* model for the distillation graph.
+        # We cannot reuse the CE forward pass because that graph was consumed by
+        # loss.backward() already.
+        new_logits = model(x)
+
+        with torch.no_grad():
+            # Reference logits from the frozen snapshot; no gradient needed.
+            old_logits = self._old_model(x)
+
+        # Temperature-scaled distributions
+        old_soft     = F.softmax(old_logits / self.temperature, dim=-1)
+        new_log_soft = F.log_softmax(new_logits / self.temperature, dim=-1)
+
+        # KL divergence: reduction="batchmean" gives the mean over the batch,
+        # which matches the definition used in the original LwF paper.
+        distill_loss = F.kl_div(new_log_soft, old_soft, reduction="batchmean")
+
+        # T^2 restores gradient magnitude (see class docstring for derivation).
+        return self.alpha * (self.temperature ** 2) * distill_loss
+
+    def post_task(
+        self,
+        task_id: int,
+        model: nn.Module,
+        train_loader: DataLoader,
+        device: torch.device,
+    ) -> None:
+        """
+        Snapshot the current model after task T completes.
+
+        Stored on CPU so that GPU VRAM is freed during the next task's training;
+        pre_task() moves the snapshot back to the GPU at the start of task T+1.
+        """
+        import copy
+        self._old_model = copy.deepcopy(model).eval().cpu()
+
+
+# ── Averaged Gradient Episodic Memory ─────────────────────────────────────────
+
+@register_method("agem")
+class AGEMMethod(CLMethod):
+    """
+    Averaged Gradient Episodic Memory (Chaudhry et al., 2019).
+
+    Enforces that every gradient update for the current task does not increase
+    the average loss on an episodic reference memory sampled from all
+    previously seen tasks.  Formally, the constraint is:
+
+        g_task . g_ref >= 0
+
+    where g_task is the gradient of the current-task cross-entropy (already
+    accumulated in parameter .grad buffers when augmented_loss() is called)
+    and g_ref is the gradient of the cross-entropy on a random mini-batch
+    drawn from episodic memory.
+
+    If the constraint is violated (inner product < 0), g_task is projected
+    onto the constraint half-space defined by g_ref:
+
+        g_task' = g_task - ( g_task . g_ref / ||g_ref||^2 ) * g_ref
+
+    This projection is performed *in-place* on the .grad buffers so that the
+    corrected gradient is used by the subsequent optimizer.step() call.
+    augmented_loss() then returns tensor(0.0) so the generic runner's
+    `if aug.item() != 0.0` guard does NOT trigger a second backward() — the
+    gradient correction has already been applied.
+
+    The reference gradient is computed via torch.autograd.grad(), which
+    returns fresh gradient tensors WITHOUT accumulating into .grad, thereby
+    keeping the task gradient and reference gradient computations independent.
+
+    Episodic memory is populated by reservoir sampling (Algorithm R, Vitter
+    1985) in post_task(), guaranteeing a uniform inclusion probability of
+    mem_size / n_seen for each observed sample.
+
+    Hyperparameters (set via config_overrides)
+    ------------------------------------------
+    agem_mem_size : total episodic memory capacity across all tasks (default 200)
+
+    References
+    ----------
+    Chaudhry, A., Ranzato, M., Rohrbach, M. & Elhoseiny, M. (2019).
+    Efficient Lifelong Learning with A-GEM. ICLR 2019. arXiv:1812.00420.
+
+    Vitter, J. S. (1985). Random Sampling with a Reservoir. ACM Transactions
+    on Mathematical Software, 11(1), 37-57.
+    """
+
+    def __init__(self, config: Any) -> None:
+        super().__init__(config)
+        self.mem_size    = int(getattr(config, "agem_mem_size", 200))
+        self._mem_x:     list[torch.Tensor] = []
+        self._mem_y:     list[torch.Tensor] = []
+        self._total_seen: int = 0
+
+    def pre_task(self, task_id: int, model: nn.Module, device: torch.device) -> None:
+        """No-op: A-GEM requires no task-boundary model surgery."""
+        pass
+
+    def regularization_loss(self, model: nn.Module) -> torch.Tensor:
+        """No parameter-space penalty; constraint is enforced in augmented_loss."""
+        return torch.tensor(0.0)
+
+    def augmented_loss(
+        self,
+        model: nn.Module,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        task_id: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Enforce the A-GEM gradient constraint and project if violated.
+
+        Called AFTER loss.backward() has populated .grad on all parameters.
+        Returns tensor(0.0) in all cases; the correction is applied in-place.
+
+        Steps
+        -----
+        1. If no episodic memory exists (task 0), return zero immediately.
+        2. Sample up to 256 items uniformly at random from episodic memory.
+        3. Compute g_ref via torch.autograd.grad() -- does NOT touch .grad.
+        4. Compute dot = g_task . g_ref and ref_norm_sq = ||g_ref||^2.
+        5. If dot < 0 (constraint violated) project g_task in-place:
+               g_task' = g_task - (dot / ref_norm_sq) * g_ref
+        6. Return tensor(0.0) so the runner does not call aug.backward().
+        """
+        if task_id == 0 or not self._mem_x:
+            return torch.tensor(0.0, device=device)
+
+        # --- Sample reference batch ---
+        n_ref = min(256, len(self._mem_x))
+        idx   = random.sample(range(len(self._mem_x)), n_ref)
+        mx = torch.stack([self._mem_x[i] for i in idx]).to(device)
+        my = torch.stack([self._mem_y[i] for i in idx]).to(device)
+
+        # --- Parameters with existing task gradients ---
+        # Only consider parameters that already have a .grad from the CE backward.
+        # Parameters without .grad cannot be projected and are skipped.
+        params = [
+            p for p in model.parameters()
+            if p.requires_grad and p.grad is not None
+        ]
+        if not params:
+            return torch.tensor(0.0, device=device)
+
+        # --- Reference gradient (does NOT accumulate into .grad) ---
+        mem_out  = model(mx)
+        mem_loss = F.cross_entropy(mem_out, my)
+
+        g_ref_list = torch.autograd.grad(
+            mem_loss,
+            params,
+            retain_graph=False,
+            create_graph=False,
+            allow_unused=True,
+        )
+
+        # --- Inner product g_task . g_ref and ||g_ref||^2 ---
+        dot         = torch.tensor(0.0, device=device)
+        ref_norm_sq = torch.tensor(0.0, device=device)
+        for p, g_ref in zip(params, g_ref_list):
+            if g_ref is not None and p.grad is not None:
+                dot         = dot         + (p.grad.data * g_ref.data).sum()
+                ref_norm_sq = ref_norm_sq + (g_ref.data ** 2).sum()
+
+        # --- Project in-place if constraint is violated ---
+        # Guard ref_norm_sq > epsilon to avoid division by a degenerate reference.
+        if dot.item() < 0.0 and ref_norm_sq.item() > 1e-10:
+            proj_coeff = dot / (ref_norm_sq + 1e-10)
+            for p, g_ref in zip(params, g_ref_list):
+                if g_ref is not None and p.grad is not None:
+                    p.grad.data.sub_(proj_coeff * g_ref.data)
+
+        # Return zero -- projection was in-place; no second backward() needed.
+        return torch.tensor(0.0, device=device)
+
+    def post_task(
+        self,
+        task_id: int,
+        model: nn.Module,
+        loader: DataLoader,
+        device: torch.device,
+    ) -> None:
+        """
+        Populate episodic memory via reservoir sampling (Algorithm R).
+
+        Iterates through the full training loader for the completed task and
+        applies reservoir sampling to maintain a memory of size self.mem_size
+        with a uniform inclusion probability of mem_size / n_total_seen for
+        every sample observed across all tasks.
+
+        Samples are stored detached on CPU to minimise memory footprint.
+        """
+        for x_batch, y_batch in loader:
+            for xi, yi in zip(x_batch, y_batch):
+                if self._total_seen < self.mem_size:
+                    # Memory not yet full: always insert.
+                    self._mem_x.append(xi.detach().cpu())
+                    self._mem_y.append(yi.detach().cpu())
+                else:
+                    # Reservoir replacement: draw j ~ Uniform[0, total_seen].
+                    # Replace slot j if j < mem_size, preserving the invariant
+                    # that each sample has inclusion probability
+                    # mem_size / (total_seen + 1).
+                    j = random.randint(0, self._total_seen)
+                    if j < self.mem_size:
+                        self._mem_x[j] = xi.detach().cpu()
+                        self._mem_y[j] = yi.detach().cpu()
+                self._total_seen += 1
+
+
+# ── Thermodynamic Continual Learning ──────────────────────────────────────────
+
+@register_method("tcl")
+class TCLMethod(CLMethod):
+    """
+    Thermodynamic Continual Learning via gradient-energy EMA importance.
+
+    Accumulates per-parameter gradient-squared EMA (ThermalImportance) during
+    task training. After each task, commits a checkpoint (weights + importance)
+    to the elastic ring buffer (ThermalMemory). During subsequent tasks applies
+    an importance-weighted L2 penalty proportional to parameter drift from the
+    committed checkpoints.
+
+    The ThermalImportance.accumulate() call is made inside augmented_loss()
+    (after loss.backward() has populated .grad) so that gradient energy is
+    captured from the fully-computed gradient, not just the CE loss component.
+    augmented_loss() returns tensor(0.0) so no second backward() is triggered.
+
+    Key config fields (read via getattr with defaults):
+      tcl_penalty_lambda: float = 1.0   — elastic penalty weight
+      tcl_ema_beta:       float = 0.99  — EMA decay for importance accumulation
+
+    Reference: ThermalImportance / ThermalMemory / TCLRegularizer in tcl.py
+               (TAR internal; not yet published).
+    """
+
+    def __init__(self, config: Any) -> None:
+        super().__init__(config)
+        # Deferred imports to avoid circular import issues at module load time
+        from tcl import ThermalMemory, TCLRegularizer  # noqa: PLC0415
+        self.tcl_penalty_lambda = float(getattr(config, "tcl_penalty_lambda", 1.0))
+        self.tcl_ema_beta       = float(getattr(config, "tcl_ema_beta",       0.99))
+        self._memory             = ThermalMemory()
+        self._regularizer        = TCLRegularizer(self._memory, lambda_tcl=self.tcl_penalty_lambda)
+        self._importance         = None  # created per-task in pre_task()
+
+    def pre_task(self, task_id: int, model: nn.Module, device: torch.device) -> None:
+        """Create a fresh ThermalImportance accumulator for this task."""
+        from tcl import ThermalImportance  # noqa: PLC0415
+        self._importance = ThermalImportance(model, ema_beta=self.tcl_ema_beta)
+
+    def augmented_loss(
+        self,
+        model: nn.Module,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        task_id: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Accumulate gradient energy from the already-computed .grad buffers.
+
+        Called AFTER loss.backward() has populated .grad on all parameters.
+        Returns tensor(0.0) so the generic runner's
+        `if aug.item() != 0.0` guard does NOT trigger a second backward().
+        """
+        if self._importance is not None:
+            self._importance.accumulate(model)
+        return torch.tensor(0.0, device=device)
+
+    def regularization_loss(self, model: nn.Module) -> torch.Tensor:
+        """Return the importance-weighted elastic penalty from all committed tasks."""
+        device = next(model.parameters()).device
+        return self._regularizer.penalty(model, device=device)
+
+    def post_task(
+        self,
+        task_id: int,
+        model: nn.Module,
+        loader: DataLoader,
+        device: torch.device,
+    ) -> None:
+        """
+        Commit the current task's weight checkpoint and importance map to memory.
+
+        ThermalMemory.commit() accepts the ThermalImportance object directly and
+        calls .finalize() internally to produce the normalized importance tensors.
+        A fresh importance accumulator is created in the next pre_task() call.
+        """
+        if self._importance is not None:
+            self._memory.commit(model, self._importance, task_id=task_id)
+        # Reset so stale gradients cannot bleed into the next task's accumulation
+        self._importance = None
