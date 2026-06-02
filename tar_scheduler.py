@@ -309,11 +309,30 @@ class TARScheduler:
         for spec in sorted(pending_specs, key=lambda rec: self._priority_key(rec, experiment_ranks, frontier_ranks)):
             exp_vram = _spec_vram_budget(spec)
             is_cpu_only = spec.dataset == "cpu_only"
+            # Register with the veto window so the 24h clock starts ticking
+            try:
+                from tar_lab.human_review import register_director_proposal
+                register_director_proposal(
+                    self.workspace,
+                    experiment_id=spec.id,
+                    name=getattr(spec, 'name', '') or getattr(spec, 'hypothesis_name', ''),
+                    frontier_id=getattr(spec, 'frontier_problem_id', ''),
+                    priority=int(getattr(spec, 'priority', 50) or 50),
+                    context_why=getattr(spec, 'description', '') or getattr(spec, 'context_why', ''),
+                )
+            except Exception:
+                pass  # Registration failure must never block scheduling
             if str(getattr(spec, "id", "") or "") not in approved_ids:
+                try:
+                    from tar_lab.human_review import load_director_proposals
+                    proposals = {p["experiment_id"]: p for p in load_director_proposals(self.workspace)}
+                    auto_at_str = proposals.get(spec.id, {}).get("auto_approve_at", "unknown")
+                except Exception:
+                    auto_at_str = "unknown"
                 hold_reasons.append(HoldReason(
                     experiment_id=spec.id,
                     experiment_name=spec.name,
-                    reason="Awaiting explicit human approval in the dashboard and a committed execution manifest.",
+                    reason=f"Pending 24h human veto window — auto-approves at {auto_at_str}. Veto in Human Review panel to block.",
                 ))
                 continue
             unmet = []

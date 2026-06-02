@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -462,12 +463,128 @@ def answer_human_question(
     return None
 
 
+# DEPRECATED — use VetoWindowApproval. Kept for import compatibility.
 class _UniversalApproval:
     """Sentinel returned in autonomous mode — all experiments are within scope."""
     def __contains__(self, item: object) -> bool:
         return True
     def __bool__(self) -> bool:
         return True
+
+
+class VetoWindowApproval:
+    """
+    Phase 6.5 — 24-hour human veto window for Director-proposed experiments.
+
+    Experiments proposed by the autonomous Director enter pending_veto state.
+    They auto-approve after auto_approve_hours unless the operator vetoes.
+    Vetoed experiments are blocked indefinitely.
+
+    State persisted to tar_state/director_proposals.json.
+    """
+    def __init__(self, workspace: Path, auto_approve_hours: float = 24.0) -> None:
+        self._ws = workspace
+        self._hours = auto_approve_hours
+        self._lock = threading.Lock()
+
+    def _path(self) -> Path:
+        return self._ws / "tar_state" / "director_proposals.json"
+
+    def _load(self) -> list[dict]:
+        try:
+            raw = json.loads(self._path().read_text(encoding="utf-8"))
+            return raw if isinstance(raw, list) else []
+        except Exception:
+            return []
+
+    def _save(self, data: list[dict]) -> None:
+        p = self._path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def _auto_approve_expired(self, data: list[dict]) -> tuple[list[dict], bool]:
+        now = datetime.now(timezone.utc)
+        changed = False
+        for entry in data:
+            if entry.get("status") == "pending_veto":
+                try:
+                    auto_at = datetime.fromisoformat(entry["auto_approve_at"])
+                    if now >= auto_at:
+                        entry["status"] = "auto_approved"
+                        changed = True
+                except Exception:
+                    pass
+        return data, changed
+
+    def _approved_ids(self, data: list[dict]) -> frozenset[str]:
+        return frozenset(
+            e["experiment_id"] for e in data
+            if e.get("status") in ("approved", "auto_approved")
+        )
+
+    def register(self, experiment_id: str, name: str = "",
+                 frontier_id: str = "", priority: int = 50,
+                 context_why: str = "") -> bool:
+        """Register a new proposal. Returns True if newly added."""
+        with self._lock:
+            data = self._load()
+            existing = {e["experiment_id"] for e in data}
+            if experiment_id in existing:
+                return False
+            now = datetime.now(timezone.utc)
+            data.append({
+                "experiment_id": experiment_id,
+                "experiment_name": name,
+                "frontier_problem_id": frontier_id,
+                "proposed_at": now.isoformat(),
+                "auto_approve_at": (now + timedelta(hours=self._hours)).isoformat(),
+                "status": "pending_veto",
+                "vetoed_at": None,
+                "veto_reason": "",
+                "priority": priority,
+                "context_why": context_why,
+            })
+            self._save(data)
+        return True
+
+    def veto(self, experiment_id: str, reason: str = "") -> bool:
+        with self._lock:
+            data = self._load()
+            for e in data:
+                if e["experiment_id"] == experiment_id and e["status"] == "pending_veto":
+                    e["status"] = "vetoed"
+                    e["vetoed_at"] = datetime.now(timezone.utc).isoformat()
+                    e["veto_reason"] = reason
+                    self._save(data)
+                    return True
+        return False
+
+    def approve(self, experiment_id: str) -> bool:
+        with self._lock:
+            data = self._load()
+            for e in data:
+                if e["experiment_id"] == experiment_id:
+                    e["status"] = "approved"
+                    self._save(data)
+                    return True
+        return False
+
+    def __contains__(self, experiment_id: object) -> bool:
+        with self._lock:
+            data, changed = self._auto_approve_expired(self._load())
+            if changed:
+                self._save(data)
+            return str(experiment_id) in self._approved_ids(data)
+
+    def all_proposals(self) -> list[dict]:
+        with self._lock:
+            data, changed = self._auto_approve_expired(self._load())
+            if changed:
+                self._save(data)
+        return data
+
+    def pending(self) -> list[dict]:
+        return [e for e in self.all_proposals() if e.get("status") == "pending_veto"]
 
 
 def approved_experiment_ids(workspace: Path) -> "set[str] | _UniversalApproval":
@@ -487,8 +604,25 @@ def approved_experiment_ids(workspace: Path) -> "set[str] | _UniversalApproval":
                 approved.add(experiment_id)
         return approved
     # Autonomous mode: Director scope constraint (_STRICT_REAL_WORLD_FRONTIER_ONLY)
-    # is the gate. All Director-proposed experiments are within scope by design.
-    return _UniversalApproval()
+    # is the gate. Experiments pass through the 24h human veto window.
+    return VetoWindowApproval(workspace)
+
+
+def load_director_proposals(workspace: Path) -> list[dict]:
+    return VetoWindowApproval(workspace).all_proposals()
+
+def veto_director_proposal(workspace: Path, experiment_id: str, reason: str = "") -> bool:
+    return VetoWindowApproval(workspace).veto(experiment_id, reason)
+
+def approve_director_proposal(workspace: Path, experiment_id: str) -> bool:
+    return VetoWindowApproval(workspace).approve(experiment_id)
+
+def register_director_proposal(workspace: Path, experiment_id: str,
+                                name: str = "", frontier_id: str = "",
+                                priority: int = 50, context_why: str = "") -> bool:
+    return VetoWindowApproval(workspace).register(
+        experiment_id, name, frontier_id, priority, context_why
+    )
 
 
 def approved_paper_ids(workspace: Path) -> set[str]:
