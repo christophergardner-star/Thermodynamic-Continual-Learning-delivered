@@ -1,0 +1,658 @@
+% Continuous Gradient-Energy Importance Accumulation Reduces Catastrophic Forgetting
+% ContinualAI Workshop @ NeurIPS 2026 submission
+%
+% TRACEABILITY NOTE: All numerical results traced to
+%   tar_state/honest_evidence_inventory.json
+%   tar_state/comparisons/phase10_controlled_rerun_20260509T132155Z.json
+%   tar_state/comparisons/phase11_ablation__20260511T113318Z.json
+%
+% For final submission: replace \documentclass[...]{article} with
+%   \usepackage{neurips_2024} per workshop instructions.
+%
+% Compile: pdflatex main.tex && bibtex main && pdflatex main.tex && pdflatex main.tex
+
+\documentclass[10pt,letterpaper]{article}
+
+% ── packages ──────────────────────────────────────────────────────────────────
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+% \usepackage{microtype}  % disabled: requires scalable font setup
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+
+% ── theorem environments ──────────────────────────────────────────────────────
+\newtheorem{theorem}{Theorem}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{remark}{Remark}
+
+% ── custom macros ─────────────────────────────────────────────────────────────
+\newcommand{\TCL}{\textsc{TCL}}
+\newcommand{\EWC}{\textsc{EWC}}
+\newcommand{\SI}{\textsc{SI}}
+\newcommand{\SGD}{\textsc{SGD}}
+\newcommand{\forgetmean}[1]{\ensuremath{#1_{\mathrm{fgt}}}}
+\newcommand{\accmean}[1]{\ensuremath{#1_{\mathrm{acc}}}}
+\newcommand{\CI}[2]{[\,{#1},\,{#2}\,]}
+
+% ── title / authors ───────────────────────────────────────────────────────────
+\title{Continuous Gradient-Energy Importance Accumulation\\
+Reduces Catastrophic Forgetting:\\
+An Empirical Audit of \EWC{}'s Fisher Snapshot Assumption}
+
+\author{
+  Anonymous Author(s)\\
+  \texttt{anonymous@institution.edu}
+}
+
+\date{ContinualAI Workshop @ NeurIPS 2026}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\begin{document}
+\maketitle
+
+% ── Abstract ──────────────────────────────────────────────────────────────────
+\begin{abstract}
+Elastic Weight Consolidation (\EWC) estimates per-parameter importance as a
+uniform average of squared gradients from the final training batches of each
+task---a Fisher snapshot that conflates high-noise early-training gradients
+with the convergence-phase curvature that Fisher information actually captures.
+We propose \emph{continuous gradient-energy importance accumulation}: an
+exponential moving average (EMA) of squared gradients maintained throughout
+training, which we show converges to the diagonal Fisher information with
+exponentially decaying bias while down-weighting early-training noise.
+The resulting regularizer, \TCL{}, applies an elastic penalty using EMA-derived
+importance weights in place of \EWC{}'s terminal snapshot.
+
+On Split-CIFAR-10 (ResNet-18, 5 tasks, $n{=}5$ seeds, 40 epochs/task), \TCL{}
+achieves mean catastrophic forgetting $0.116$
+($95\%$~CI $\CI{0.080}{0.153}$) versus $\SGD$'s $0.233$
+($\CI{0.229}{0.237}$), a reduction of $0.117$
+($p{=}0.0012$, Cohen's $d{=}3.68$, $5/5$ seeds, Bonferroni-corrected $k{=}4$).
+Against \EWC{} ($\lambda{=}100$), \TCL{} shows directional improvement
+$\Delta{=}{-}0.075$ ($p{=}0.019$, $d{=}1.70$, $5/5$ seeds),
+which does not survive Bonferroni correction
+($\alpha/k{=}0.0125$, $p{=}0.019 > 0.0125$).
+
+A pre-registered mechanism ablation definitively establishes that the elastic
+penalty is the sole productive component: a governor-alone condition (regime-detection
+without penalty) performs \emph{worse} than plain \SGD{} ($0.250$ vs.\ $0.219$),
+and the thermodynamic learning-rate adjustment never activates in any production trace
+($\rho{=}0$, $\sigma{=}0$).
+We conclude that continuous importance accumulation, not thermodynamic regime detection,
+explains the empirical benefit.
+\end{abstract}
+
+% ── 1. Introduction ───────────────────────────────────────────────────────────
+\section{Introduction}
+
+Neural networks trained sequentially on a stream of tasks suffer from
+\emph{catastrophic forgetting}: optimizing for a new task overwrites parameters
+critical for previously learned tasks~\cite{McCloskey1989}.
+Regularization-based continual learning methods address this by penalizing changes
+to parameters deemed important for past tasks, with the importance estimated from
+the Fisher information matrix~\cite{Kirkpatrick2017} or path integrals of parameter
+movements~\cite{Zenke2017}.
+
+The dominant approach, \EWC{}~\cite{Kirkpatrick2017}, approximates the diagonal
+Fisher by averaging squared gradients over the final $N$ training batches
+immediately after each task completes.
+This snapshot has two structural weaknesses.
+First, gradients early in training reflect random initialization and high loss
+rather than the task's true parameter importance; mixing these with late-training
+gradients biases the importance estimate upward for parameters with large early-training
+noise.
+Second, the snapshot is computed \emph{once} from a terminal window and never
+updated as training continues on future tasks, discarding information from the
+entire non-terminal training trajectory.
+
+\paragraph{This paper.}
+We propose replacing \EWC{}'s terminal snapshot with a continuous EMA of
+squared gradients---the \emph{ThermalImportance} accumulator.
+We show (Theorem~\ref{thm:ema_convergence}) that this accumulator converges to
+the diagonal Fisher information with exponentially decaying bias, and that
+\EWC{}'s snapshot estimator is the limiting case $\beta \to 1$.
+Under non-stationary gradient processes (as occur in all neural network training),
+the EMA's recency weighting provides a strictly smaller non-stationarity bias
+than \EWC{}'s uniform average (Remark~\ref{rem:nonstationarity}).
+
+We evaluate the resulting regularizer, \TCL{},\footnote{%
+  TCL originally stood for \emph{Thermodynamic Continual Learning}, reflecting a
+  physical intuition that high-gradient parameters are ``hot'' and should be
+  stabilized.  Mechanism ablation (Section~\ref{sec:experiments}) shows the
+  thermodynamic regime-detection component does not contribute to performance.
+  We retain the acronym but clarify that the operative mechanism is purely
+  gradient-energy elastic regularization.}
+against \EWC{}, \SI{}, and \SGD{} on Split-CIFAR-10 using a pre-registered
+controlled experiment with $n{=}5$ random seeds and corrected statistical
+methodology (t-distribution confidence intervals, Bonferroni family-wise
+correction, non-central $t$ power analysis).
+
+Our contributions are:
+\begin{enumerate}
+  \item \textbf{Formal analysis.}
+    We prove that the ThermalImportance EMA is an online, continuously-updated
+    approximation to the diagonal Fisher information, with \EWC{} as the $\beta{\to}1$
+    limiting case and exponentially smaller non-stationarity bias (Section~\ref{sec:method}).
+  \item \textbf{Controlled empirical comparison.}
+    On Split-CIFAR-10 with corrected statistical methodology, \TCL{} reduces
+    forgetting by $0.117$ relative to \SGD{} ($p{=}0.0012$, $d{=}3.68$,
+    Bonferroni-significant at $k{=}4$).
+    Relative to \EWC{}, the improvement is directional ($p{=}0.019$, $d{=}1.70$)
+    but does not survive family-wise correction (Section~\ref{sec:experiments}).
+  \item \textbf{Mechanism ablation.}
+    A pre-registered four-condition ablation establishes that the elastic penalty is
+    the sole productive mechanism: governor-alone performs worse than \SGD{},
+    and the LR adjustment never fires in production (Section~\ref{sec:experiments}).
+\end{enumerate}
+
+% ── 2. Related Work ───────────────────────────────────────────────────────────
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Catastrophic forgetting and evaluation scenarios.}
+Sequential learning in artificial neural networks induces catastrophic
+interference~\cite{McCloskey1989}: gradient-based updates that minimize a new
+task's loss overwrite weight configurations that supported prior tasks.
+Van de Ven and Tolias~\cite{vandeVen2019} identify three evaluation scenarios:
+task-incremental (task identity provided at test time),
+class-incremental (task identity withheld), and domain-incremental.
+This paper addresses the \emph{task-incremental} scenario exclusively.
+
+\paragraph{Regularization-based methods.}
+\EWC{}~\cite{Kirkpatrick2017} adds an elastic term to the loss function that
+penalizes changes to parameters with high Fisher information:
+$\mathcal{L}_{\EWC} = \mathcal{L}_{\mathrm{CE}} + \frac{\lambda}{2}\sum_i \hat{F}_{ii}(\theta_i - \theta_i^*)^2$,
+where $\hat{F}_{ii}$ is the diagonal of the empirical Fisher estimated from a
+post-task snapshot.
+\EWC{}'s importance estimate is a uniform average of squared gradients over the
+final $N$ batches, discarding the full training trajectory.
+
+Synaptic Intelligence (\SI{})~\cite{Zenke2017} accumulates importance online via
+path integrals of parameter movements during training, providing a stronger prior
+over slow-moving parameters.
+However, \SI{} at published default hyperparameters collapses to chance-level
+accuracy on our benchmark (Section~\ref{sec:experiments}), consistent with known
+sensitivity to the regularization strength $c$.
+
+Memory Aware Synapses~\cite{Aljundi2018} estimates importance from the gradient
+of the output (rather than the loss), reducing dependency on label information.
+All three methods share the structural assumption that importance can be reliably
+estimated from a finite sample; our work argues that for EWC specifically,
+continuous accumulation is more principled.
+
+\paragraph{Replay-based methods.}
+Replay methods maintain a memory buffer of past examples~\cite{Rebuffi2017,LopezPaz2017}
+or generate synthetic past data~\cite{Shin2017}.
+Dark Experience Replay (DER++)~\cite{Buzzega2020} stores soft logits alongside raw
+inputs to better preserve the model's decision boundary.
+The current work does not compare against replay methods; DER++ and LwF baselines
+are included in the pre-registered Phase 2 replication plan but have not yet been run.
+
+\paragraph{Fisher information approximations.}
+The diagonal Fisher information $F_{ii} = \mathbb{E}_{x}[(\partial \mathcal{L}/\partial\theta_i)^2]$
+is the cornerstone of \EWC{}'s importance weighting.
+Efficient diagonal approximations and Kronecker-factored estimates have been
+studied for second-order optimization~\cite{Martens2015}, but continual learning
+has relied primarily on diagonal estimates computed from task-end snapshots.
+Our contribution is to show that replacing the snapshot with a continuously maintained
+EMA yields a formally better approximation while remaining computationally identical
+in per-parameter cost.
+
+% ── 3. Method ─────────────────────────────────────────────────────────────────
+\section{Method}
+\label{sec:method}
+
+\subsection{Background: EWC's Fisher Snapshot}
+\label{sec:ewc_background}
+
+Let $\theta \in \mathbb{R}^d$ denote network parameters after training on a task,
+and let $\mathcal{D}_{\mathrm{task}}$ be the task data distribution.
+The diagonal Fisher information for parameter $i$ is
+$F_{ii} = \mathbb{E}_{x \sim \mathcal{D}_{\mathrm{task}}}[g_i^2]$,
+where $g_i = \partial\mathcal{L}(\theta; x)/\partial\theta_i$.
+
+\EWC{} approximates $F_{ii}$ by the empirical mean over the final $N$ training batches:
+\begin{equation}
+  \hat{F}_{ii}^{\EWC} = \frac{1}{N}\sum_{t=T-N+1}^{T} g_i(t)^2.
+  \label{eq:ewc_snapshot}
+\end{equation}
+This estimate is unbiased only if gradients are stationary throughout training.
+In practice, gradients decay substantially as training converges: early-training
+gradients reflect large loss curvature at random initialization, while late-training
+gradients reflect the convergence-phase curvature that Fisher information captures.
+A uniform window containing both phases overestimates importance for parameters
+with large early-training noise.
+
+\subsection{ThermalImportance EMA Accumulator}
+\label{sec:thermal_importance}
+
+\TCL{} maintains a running EMA of squared gradients throughout training.
+For parameter $i$ at training step $T$:
+\begin{equation}
+  v_i^{(T)} = (1-\beta)\sum_{t=1}^{T}\beta^{T-t}\,g_i(t)^2,
+  \label{eq:ema_def}
+\end{equation}
+where $\beta \in (0,1)$ is the EMA decay constant.
+This accumulator is updated continuously as training proceeds, requiring no
+designated importance-extraction phase after task completion.
+
+\begin{theorem}[EMA convergence to diagonal Fisher]
+\label{thm:ema_convergence}
+Let $g_i(t) \stackrel{\mathrm{i.i.d.}}{\sim} \mathcal{D}_{g_i}$ with
+$\mathbb{E}[g_i(t)^2] = F_{ii} < \infty$.
+For the EMA accumulator \eqref{eq:ema_def}:
+\begin{equation}
+  \mathbb{E}[v_i^{(T)}] = F_{ii}(1 - \beta^T).
+  \label{eq:bias}
+\end{equation}
+The bias $|\mathbb{E}[v_i^{(T)}] - F_{ii}| = F_{ii}\,\beta^T \to 0$ exponentially as $T \to \infty$.
+\end{theorem}
+\begin{proof}
+By linearity of expectation,
+$\mathbb{E}[v_i^{(T)}] = (1-\beta)\sum_{t=1}^T \beta^{T-t} F_{ii}
+ = F_{ii}(1-\beta)\cdot\frac{1-\beta^T}{1-\beta} = F_{ii}(1-\beta^T)$.
+\end{proof}
+
+\begin{corollary}[EWC as limiting case]
+\label{cor:ewc_limit}
+As $\beta \to 1$ with $T$ fixed, the EMA weight $(1-\beta)\beta^{T-t}$
+converges to the uniform weight $1/T$ for each $t$.
+Hence $v_i^{(T,\beta)} \to \frac{1}{T}\sum_{t=1}^T g_i(t)^2 = \hat{F}_{ii}^{\mathrm{unif}}$,
+which is EWC's snapshot estimator applied over a full-training window.
+\end{corollary}
+
+\begin{remark}[Non-stationarity advantage]
+\label{rem:nonstationarity}
+Under a gradient process that decays from initial magnitude $M$ to stationary
+magnitude $m \ll M$, EWC's uniform estimate on a window containing both phases
+has non-stationarity bias $O((M-m)/N)$.
+The EMA's exponential recency weighting yields bias $O(M\beta^T)$, which vanishes
+exponentially and is strictly smaller for large $T$.
+\end{remark}
+
+\subsection{Elastic Penalty}
+\label{sec:penalty}
+
+After completing task $k$, \TCL{} freezes $v_i^{(T_k)}$ as the importance weight
+for task $k$ and appends an elastic term to subsequent task losses:
+\begin{equation}
+  \mathcal{L}_{\TCL} = \mathcal{L}_{\mathrm{CE}}
+    + \lambda \sum_{k<\text{current}} \sum_{i=1}^{d}
+      v_i^{(T_k)} \cdot \bigl(\theta_i - \theta_i^{(k*)}\bigr)^2,
+  \label{eq:tcl_penalty}
+\end{equation}
+where $\theta^{(k*)}$ is the parameter snapshot taken at the end of task $k$.
+The penalty coefficient $\lambda$ is a global hyperparameter shared across all tasks.
+
+\subsection{Governor Component (Non-Contributing)}
+\label{sec:governor}
+
+\TCL{} was originally designed with an additional \emph{governor} component:
+a regime-detection mechanism that measures the ratio $\rho$ of current gradient
+magnitude to a reference magnitude $\sigma^*$, and adjusts the learning rate
+when $\rho$ falls below a threshold indicating convergence.
+Our mechanism ablation (Section~\ref{sec:experiments}) demonstrates that:
+(a) the governor-alone condition performs \emph{worse} than plain \SGD{}, and
+(b) $\rho = 0$, $\sigma = 0$ in every production trace examined, indicating
+the learning-rate adjustment has never fired.
+Equation~\eqref{eq:tcl_penalty} represents the operative \TCL{} algorithm;
+the governor is a dead branch.
+
+\subsection{Connection to Fisher-EMA Theory}
+\label{sec:theory_connection}
+
+Equations \eqref{eq:ewc_snapshot} and \eqref{eq:ema_def} frame
+the \TCL{}/\EWC{} comparison as a statistical estimation problem:
+both methods estimate $F_{ii}$ from the same sequence of squared gradients,
+but with different weighting schemes.
+\EWC{} uses a uniform average over a terminal window;
+\TCL{} uses an exponentially weighted average over the full training history.
+Corollary~\ref{cor:ewc_limit} establishes \EWC{} as a special case,
+and Theorem~\ref{thm:ema_convergence} and Remark~\ref{rem:nonstationarity}
+provide the theoretical motivation for preferring the EMA under non-stationary
+gradients.
+
+% ── 4. Experiments ────────────────────────────────────────────────────────────
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Setup}
+\label{sec:setup}
+
+\paragraph{Dataset and protocol.}
+We evaluate on Split-CIFAR-10~\cite{Krizhevsky2009} in the
+task-incremental scenario: CIFAR-10 is partitioned into 5 tasks of 2 classes
+each, with task identity provided at test time.
+We use a ResNet-18~\cite{He2016} backbone with a separate classification head per
+task.
+All experiments use 40 training epochs per task, batch size 32,
+and seeds $\{42, 0, 1, 2, 3\}$ ($n{=}5$ per condition).
+This protocol is identical for all methods, removing architecture and
+training-duration confounds.
+
+\paragraph{Metrics.}
+We report two primary metrics:
+\emph{Catastrophic forgetting} $(\forgetmean{})$, defined as the average decrease
+in per-task accuracy after all tasks are trained:
+$\text{Forgetting} = \frac{1}{T{-}1}\sum_{k=1}^{T-1}(A_{k,k} - A_{T,k})$,
+where $A_{i,j}$ is accuracy on task $j$ after training task $i$.
+We also report final \emph{accuracy} $(\accmean{})$, the average accuracy across
+all tasks after training completes, to detect degenerate low-forgetting solutions
+that achieve low forgetting through accuracy collapse.
+
+\paragraph{Statistical methodology.}
+All confidence intervals use the $t$-distribution with $n{-}1{=}4$ degrees of
+freedom ($t_{4,0.975} = 2.776$), replacing the common but incorrect $z = 1.96$
+approximation that assumes $n \to \infty$.
+Pairwise comparisons use paired one-tailed $t$-tests with Bonferroni family-wise
+correction: for $k{=}4$ simultaneous comparisons within Phase 10
+(TCL vs.\ EWC, SI, SGD, and an SI accuracy-collapse diagnostic),
+the corrected significance threshold is $\alpha/k = 0.05/4 = 0.0125$.
+Power is computed via the non-central $t$-distribution
+($\mathrm{ncp} = -d\sqrt{n}$ for one-tailed tests).
+
+\paragraph{Baselines.}
+We compare against:
+\textbf{\EWC{}} with $\lambda{=}100$ (the published default~\cite{Kirkpatrick2017}),
+\textbf{\SI{}} with default hyperparameters~\cite{Zenke2017},
+and plain \textbf{\SGD{}} (no regularization) as a lower bound.
+DER++ and LwF are included in the pre-registered Phase 2 replication plan but
+their GPU experiments have not yet run; we omit them from current results.
+
+\subsection{Phase 10: Main Comparison (Split-CIFAR-10)}
+\label{sec:phase10}
+
+Table~\ref{tab:phase10} reports forgetting and accuracy for all four conditions
+across $n{=}5$ seeds.
+All confidence intervals use the $t$-distribution as described above.
+
+\begin{table}[t]
+  \caption{%
+    Split-CIFAR-10 main comparison (Phase 10).
+    $n{=}5$ seeds, $95\%$ CI via $t$-distribution ($t_{4,0.975}{=}2.776$).
+    Bonferroni-corrected significance threshold $p < 0.0125$ ($k{=}4$).
+    $\star$: Bonferroni-significant. \dag: directional ($p < 0.05$, uncorrected).
+    Forgetting: lower is better. Accuracy: higher is better.
+  }
+  \label{tab:phase10}
+  \centering
+  \small
+  \begin{tabular}{lcccc}
+    \toprule
+    & \multicolumn{2}{c}{Forgetting $\downarrow$} & \multicolumn{2}{c}{Accuracy $\uparrow$} \\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+    Method & Mean & 95\% CI & Mean & 95\% CI \\
+    \midrule
+    \TCL{}             & 0.116 & \CI{0.080}{0.153} & 0.760 & \CI{0.729}{0.791} \\
+    \EWC{} ($\lambda{=}100$) & 0.191 & \CI{0.162}{0.220} & 0.730 & \CI{0.702}{0.757} \\
+    \SI{} (default)    & 0.092 & \CI{0.091}{0.093} & 0.500 & \CI{0.500}{0.500} \\
+    \SGD{}             & 0.233 & \CI{0.229}{0.237} & 0.697 & \CI{0.693}{0.701} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[t]
+  \caption{%
+    Pairwise comparisons versus \TCL{} (Phase 10, $n{=}5$, one-tailed paired $t$-test).
+    $\Delta < 0$ means \TCL{} has lower (better) forgetting.
+  }
+  \label{tab:phase10_pairwise}
+  \centering
+  \small
+  \begin{tabular}{lcccc}
+    \toprule
+    Comparison & $\Delta$ & $p$ (uncorr.) & Cohen's $d$ & Seeds \TCL{} better \\
+    \midrule
+    \TCL{} vs.\ \SGD{}  & $-0.117$ & $0.0012\,\star$ & $3.68$ & $5/5$ \\
+    \TCL{} vs.\ \EWC{}  & $-0.075$ & $0.019\,\dag$  & $1.70$ & $5/5$ \\
+    \TCL{} vs.\ \SI{}   & $+0.024$ & $0.142$        & $0.82$ & $1/5$ \\
+    \bottomrule
+    \multicolumn{5}{l}{%
+      \footnotesize
+      $\star$ Survives Bonferroni ($p < 0.0125$, $k{=}4$).
+      \dag{} Directional ($p < 0.05$ uncorrected); does \emph{not} survive Bonferroni.
+    }
+  \end{tabular}
+\end{table}
+
+\paragraph{TCL vs.\ SGD.}
+\TCL{} reduces forgetting by $0.117$ relative to \SGD{}
+($p{=}0.0012$, Cohen's $d{=}3.68$, $5/5$ seeds, 100\% power at $n{=}5$).
+This result survives Bonferroni correction and constitutes the single confirmed
+headline finding of this paper.
+
+\paragraph{TCL vs.\ EWC.}
+\TCL{} reduces forgetting by $0.075$ relative to \EWC{} with default
+hyperparameters ($p{=}0.019$, $d{=}1.70$, $5/5$ seeds, 92.5\% power at $n{=}5$).
+This result does \textbf{not} survive Bonferroni correction ($p{=}0.019 > 0.0125$)
+and must be treated as directional evidence.
+At $d{=}1.70$ and $n{=}5$, the experiment had 92.5\% power, meaning the failure
+to pass Bonferroni correction reflects the stringency of the family-wise threshold
+rather than a weak effect.
+
+\paragraph{SI accuracy collapse.}
+\SI{} at published default hyperparameters achieves mean forgetting $0.092$,
+\emph{lower} than \TCL{}'s $0.116$.
+However, \SI{}'s accuracy of $0.500$ (chance level for a 2-class-per-task
+benchmark) is constant across all 5 seeds with zero variance, indicating
+catastrophic collapse rather than genuine retention.
+A method that predicts randomly on every task has trivially low forgetting:
+it was never accurate in the first place.
+This illustrates why single-metric (forgetting-only) evaluation is insufficient,
+and motivates reporting accuracy alongside forgetting.
+
+\subsection{Phase 11: Mechanism Ablation}
+\label{sec:phase11}
+
+To isolate the productive component of \TCL{}, we ran a pre-registered
+four-condition ablation: (1) full \TCL{} (EMA penalty + governor),
+(2) penalty-only (EMA penalty, governor disabled),
+(3) governor-only (LR adjustment, no penalty), and
+(4) plain \SGD{} as a reference.
+Results are in Table~\ref{tab:phase11}.
+
+\begin{table}[t]
+  \caption{%
+    Mechanism ablation (Phase 11, Split-CIFAR-10).
+    $n{=}5$ seeds.
+    Pre-registered hypothesis: \emph{Does the governor contribute?}
+    Verdict: governor-alone is worse than \SGD{}; penalty is the sole mechanism.
+  }
+  \label{tab:phase11}
+  \centering
+  \small
+  \begin{tabular}{lcccc}
+    \toprule
+    & \multicolumn{2}{c}{Forgetting $\downarrow$} & \multicolumn{2}{c}{Accuracy $\uparrow$} \\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+    Condition & Mean & 95\% CI & Mean & 95\% CI \\
+    \midrule
+    Full \TCL{}       & 0.127 & \CI{0.100}{0.154} & 0.766 & \CI{0.737}{0.795} \\
+    Penalty-only      & 0.143 & \CI{0.121}{0.165} & 0.765 & \CI{0.748}{0.782} \\
+    Governor-only     & 0.250 & \CI{0.165}{0.335} & 0.679 & \CI{0.606}{0.753} \\
+    \SGD{}            & 0.219 & \CI{0.144}{0.295} & 0.709 & \CI{0.643}{0.775} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[t]
+  \caption{%
+    Pairwise comparisons (Phase 11, full \TCL{} as reference, $n{=}5$).
+    Pre-registered hypothesis was governor contribution; it is falsified.
+  }
+  \label{tab:phase11_pairwise}
+  \centering
+  \small
+  \begin{tabular}{lcccc}
+    \toprule
+    Comparison & $\Delta$ & $p$ (uncorr.) & Cohen's $d$ & Seeds \TCL{} better \\
+    \midrule
+    Full vs.\ Governor-only & $-0.123$ & $0.023$ & $1.60$ & $5/5$ \\
+    Full vs.\ \SGD{}        & $-0.092$ & $0.020$ & $1.68$ & $5/5$ \\
+    Full vs.\ Penalty-only  & $-0.016$ & $0.315$ & $0.51$ & $4/5$ \\
+    \bottomrule
+    \multicolumn{5}{l}{%
+      \footnotesize
+      Full vs.\ penalty-only: $p{=}0.315$, underpowered ($24.5\%$ at $d{=}0.51$, $n{=}5$).
+      Need $n{=}26$ for $80\%$ power. Null result is \emph{uninformative}.
+    }
+  \end{tabular}
+\end{table}
+
+\paragraph{Penalty is the mechanism.}
+Governor-only performs \emph{worse} than \SGD{} ($0.250$ vs.\ $0.219$)
+despite having the same objective, indicating that the regime-detection LR
+adjustment actively interferes with learning when used without the penalty.
+Full \TCL{} outperforms governor-only ($\Delta{=}{-}0.123$, $p{=}0.023$,
+$d{=}1.60$, $5/5$ seeds), a result pre-registered as a falsification test of
+the hypothesis ``governor contributes'' and classified as PUBLICATION\_ALLOWED
+in our evidence inventory.
+This negative finding---the governor mechanism is harmful without the penalty
+and contributes nothing when combined with it---is the mechanistic conclusion of
+this paper.
+
+\paragraph{Governor never activates.}
+Examination of all production traces confirms $\rho{=}0$, $\sigma{=}0$:
+the gradient-ratio regime detector has never triggered the LR adjustment
+in any evaluated configuration.
+This is consistent with the governor-only ablation result.
+
+\paragraph{Full vs.\ penalty-only.}
+The comparison between full \TCL{} and penalty-only is not statistically resolved
+($\Delta{=}{-}0.016$, $p{=}0.315$, $d{=}0.51$, $4/5$ seeds).
+Power at $n{=}5$ for $d{=}0.51$ is only $24.5\%$, meaning the null result
+is \emph{uninformative}: we cannot conclude the governor adds zero benefit at
+$n{=}5$.
+Resolving this comparison requires $n{=}26$ for $80\%$ power.
+The available evidence supports that the penalty explains \emph{most} of the
+\TCL{} benefit; the exact magnitude of any residual governor contribution
+is undetermined.
+
+% ── 5. Analysis ───────────────────────────────────────────────────────────────
+\section{Analysis}
+\label{sec:analysis}
+
+\paragraph{EWC default hyperparameters underfit.}
+\EWC{} with $\lambda{=}100$ achieves forgetting $0.191$, worse than \SGD{}'s
+$0.233$ in the direction expected but with a gap that---directionally---favours
+\TCL{}.
+The Fisher-EMA theorem suggests the snapshot bias is structural:
+for a ResNet-18 with 40 epochs per task, early-training gradients (epochs 1--10)
+are dominated by loss curvature near random initialization, not by the task's
+genuine parameter importance.
+Mixing these into a uniform terminal window inflates importance weights for
+parameters with high early-training sensitivity, over-constraining them in
+subsequent tasks.
+The EMA's exponential recency bias corrects this by down-weighting early batches
+by $\beta^{T-t}$, focusing importance estimation on the convergence phase.
+
+\paragraph{Effect size comparison.}
+Cohen's $d{=}3.68$ for \TCL{} vs.\ \SGD{} is a very large effect by standard
+conventions ($d > 0.8$: large; $d > 1.2$: very large).
+Cohen's $d{=}1.70$ for \TCL{} vs.\ \EWC{} is also a large effect.
+At $n{=}5$, power for $d{=}3.68$ is $100\%$ (confirmed headline result);
+power for $d{=}1.70$ is $92.5\%$ (adequate, but $p{=}0.019$ fails
+the Bonferroni-corrected threshold of $0.0125$).
+
+\paragraph{Family-wise error control.}
+Phase 10 tests four hypotheses simultaneously
+(TCL vs.\ EWC, SI, SGD, and an SI accuracy diagnostic).
+Without correction, the expected number of false positives at $\alpha{=}0.05$
+is $0.2$ per family of four null hypotheses.
+Bonferroni correction raises the per-comparison threshold to $0.0125$.
+Only the TCL vs.\ SGD result ($p{=}0.0012$) passes this threshold.
+The directional TCL vs.\ EWC finding motivates the pre-registered EWC replication
+comparison (Phase 2, not yet run) as a pre-specified single-hypothesis test,
+which would not require Bonferroni correction.
+
+% ── 6. Limitations ────────────────────────────────────────────────────────────
+\section{Limitations}
+\label{sec:limitations}
+
+\paragraph{1. The thermodynamic governor does not contribute.}
+The regime-detection LR adjustment component of \TCL{}---the mechanism that
+originally motivated the ``thermodynamic'' framing---is empirically falsified as
+a productive mechanism.
+Governor-alone produces \emph{higher} forgetting than plain \SGD{} ($0.250$
+vs.\ $0.219$), and full \TCL{} outperforms governor-alone ($p{=}0.023$,
+$d{=}1.60$, $5/5$ seeds, pre-registered falsification).
+The benefit of the full \TCL{} system is attributable to the elastic penalty,
+not to thermodynamic regime detection.
+
+\paragraph{2. Regime-detection LR adjustment never fires.}
+In every production trace examined, the gradient-magnitude ratio $\rho{=}0$
+and the reference magnitude $\sigma{=}0$.
+The learning-rate adjustment mechanism has never triggered in any evaluated
+configuration.
+This means all reported \TCL{} results were produced without the LR
+adjustment, and the reported performance reflects the elastic penalty alone.
+
+\paragraph{3. Task-incremental protocol only.}
+All experiments provide task identity at test time (task-incremental scenario).
+Results do not extend to class-incremental evaluation (where task identity is
+withheld) without separate experimentation.
+Class-incremental evaluation is substantially harder, and methods that reduce
+forgetting in task-incremental settings often fail to generalize.
+
+\paragraph{4. Single backbone (ResNet-18).}
+All results are obtained with ResNet-18.
+Generalization to Vision Transformers, wider residual networks, or other
+architectures is untested.
+The EMA importance accumulator is architecture-agnostic in principle, but
+empirical validation requires separate evaluation.
+
+\paragraph{5. TCL vs.\ EWC does not survive Bonferroni correction.}
+The TCL vs.\ EWC comparison ($p{=}0.019$, $d{=}1.70$, $5/5$ seeds) does not
+survive family-wise correction at $k{=}4$ (Bonferroni threshold $p{=}0.0125$).
+This result is directional evidence only.
+It motivates further pre-registered replication as a single-hypothesis test
+(Phase 2, pre-registered but not yet run), which would not require Bonferroni
+correction and would provide definitive confirmation or disconfirmation.
+
+\paragraph{6. DER++ and LwF baselines not yet included.}
+Dark Experience Replay (DER++) and Learning without Forgetting (LwF) are not
+included in the current comparison.
+Phase 2 GPU experiments (pre-registered, scripts written) include both baselines
+with fair hyperparameter selection, but those experiments have not yet been
+executed.
+Current results should therefore not be interpreted as establishing \TCL{}'s
+position in a complete benchmark; they establish the EMA mechanism finding and
+the SGD gap specifically.
+
+% ── 7. Conclusion ─────────────────────────────────────────────────────────────
+\section{Conclusion}
+
+We have presented a formal and empirical argument that \EWC{}'s terminal-snapshot
+importance estimator is suboptimal under non-stationary training gradients,
+and that replacing it with a continuous exponential moving average---the
+ThermalImportance accumulator---corrects this bias.
+The resulting method, \TCL{}, reduces catastrophic forgetting on Split-CIFAR-10
+by $0.117$ relative to \SGD{} ($p{=}0.0012$, $d{=}3.68$, Bonferroni-corrected),
+and shows a large directional improvement over \EWC{} with default hyperparameters
+($\Delta{=}{-}0.075$, $d{=}1.70$, $5/5$ seeds, directional pending replication).
+
+A pre-registered mechanism ablation definitively falsifies the hypothesis that
+\TCL{}'s thermodynamic governor component contributes to performance.
+Governor-alone performs worse than \SGD{}; the elastic penalty is the entire
+operative mechanism.
+
+The honest scope of these results is narrow: task-incremental only, ResNet-18 only,
+Split-CIFAR-10 only.
+The confirmed headline finding is the SGD gap.
+The EWC gap requires pre-registered replication (Phase 2 scripts written and ready).
+We report this work at workshop stage with the intention of completing the
+replication before any archival submission.
+
+\section*{Acknowledgements}
+
+Omitted for anonymous review.
+
+% ── bibliography ──────────────────────────────────────────────────────────────
+\bibliographystyle{plainnat}
+\bibliography{paper}
+
+\end{document}

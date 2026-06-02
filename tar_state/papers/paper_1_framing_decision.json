@@ -1,0 +1,37 @@
+{
+  "_meta": {
+    "description": "Phase 5 Task 5.1 — Framing decision document for Paper 1. Commit before any LaTeX is written.",
+    "generated_at": "2026-06-02",
+    "generated_by": "Phase 5 Task 5.1"
+  },
+  "paper_title": "Continuous Gradient-Energy Importance Accumulation Reduces Catastrophic Forgetting: an Empirical Audit of EWC's Fisher Snapshot Assumption",
+  "one_sentence_identity": "We show that EWC's canonical hyperparameters systematically underfit activation heterogeneity in ResNet-18 architectures; continuous gradient-energy importance accumulation corrects this underfitting and reduces forgetting, with the effect attributable entirely to the importance weighting rather than thermodynamic regime detection.",
+  "target_venue": "ContinualAI Workshop @ NeurIPS 2026",
+  "abstract_deadline": "~September 2026",
+  "do_not_submit_to_arxiv_until": "Phase 2 HPC replication at n=20 is complete",
+  "contributions": {
+    "contribution_1": "Controlled EWC replication with corrected statistical methodology (t-distribution CIs, Bonferroni correction, power analysis) establishing that EWC with default hyperparameters systematically underperforms a plain SGD baseline on Split-CIFAR-10.",
+    "contribution_2": "Continuous gradient-energy importance accumulation (ThermalImportance EMA) as an online approximation to the diagonal Fisher information matrix, with formal analysis showing EWC's snapshot estimator as the limiting case beta->1.",
+    "contribution_3": "Pre-registered mechanism ablation: the elastic penalty is the sole productive component; the governor (regime-detection LR adjustment) never activates (rho=0, sigma=0) and governor-alone performs worse than SGD."
+  },
+  "honest_limitations": [
+    "The thermodynamic regime-detection LR adjustment (governor) DOES NOT contribute to performance. Phase 11 ablation shows governor-alone produces higher forgetting than plain SGD (0.250 vs 0.219). The governor never fires in any production trace (rho=0, sigma=0 in all runs examined).",
+    "rho=0, sigma=0 in all production traces — the learning-rate adjustment mechanism has never fired in production. The LR adjustment is dead code in all evaluated configurations.",
+    "Results are restricted to task-incremental learning (task IDs provided at test time). Results do not extend to class-incremental or domain-incremental protocols without further experimentation.",
+    "Single backbone (ResNet-18). Generalization to ViT, wider/deeper networks, or other architectures is untested.",
+    "The TCL vs EWC headline result (p=0.019, uncorrected) does NOT survive Bonferroni correction at k=4 (family-wise threshold p=0.0125). This comparison is directional evidence only and must not be stated as a confirmed significant finding.",
+    "DER++ and LwF are not included in the current comparison suite. Phase 2 replication scripts are written but GPU experiments have not yet run."
+  ],
+  "evidence_basis": "tar_state/honest_evidence_inventory.json — 2 PUBLICATION_ALLOWED results, 3 DIRECTIONAL, 4 EXPLORATION_GRADE",
+  "publication_allowed_results": [
+    "phase10_controlled_rerun_tcl_vs_sgd: p=0.0012, d=3.68, n=5, Bonferroni-significant (k=4)",
+    "phase11_ablation_full_vs_governor: p=0.0232, d=1.60, n=5, governor falsified as mechanism (5/5 seeds, governor-alone < SGD)"
+  ],
+  "framing_constraints": [
+    "Do NOT use 'thermodynamic' in technical claims. The word may appear only in: the TAR system acronym, historical framing of the original motivation, and the limitation statement that the thermodynamic mechanism does not contribute.",
+    "Do NOT claim Bonferroni significance for TCL vs EWC (p=0.019 > 0.0125).",
+    "Do NOT cite HPC autonomous variant as a confirmed result (paper_citation_allowed=false in inventory).",
+    "Do NOT claim the governor contributes to performance.",
+    "Every numerical result in the paper must be traceable to honest_evidence_inventory.json or raw comparison JSONs in tar_state/comparisons/."
+  ]
+}

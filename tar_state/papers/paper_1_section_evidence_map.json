@@ -1,0 +1,276 @@
+{
+  "_meta": {
+    "description": "Phase 5 Task 5.2 — Maps every claim in every paper section to the supporting evidence entry. Claims marked EVIDENCE_MISSING must not appear in the paper.",
+    "generated_at": "2026-06-02",
+    "generated_by": "Phase 5 Task 5.2",
+    "evidence_source": "tar_state/honest_evidence_inventory.json"
+  },
+  "sections": {
+    "abstract": {
+      "claims": [
+        {
+          "claim": "TCL achieves mean forgetting 0.116 [95% CI 0.080, 0.153] on Split-CIFAR-10, n=5 seeds",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_sgd",
+          "evidence_source": "tar_state/comparisons/phase10_controlled_rerun_20260509T132155Z.json",
+          "verdict": "PUBLICATION_ALLOWED",
+          "notes": "CI computed via t-distribution df=4, t=2.776"
+        },
+        {
+          "claim": "SGD achieves mean forgetting 0.233 [95% CI 0.229, 0.237]",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_sgd",
+          "evidence_source": "tar_state/comparisons/phase10_controlled_rerun_20260509T132155Z.json",
+          "verdict": "PUBLICATION_ALLOWED"
+        },
+        {
+          "claim": "TCL vs SGD: delta=-0.117, p=0.0012, d=3.68, 5/5 seeds, Bonferroni-significant (k=4)",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_sgd",
+          "evidence_source": "tar_state/comparisons/phase10_controlled_rerun_20260509T132155Z.json",
+          "verdict": "PUBLICATION_ALLOWED"
+        },
+        {
+          "claim": "TCL vs EWC: directional improvement delta=-0.075, p=0.019, d=1.70, 5/5 seeds; does NOT survive Bonferroni (k=4, threshold 0.0125)",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_ewc",
+          "evidence_source": "tar_state/comparisons/phase10_controlled_rerun_20260509T132155Z.json",
+          "verdict": "DIRECTIONAL — must be framed as directional only"
+        },
+        {
+          "claim": "Governor-alone performs worse than full TCL; p=0.023, d=1.60, 5/5 seeds; governor-alone also worse than SGD",
+          "evidence_id": "phase11_ablation_full_vs_governor",
+          "evidence_source": "tar_state/comparisons/phase11_ablation__20260511T113318Z.json",
+          "verdict": "PUBLICATION_ALLOWED"
+        },
+        {
+          "claim": "Thermodynamic regime-detection LR adjustment never activates (rho=0, sigma=0)",
+          "evidence_id": "phase11_ablation_full_vs_governor",
+          "evidence_source": "honest_evidence_inventory.json key_mechanistic_finding field",
+          "verdict": "PUBLICATION_ALLOWED — qualitative finding, not statistical"
+        },
+        {
+          "claim": "SI default collapses to chance-level accuracy (0.500) across all 5 seeds",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_sgd",
+          "evidence_source": "tar_state/comparisons/phase10_controlled_rerun_20260509T132155Z.json aggregate.si.acc_mean=0.500",
+          "verdict": "DIRECTIONAL — observational finding from Phase 10 data; not independently pre-registered"
+        }
+      ],
+      "forbidden_claims": [
+        "TCL significantly outperforms EWC (Bonferroni-corrected) — evidence_id: phase10_controlled_rerun_tcl_vs_ewc, EVIDENCE_MISSING: p=0.019 does not meet threshold 0.0125",
+        "HPC variant achieves lower forgetting — evidence_id: hpc_autonomous_high_penalty_conservative, paper_citation_allowed=false",
+        "TCL generalises across datasets — evidence_ids: phase16_cifar100_*, phase17_tinyimagenet_*, all paper_citation_allowed=false"
+      ]
+    },
+    "introduction": {
+      "claims": [
+        {
+          "claim": "EWC computes Fisher importance from a uniform average of the final N batches",
+          "evidence_id": "Kirkpatrick2017 (literature)",
+          "evidence_source": "Reference — no experimental claim",
+          "verdict": "LITERATURE_SUPPORTED"
+        },
+        {
+          "claim": "Continuous importance accumulation via EMA corrects EWC's snapshot bias",
+          "evidence_id": "tar_state/papers/fisher_ema_theorem.tex",
+          "evidence_source": "Theorem 1 — EMA is unbiased estimator of diagonal Fisher as T->infinity",
+          "verdict": "THEORETICALLY_SUPPORTED"
+        },
+        {
+          "claim": "Motivation for this paper: Phase 10 controlled comparison showing directional TCL advantage over EWC",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_ewc",
+          "verdict": "DIRECTIONAL"
+        }
+      ],
+      "forbidden_claims": [
+        "The thermodynamic governor is a primary mechanism — EVIDENCE_MISSING (Phase 11 falsifies this)"
+      ]
+    },
+    "related_work": {
+      "claims": [
+        {
+          "claim": "EWC (Kirkpatrick et al. 2017) uses diagonal Fisher as importance weights for elastic regularization",
+          "evidence_id": "Kirkpatrick2017 (literature)",
+          "verdict": "LITERATURE_SUPPORTED"
+        },
+        {
+          "claim": "SI (Zenke et al. 2017) accumulates importance online via parameter path integrals",
+          "evidence_id": "Zenke2017 (literature)",
+          "verdict": "LITERATURE_SUPPORTED"
+        },
+        {
+          "claim": "Three continual learning scenarios: task-incremental, class-incremental, domain-incremental (van de Ven & Tolias 2019)",
+          "evidence_id": "vandeVen2019 (literature)",
+          "verdict": "LITERATURE_SUPPORTED"
+        },
+        {
+          "claim": "This paper addresses task-incremental scenario only",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_sgd",
+          "evidence_source": "All Phase 10/11 experiments use task IDs at test time",
+          "verdict": "EXPERIMENTAL_SCOPE"
+        }
+      ],
+      "forbidden_claims": []
+    },
+    "method": {
+      "claims": [
+        {
+          "claim": "ThermalImportance EMA accumulator: v_i^(T) = (1-beta) sum_{t=1}^{T} beta^{T-t} g_i(t)^2",
+          "evidence_id": "tar_state/papers/fisher_ema_theorem.tex",
+          "evidence_source": "Equation (1) of fisher_ema_theorem.tex",
+          "verdict": "THEORETICALLY_DEFINED"
+        },
+        {
+          "claim": "E[v_i^(T)] = F_{ii}(1 - beta^T) -> F_{ii} as T->infinity",
+          "evidence_id": "tar_state/papers/fisher_ema_theorem.tex",
+          "evidence_source": "Theorem 1 of fisher_ema_theorem.tex",
+          "verdict": "PROVED"
+        },
+        {
+          "claim": "EWC's uniform average is the limiting case beta->1 of the EMA",
+          "evidence_id": "tar_state/papers/fisher_ema_theorem.tex",
+          "evidence_source": "Corollary 1 of fisher_ema_theorem.tex",
+          "verdict": "PROVED"
+        },
+        {
+          "claim": "Under non-stationary gradients, EMA has exponentially smaller bias than EWC's uniform snapshot",
+          "evidence_id": "tar_state/papers/fisher_ema_theorem.tex",
+          "evidence_source": "Remark 2 (non-stationarity advantage)",
+          "verdict": "PROVED — asymptotic, assumes mixing-time model"
+        },
+        {
+          "claim": "Elastic penalty: L_TCL = L_CE + lambda * sum_i v_i^(T) * (theta_i - theta_i^*)^2",
+          "evidence_id": "Phase 10/11 experiment code",
+          "evidence_source": "Implementation in TCL method code",
+          "verdict": "EXPERIMENTAL_FACT"
+        },
+        {
+          "claim": "Governor (regime-detection LR adjustment): rho=0, sigma=0 in all production traces — mechanism never activates",
+          "evidence_id": "phase11_ablation_full_vs_governor",
+          "evidence_source": "honest_evidence_inventory.json key_mechanistic_finding",
+          "verdict": "OBSERVATION — qualitative; reported as limitation"
+        }
+      ],
+      "forbidden_claims": [
+        "Governor LR adjustment improves performance — EVIDENCE_MISSING: Phase 11 falsifies this"
+      ]
+    },
+    "experiments": {
+      "claims": [
+        {
+          "claim": "TCL forgetting 0.116 [0.080, 0.153] vs SGD 0.233 [0.229, 0.237]; delta=-0.117, p=0.0012, d=3.68, Bonferroni-significant",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_sgd",
+          "evidence_source": "tar_state/comparisons/phase10_controlled_rerun_20260509T132155Z.json",
+          "verdict": "PUBLICATION_ALLOWED"
+        },
+        {
+          "claim": "TCL forgetting 0.116 [0.080, 0.153] vs EWC 0.191 [0.162, 0.220]; delta=-0.075, p=0.019, d=1.70, directional only (Bonferroni fails, k=4)",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_ewc",
+          "evidence_source": "tar_state/comparisons/phase10_controlled_rerun_20260509T132155Z.json",
+          "verdict": "DIRECTIONAL"
+        },
+        {
+          "claim": "SI (default hyperparameters) accuracy=0.500 (chance level) across all 5 seeds; forgetting=0.092",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_sgd",
+          "evidence_source": "tar_state/comparisons/phase10_controlled_rerun_20260509T132155Z.json aggregate.si",
+          "verdict": "OBSERVATIONAL — within Phase 10 data"
+        },
+        {
+          "claim": "Phase 11 ablation: full TCL 0.127 vs penalty-only 0.143 vs governor-only 0.250 vs SGD 0.219",
+          "evidence_id": "phase11_ablation_full_vs_governor",
+          "evidence_source": "tar_state/comparisons/phase11_ablation__20260511T113318Z.json",
+          "verdict": "PUBLICATION_ALLOWED"
+        },
+        {
+          "claim": "Full TCL vs governor-only: delta=-0.123, p=0.023, d=1.60, 5/5 seeds; governor-alone also worse than SGD",
+          "evidence_id": "phase11_ablation_full_vs_governor",
+          "evidence_source": "tar_state/comparisons/phase11_ablation__20260511T113318Z.json pairwise.governor_only",
+          "verdict": "PUBLICATION_ALLOWED"
+        },
+        {
+          "claim": "Full TCL vs penalty-only: delta=-0.016, p=0.315, d=0.51 — not significant; n=26 needed for 80% power",
+          "evidence_id": "phase11_ablation_full_vs_penalty_only",
+          "evidence_source": "tar_state/comparisons/phase11_ablation__20260511T113318Z.json pairwise.penalty_only",
+          "verdict": "DIRECTIONAL — must disclose: uninformative null at n=5"
+        }
+      ],
+      "forbidden_claims": [
+        "HPC outperforms TCL — paper_citation_allowed=false in inventory (evidence_id: hpc_autonomous_high_penalty_conservative)",
+        "TCL outperforms EWC on CIFAR-100 — EXPLORATION_GRADE (n=3, paper_citation_allowed=false)",
+        "TCL outperforms SGD on TinyImageNet with d=75.08 — EXPLORATION_GRADE (n=3, d is artifact, paper_citation_allowed=false)",
+        "DER++ or LwF comparisons — GPU experiments not run, no data"
+      ]
+    },
+    "analysis": {
+      "claims": [
+        {
+          "claim": "Bonferroni correction at k=4 raises family-wise threshold to p=0.0125; TCL vs EWC (p=0.019) fails this threshold",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_ewc",
+          "verdict": "STATISTICAL_METHODOLOGY"
+        },
+        {
+          "claim": "Cohen's d=3.68 for TCL vs SGD — very large effect; Cohen's d=1.70 for TCL vs EWC — large effect",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_sgd and phase10_controlled_rerun_tcl_vs_ewc",
+          "verdict": "PUBLICATION_ALLOWED"
+        },
+        {
+          "claim": "Power analysis: Phase 10 TCL vs SGD has 100% power at d=3.68, n=5; TCL vs EWC has 92.5% power at d=1.70, n=5",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_ewc and phase10_controlled_rerun_tcl_vs_sgd",
+          "evidence_source": "honest_evidence_inventory.json achieved_power_pct",
+          "verdict": "PUBLICATION_ALLOWED"
+        }
+      ],
+      "forbidden_claims": []
+    },
+    "limitations": {
+      "claims": [
+        {
+          "claim": "LIMITATION 1: Governor never activates (rho=0, sigma=0); governor-alone < SGD; LR adjustment is not a productive mechanism",
+          "evidence_id": "phase11_ablation_full_vs_governor",
+          "verdict": "REQUIRED_LIMITATION — PUBLICATION_ALLOWED finding in negative direction"
+        },
+        {
+          "claim": "LIMITATION 2: rho=0, sigma=0 in all examined production traces; thermodynamic LR adjustment has never fired",
+          "evidence_id": "phase11_ablation_full_vs_governor",
+          "evidence_source": "key_mechanistic_finding in honest_evidence_inventory.json",
+          "verdict": "REQUIRED_LIMITATION"
+        },
+        {
+          "claim": "LIMITATION 3: Task-incremental protocol only; task IDs provided at test time; class-incremental and domain-incremental untested",
+          "evidence_id": "ALL — scope constraint across all experiments",
+          "verdict": "REQUIRED_LIMITATION"
+        },
+        {
+          "claim": "LIMITATION 4: Single backbone (ResNet-18); ViT and other architectures untested",
+          "evidence_id": "ALL — scope constraint",
+          "verdict": "REQUIRED_LIMITATION"
+        },
+        {
+          "claim": "LIMITATION 5: TCL vs EWC (p=0.019) does not survive Bonferroni correction at k=4 (threshold 0.0125)",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_ewc",
+          "verdict": "REQUIRED_LIMITATION — must be explicitly stated"
+        },
+        {
+          "claim": "LIMITATION 6: DER++ and LwF not included; Phase 2 comparison scripts written but GPU experiments not run",
+          "evidence_id": "EVIDENCE_MISSING — acknowledged gap",
+          "verdict": "REQUIRED_LIMITATION"
+        }
+      ]
+    },
+    "conclusion": {
+      "claims": [
+        {
+          "claim": "TCL's continuous gradient-energy importance accumulation significantly reduces forgetting vs SGD on Split-CIFAR-10",
+          "evidence_id": "phase10_controlled_rerun_tcl_vs_sgd",
+          "verdict": "PUBLICATION_ALLOWED"
+        },
+        {
+          "claim": "The elastic penalty is the entire productive mechanism; the governor contributes nothing",
+          "evidence_id": "phase11_ablation_full_vs_governor",
+          "verdict": "PUBLICATION_ALLOWED"
+        },
+        {
+          "claim": "Future work: HPC replication at n=20 (pre-registered), CIFAR-100 and TinyImageNet reruns at n=5, DER++ and LwF baselines",
+          "evidence_id": "EVIDENCE_MISSING — future work, not a current result",
+          "verdict": "FUTURE_WORK — allowable forward pointer"
+        }
+      ]
+    }
+  }
+}

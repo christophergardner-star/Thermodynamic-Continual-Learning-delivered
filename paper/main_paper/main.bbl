@@ -1,0 +1,91 @@
+\begin{thebibliography}{12}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Aljundi et~al.(2018)Aljundi, Babiloni, Elhoseiny, Rohrbach, and
+  Tuytelaars]{Aljundi2018}
+Rahaf Aljundi, Francesca Babiloni, Mohamed Elhoseiny, Marcus Rohrbach, and
+  Tinne Tuytelaars.
+\newblock Memory aware synapses: Learning what (not) to forget.
+\newblock In \emph{Proceedings of the European Conference on Computer Vision
+  (ECCV)}, pages 139--154, 2018.
+
+\bibitem[Buzzega et~al.(2020)Buzzega, Boschini, Porrello, Abati, and
+  Calderara]{Buzzega2020}
+Pietro Buzzega, Matteo Boschini, Angelo Porrello, Davide Abati, and Simone
+  Calderara.
+\newblock Dark experience for general continual learning: a strong, simple
+  baseline.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~33, pages 15920--15930, 2020.
+
+\bibitem[He et~al.(2016)He, Zhang, Ren, and Sun]{He2016}
+Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+\newblock Deep residual learning for image recognition.
+\newblock In \emph{Proceedings of the IEEE Conference on Computer Vision and
+  Pattern Recognition}, pages 770--778, 2016.
+
+\bibitem[Kirkpatrick et~al.(2017)Kirkpatrick, Pascanu, Rabinowitz, Veness,
+  Desjardins, Rusu, Milan, Quan, Ramalho, Grabska-Barwinska,
+  et~al.]{Kirkpatrick2017}
+James Kirkpatrick, Razvan Pascanu, Neil Rabinowitz, Joel Veness, Guillaume
+  Desjardins, Andrei~A. Rusu, Kieran Milan, John Quan, Tiago Ramalho, Agnieszka
+  Grabska-Barwinska, et~al.
+\newblock Overcoming catastrophic forgetting in neural networks.
+\newblock \emph{Proceedings of the National Academy of Sciences}, 114\penalty0
+  (13):\penalty0 3521--3526, 2017.
+
+\bibitem[Krizhevsky and Hinton(2009)]{Krizhevsky2009}
+Alex Krizhevsky and Geoffrey Hinton.
+\newblock Learning multiple layers of features from tiny images.
+\newblock Technical report, University of Toronto, 2009.
+
+\bibitem[Lopez-Paz and Ranzato(2017)]{LopezPaz2017}
+David Lopez-Paz and Marc'Aurelio Ranzato.
+\newblock Gradient episodic memory for continual learning.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~30, 2017.
+
+\bibitem[Martens and Grosse(2015)]{Martens2015}
+James Martens and Roger Grosse.
+\newblock Optimizing neural networks with {Kronecker}-factored approximate
+  curvature.
+\newblock In \emph{Proceedings of the 32nd International Conference on Machine
+  Learning}, pages 2408--2417, 2015.
+
+\bibitem[McCloskey and Cohen(1989)]{McCloskey1989}
+Michael McCloskey and Neal~J. Cohen.
+\newblock Catastrophic interference in connectionist networks: The sequential
+  learning problem.
+\newblock \emph{Psychology of Learning and Motivation}, 24:\penalty0 109--165,
+  1989.
+
+\bibitem[Rebuffi et~al.(2017)Rebuffi, Kolesnikov, Sperl, and
+  Lampert]{Rebuffi2017}
+Sylvestre-Alvise Rebuffi, Alexander Kolesnikov, Georg Sperl, and Christoph~H.
+  Lampert.
+\newblock i{C}a{RL}: Incremental classifier and representation learning.
+\newblock In \emph{Proceedings of the IEEE Conference on Computer Vision and
+  Pattern Recognition}, pages 2001--2010, 2017.
+
+\bibitem[Shin et~al.(2017)Shin, Lee, Kim, and Kim]{Shin2017}
+Hanul Shin, Jung~Kwon Lee, Jaehong Kim, and Jiwon Kim.
+\newblock Continual learning with deep generative replay.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~30, 2017.
+
+\bibitem[van~de Ven and Tolias(2019)]{vandeVen2019}
+Gido~M. van~de Ven and Andreas~S. Tolias.
+\newblock Three scenarios for continual learning.
+\newblock \emph{arXiv preprint arXiv:1904.07734}, 2019.
+
+\bibitem[Zenke et~al.(2017)Zenke, Poole, and Ganguli]{Zenke2017}
+Friedemann Zenke, Ben Poole, and Surya Ganguli.
+\newblock Continual learning through synaptic intelligence.
+\newblock In \emph{Proceedings of the 34th International Conference on Machine
+  Learning}, pages 3987--3995, 2017.
+
+\end{thebibliography}
