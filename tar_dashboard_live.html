@@ -2838,6 +2838,70 @@ function renderResearch() {
 /* ══════════════════════════════════════════════════════════
    LITERATURE VIEW
    ══════════════════════════════════════════════════════════ */
+function openLitDetail(type, jsonStr) {
+  let data = {};
+  try { data = JSON.parse(jsonStr); } catch(_) { data = {raw: jsonStr}; }
+  let html = '';
+
+  if (type === 'gap') {
+    const signals = Array.isArray(data.signals) ? data.signals : [];
+    html = `
+      <strong style="font-size:14px">${esc(data.frontier_id||'Gap Signal')}</strong>
+      <div class="drawer-sub">Gap Signal — literature-derived priority adjustment</div>
+      <h2>Priority Delta</h2>
+      <div style="font-size:28px;font-weight:700;color:var(--green)">+${fmtN(data.priority_delta,1)}</div>
+      <div style="font-size:11px;color:var(--dim);margin-top:2px">Higher = more urgent to investigate</div>
+      <h2>Evidence Signals (${signals.length})</h2>
+      ${signals.length ? signals.map(s=>`<div class="alert-item" style="align-items:flex-start;padding:5px 0">
+        ${dotHtml('blue')}<span class="alert-msg" style="font-size:12px;line-height:1.5">${esc(s)}</span>
+      </div>`).join('') : '<div class="empty-state">No signals</div>'}
+      ${data.source_count!=null?`<h2>Sources</h2><div style="font-size:12px;color:var(--muted)">${esc(String(data.source_count))} literature sources contributed</div>`:''}`;
+  } else if (type === 'claim') {
+    const text = data.verification || data.text || JSON.stringify(data, null, 2);
+    html = `
+      <strong style="font-size:14px">${esc(data.task_id||'Claim Verification')}</strong>
+      <div class="drawer-sub">Literature claim verification</div>
+      <h2>Full Verdict</h2>
+      <div class="terminal" style="height:320px;font-size:11px;line-height:1.6;overflow-y:auto;white-space:pre-wrap">${esc(text)}</div>`;
+  } else if (type === 'eval') {
+    const text = data.evaluation || data.rationale || data.summary || data.text || JSON.stringify(data, null, 2);
+    const expId = data.experiment_id || data.id || '';
+    html = `
+      <strong style="font-size:14px">Experiment Evaluation</strong>
+      ${expId?`<div class="drawer-sub mono">${esc(expId)}</div>`:'<div class="drawer-sub">Literature-informed evaluation</div>'}
+      <h2>Evaluation</h2>
+      <div class="terminal" style="height:320px;font-size:11px;line-height:1.6;overflow-y:auto;white-space:pre-wrap">${esc(text)}</div>`;
+  } else if (type === 'synth') {
+    const text = data.synthesis || data.summary || data.text || JSON.stringify(data, null, 2);
+    const frontier = data.frontier_id || data.topic || data.domain || '';
+    html = `
+      <strong style="font-size:14px">Frontier Synthesis</strong>
+      ${frontier?`<div class="drawer-sub">${esc(frontier)}</div>`:'<div class="drawer-sub">Literature synthesis</div>'}
+      <h2>Full Synthesis</h2>
+      <div class="terminal" style="height:340px;font-size:11px;line-height:1.65;overflow-y:auto;white-space:pre-wrap">${esc(text)}</div>`;
+  } else if (type === 'source') {
+    html = `
+      <strong style="font-size:14px">${esc(data.name||'Source')}</strong>
+      <div class="drawer-sub">Literature ingestion source</div>
+      <h2>Health</h2>
+      <div class="kv-grid">
+        <span class="kv-k">Status</span><span class="kv-v" style="color:var(--${data.ok?'green':'red'})">${data.ok?'✓ OK':'✗ Error'}</span>
+        <span class="kv-k">Papers ingested</span><span class="kv-v">${esc(String(data.ingested||0))}</span>
+        <span class="kv-k">Last sync</span><span class="kv-v">${fmtDate(data.last_sync||'')||'—'}</span>
+        <span class="kv-k">Rate limited</span><span class="kv-v">${data.rate_limited?'Yes':'No'}</span>
+        ${data.last_error?`<span class="kv-k">Error</span><span class="kv-v" style="color:var(--red);font-size:11px">${esc(data.last_error)}</span>`:''}
+      </div>`;
+  } else if (type === 'conflict') {
+    html = `
+      <strong style="font-size:14px">Conflict / Error</strong>
+      <div class="drawer-sub">System conflict or ingestion error</div>
+      <h2>Detail</h2>
+      <div class="terminal" style="font-size:11.5px;padding:10px;white-space:pre-wrap">${esc(data.text||JSON.stringify(data,null,2))}</div>`;
+  }
+
+  openDrawer(html);
+}
+
 function renderLiterature() {
   renderApiError('lit-status', 'literature', 'llm_insights');
   const lit     = S.data.literature  || {};
@@ -2859,7 +2923,10 @@ function renderLiterature() {
   const srcRows = Object.entries(srcHealth).map(([src, h]) => {
     if (typeof h !== 'object') return '';
     const tone = h.ok ? 'green' : 'red';
-    return `<tr style="border-bottom:1px solid var(--border)">
+    const rowData = esc(JSON.stringify({name: src, ...h}));
+    return `<tr style="border-bottom:1px solid var(--border);cursor:pointer"
+        data-lit-type="source" data-lit-json="${rowData}"
+        onclick="openLitDetail(this.dataset.litType,this.dataset.litJson)">
       <td style="padding:3px 6px;font-size:11.5px">${esc(src)}</td>
       <td style="padding:3px 6px">${dotHtml(tone)} <span style="font-size:10px;color:var(--${tone})">${h.ok?'ok':'error'}</span></td>
       <td style="padding:3px 6px;text-align:right;font-family:var(--font-mono);font-size:11px">${h.ingested||0}</td>
@@ -2902,7 +2969,14 @@ function renderLiterature() {
     ...srcErrors,
   ];
   $('lit-conflicts').innerHTML = allConflicts.length
-    ? allConflicts.slice(0,5).map(c=>`<div class="warning-banner">${esc(String(c).substring(0,150))}</div>`).join('')
+    ? allConflicts.slice(0,5).map(c=>{
+        const cStr = String(c);
+        const jStr = esc(JSON.stringify({text: cStr}));
+        return `<div class="warning-banner" style="cursor:pointer"
+          data-lit-type="conflict" data-lit-json="${jStr}"
+          onclick="openLitDetail(this.dataset.litType,this.dataset.litJson)"
+          title="Click for detail">${esc(cStr.substring(0,150))}</div>`;
+      }).join('')
     : '<div class="empty-state">No conflicts detected ✓</div>';
 
   // ── LLM Insights (4 categories) ───────────────────────────────────────────
@@ -2921,38 +2995,61 @@ function renderLiterature() {
 
   if (gaps.length) insHtml += `<div class="card" style="margin-bottom:8px">
     <div class="section-head" style="margin:0 0 6px">Gap Signals (${gaps.length})</div>
-    ${gaps.slice(0,4).map(g=>`<div class="alert-item" style="align-items:flex-start">
-      ${dotHtml('blue')}
-      <span class="alert-msg" style="font-size:11.5px">
-        <strong>${esc(g.frontier_id||'')}</strong>
-        ${g.priority_delta!=null?`<span style="color:var(--green);margin-left:6px">+${fmtN(g.priority_delta,1)}</span>`:''}
-        ${Array.isArray(g.signals)&&g.signals.length?`<span style="color:var(--dim);font-size:10.5px;display:block;margin-top:2px">${esc(g.signals[0].substring(0,100))}</span>`:''}
-      </span>
-    </div>`).join('')}
+    ${gaps.slice(0,4).map(g=>{
+      const jStr = esc(JSON.stringify(g));
+      return `<div class="alert-item" style="align-items:flex-start;cursor:pointer"
+        data-lit-type="gap" data-lit-json="${jStr}"
+        onclick="openLitDetail(this.dataset.litType,this.dataset.litJson)">
+        ${dotHtml('blue')}
+        <span class="alert-msg" style="font-size:11.5px">
+          <strong>${esc(g.frontier_id||'')}</strong>
+          ${g.priority_delta!=null?`<span style="color:var(--green);margin-left:6px">+${fmtN(g.priority_delta,1)}</span>`:''}
+          ${Array.isArray(g.signals)&&g.signals.length?`<span style="color:var(--dim);font-size:10.5px;display:block;margin-top:2px">${esc(g.signals[0].substring(0,100))}</span>`:''}
+        </span>
+      </div>`;
+    }).join('')}
   </div>`;
 
   if (claims_v.length) insHtml += `<div class="card" style="margin-bottom:8px">
     <div class="section-head" style="margin:0 0 6px">Claim Verifications (${claims_v.length})</div>
-    ${claims_v.slice(0,3).map(c=>`<div class="alert-item">
-      ${dotHtml('teal')}
-      <span class="alert-msg" style="font-size:11.5px">${esc((typeof c==='string'?c:(c.task_id||(c.verification||'').substring(0,80)||JSON.stringify(c))).substring(0,100))}</span>
-    </div>`).join('')}
+    ${claims_v.slice(0,3).map(c=>{
+      const jStr = esc(JSON.stringify(typeof c==='string'?{text:c}:c));
+      const label = typeof c==='string'?c:(c.task_id||(c.verification||'').substring(0,80)||JSON.stringify(c));
+      return `<div class="alert-item" style="cursor:pointer"
+        data-lit-type="claim" data-lit-json="${jStr}"
+        onclick="openLitDetail(this.dataset.litType,this.dataset.litJson)">
+        ${dotHtml('teal')}
+        <span class="alert-msg" style="font-size:11.5px">${esc(label.substring(0,100))}</span>
+      </div>`;
+    }).join('')}
   </div>`;
 
   if (expEvals.length) insHtml += `<div class="card" style="margin-bottom:8px">
     <div class="section-head" style="margin:0 0 6px">Experiment Evaluations (${expEvals.length})</div>
-    ${expEvals.slice(0,3).map(e=>`<div class="alert-item">
-      ${dotHtml('amber')}
-      <span class="alert-msg" style="font-size:11.5px">${esc((typeof e==='string'?e:(e.evaluation||e.summary||JSON.stringify(e))).substring(0,100))}</span>
-    </div>`).join('')}
+    ${expEvals.slice(0,3).map(e=>{
+      const jStr = esc(JSON.stringify(typeof e==='string'?{text:e}:e));
+      const label = typeof e==='string'?e:(e.evaluation||e.summary||JSON.stringify(e));
+      return `<div class="alert-item" style="cursor:pointer"
+        data-lit-type="eval" data-lit-json="${jStr}"
+        onclick="openLitDetail(this.dataset.litType,this.dataset.litJson)">
+        ${dotHtml('amber')}
+        <span class="alert-msg" style="font-size:11.5px">${esc(label.substring(0,100))}</span>
+      </div>`;
+    }).join('')}
   </div>`;
 
   if (syntheses.length) insHtml += `<div class="card">
     <div class="section-head" style="margin:0 0 6px">Frontier Syntheses (${syntheses.length})</div>
-    ${syntheses.slice(0,3).map(s=>`<div class="alert-item">
-      ${dotHtml('green')}
-      <span class="alert-msg" style="font-size:11.5px">${esc((typeof s==='string'?s:(s.synthesis||s.summary||JSON.stringify(s))).substring(0,100))}</span>
-    </div>`).join('')}
+    ${syntheses.slice(0,3).map(s=>{
+      const jStr = esc(JSON.stringify(typeof s==='string'?{text:s}:s));
+      const label = typeof s==='string'?s:(s.synthesis||s.summary||JSON.stringify(s));
+      return `<div class="alert-item" style="cursor:pointer"
+        data-lit-type="synth" data-lit-json="${jStr}"
+        onclick="openLitDetail(this.dataset.litType,this.dataset.litJson)">
+        ${dotHtml('green')}
+        <span class="alert-msg" style="font-size:11.5px">${esc(label.substring(0,100))}</span>
+      </div>`;
+    }).join('')}
   </div>`;
 
   $('lit-insights').innerHTML = insHtml || '<div class="empty-state">No LLM insights available</div>';
