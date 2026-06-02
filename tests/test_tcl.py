@@ -502,3 +502,102 @@ class TestTCLTrainer:
         assert 0 in result['per_task_acc']
         assert 1 in result['per_task_acc']
         assert result['avg_forgetting'] >= 0.0
+
+
+# ── Invariant & device tests (Phase 4.12 + 4.2) ──────────────────────────────
+
+class TestTCLInvariants:
+    """Correctness invariants for ThermalMemory.penalty().
+
+    These tests document and enforce mathematical properties that must hold
+    regardless of input values.  They also cover the device-placement fix
+    that ensures penalty() returns a tensor on the same device as the model.
+    """
+
+    def _checkpoint_with(
+        self,
+        memory: ThermalMemory,
+        model: nn.Sequential,
+        importance_val: float,
+    ) -> None:
+        """Store a task checkpoint with uniform controlled importance.
+
+        Directly fills the internal EMA buffer (_v) so the test controls
+        exactly what importance values are stored without running real training.
+        """
+        importance = ThermalImportance(model, ema_beta=0.9)
+        for name in importance._v:
+            importance._v[name].fill_(importance_val)
+        importance._step = importance.min_steps  # mark as ready
+        memory.commit(model, importance, task_id=0)
+
+    @pytest.mark.parametrize("importance_val,drift_magnitude", [
+        (0.0, 1.0),   # zero importance  → penalty must be 0
+        (1.0, 0.0),   # zero drift       → penalty must be 0
+        (0.0, 0.0),   # both zero        → penalty must be 0
+        (1.0, 1.0),   # both positive    → penalty must be positive
+    ])
+    def test_penalty_always_nonnegative(self, importance_val, drift_magnitude):
+        """Penalty is a sum of non-negative terms and must never be negative."""
+        torch.manual_seed(0)
+        model = _make_model()
+        memory = ThermalMemory()
+        self._checkpoint_with(memory, model, importance_val)
+
+        # Shift weights by drift_magnitude to create a controlled drift
+        with torch.no_grad():
+            for p in model.parameters():
+                p.data.fill_(drift_magnitude)
+
+        penalty = memory.penalty(model)
+        assert float(penalty.item()) >= 0.0, (
+            f"Penalty is negative ({float(penalty.item()):.6f}) "
+            f"for importance={importance_val}, drift={drift_magnitude}"
+        )
+
+    def test_penalty_zero_when_no_tasks(self):
+        """Penalty is exactly zero when no tasks have been checkpointed."""
+        model = _make_model()
+        memory = ThermalMemory()
+        penalty = memory.penalty(model)
+        assert float(penalty.item()) == 0.0
+
+    def test_penalty_zero_device_matches_model_cpu(self):
+        """Early-return zero tensor must be on CPU when model is on CPU."""
+        model = _make_model()  # CPU by default
+        memory = ThermalMemory()
+        penalty = memory.penalty(model)
+        assert penalty.device.type == "cpu"
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_penalty_device_match_cuda(self):
+        """Penalty tensor must be on the same device as model parameters (CUDA path)."""
+        device = torch.device("cuda:0")
+        model = _make_model().to(device)
+        memory = ThermalMemory()
+
+        # Checkpoint with a full task so memory is non-empty
+        self._checkpoint_with(memory, model, importance_val=1.0)
+
+        # Drift weights slightly
+        with torch.no_grad():
+            for p in model.parameters():
+                p.data.add_(torch.randn_like(p.data) * 0.01)
+
+        penalty = memory.penalty(model, device=device)
+        assert penalty.device.type == "cuda", (
+            f"Penalty on wrong device: {penalty.device} (expected cuda)"
+        )
+        assert penalty.ndim == 1 and penalty.shape[0] == 1
+        assert float(penalty.item()) >= 0.0
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_penalty_zero_cuda_empty_memory(self):
+        """Early-return zero tensor must land on CUDA when model is on CUDA and memory is empty."""
+        device = torch.device("cuda:0")
+        model = _make_model().to(device)
+        memory = ThermalMemory()
+        penalty = memory.penalty(model)
+        assert penalty.device.type == "cuda", (
+            f"Empty-memory penalty on wrong device: {penalty.device}"
+        )

@@ -337,6 +337,18 @@ def validate_result_artifact(
                 seed_count = len(seeds) if isinstance(seeds, (list, dict)) else 0
         if seed_count < 5:
             issues.append(f"insufficient_seeds_for_publication: {seed_count} < 5")
+    # Gate 5: benchmark tier downgrade disclosure.
+    # requested_benchmark_tier and executed_benchmark_tier are set by science_exec.py
+    # when a canonical-tier benchmark is unavailable and the system falls back silently.
+    # A downgrade makes results non-publication-grade regardless of other gates.
+    req_tier = record.get("requested_benchmark_tier")
+    exec_tier = record.get("executed_benchmark_tier")
+    if req_tier and exec_tier and req_tier != exec_tier:
+        issues.append(
+            f"benchmark_tier_downgraded: requested={req_tier}, executed={exec_tier} "
+            "— result is not publication-grade"
+        )
+
     # Gate 4: pre-registration check for confirmatory experiments.
     experiment_id = str(trust.get("logical_name", "") or "")
     preregistration_gate_checked = bool(experiment_id)
@@ -362,7 +374,10 @@ def validate_result_artifact(
             "env_present": trust["provenance_status"] == "env_snapshot_present",
             "statistics_present": bool(stats),
             "numbers_sane": "invalid_number_detected_nan_or_inf" not in issues,
-            "publication_allowed": bool(trust["publication_allowed"]),
+            "publication_allowed": bool(trust["publication_allowed"]) and not any(
+                "benchmark_tier_downgraded" in i for i in issues
+            ),
+            "tier_downgrade_detected": any("benchmark_tier_downgraded" in i for i in issues),
         },
         "preregistration_gate_checked": preregistration_gate_checked,
         "preregistration_gate_passed": preregistration_gate_passed,

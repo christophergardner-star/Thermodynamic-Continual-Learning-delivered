@@ -141,3 +141,69 @@ def test_reject_family_proposal_does_not_enter_registered():
             assert updated.proposed_family.status == "rejected"
         finally:
             orchestrator.shutdown()
+
+
+# ── Two-step diagnosis tests (Phase 4.4) ─────────────────────────────────────
+
+import json as _json
+
+
+class _MockOperatorDirector(GenerativeDirector):
+    """GenerativeDirector subclass that returns controlled operator responses."""
+
+    def __init__(self, diagnosis_response: dict, proposal_response: dict | None = None):
+        super().__init__(workspace_root=".", operator_role=object())  # truthy operator
+        self._diagnosis_response = diagnosis_response
+        self._proposal_response = proposal_response
+        self._call_count = 0
+
+    def _call_operator(self, prompt: str) -> str:
+        self._call_count += 1
+        if self._call_count == 1:
+            return _json.dumps(self._diagnosis_response)
+        return _json.dumps(self._proposal_response or {})
+
+
+def test_diagnosis_hyperparameter_returns_tuning_action():
+    """When diagnosis is root_cause='a', director must return tune_hyperparameters
+    without making a second LLM call for a new family proposal."""
+    director = _MockOperatorDirector(
+        diagnosis_response={"root_cause": "a", "reasoning": "lambda is too large causing over-regularization"},
+    )
+    proposal = director.propose_family(
+        _policy(failure_streak=6, pivot_required=True),
+        trigger_reason="high forgetting despite penalty — lambda likely too large",
+    )
+    assert proposal.proposed_family.name == "tune_hyperparameters", (
+        f"Expected tune_hyperparameters, got: {proposal.proposed_family.name}"
+    )
+    assert proposal.proposed_family.config_delta.get("action") == "tune_hyperparameters"
+    assert proposal.proposed_family.config_delta.get("root_cause") == "a"
+    assert director._call_count == 1, (
+        f"Expected exactly 1 LLM call for root_cause=a, got {director._call_count}"
+    )
+
+
+def test_diagnosis_algorithmic_triggers_new_family_proposal():
+    """When diagnosis is root_cause='d', director must make a second LLM call
+    to propose a new algorithm family."""
+    director = _MockOperatorDirector(
+        diagnosis_response={"root_cause": "d", "reasoning": "elastic penalty cannot handle this task distribution"},
+        proposal_response={
+            "name": "adaptive_momentum_reset",
+            "description": "Reset optimizer momentum at task boundaries to reduce interference",
+            "config_delta": {"reset_momentum": True},
+            "rationale": "Momentum carries stale gradient directions from previous tasks",
+        },
+    )
+    proposal = director.propose_family(
+        _policy(failure_streak=6, pivot_required=True),
+        trigger_reason="penalty not reducing forgetting on this dataset",
+    )
+    assert proposal.proposed_family.name == "adaptive_momentum_reset", (
+        f"Expected new family name, got: {proposal.proposed_family.name}"
+    )
+    assert proposal.proposed_family.name != "tune_hyperparameters"
+    assert director._call_count == 2, (
+        f"Expected 2 LLM calls for root_cause=d, got {director._call_count}"
+    )

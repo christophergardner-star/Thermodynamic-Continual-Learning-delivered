@@ -18,6 +18,12 @@ from tar_lab.schemas import (
 )
 
 
+# probe_overclaim_rate is derived from division; floating-point rounding can produce
+# values like 1e-17 when the true answer is zero.  Treat anything below this threshold
+# as indistinguishable from zero so rounding noise does not reject clean adapters.
+_FLOAT_TOLERANCE = 1e-9
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -164,8 +170,8 @@ class SelfImprovementEngine:
     ) -> tuple[bool, str]:
         if not anchor_hash_verified:
             return False, "anchor_integrity_failed"
-        if probe_overclaim_rate != 0.0:
-            return False, f"overclaim_invariant_violated: rate={probe_overclaim_rate}"
+        if probe_overclaim_rate > _FLOAT_TOLERANCE:
+            return False, f"overclaim_invariant_violated: rate={probe_overclaim_rate:.6f}"
         if probe_mean_score < self._policy.min_mean_score_floor:
             return False, (
                 f"mean_score={probe_mean_score} below floor "

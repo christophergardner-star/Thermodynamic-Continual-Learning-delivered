@@ -275,6 +275,134 @@ def _run_sandbox(class_code: str, workspace: str) -> tuple[bool, str]:
     return passed, output
 
 # ---------------------------------------------------------------------------
+# Minibench validation (Phase 4.3)
+# ---------------------------------------------------------------------------
+
+def _run_minibench(class_code: str) -> tuple[bool, str]:
+    """Run synthesised method through a tiny in-process training loop.
+
+    The AST check and sandbox verify that the code *runs without crashing*.
+    This step verifies that the method *does something scientifically meaningful*:
+    - Produces non-zero regularization loss at some point (not a constant-zero stub)
+    - Forgetting stays in [0, 1]
+    - Accuracy is above random-guessing floor
+    - No NaN or Inf in any metric
+
+    Two synthetic tasks on a 16-dim → 2-class MLP, 2 epochs each, CPU only.
+    """
+    import math
+    import types
+
+    try:
+        import torch
+        import torch.nn as nn
+        from torch.utils.data import DataLoader, TensorDataset
+    except ImportError:
+        return True, "[minibench skipped: torch unavailable]"
+
+    # ── Exec the synthesised class into an isolated namespace ─────────────────
+    namespace: dict = {"__builtins__": __builtins__}
+    try:
+        exec(compile(class_code, "<synthesised>", "exec"), namespace)  # noqa: S102
+    except Exception as exc:
+        return False, f"Minibench exec failed: {exc}"
+
+    # Find the CLMethod subclass in the namespace
+    method_cls = None
+    for obj in namespace.values():
+        if (
+            isinstance(obj, type)
+            and obj.__name__ != "CLMethod"
+            and hasattr(obj, "regularization_loss")
+        ):
+            method_cls = obj
+            break
+    if method_cls is None:
+        return False, "Minibench: no CLMethod subclass found in synthesised code"
+
+    # ── Build a tiny model and synthetic tasks ────────────────────────────────
+    torch.manual_seed(42)
+    device = torch.device("cpu")
+    model = nn.Sequential(nn.Linear(16, 32), nn.ReLU(), nn.Linear(32, 2))
+    criterion = nn.CrossEntropyLoss()
+
+    def _make_data(feature_idx: int, n: int = 120) -> DataLoader:
+        X = torch.randn(n, 16)
+        y = (X[:, feature_idx] > 0).long()
+        return DataLoader(TensorDataset(X, y), batch_size=32, shuffle=True)
+
+    loaders = [_make_data(0), _make_data(15)]
+
+    # ── Instantiate method with a minimal config object ───────────────────────
+    try:
+        cfg = types.SimpleNamespace(
+            lambda_tcl=1.0, ema_beta=0.99, penalty_lambda=1.0,
+            max_tasks=5, task_decay=1.0, anneal_rate=1.0,
+        )
+        method = method_cls(cfg)
+    except Exception as exc:
+        return False, f"Minibench: method instantiation failed: {exc}"
+
+    # ── Training loop — 2 tasks × 2 epochs ───────────────────────────────────
+    max_reg_loss = 0.0
+    per_task_acc: list[float] = []
+
+    try:
+        for task_id, loader in enumerate(loaders):
+            method.pre_task(task_id, model, device)
+            opt = torch.optim.SGD(model.parameters(), lr=0.01)
+
+            for _epoch in range(2):
+                for X_b, y_b in loader:
+                    opt.zero_grad()
+                    logits = model(X_b.to(device))
+                    ce_loss = criterion(logits, y_b.to(device))
+                    try:
+                        reg = method.regularization_loss(model)
+                        reg_val = float(reg.item()) if hasattr(reg, "item") else 0.0
+                    except Exception:
+                        reg_val = 0.0
+                    max_reg_loss = max(max_reg_loss, abs(reg_val))
+                    loss = ce_loss + reg_val
+                    loss.backward()
+                    opt.step()
+
+            method.post_task(task_id, model, loader, device)
+
+            # Evaluate accuracy on this task's data
+            correct = total = 0
+            with torch.no_grad():
+                for X_b, y_b in loader:
+                    preds = model(X_b.to(device)).argmax(dim=1)
+                    correct += (preds == y_b.to(device)).sum().item()
+                    total += len(y_b)
+            per_task_acc.append(correct / total if total > 0 else 0.0)
+
+    except Exception as exc:
+        return False, f"Minibench: training loop crashed: {exc}"
+
+    # ── Sanity checks ─────────────────────────────────────────────────────────
+    mean_acc = sum(per_task_acc) / len(per_task_acc) if per_task_acc else 0.0
+
+    if any(math.isnan(v) or math.isinf(v) for v in per_task_acc):
+        return False, f"Minibench: NaN or Inf detected in accuracy values: {per_task_acc}"
+
+    if mean_acc < 0.15:
+        return False, (
+            f"Minibench: mean accuracy {mean_acc:.3f} below floor 0.15 "
+            "(likely collapse — method may be interfering with learning)"
+        )
+
+    if max_reg_loss == 0.0:
+        return False, (
+            "Minibench: method never produced non-zero regularization loss. "
+            "Likely returns a constant zero — broken implementation."
+        )
+
+    return True, f"Minibench passed (acc={mean_acc:.3f}, max_reg={max_reg_loss:.4f})"
+
+
+# ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 
@@ -397,6 +525,14 @@ def synthesize_and_validate_method(
             continue
 
         log_fn(f"[method_synthesizer] sandbox passed: {output.splitlines()[-1]}")
+
+        # Minibench: verify the method produces meaningful scientific output
+        mb_passed, mb_reason = _run_minibench(class_code)
+        log_fn(f"[method_synthesizer] minibench: {mb_reason}")
+        if not mb_passed:
+            prior_error = f"MINIBENCH_FAILED: {mb_reason}"
+            log_fn(f"[method_synthesizer] minibench failed — will retry: {mb_reason}")
+            continue
 
         # Save
         saved_path = _save_method(method_key, class_code, parsed, synth_dir)

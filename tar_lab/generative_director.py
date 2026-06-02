@@ -20,26 +20,45 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-PROPOSAL_PROMPT_TEMPLATE = """You are the Director of a thermodynamic continual-learning research system.
+# Step 1 — Diagnose the root cause before proposing anything.
+# This prevents unconditional novelty-seeking when the real problem is
+# a wrong hyperparameter or an architecture that is too small.
+_DIAGNOSIS_PROMPT = """\
+You are diagnosing why a continual learning experiment has failed.
+Given the failure pattern below, classify the most likely root cause:
 
-The current experiment is stuck. The three standard families
-(elastic_anchor, ou_drift_jitter, layer_freeze) have all been tried and
-are not resolving the current failure pattern.
+(a) hyperparameter mis-specification — the algorithm family is correct but λ, lr, or momentum are wrong
+(b) architecture limitation — the backbone is too small or the wrong inductive bias for this task
+(c) dataset characteristic — the data distribution violates the method's assumptions
+(d) algorithmic limitation — no tuning of this family can address this failure mode
 
 Objective: {objective_slug}
 Failure context: {trigger_reason}
 Recent failure streak: {failure_streak}
+Latest governor metrics: energy={energy:.4f}, σ={sigma:.4f}, ρ={rho:.4f}
 
-Propose ONE new experiment family. Respond in this exact JSON format:
+Respond with ONLY this JSON object (no other text):
+{{"root_cause": "<a|b|c|d>", "reasoning": "<one sentence>"}}"""
+
+# Step 2 — Only reached when diagnosis is (c) or (d).
+# For (a)/(b) a tuning action is returned directly without this call.
+_PROPOSAL_PROMPT = """\
+Diagnosed root cause: {root_cause} — {reasoning}
+
+The three standard families (elastic_anchor, ou_drift_jitter, layer_freeze) have
+been tried and cannot resolve this failure pattern.  Propose ONE new experiment
+family that directly addresses the diagnosed root cause.
+
+Objective: {objective_slug}
+Failure context: {trigger_reason}
+
+Respond with ONLY this JSON object (no other text):
 {{
   "name": "<short_slug_no_spaces>",
   "description": "<one sentence describing the approach>",
   "config_delta": {{"key": "value"}},
-  "rationale": "<why this would address the failure pattern>"
-}}
-
-Be concrete. Do not propose a variant of the three existing families.
-"""
+  "rationale": "<why this addresses the diagnosed root cause>"
+}}"""
 
 
 class GenerativeDirector:
@@ -72,32 +91,79 @@ class GenerativeDirector:
         family: ProposedExperimentFamily
 
         if self._operator is not None:
-            prompt = PROPOSAL_PROMPT_TEMPLATE.format(
+            # ── Step 1: Diagnose the root cause ──────────────────────────────
+            latest = policy.data_anchor[-1]
+            diagnosis_prompt = _DIAGNOSIS_PROMPT.format(
                 objective_slug=policy.objective_slug,
                 trigger_reason=trigger_reason,
                 failure_streak=policy.failure_streak,
+                energy=latest.energy_e,
+                sigma=latest.entropy_sigma,
+                rho=latest.drift_rho,
             )
             try:
-                response = self._call_operator(prompt)
-                parsed = self._parse_operator_response(response)
+                diag_response = self._call_operator(diagnosis_prompt)
+                diag_parsed = self._parse_operator_response(diag_response)
+                root_cause = str(diag_parsed.get("root_cause", "d")).strip().lower()
+                reasoning = str(diag_parsed.get("reasoning", ""))
+            except Exception as exc:
+                # Diagnosis failed — fall through to heuristic
+                root_cause = "d"
+                reasoning = f"diagnosis_unavailable: {exc}"
+
+            # ── Step 2: Act on the diagnosis ──────────────────────────────────
+            if root_cause in ("a", "b"):
+                # Hyperparameter or architecture issue — no new family needed.
+                # Return a tuning recommendation instead.
+                tune_target = "architecture_backbone" if root_cause == "b" else "lambda_lr_momentum"
                 family = ProposedExperimentFamily(
                     family_id=f"fam-{uuid.uuid4().hex[:8]}",
-                    name=str(parsed.get("name", "operator_proposed")),
-                    description=str(parsed.get("description", "")),
-                    config_delta=parsed.get("config_delta", {}) if isinstance(parsed.get("config_delta", {}), dict) else {},
-                    rationale=str(parsed.get("rationale", "")),
+                    name="tune_hyperparameters",
+                    description=(
+                        f"Tuning recommendation (root cause {root_cause}): "
+                        f"adjust {tune_target} rather than proposing a new algorithm family."
+                    ),
+                    config_delta={
+                        "action": "tune_hyperparameters",
+                        "root_cause": root_cause,
+                        "tune_target": tune_target,
+                    },
+                    rationale=reasoning,
                     proposed_by="operator",
+                    feasibility_note=f"diagnosis={root_cause}: {reasoning}",
                 )
                 operator_available = True
-                operator_prompt_used = prompt
-            except Exception as exc:
-                family = self._rule_heuristic_proposal(policy, trigger_reason)
-                family = family.model_copy(
-                    update={
-                        "feasibility_note": f"operator_unavailable: {exc}",
-                        "updated_at": utc_now_iso(),
-                    }
+                operator_prompt_used = diagnosis_prompt
+            else:
+                # Root cause is dataset or algorithmic — propose a new family.
+                proposal_prompt = _PROPOSAL_PROMPT.format(
+                    root_cause=root_cause,
+                    reasoning=reasoning,
+                    objective_slug=policy.objective_slug,
+                    trigger_reason=trigger_reason,
                 )
+                try:
+                    response = self._call_operator(proposal_prompt)
+                    parsed = self._parse_operator_response(response)
+                    family = ProposedExperimentFamily(
+                        family_id=f"fam-{uuid.uuid4().hex[:8]}",
+                        name=str(parsed.get("name", "operator_proposed")),
+                        description=str(parsed.get("description", "")),
+                        config_delta=parsed.get("config_delta", {}) if isinstance(parsed.get("config_delta", {}), dict) else {},
+                        rationale=str(parsed.get("rationale", "")),
+                        proposed_by="operator",
+                        feasibility_note=f"diagnosis={root_cause}: {reasoning}",
+                    )
+                    operator_available = True
+                    operator_prompt_used = f"{diagnosis_prompt}\n\n---\n\n{proposal_prompt}"
+                except Exception as exc:
+                    family = self._rule_heuristic_proposal(policy, trigger_reason)
+                    family = family.model_copy(
+                        update={
+                            "feasibility_note": f"operator_unavailable: {exc} (diagnosis={root_cause})",
+                            "updated_at": utc_now_iso(),
+                        }
+                    )
         else:
             family = self._rule_heuristic_proposal(policy, trigger_reason)
 

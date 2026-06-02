@@ -420,15 +420,15 @@ class ThermalMemory:
         Tensor
             Scalar penalty (on same device as model parameters).
         """
-        if not self._tasks:
-            return torch.zeros(1, requires_grad=False)
-
-        # Infer device
+        # Infer device before early return so the zero tensor lands on the right device.
         if device is None:
             try:
                 device = next(model.parameters()).device
             except StopIteration:
                 device = torch.device('cpu')
+
+        if not self._tasks:
+            return torch.zeros(1, device=device, requires_grad=False)
 
         total_penalty = torch.zeros(1, device=device)
         n = len(self._tasks)
@@ -453,6 +453,11 @@ class ThermalMemory:
                 term = (imp * diff * diff).sum()
                 total_penalty = total_penalty + task_weight * term
 
+        assert float(total_penalty.item()) >= 0.0, (
+            f"TCL penalty is negative ({float(total_penalty.item()):.6f}). "
+            "Indicates a numerical error in importance or drift computation. "
+            "Expected: sum of non-negative products of importance weights × squared drifts."
+        )
         return total_penalty
 
     @property

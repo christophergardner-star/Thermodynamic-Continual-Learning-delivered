@@ -150,3 +150,36 @@ def test_consecutive_gate_failures_pause_cycle(tmp_path: Path):
     cycle = engine.record_gate_failure(cycle, "failure-3")
     assert cycle.status == "paused_consecutive_failures"
     assert cycle.human_resume_required is True
+
+
+# ── Float-tolerance tests (Phase 4.10) ───────────────────────────────────────
+
+def test_overclaim_gate_tolerates_float_rounding(tmp_path: Path):
+    """Floating-point rounding noise (< 1e-9) must not reject a clean adapter.
+
+    probe_overclaim_rate is derived from division; Python float arithmetic can
+    produce values like 1.4e-17 when the true answer is zero.  The gate must
+    treat anything below _FLOAT_TOLERANCE as indistinguishable from zero.
+    """
+    engine = SelfImprovementEngine(str(tmp_path))
+    rounding_noise = 1e-15  # well below _FLOAT_TOLERANCE = 1e-9
+    gate_passed, reason = engine.evaluate_gate(
+        probe_mean_score=0.80,       # above default floor of 0.40
+        probe_overclaim_rate=rounding_noise,
+        anchor_hash_verified=True,
+    )
+    assert gate_passed is True, (
+        f"Rounding noise {rounding_noise} incorrectly rejected clean adapter: {reason}"
+    )
+
+
+def test_overclaim_gate_rejects_real_overclaim(tmp_path: Path):
+    """A genuine non-zero overclaim rate must be rejected regardless of score."""
+    engine = SelfImprovementEngine(str(tmp_path))
+    gate_passed, reason = engine.evaluate_gate(
+        probe_mean_score=0.99,   # very high score — should not override the overclaim
+        probe_overclaim_rate=0.001,  # 0.1% — real overclaim, above tolerance
+        anchor_hash_verified=True,
+    )
+    assert gate_passed is False
+    assert "overclaim_invariant_violated" in reason

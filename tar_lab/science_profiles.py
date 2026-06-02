@@ -31,11 +31,46 @@ _FINANCIAL_KEYWORDS = frozenset({
     "derivative pricing", "black-scholes", "stochastic volatility",
 })
 
+# Domains that TAR accepts.  Anything else is out-of-scope.
+_ACCEPTED_DOMAINS = frozenset({"continual_learning", "thermodynamics_ml", "other_ml"})
+
 
 def _is_financial_domain(text: str) -> bool:
-    """Return True if the text contains financial/economics keywords outside CL scope."""
+    """Return True if the text contains financial/economics keywords outside CL scope.
+
+    Acts as a hard backstop even when the ML classifier is unavailable.
+    """
     lower = text.lower()
     return any(kw in lower for kw in _FINANCIAL_KEYWORDS)
+
+
+def _classify_out_of_domain(text: str) -> tuple[bool, str]:
+    """Return (is_out_of_domain, reason) using the ML domain classifier.
+
+    Falls back to keyword detection if the classifier model is not built yet.
+    Returns (True, reason) when the problem should be rejected.
+    """
+    try:
+        from tar_lab.domain_classifier import classify_domain
+        result = classify_domain(text)
+        domain = result.get("domain", "unknown")
+        confidence = result.get("confidence", 0.0)
+        ambiguous = result.get("ambiguous", True)
+        finance_hard_block = result.get("finance_hard_block", False)
+
+        if finance_hard_block:
+            return True, f"finance keyword filter (domain={domain}, conf={confidence:.2f})"
+        if ambiguous:
+            # Low confidence — log but do not block (may be a novel domain)
+            return False, f"ambiguous domain (conf={confidence:.2f}, top={domain})"
+        if domain not in _ACCEPTED_DOMAINS:
+            return True, f"out-of-scope domain: {domain} (conf={confidence:.2f})"
+        return False, ""
+    except Exception:
+        # Classifier unavailable — fall back to keyword filter only
+        if _is_financial_domain(text):
+            return True, "finance keyword filter (classifier unavailable)"
+        return False, ""
 
 
 def _slugify(text: str, max_len: int = 48) -> str:
@@ -314,9 +349,10 @@ class ScienceProfileRegistry:
         benchmark_tier: BenchmarkTier = "validation",
         requested_benchmark: Optional[str] = None,
     ) -> ProblemResolutionReport:
-        if _is_financial_domain(problem):
+        is_rejected, rejection_reason = _classify_out_of_domain(problem)
+        if is_rejected:
             raise ValueError(
-                f"Problem rejected: financial/economics domain detected. "
+                f"Problem rejected: {rejection_reason}. "
                 f"TAR only accepts continual-learning research problems. "
                 f"Problem: {problem!r}"
             )

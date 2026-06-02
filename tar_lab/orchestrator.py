@@ -199,6 +199,21 @@ class TAROrchestrator:
         except Exception as exc:
             self.memory_error = str(exc)
 
+        # Wire LiteratureBrain so the knowledge graph populates autonomously.
+        # start() is non-blocking — launches a daemon thread that ingests papers
+        # from ArXiv, Semantic Scholar, and Papers With Code on a rolling schedule.
+        self._literature_brain = None
+        self._literature_brain_error: Optional[str] = None
+        try:
+            from literature import LiteratureBrain  # top-level package
+            db_path = self.store.state_dir / "literature" / "literature_graph.db"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._literature_brain = LiteratureBrain(db_path=str(db_path))
+            self._literature_brain.start()
+        except Exception as exc:
+            # Non-fatal: literature pipeline failure does not block research operations.
+            self._literature_brain_error = str(exc)
+
     def seed_mock_metrics(self) -> list[GovernorMetrics]:
         trial_id = "seed"
         metrics = [
@@ -8242,6 +8257,16 @@ class TAROrchestrator:
         if self.vault is not None:
             self.vault.close()
             self.vault = None
+        if self._literature_brain is not None:
+            try:
+                self._literature_brain.stop()
+            except Exception:
+                pass
+            try:
+                self._literature_brain.graph.close()
+            except Exception:
+                pass
+            self._literature_brain = None
         gc.collect()
 
 
