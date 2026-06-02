@@ -58,6 +58,34 @@ from typing import Any
 _REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(_REPO))
 
+_ARROW_CACHE = (
+    _REPO / "dataset_artifacts" / "tinyimagenet"
+    / "Maysee___tiny-imagenet" / "default" / "0.0.0"
+    / "5a77092c28e51558c5586e9c5eb71a7e17a5e43f"
+)
+
+
+def _load_tinyimagenet_from_arrow():
+    """Load TinyImageNet from local Arrow cache, bypassing HF lock-file issues."""
+    import datasets as hf_datasets
+    if not _ARROW_CACHE.exists():
+        raise FileNotFoundError(
+            f"TinyImageNet Arrow cache not found at {_ARROW_CACHE}. "
+            "Run phase17_tinyimagenet.py once to populate the cache."
+        )
+    train_ds = hf_datasets.Dataset.from_file(
+        str(_ARROW_CACHE / "tiny-imagenet-train.arrow")
+    )
+    val_ds = hf_datasets.Dataset.from_file(
+        str(_ARROW_CACHE / "tiny-imagenet-valid.arrow")
+    )
+    train_items = [(row["image"], int(row["label"])) for row in train_ds]
+    val_items   = [(row["image"], int(row["label"])) for row in val_ds]
+    print(f"  Loaded {len(train_items)} train / {len(val_items)} val from Arrow cache",
+          flush=True)
+    return train_items, val_items
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -279,21 +307,42 @@ def main() -> None:
     print(f"result_id={RESULT_ID}")
     print(f"{'='*72}", flush=True)
 
+    import phase17_tinyimagenet as _p17
+    print("[TinyImageNet] Loading dataset from Arrow cache...", flush=True)
+    _ti_train_items, _ti_val_items = _load_tinyimagenet_from_arrow()
+
     method_results: dict[str, dict] = {}
 
     for method_name, config_overrides in METHODS_CONFIG.items():
         print(f"\n[run] method={method_name}  config={config_overrides}", flush=True)
 
-        seed_results, forgetting_list, accuracy_list = run_generic_benchmark(
-            dataset_name     = DATASET,
-            backbone_name    = BACKBONE,
-            method_name      = method_name,
-            seeds            = SEEDS,
-            epochs           = EPOCHS,
-            config_overrides = config_overrides,
-            data_root        = DATA_ROOT,
-            log_fn           = print,
-        )
+        seed_results_all: list = []
+        forgetting_list: list[float] = []
+        accuracy_list: list[float] = []
+        for seed in SEEDS:
+            from torch.utils.data import DataLoader
+            _subsets_train, _subsets_test = _p17._build_tinyimagenet_tasks(
+                seed, _ti_train_items, _ti_val_items, backbone=BACKBONE
+            )
+            prebuilt_train = [DataLoader(ds, batch_size=64, shuffle=True,  num_workers=0, pin_memory=False) for ds in _subsets_train]
+            prebuilt_test  = [DataLoader(ds, batch_size=64, shuffle=False, num_workers=0, pin_memory=False) for ds in _subsets_test]
+            sr, fl, al = run_generic_benchmark(
+                dataset_name        = DATASET,
+                backbone_name       = BACKBONE,
+                method_name         = method_name,
+                seeds               = [seed],
+                epochs              = EPOCHS,
+                config_overrides    = config_overrides,
+                data_root           = DATA_ROOT,
+                log_fn              = print,
+                prebuilt_task_train = prebuilt_train,
+                prebuilt_task_test  = prebuilt_test,
+            )
+            seed_results_all.extend(sr)
+            forgetting_list.extend(fl)
+            accuracy_list.extend(al)
+
+        seed_results = seed_results_all
 
         method_results[method_name] = _build_method_aggregate(
             method_name, seed_results, forgetting_list, accuracy_list
