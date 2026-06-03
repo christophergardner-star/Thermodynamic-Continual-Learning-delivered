@@ -2426,6 +2426,47 @@ class ResearchDirector:
             or str(exp.get("stage", "") or "") == "complete"
         }
 
+        # Phase 1.2 self-improvement: durable human-feedback priors. Rebuild once per
+        # cycle (read-only over human_review_state + director_proposals), then apply as a
+        # SCORE PENALTY ONLY inside _priority_for. Operator can disable via the flag
+        # tar_state/human_feedback_priors.disabled.
+        try:
+            from tar_lab import human_feedback_learning as _hfl
+            _hf_disabled = _hfl.is_disabled(self.workspace)
+            _hf_priors = {} if _hf_disabled else _hfl.rebuild_priors(self.workspace)
+        except Exception:
+            _hfl = None
+            _hf_priors = {}
+            _hf_disabled = True
+        # Phase 1.3 self-improvement: outcome registry (read-only over experiment_archive +
+        # findings/failure memos). Penalty-only deprioritisation of operationally-failed
+        # experiments; surfaces outcome digests on directives so they stop being write-only.
+        try:
+            from tar_lab import outcome_learner as _ol
+            _ol_disabled = _ol.is_disabled(self.workspace)
+            _ol_priors = {} if _ol_disabled else _ol.rebuild_outcome_priors(self.workspace)
+        except Exception:
+            _ol = None
+            _ol_priors = {}
+            _ol_disabled = True
+        # Phase 2.1 self-improvement: refresh the calibration registry (advisory only —
+        # predicted-vs-observed + power-based sample-size recommendations). Changes NO
+        # score and NO pre-registration; integrity rail #3.
+        try:
+            from tar_lab import calibration_learner as _cal
+            if not _cal.is_disabled(self.workspace):
+                _cal.rebuild_calibration(self.workspace)
+        except Exception:
+            pass
+        # Phase 3.1a self-improvement: refresh advisory method-variant proposals (no code
+        # generated, nothing run/adopted; append-only-safe — canonical methods untouched).
+        try:
+            from tar_lab import method_refinement_engine as _mre
+            if not _mre.is_disabled(self.workspace):
+                _mre.rebuild_variant_proposals(self.workspace)
+        except Exception:
+            pass
+
         directives: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
         tracked_frontiers = [
@@ -2493,7 +2534,22 @@ class ResearchDirector:
                     special_boost = 24.0
                 elif exp_id == "phase17_tinyimagenet":
                     special_boost = 14.0
-                return round(base_priority + paper_boost + status_boost + bias + special_boost - dependency_penalty, 1)
+                # Human-feedback prior (Phase 1.2): penalty-only deprioritisation of
+                # experiments/frontiers humans have explicitly vetoed. Never a boost.
+                hf_penalty = 0.0
+                if _hf_priors and not _hf_disabled and _hfl is not None:
+                    try:
+                        hf_penalty, _ = _hfl.penalty_for(_hf_priors, exp_id, frontier_id)
+                    except Exception:
+                        hf_penalty = 0.0
+                # Outcome prior (Phase 1.3): deprioritise re-proposing an operationally-failed experiment.
+                outcome_pen = 0.0
+                if _ol_priors and not _ol_disabled and _ol is not None:
+                    try:
+                        outcome_pen, _ = _ol.failure_penalty(_ol_priors, exp_id)
+                    except Exception:
+                        outcome_pen = 0.0
+                return round(base_priority + paper_boost + status_boost + bias + special_boost - dependency_penalty - hf_penalty - outcome_pen, 1)
 
             for exp in experiments:
                 if str(exp.get("frontier_problem_id", "") or "") != frontier_id:
@@ -2514,6 +2570,7 @@ class ResearchDirector:
                     "status": status,
                     "scheduler_intent": intent,
                     "priority_score": priority_score,
+                    "outcome_digest": (_ol.outcome_context(_ol_priors, exp_id) if (_ol is not None and _ol_priors and not _ol_disabled) else {}),
                     "frontier_problem_id": frontier_id,
                     "frontier_problem_title": str(frontier.get("title", "") or ""),
                     "global_problem_statement": str(frontier.get("global_problem_statement", "") or ""),
@@ -2573,7 +2630,18 @@ class ResearchDirector:
                 })
                 seen_ids.add(exp_id)
 
-            for proposal in self._frontier_experiment_catalog(frontier, paper, path):
+            # Falsified-direction retirement (Phase-1 self-improvement): do not generate
+            # NEW experiment proposals for a frontier whose hypothesis is falsified and which
+            # has no experiments still pending/awaited. Existing & running experiments are
+            # still processed above; this only stops fresh probes on a dead direction
+            # (e.g. fp-catastrophic-forgetting, 21 null/adverse vs 2 positive). Reversible:
+            # if the frontier's truth_status changes back, proposals resume automatically.
+            _falsified_dead = (
+                str(frontier.get("truth_status", "") or "") == "falsified"
+                and not frontier.get("waiting_on_experiment_ids")
+            )
+            _catalog_proposals = [] if _falsified_dead else self._frontier_experiment_catalog(frontier, paper, path)
+            for proposal in _catalog_proposals:
                 exp_id = str(proposal.get("experiment_id", "") or "")
                 if not exp_id or exp_id in seen_ids:
                     continue

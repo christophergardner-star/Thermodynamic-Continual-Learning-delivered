@@ -590,6 +590,7 @@ class ExperimentOrchestrator:
 
     def _save(self) -> None:
         self._queue_path.parent.mkdir(parents=True, exist_ok=True)
+        new_ids = {str(s.id) for s in self._specs.values()}
         data = {
             "schema_version": "v1",
             "saved_at": datetime.now(timezone.utc).isoformat(),
@@ -597,6 +598,50 @@ class ExperimentOrchestrator:
         }
         tmp = self._queue_path.with_suffix(".tmp")
         with acquire_file_lock(self._queue_path):
+            # Clobber guard: this write fully REPLACES the queue file with our
+            # in-memory set. If two orchestrators (daemon + queue-maintainer) hold
+            # divergent views, a save can silently drop manually-authored experiments
+            # (e.g. a pre-registered phase2/3 confirmatory queue). We cannot safely
+            # rewrite the concurrency model here, so instead we make any such drop
+            # ALWAYS recoverable and loud: snapshot the prior file and log it before
+            # overwriting whenever non-terminal experiments would disappear.
+            try:
+                if self._queue_path.exists():
+                    prior = json.loads(self._queue_path.read_text(encoding="utf-8"))
+                    prior_exps = prior.get("experiments", []) if isinstance(prior, dict) else []
+                    _terminal = {"complete", "failed", "skipped", "archived"}
+                    dropped = [
+                        str(e.get("id"))
+                        for e in prior_exps
+                        if isinstance(e, dict) and e.get("id")
+                        and str(e.get("id")) not in new_ids
+                        and str(e.get("status", "") or "") not in _terminal
+                    ]
+                    if dropped:
+                        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                        snap = self._queue_path.with_name(f"experiment_queue.autobak-{ts}.json")
+                        if not snap.exists():
+                            snap.write_text(json.dumps(prior, indent=2), encoding="utf-8")
+                            # Keep only the 5 most recent auto-backups to avoid disk bloat.
+                            try:
+                                old = sorted(
+                                    self._queue_path.parent.glob("experiment_queue.autobak-*.json"),
+                                    reverse=True,
+                                )[5:]
+                                for o in old:
+                                    o.unlink()
+                            except Exception:
+                                pass
+                        try:
+                            self._log(
+                                f"[queue_guard] save would drop {len(dropped)} non-terminal "
+                                f"experiment(s) absent from memory: {dropped}. "
+                                f"Prior queue snapshotted -> {snap.name} (recoverable)."
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
             os.replace(tmp, self._queue_path)
         self._refresh_experiment_library()
@@ -1246,6 +1291,26 @@ class ExperimentOrchestrator:
         changed = False
         active_runtime_experiment_id = self._active_runtime_experiment_id()
 
+        # Set of experiment_ids whose runtime lease is still ACTIVE. Used to detect
+        # phantom in-process (pid<=0) runs: if the daemon was hard-killed mid-run, the
+        # except/finally never executed, so the queue entry is stuck "running" even
+        # though the lease has been released/failed/expired. A hard kill (taskkill /F,
+        # SIGKILL) cannot be caught, so this restart-time reconcile is the only robust
+        # cleanup for that case.
+        _active_lease_expids: set[str] = set()
+        try:
+            _lp = self.workspace / "tar_state" / "runtime_ledger.json"
+            with open(_lp, encoding="utf-8-sig") as _lf0:
+                _led0 = json.load(_lf0)
+            _ACTIVE_LEASE_STATES = {"starting", "running", "waiting", "planning", "authoring", "compiling"}
+            for _l in _led0.get("leases", []):
+                if str(_l.get("status", "")) in _ACTIVE_LEASE_STATES:
+                    _eid = str(_l.get("experiment_id", "") or "")
+                    if _eid:
+                        _active_lease_expids.add(_eid)
+        except Exception:
+            pass
+
         for spec in self._specs.values():
             if self._apply_saved_terminal_state(spec):
                 changed = True
@@ -1268,6 +1333,14 @@ class ExperimentOrchestrator:
                             f"is fresh (<120s) — possible zombie handle; monitoring"
                         )
                     elif self._mark_stalled(spec, "stale_running_pid_missing"):
+                        changed = True
+                elif int(spec.pid or 0) <= 0 and spec.id not in _active_lease_expids:
+                    # In-process run (pid<=0) whose runtime lease is no longer ACTIVE —
+                    # the daemon was hard-killed mid-run, so the except/finally that would
+                    # have marked it failed never executed. Reconcile the phantom to
+                    # stalled (pending + re-runnable) so it does not block the queue or
+                    # mislead the dashboard.
+                    if self._mark_stalled(spec, "stale_in_process_lease_inactive"):
                         changed = True
                 elif spec.error:
                     # Experiment is confirmed running — clear any residual error field
@@ -1693,6 +1766,37 @@ class ExperimentOrchestrator:
                 manifest_path=str(getattr(self._active_manifest, "_path", "")),
             )
             raise RuntimeLeaseError(msg)
+
+        # RAIL 4 (defense in depth) — re-verify human approval / 24h veto window at
+        # the execute boundary, mirroring tar_scheduler. The scheduler already gates
+        # on approved_experiment_ids() at schedule time, so in normal operation an
+        # approved experiment passes silently here. This catches any path that reaches
+        # execution without scheduler vetting (or an approval that flipped between
+        # scheduling and execution). Autonomous mode only — a manual/human-initiated
+        # run (_autonomous=False) is itself an explicit human override. Fails OPEN on
+        # any error so the approval subsystem can never deadlock autonomous execution.
+        if self._autonomous:
+            try:
+                from tar_lab.human_review import approved_experiment_ids
+                _is_approved = str(spec.id) in approved_experiment_ids(self.workspace)
+            except Exception:
+                _is_approved = True
+            if not _is_approved:
+                msg = (
+                    f"Refusing to execute '{spec.id}': not human-approved / still in the "
+                    f"24h veto window. The scheduler should have held this — blocking at the "
+                    f"execute boundary as defense in depth. Approve or wait out the window "
+                    f"in the Human Review panel."
+                )
+                self._log(f"[veto_gate] {msg}")
+                write_refuse_note(
+                    self.workspace,
+                    component="ExperimentOrchestrator._execute",
+                    reason=msg,
+                    experiment_id=spec.id,
+                )
+                _append_audit(self.workspace, "veto_gate_refused", {"experiment_id": spec.id})
+                raise ManifestGateError(msg)
 
         report: dict[str, Any] | None = None
         if not skip_preflight:

@@ -66,6 +66,15 @@ BASELINE_CONFIG = {
 SPRT_ALPHA = 0.05
 SPRT_BETA = 0.10
 SPRT_CHECK_INTERVAL = 4   # Check boundary every N seeds
+# Minimum seeds before the FIRST SPRT boundary check. The check feeds running
+# Wilcoxon signed-rank p-values into Wald's SPRT, but the one-tailed signed-rank
+# test cannot reach p<0.05 until n>=5 (its small-n floor). A check at n=4 therefore
+# sums only H0 increments and is structurally forced to accept_H0 regardless of the
+# effect — which prematurely terminated this pre-registered n=20 run at n=4 despite
+# 3/4 seeds favoring HPC (d=-1.17). Gate the first check to n>=8 (the first interval
+# multiple where the test can reject) so the SPRT can move toward either boundary on
+# its merits rather than being forced to H0.
+SPRT_MIN_SEEDS_FOR_CHECK = 8
 
 PREREG_FILE = _TAR_STATE / "preregistrations" / "hpc_replication.json"
 EXEC_FLAG = _TAR_STATE / "execution_enabled.flag"
@@ -585,9 +594,10 @@ def main() -> None:
         }
         _save_checkpoint(state)
 
-        # 6. SPRT check every SPRT_CHECK_INTERVAL seeds
+        # 6. SPRT check every SPRT_CHECK_INTERVAL seeds (not before n>=SPRT_MIN_SEEDS_FOR_CHECK;
+        #    the n=4 check is structurally forced to accept_H0 — see constant above)
         n_run = len(per_seed_results)
-        if n_run % SPRT_CHECK_INTERVAL == 0 and n_run > 0:
+        if n_run % SPRT_CHECK_INTERVAL == 0 and n_run >= SPRT_MIN_SEEDS_FOR_CHECK:
             # Compute a per-seed p-value proxy: sign(delta) mapped to a
             # Bernoulli p-value.  A proper sequential test requires p-values;
             # here we use a sign test approximation: if delta < 0 (HPC better),

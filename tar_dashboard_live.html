@@ -946,6 +946,11 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
         <div class="section-head">API Budget</div>
         <div id="obs-budget" class="card"></div>
 
+        <div class="section-head">Autonomy Ramp</div>
+        <div class="card" id="obs-ramp">
+          <div class="loading-state">Loading…</div>
+        </div>
+
         <div class="section-head">Phase 2 — GPU Experiments</div>
         <div class="card" id="obs-phase2-launcher">
           <div class="loading-state">Loading…</div>
@@ -1644,6 +1649,9 @@ function renderObs() {
   // RunPod
   renderObsRunPod();
 
+  // Autonomy ramp
+  renderObsRamp();
+
   // Active experiments
   renderObsActiveExps(experiments);
 
@@ -2277,6 +2285,43 @@ async function runpodAction(action) {
     renderObsRunPod();
   } catch(e) {
     toast('RunPod error: ' + e.message, 'err');
+  }
+}
+
+async function renderObsRamp() {
+  const el = $('obs-ramp');
+  if (!el) return;
+  let r;
+  try { r = await api('/api/autonomy_ramp'); }
+  catch(e) { el.innerHTML = '<div style="color:var(--dim);font-size:12px">ramp unavailable</div>'; return; }
+  if (!r || r.configured === false) {
+    el.innerHTML = '<div style="color:var(--dim);font-size:12px">Not configured — full autonomy is ungated.<br>Run <span class="mono">python tar_autonomy_ramp.py init</span> to arm the staged ramp.</div>';
+    return;
+  }
+  const stage = r.stage || '';
+  const toneMap = {confirmatory:'amber', verifying:'amber', awaiting_confirm:'green', full_autonomy:'green', hold:'red'};
+  const labelMap = {confirmatory:'Confirmatory — running Phase 2/3', verifying:'Verifying safety gates', awaiting_confirm:'AWAITING YOUR CONFIRMATION', full_autonomy:'Full autonomy ENGAGED', hold:'HELD — a safety gate failed'};
+  const tone = toneMap[stage] || 'dim';
+  let html = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      ${dotHtml(tone, stage==='full_autonomy'||stage==='awaiting_confirm')}
+      <span>${esc(labelMap[stage]||stage)}</span>
+    </div>`;
+  if (r.blocked_reason) html += `<div style="font-size:11px;color:var(--dim);margin-bottom:8px;line-height:1.5">${esc(r.blocked_reason)}</div>`;
+  if (r.needs_confirm) {
+    html += `<div style="display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn sm green-btn" onclick="if(confirm('Promote TAR to FULL AUTONOMY? Director-generated experiments will begin running.')) rampConfirm()">Confirm full autonomy</button>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+async function rampConfirm() {
+  try {
+    const r = await api('/api/autonomy_ramp/confirm', {method:'POST'});
+    toast('Autonomy ramp: ' + (r.stage || 'confirmed'));
+    renderObsRamp();
+  } catch(e) {
+    toast('Ramp error: ' + e.message, 'err');
   }
 }
 

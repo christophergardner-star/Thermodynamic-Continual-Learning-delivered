@@ -149,8 +149,21 @@ class TARScheduler:
                 ranks[exp_id] = idx
         return ranks
 
+    # Pre-registered Phase 2/3 confirmatory experiments, identified by their explicit
+    # runner_key. These MUST run (and complete) before any director-generated experiment.
+    _PHASE2_RUNNER_KEYS = frozenset({
+        "hpc_replication_phase2", "hp_selection", "mechanistic_ablation_7c",
+        "phase16_cifar100_rerun", "phase17_tinyimagenet_rerun", "hpc_lambda_momentum_abl",
+    })
+
     @staticmethod
-    def _priority_key(spec: Any, experiment_ranks: dict[str, int], frontier_ranks: dict[str, int]) -> tuple[int, int, int, int, str]:
+    def _priority_key(spec: Any, experiment_ranks: dict[str, int], frontier_ranks: dict[str, int]) -> tuple[int, int, int, int, int, str]:
+        # Phase 2/3 confirmatory experiments take ABSOLUTE precedence over director-
+        # generated work. Without this, a director-generated spec (low director
+        # scheduler_rank) outranks a phase2 spec (which has no director rank → 999),
+        # letting generated experiments preempt the pre-registered confirmatory queue.
+        runner_key = str(getattr(spec, "runner_key", "") or "")
+        phase2_first = 0 if runner_key in TARScheduler._PHASE2_RUNNER_KEYS else 1
         stage = str(getattr(spec, "stage", "") or "")
         exp_id = str(getattr(spec, "id", "") or "")
         frontier = str(getattr(spec, "frontier_problem_id", "") or "")
@@ -159,7 +172,7 @@ class TARScheduler:
         frontier_rank = frontier_ranks.get(frontier, 999)
         priority = int(getattr(spec, "priority", 50) or 50)
         submitted_at = str(getattr(spec, "submitted_at", "") or "")
-        return (experiment_rank, stalled_scaleup, frontier_rank, priority, submitted_at)
+        return (phase2_first, experiment_rank, stalled_scaleup, frontier_rank, priority, submitted_at)
 
     def read_hardware(self) -> HardwareSnapshot:
         hw_path = self.workspace / "tar_state" / "hardware_state.json"
@@ -306,6 +319,21 @@ class TARScheduler:
         frontier_ranks = self._director_frontier_ranks()
         approved_ids = approved_experiment_ids(self.workspace)
 
+        # Phase 2/3 confirmatory experiments must COMPLETE before any director-generated
+        # experiment runs. While any phase2 experiment is still active (pending/running),
+        # all director-generated (non-phase2) experiments are held.
+        def _is_phase2(s: Any) -> bool:
+            return str(getattr(s, "runner_key", "") or "") in self._PHASE2_RUNNER_KEYS
+        phase2_active = any(_is_phase2(s) for s in list(pending_specs) + list(running_specs))
+        # Autonomy ramp: when a ramp is configured, director-generated experiments stay
+        # held until the ramp reaches full_autonomy (confirmatory runs complete, safety
+        # gates pass, and a human confirms). No ramp configured -> ungated (returns True).
+        try:
+            from tar_autonomy_ramp import is_full_autonomy as _is_full_autonomy
+            _ramp_full = _is_full_autonomy(self.workspace)
+        except Exception:
+            _ramp_full = True
+
         for spec in sorted(pending_specs, key=lambda rec: self._priority_key(rec, experiment_ranks, frontier_ranks)):
             exp_vram = _spec_vram_budget(spec)
             is_cpu_only = spec.dataset == "cpu_only"
@@ -322,6 +350,24 @@ class TARScheduler:
                 )
             except Exception:
                 pass  # Registration failure must never block scheduling
+            # Phase 2 precedence gate + autonomy ramp — hold director-generated
+            # experiments until the confirmatory queue is drained AND the ramp has
+            # been promoted to full autonomy (human-confirmed). Phase 2 runs are
+            # never held by this gate.
+            if not _is_phase2(spec) and (phase2_active or not _ramp_full):
+                _reason = (
+                    "Held until all Phase 2/3 confirmatory experiments complete "
+                    "(phase2 has absolute precedence)."
+                    if phase2_active else
+                    "Held by autonomy ramp — confirmatory runs complete; awaiting human "
+                    "confirmation to enable full autonomy."
+                )
+                hold_reasons.append(HoldReason(
+                    experiment_id=spec.id,
+                    experiment_name=spec.name,
+                    reason=_reason,
+                ))
+                continue
             if str(getattr(spec, "id", "") or "") not in approved_ids:
                 try:
                     from tar_lab.human_review import load_director_proposals
@@ -406,6 +452,25 @@ class TARScheduler:
                         )
                     ))
                     continue
+
+                # Measured-VRAM guard: the committed tally above only sees the
+                # orchestrator's own experiments. Cross-check the GPU's ACTUAL free
+                # memory so we never start on top of a process the orchestrator did
+                # not launch (e.g. a manually-run pre-registered phase2 script sharing
+                # the card). Prevents OOM/contention on a shared GPU.
+                if hw.vram_total_gb and hw.vram_total_gb > 0:
+                    measured_free = max(0.0, float(hw.vram_total_gb) - float(hw.vram_used_gb))
+                    if (exp_vram + reserve_headroom) > measured_free:
+                        hold_reasons.append(HoldReason(
+                            experiment_id   = spec.id,
+                            experiment_name = spec.name,
+                            reason = (
+                                f"Needs {exp_vram:.1f} GB VRAM but only {measured_free:.1f} GB "
+                                f"is actually free on the GPU (in use by another process — "
+                                f"possibly a manual run). Holding to avoid contention."
+                            )
+                        ))
+                        continue
 
             # Clear to run
             can_start.append(spec.id)

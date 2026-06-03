@@ -44,7 +44,25 @@ _MIN_QUEUED_EXPERIMENTS = 6
 _MAX_QUEUED_EXPERIMENTS = 15
 
 
+def _daemon_execution_paused(workspace: "Path | None" = None) -> bool:
+    """A manual pause flag that halts the daemon's autonomous GPU execution WITHOUT
+    touching execution_enabled.flag.
+
+    This decouples the daemon from manually-launched pre-registered runs (e.g.
+    run_hpc_replication.py), which gate on execution_enabled.flag. With
+    tar_state/daemon_paused.flag present, the daemon stays in planning-only mode
+    (coordinates, maintains the queue, updates the director/author) while a manual
+    run owns the GPU — preventing the two from contending. Remove the flag to resume.
+    """
+    if workspace is None:
+        return False
+    return (Path(workspace) / "tar_state" / "daemon_paused.flag").exists()
+
+
 def _bounded_execution_enabled(workspace: "Path | None" = None) -> bool:
+    # Manual pause always wins, regardless of execution_enabled.flag or env override.
+    if _daemon_execution_paused(workspace):
+        return False
     if str(os.environ.get("TAR_ENABLE_BOUNDED_EXECUTION", "") or "").strip().lower() in {
         "1", "true", "yes", "on",
     }:
@@ -1944,6 +1962,25 @@ def run_portfolio_daemon(
 
     _release_dead_leases_at_startup(workspace)
 
+    # Graceful-shutdown handler: convert SIGTERM/SIGINT/SIGBREAK into the existing
+    # KeyboardInterrupt cleanup path (stop threads, mark daemon stopped). NOTE: a hard
+    # kill (taskkill /F, SIGKILL) cannot be caught — a phantom in-process run from that
+    # case is reconciled on the next startup by ExperimentOrchestrator
+    # .reconcile_runtime_state (reason "stale_in_process_lease_inactive").
+    try:
+        import signal as _signal
+        def _graceful_stop(_signum, _frame):
+            raise KeyboardInterrupt()
+        for _sig_name in ("SIGTERM", "SIGINT", "SIGBREAK"):
+            _sig = getattr(_signal, _sig_name, None)
+            if _sig is not None:
+                try:
+                    _signal.signal(_sig, _graceful_stop)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     daemon_status = {"status": "starting", "last_event": "daemon boot"}
     execution_enabled = _bounded_execution_enabled()
     heartbeat_interval_s = max(15.0, min(60.0, poll_interval_s))
@@ -2002,10 +2039,19 @@ def run_portfolio_daemon(
                 author_state = {}
             coordination_state = write_research_coordination_state(workspace, orch, director_state, author_state)
             _ensure_director_seeded_queue(workspace, orch, coordination_state=coordination_state)
+            try:
+                from tar_autonomy_ramp import evaluate_ramp as _evaluate_ramp
+                _evaluate_ramp(workspace)
+            except Exception:
+                pass
             if not _bounded_execution_enabled(workspace):
                 daemon_status.update({
                     "status": "planning_only",
-                    "last_event": "awaiting human-approved manifest execution",
+                    "last_event": (
+                        "paused by operator (daemon_paused.flag) — a manual run owns the GPU"
+                        if _daemon_execution_paused(workspace)
+                        else "awaiting human-approved manifest execution"
+                    ),
                 })
                 _emit_daemon_state(refresh_scheduler=True)
                 heartbeat_from_env(workspace, status="running", message="living research daemon planning-only mode")
@@ -2121,6 +2167,11 @@ def run_queue_maintainer_daemon(
             author_state = write_planned_author_state(workspace)
             coordination_state = write_research_coordination_state(workspace, orch, director_state, author_state)
             submitted_ids = _ensure_director_seeded_queue(workspace, orch, coordination_state=coordination_state)
+            try:
+                from tar_autonomy_ramp import evaluate_ramp as _evaluate_ramp
+                _evaluate_ramp(workspace)
+            except Exception:
+                pass
             author_state = write_planned_author_state(workspace)
             write_research_coordination_state(workspace, orch, director_state, author_state)
             last_event = (

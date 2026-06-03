@@ -217,8 +217,12 @@ def _fmt_age_text(seconds: float | int | None) -> str:
 
 
 def _pid_started_for_spec(pid: int, started_at: str, tolerance_s: float = 300.0) -> bool | None:
-    if pid <= 0 or _psutil is None:
+    if _psutil is None:
         return None
+    if pid <= 0:
+        # No live PID recorded → definitively not running (lets reconciliation
+        # stall phantom "running" entries with pid:0 instead of leaving them).
+        return False
     started_dt = _parse_iso_dt(started_at)
     if started_dt is None:
         return None
@@ -1278,6 +1282,7 @@ def _runtime_experiment_records() -> list[dict[str, Any]]:
     experiments: list[dict[str, Any]] = []
     living_state = _fresh_state("living_research_daemon.json")
     active_runtime_experiment_id = str(living_state.get("active_experiment_id", "") or "")
+    phase2_live = _live_phase2_runner_pids()
 
     for rec in queue_records:
         rec_id = rec.get("id", "")
@@ -1290,7 +1295,15 @@ def _runtime_experiment_records() -> list[dict[str, Any]]:
             progress = entry.get("progress", {}) if isinstance(entry.get("progress", {}), dict) else {}
             progress = _annotate_live_progress(rec_id, int(entry.get("pid", 0) or 0), stage or status, progress)
             entry["progress"] = progress
-            if status == "running" or stage == "running":
+            _rk = str(entry.get("runner_key", "") or "")
+            if _rk and _rk in phase2_live:
+                # A standalone Phase 2 script for this runner is genuinely alive —
+                # trust real process liveness over any stale queue pid/status so the
+                # queue/active panels and narration stay consistent with phase2_pids.
+                entry["status"] = "running"
+                entry["stage"] = "running"
+                entry["pid"] = phase2_live[_rk]
+            elif status == "running" or stage == "running":
                 pid = int(entry.get("pid", 0) or 0)
                 pid_matches = _pid_started_for_spec(pid, str(entry.get("started_at", "") or ""))
                 daemon_owns_this = bool(active_runtime_experiment_id and active_runtime_experiment_id == rec_id)
@@ -2659,6 +2672,69 @@ def api_autonomous():
     })
 
 
+# ── autonomy ramp (confirmatory → full-autonomy step-up) ──────────────────────
+@app.route("/api/autonomy_ramp")
+def api_autonomy_ramp():
+    """Current ramp stage + per-gate report. Read-only; the daemon advances it."""
+    try:
+        from tar_autonomy_ramp import load_ramp_state, status_line, STAGE_AWAITING_CONFIRM, STAGE_HOLD
+        st = load_ramp_state(_WS)
+        if not st:
+            return jsonify({"configured": False, "stage": "none",
+                            "summary": "Autonomy ramp not configured — full autonomy is ungated."})
+        stage = st.get("stage", "")
+        return jsonify({
+            "configured": True,
+            "enabled": bool(st.get("enabled")),
+            "stage": stage,
+            "blocked_reason": st.get("blocked_reason", ""),
+            "gate_report": st.get("gate_report", {}),
+            "phase2_runner_keys": st.get("phase2_runner_keys", []),
+            "confirmed_by_human": bool(st.get("confirmed_by_human")),
+            "promoted_at": st.get("promoted_at", ""),
+            "updated_at": st.get("updated_at", ""),
+            "needs_confirm": stage == STAGE_AWAITING_CONFIRM,
+            "on_hold": stage == STAGE_HOLD,
+            "summary": status_line(_WS),
+        })
+    except Exception as exc:
+        return jsonify({"configured": False, "stage": "error", "error": str(exc)}), 200
+
+
+@app.route("/api/autonomy_ramp/confirm", methods=["POST"])
+def api_autonomy_ramp_confirm():
+    """Human final confirmation to promote to full autonomy (only effective once gates pass)."""
+    try:
+        from tar_autonomy_ramp import confirm_promotion
+        st = confirm_promotion(_WS)
+        return jsonify({"ok": True, "stage": (st or {}).get("stage", ""),
+                        "blocked_reason": (st or {}).get("blocked_reason", "")})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/autonomy_ramp/init", methods=["POST"])
+def api_autonomy_ramp_init():
+    """Arm the ramp (start in confirmatory mode)."""
+    try:
+        from tar_autonomy_ramp import init_ramp, evaluate_ramp
+        init_ramp(_WS)
+        st = evaluate_ramp(_WS)
+        return jsonify({"ok": True, "stage": (st or {}).get("stage", "")})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/autonomy_ramp/disable", methods=["POST"])
+def api_autonomy_ramp_disable():
+    try:
+        from tar_autonomy_ramp import disable_ramp
+        disable_ramp(_WS)
+        return jsonify({"ok": True})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
 # ── frontier problems ─────────────────────────────────────────────────────────
 @app.route("/api/frontier")
 def api_frontier():
@@ -3862,9 +3938,14 @@ def _extract_seed_progress_from_lines(lines: list[str]) -> dict:
 
 
 def _build_narration_context() -> dict:
-    eq = _jload(_WS / "tar_state" / "experiment_queue.json") or {}
-    experiments = eq.get("experiments", []) if isinstance(eq, dict) else []
-    running = next((e for e in experiments if e.get("status") == "running"), None)
+    # Use reconciled runtime records (live Phase 2 runs win; dead/phantom entries are
+    # stalled) so narration never describes a stale or non-existent experiment.
+    experiments = _runtime_experiment_records()
+    running = next(
+        (e for e in experiments
+         if str(e.get("stage", "")) == "running" or str(e.get("status", "")) == "running"),
+        None,
+    )
     if not running:
         return {
             "prompt": None,
@@ -4252,20 +4333,35 @@ def api_llm_insights():
     director_data = _jload(_WS / "tar_state" / "research_director_state.json") or {}
     llm_insights = director_data.get("llm_insights", {})
 
+    import time as _time
+    now_ts = _time.time()
     cache_dir = _WS / "tar_state" / "llm_cache"
     scheduler_rationale: str = ""
+    # Only surface the cached scheduler rationale if it is RECENT. When the autonomy
+    # daemon is not running, the newest cached rationale is stale and may describe an
+    # experiment that has since stopped (e.g. a reconciled phantom) — show an honest
+    # "idle" note instead of out-of-date text.
+    _SCHED_STALE_S = 900  # 15 minutes
     if cache_dir.exists():
         candidates = sorted(cache_dir.glob("scheduler_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
         for path in candidates[:1]:
+            try:
+                age_s = now_ts - path.stat().st_mtime
+            except Exception:
+                age_s = 0.0
             data = _jload(path)
             if isinstance(data, dict):
-                scheduler_rationale = str(data.get("content", "") or "")
+                if age_s <= _SCHED_STALE_S:
+                    scheduler_rationale = str(data.get("content", "") or "")
+                else:
+                    scheduler_rationale = (
+                        "Scheduler idle — the autonomy daemon is not running, so there is no "
+                        "live scheduling rationale. (Cached rationale suppressed as out-of-date.)"
+                    )
 
     # Load active gap signals from the director priority overlay (written by LLM feedback loop)
-    import time as _time
     overlay_raw = _jload(_WS / "tar_state" / "director_priority_overlay.json") or {}
     _48H = 48 * 3600
-    now_ts = _time.time()
     gap_signals = []
     for fid, entry in overlay_raw.items():
         if isinstance(entry, dict):
@@ -4970,6 +5066,32 @@ def _any_phase2_alive() -> bool:
     return False
 
 
+def _live_phase2_runner_pids() -> dict[str, int]:
+    """Map orchestrator runner_key -> live PID for any Phase 2 script alive now.
+
+    Phase 2 scripts (run_hpc_replication etc.) run as standalone processes tracked
+    in phase2_pids.json, separate from the orchestrator queue. This lets the queue,
+    active-experiments, and narration panels trust real process liveness over a
+    stale queue pid, keeping all panels consistent with phase2_pids.json.
+    """
+    out: dict[str, int] = {}
+    try:
+        import psutil as _ps
+    except Exception:
+        return out
+    for script_key, entry in _load_phase2_pids().items():
+        runner_key = _SCRIPT_TO_RUNNER_KEY.get(script_key)
+        pid = entry.get("pid") if isinstance(entry, dict) else None
+        if not runner_key or not pid:
+            continue
+        try:
+            if _ps.pid_exists(int(pid)):
+                out[runner_key] = int(pid)
+        except Exception:
+            pass
+    return out
+
+
 def _sync_phase2_progress(script_key: str) -> None:
     """Read the script's checkpoint file and push seeds_done into experiment_queue.json progress."""
     runner_key = _SCRIPT_TO_RUNNER_KEY.get(script_key)
@@ -5003,6 +5125,11 @@ def _sync_phase2_progress(script_key: str) -> None:
         for exp in data.get("experiments", []):
             if exp.get("runner_key") == runner_key:
                 prog = exp.setdefault("progress", {})
+                # Point result_path at the live checkpoint while running — that is
+                # where this experiment's data actually accumulates (per-seed results).
+                if not exp.get("result_path"):
+                    exp["result_path"] = str(ckpt_path)
+                    changed = True
                 prev = prog.get("seeds_done", -1)
                 now = time.time()
                 # Self-initializing throughput baseline: the first observation anchors
@@ -5014,16 +5141,38 @@ def _sync_phase2_progress(script_key: str) -> None:
                     prog["_rate_base_seeds"] = seeds_done
                     prog["_rate_base_ts"]    = now
                     changed = True
-                if prev != seeds_done:  # the seed count advanced — measure and write
-                    base_seeds = int(prog.get("_rate_base_seeds", seeds_done) or 0)
-                    base_ts    = float(prog.get("_rate_base_ts", now) or now)
+                base_seeds = int(prog.get("_rate_base_seeds", seeds_done) or 0)
+                base_ts    = float(prog.get("_rate_base_ts", now) or now)
+                remaining  = max(0, seeds_total - seeds_done)
+                try:
+                    est_h = float(exp.get("estimated_runtime_h") or exp.get("est_h") or 0) or None
+                except (TypeError, ValueError):
+                    est_h = None
+
+                if prev != seeds_done:  # seed count advanced — recompute and write
                     done_since = seeds_done - base_seeds
                     if done_since >= 1 and now > base_ts:
-                        avg_h = ((now - base_ts) / 3600.0) / done_since
+                        avg_h = ((now - base_ts) / 3600.0) / done_since   # MEASURED
                         prog["avg_per_seed_h"]  = round(avg_h, 3)
-                        prog["eta_remaining_h"] = round(max(0.0, avg_h * (seeds_total - seeds_done)), 2)
+                        prog["eta_remaining_h"] = round(max(0.0, avg_h * remaining), 2)
+                        prog["eta_is_estimate"] = False
+                    elif est_h and seeds_total:
+                        avg_h = est_h / seeds_total                       # PROVISIONAL fallback
+                        prog["avg_per_seed_h"]  = round(avg_h, 3)
+                        prog["eta_remaining_h"] = round(avg_h * remaining, 2)
+                        prog["eta_is_estimate"] = True
                     prog["seeds_done"]  = seeds_done
                     prog["seeds_total"] = seeds_total
+                    changed = True
+                elif prog.get("avg_per_seed_h") is None and est_h and seeds_total:
+                    # No seed has completed yet → show the experiment's own
+                    # pre-registered estimate, clearly flagged, until the first
+                    # real completion replaces it with the measured value.
+                    avg_h = est_h / seeds_total
+                    prog["avg_per_seed_h"]  = round(avg_h, 3)
+                    prog["eta_remaining_h"] = round(avg_h * remaining, 2)
+                    prog["eta_is_estimate"] = True
+                    prog["seeds_total"]     = seeds_total
                     changed = True
                 break
         if changed:

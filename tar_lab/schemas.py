@@ -555,6 +555,9 @@ TrainingSignalKind = Literal[
     "claim_verdict",
     "portfolio_governance",
     "problem_study",
+    "evidence_assessment",
+    "experiment_design",
+    "statistical_judgment",
 ]
 AgendaDecisionKind = Literal[
     "promote_gap_project",
