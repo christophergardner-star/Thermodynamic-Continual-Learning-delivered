@@ -13,6 +13,7 @@ Open: http://localhost:7860
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -2097,6 +2098,118 @@ def api_results():
     })
 
 
+@app.route("/api/evidence")
+def api_evidence():
+    """Serve the rich statistical inventory (honest_evidence_inventory.json).
+
+    Unlike /api/phases (keyed by phase number, one row per phase), this exposes
+    every pairwise comparison — phase 10 alone contributes tcl_vs_ewc and
+    tcl_vs_sgd — with the full stats the forest plot needs: mean_delta_forgetting,
+    cohens_d, p_value_uncorrected, bonferroni_significant, n_seeds, verdict.
+    Sentinel rows without a quantitative effect (e.g. the false-positive
+    catastrophic-forgetting marker) are filtered out.
+    """
+    inv = _jload(_WS / "tar_state" / "honest_evidence_inventory.json")
+    inv = inv if isinstance(inv, dict) else {}
+    raw = inv.get("results", [])
+    raw = raw if isinstance(raw, list) else []
+    comparisons = [
+        r for r in raw
+        if isinstance(r, dict) and r.get("mean_delta_forgetting") is not None
+    ]
+    return jsonify({
+        "results":      comparisons,
+        "total":        len(comparisons),
+        "generated_at": str(inv.get("generated_at", "") or "")[:19],
+    })
+
+
+@app.route("/api/forgetting_curves")
+def api_forgetting_curves():
+    """Per-task FINAL accuracy ('retention') by method, from saved confusion matrices.
+
+    SCOPE NOTE: the per-stage accuracy trajectory (acc_matrix[task][after_task]) is
+    computed inside generic_cl_runner._run_one_seed but reduced to a scalar
+    forgetting value and never persisted. The only saved per-task artifact is
+    confusion_matrices.json (method -> seed -> task -> 2x2 matrix), captured after
+    all tasks are trained. This endpoint therefore reports FINAL per-task accuracy
+    (the final column of the R-matrix) — it visualizes retention/forgetting
+    differences across methods, but is not a per-stage trajectory.
+    """
+    vdir = _WS / "tar_state" / "validation"
+    cands = sorted(vdir.glob("**/confusion_matrices.json"),
+                   key=lambda p: p.stat().st_mtime, reverse=True) if vdir.exists() else []
+    cm = None
+    src = ""
+    for p in cands:
+        data = _jload(p)
+        if isinstance(data, dict) and data:
+            cm = data
+            src = str(p.relative_to(_WS))
+            break
+    if not cm:
+        return jsonify({"ok": False, "error": "no confusion_matrices.json found"}), 404
+
+    def _acc(mat) -> float | None:
+        try:
+            tot = sum(sum(r) for r in mat)
+            cor = sum(mat[i][i] for i in range(len(mat)))
+            return cor / tot if tot else None
+        except Exception:
+            return None
+
+    methods: list[dict[str, Any]] = []
+    n_tasks = 0
+    for method, seeds in cm.items():
+        if not isinstance(seeds, dict):
+            continue
+        task_vals: dict[int, list[float]] = {}
+        for _seed, tasks in seeds.items():
+            if not isinstance(tasks, dict):
+                continue
+            for tk, mat in tasks.items():
+                try:
+                    ti = int(tk)
+                except (ValueError, TypeError):
+                    continue
+                a = _acc(mat)
+                if a is not None:
+                    task_vals.setdefault(ti, []).append(a)
+        if not task_vals:
+            continue
+        T = max(task_vals) + 1
+        n_tasks = max(n_tasks, T)
+        mean: list[float | None] = []
+        std:  list[float | None] = []
+        for t in range(T):
+            vals = task_vals.get(t, [])
+            if vals:
+                mu = sum(vals) / len(vals)
+                sd = (sum((v - mu) ** 2 for v in vals) / len(vals)) ** 0.5
+                mean.append(round(mu, 4))
+                std.append(round(sd, 4))
+            else:
+                mean.append(None)
+                std.append(None)
+        methods.append({
+            "method":  method,
+            "mean":    mean,
+            "std":     std,
+            "n_seeds": max((len(v) for v in task_vals.values()), default=0),
+        })
+
+    return jsonify({
+        "ok":      True,
+        "source":  src,
+        "n_tasks": n_tasks,
+        "tasks":   list(range(n_tasks)),
+        "methods": methods,
+        "metric":  "final_accuracy",
+        "note":    "Final per-task accuracy after all tasks trained (retention). "
+                   "Per-stage trajectory is not persisted by the runner.",
+    })
+
+
 # ── experiments ───────────────────────────────────────────────────────────────
 @app.route("/api/experiments")
 def api_experiments():
@@ -2187,6 +2300,172 @@ def api_experiment_log(exp_id: str):
         "open_log_name": "",
         "sources": [],
     }), 404
+
+
+_TRAJ_RE = re.compile(r"\[(\w+)\]\s+seed=(\d+)\s+after task (\d+):\s*accs=\[([^\]]*)\]")
+
+
+def _parse_forgetting_trajectory(raw_text: str) -> dict | None:
+    """Parse '[METHOD] seed=S after task K: accs=[a0,...,aK]' lines from a raw run
+    log into a per-task accuracy trajectory for the most-recently-seen method/seed.
+    Returns a chart spec, or None if no such lines exist."""
+    data: dict[tuple, dict[int, list[float]]] = {}
+    order: list[tuple] = []
+    for m in _TRAJ_RE.finditer(raw_text or ""):
+        method, seed, k = m.group(1), int(m.group(2)), int(m.group(3))
+        try:
+            accs = [float(x.strip().strip("'\"")) for x in m.group(4).split(",") if x.strip()]
+        except ValueError:
+            continue
+        key = (method, seed)
+        data.setdefault(key, {})[k] = accs
+        if key not in order:
+            order.append(key)
+    if not order:
+        return None
+    method, seed = order[-1]
+    rows = data[(method, seed)]
+    max_k = max(rows)
+    n_tasks = max_k + 1
+    series = []
+    for j in range(n_tasks):
+        pts = [[k, rows[k][j]] for k in range(j, max_k + 1) if k in rows and j < len(rows[k])]
+        if pts:
+            series.append({"task": j, "points": pts})
+    if not series:
+        return None
+    return {
+        "type":  "forgetting_trajectory",
+        "title": f"Forgetting trajectory — {method.upper()}, seed {seed}",
+        "data":  {"n_tasks": n_tasks, "method": method, "seed": seed, "series": series},
+    }
+
+
+def _mean_std(vals: list[float]) -> tuple[float | None, float | None]:
+    vals = [v for v in vals if v is not None]
+    if not vals:
+        return None, None
+    mu = sum(vals) / len(vals)
+    sd = (sum((v - mu) ** 2 for v in vals) / len(vals)) ** 0.5
+    return round(mu, 4), round(sd, 4)
+
+
+@app.route("/api/experiment/<exp_id>/charts")
+def api_experiment_charts(exp_id: str):
+    """Adaptive per-experiment chart bundle. Emits whichever of these the
+    experiment has data for: forgetting trajectory (log-derived), per-seed effect,
+    SPRT boundary, and mean forgetting-by-method."""
+    exp = next((e for e in _runtime_experiment_records() if e["id"] == exp_id), None)
+    if exp is None:
+        return jsonify({"ok": False, "error": "experiment not found", "charts": []}), 404
+
+    charts: list[dict[str, Any]] = []
+
+    # Link exp -> phase2 script_key via the queue entry's runner_key
+    runner_to_script = {v: k for k, v in _SCRIPT_TO_RUNNER_KEY.items()}
+    script_key = ""
+    try:
+        q = _jload(_WS / "tar_state" / "experiment_queue.json") or {}
+        qe = next((x for x in q.get("experiments", []) if x.get("id") == exp_id), {})
+        script_key = runner_to_script.get(str(qe.get("runner_key", "") or ""), "")
+    except Exception:
+        pass
+
+    # ── Forgetting trajectory — parse the raw run log ──
+    raw_log = ""
+    try:
+        log_path = None
+        if script_key:
+            pe = _load_phase2_pids().get(script_key, {})
+            lp = pe.get("log_path") or str(_WS / "tar_state" / "logs" / f"phase2_{script_key}.log")
+            log_path = Path(lp)
+        if log_path and log_path.exists():
+            raw_log = log_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        raw_log = ""
+    if raw_log:
+        traj = _parse_forgetting_trajectory(raw_log)
+        if traj:
+            charts.append(traj)
+
+    # ── SPRT-checkpoint-backed experiments (pre-registered replications) ──
+    cfg = _SPRT_CHECKPOINTS.get(script_key)
+    if cfg:
+        ckpt = _jload(cfg["checkpoint"]) or {}
+        ckpt = ckpt if isinstance(ckpt, dict) else {}
+        per_seed = ckpt.get("per_seed_results", []) or []
+        if per_seed:
+            charts.append({
+                "type":  "per_seed_effect",
+                "title": "Per-seed effect — HPC − baseline forgetting",
+                "data":  {
+                    "seeds":  [r.get("seed") for r in per_seed],
+                    "deltas": [r.get("delta") for r in per_seed],
+                    "favorable_when": "negative",
+                },
+            })
+            hm, hs = _mean_std([r.get("hpc_forgetting") for r in per_seed])
+            bm, bs = _mean_std([r.get("baseline_forgetting") for r in per_seed])
+            charts.append({
+                "type":  "method_forgetting",
+                "title": "Mean forgetting by method",
+                "data":  {"methods": [
+                    {"label": "HPC",      "mean": hm, "std": hs},
+                    {"label": "Baseline", "mean": bm, "std": bs},
+                ], "lower_is_better": True},
+            })
+        prereg = _jload(cfg["prereg"]) or {}
+        prereg = prereg if isinstance(prereg, dict) else {}
+        sprt_log = ckpt.get("sprt_log", []) or []
+        sp = prereg.get("sprt_parameters", {}) if isinstance(prereg.get("sprt_parameters"), dict) else {}
+        alpha = float(sp.get("alpha", prereg.get("alpha", 0.05)) or 0.05)
+        beta = float(sp.get("beta", 0.10) or 0.10)
+        if sprt_log:
+            A = sprt_log[-1].get("A"); B = sprt_log[-1].get("B"); decision = sprt_log[-1].get("decision", "continue")
+        else:
+            A = math.log((1.0 - beta) / alpha); B = math.log(beta / (1.0 - alpha)); decision = "continue"
+        charts.append({
+            "type":  "sprt",
+            "title": "SPRT boundary — HPC vs TCL baseline",
+            "data":  {
+                "seeds_run":      int(ckpt.get("seeds_run", len(per_seed)) or 0),
+                "required_seeds": int(prereg.get("required_seeds", cfg["required_seeds"]) or cfg["required_seeds"]),
+                "check_interval": int(sp.get("check_interval_seeds", 4) or 4),
+                "decision": decision, "A": A, "B": B, "alpha": alpha, "beta": beta,
+                "sprt_log": sprt_log, "per_seed_results": per_seed,
+            },
+        })
+
+    # ── Result-JSON-backed experiments (completed multi-method comparisons) ──
+    result = None
+    rp = exp.get("result_path", "")
+    if rp and Path(rp).exists():
+        result = _jload(Path(rp))
+    if isinstance(result, dict):
+        agg = result.get("aggregate", {})
+        if isinstance(agg, dict) and agg and not any(c["type"] == "method_forgetting" for c in charts):
+            methods = [
+                {"label": mname, "mean": round(ms["forgetting_mean"], 4),
+                 "std": round(ms.get("forgetting_std", 0) or 0, 4)}
+                for mname, ms in agg.items()
+                if isinstance(ms, dict) and ms.get("forgetting_mean") is not None
+            ]
+            if methods:
+                charts.append({"type": "method_forgetting", "title": "Mean forgetting by method",
+                               "data": {"methods": methods, "lower_is_better": True}})
+        pw = result.get("pairwise", {})
+        if isinstance(pw, dict) and pw and not any(c["type"] == "per_seed_effect" for c in charts):
+            for bname, bstats in pw.items():
+                deltas = bstats.get("per_seed_deltas") if isinstance(bstats, dict) else None
+                if deltas:
+                    seeds = result.get("seeds", list(range(len(deltas))))
+                    charts.append({"type": "per_seed_effect",
+                                   "title": f"Per-seed effect — TCL − {bname} forgetting",
+                                   "data": {"seeds": seeds[:len(deltas)], "deltas": deltas,
+                                            "favorable_when": "negative"}})
+                    break
+
+    return jsonify({"ok": True, "exp_id": exp_id, "charts": charts})
 
 
 # ── autonomous research ───────────────────────────────────────────────────────
@@ -3452,7 +3731,7 @@ def _build_narration_context() -> dict:
         }
 
     exp_id = str(running.get("id", "") or "")
-    is_validation_suite = running.get("method", "") == "validation_suite" or "claim_validation" in exp_id
+    is_validation_suite = running.get("method", "") == "validation_suite" or "claim_validation" in exp_id or running.get("runner_key") == "hpc_replication_phase2"
 
     if is_validation_suite:
         # ── HPC replication suite narration ───────────────────────────────────
@@ -4662,6 +4941,70 @@ def api_phase2_status():
         if key not in results:
             results[key] = {"status": "idle", "pid": None, "started_at": None, "alive": False}
     return jsonify(results)
+
+
+# Checkpoint + pre-registration locations for SPRT-bearing replication scripts.
+_SPRT_CHECKPOINTS: dict[str, dict[str, Any]] = {
+    "run_hpc_replication": {
+        "checkpoint":     _WS / "tar_state" / "comparisons" / "hpc_replication_checkpoint.json",
+        "prereg":         _WS / "tar_state" / "preregistrations" / "hpc_replication.json",
+        "required_seeds": 20,
+    },
+}
+
+
+@app.route("/api/phase2/checkpoint/<key>")
+def api_phase2_checkpoint(key: str):
+    """Structured SPRT replication state for the boundary chart.
+
+    Exposes hpc_replication_checkpoint.json (sprt_log + per_seed_results), which
+    /api/phase2/status does not — that route only reports process liveness.
+    A/B boundaries are echoed from the latest sprt_log entry; before the first
+    SPRT check has fired (sprt_log empty) they are derived from the
+    pre-registration's alpha/beta via Wald's formulas so the chart can draw the
+    decision frame immediately.
+    """
+    cfg = _SPRT_CHECKPOINTS.get(key)
+    if not cfg:
+        return jsonify({"ok": False, "error": f"No SPRT checkpoint for key '{key}'",
+                        "allowed": list(_SPRT_CHECKPOINTS)}), 404
+
+    ckpt   = _jload(cfg["checkpoint"]); ckpt   = ckpt   if isinstance(ckpt,   dict) else {}
+    prereg = _jload(cfg["prereg"]);     prereg = prereg if isinstance(prereg, dict) else {}
+
+    sprt_log = ckpt.get("sprt_log", [])          or []
+    per_seed = ckpt.get("per_seed_results", [])  or []
+    required = int(prereg.get("required_seeds", cfg["required_seeds"]) or cfg["required_seeds"])
+
+    sp    = prereg.get("sprt_parameters", {}) if isinstance(prereg.get("sprt_parameters"), dict) else {}
+    alpha = float(sp.get("alpha", prereg.get("alpha", 0.05)) or 0.05)
+    beta  = float(sp.get("beta", 0.10) or 0.10)
+
+    if sprt_log:
+        last = sprt_log[-1]
+        A = last.get("A"); B = last.get("B"); decision = last.get("decision", "continue")
+    else:
+        A = B = None; decision = "continue"
+    if A is None:
+        A = math.log((1.0 - beta) / alpha)        # upper → accept H1
+    if B is None:
+        B = math.log(beta / (1.0 - alpha))         # lower → accept H0
+
+    return jsonify({
+        "ok":               True,
+        "key":              key,
+        "seeds_run":        int(ckpt.get("seeds_run", len(per_seed)) or 0),
+        "required_seeds":   required,
+        "check_interval":   int(sp.get("check_interval_seeds", 4) or 4),
+        "decision":         decision,
+        "A":                A,
+        "B":                B,
+        "alpha":            alpha,
+        "beta":             beta,
+        "sprt_log":         sprt_log,
+        "per_seed_results": per_seed,
+        "hypothesis":       str(prereg.get("hypothesis", "") or ""),
+    })
 
 
 @app.route("/api/phase2/launch", methods=["POST"])

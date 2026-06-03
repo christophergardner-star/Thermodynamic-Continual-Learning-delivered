@@ -852,6 +852,11 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
       <span class="nav-icon">✦</span> TAR Intelligence
     </div>
   </div>
+  <div class="nav-section">
+    <div class="nav-item" data-view="self-improvement">
+      <span class="nav-icon">⟳</span> Self-Improvement
+    </div>
+  </div>
 </nav>
 
 <!-- ══ MAIN + DRAWER ════════════════════════════════════════ -->
@@ -1016,6 +1021,20 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
       </table>
     </div>
 
+    <div class="section-head">Effect Sizes — Forest Plot</div>
+    <div class="view-sub" style="margin-bottom:6px">
+      Δ forgetting (TCL − baseline) with 95% CI. Points left of zero favor TCL.
+      Filled green = paper-citable · filled amber = Bonferroni-significant · hollow = directional/underpowered.
+    </div>
+    <div id="ev-forest" class="forest-wrap"><div class="loading-state">Loading…</div></div>
+
+    <div class="section-head">Per-Task Retention — final accuracy by task</div>
+    <div class="view-sub" style="margin-bottom:6px">
+      Final accuracy on each task after all tasks are trained (HPC claim-validation suite, 6 methods × 10 seeds).
+      Higher on early tasks (T1–T2) = less forgetting. Per-stage trajectory is not persisted by the runner.
+    </div>
+    <div id="ev-retention" class="forest-wrap"><div class="loading-state">Loading…</div></div>
+
     <div class="section-head">Validation State</div>
     <div id="ev-validation"><div class="loading-state">Loading…</div></div>
   </section>
@@ -1144,6 +1163,50 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
           <textarea class="chat-input" id="intel-input" rows="2" placeholder="Ask TAR about experiment results, frontier gaps, statistical findings…"></textarea>
           <button class="btn primary" id="intel-send">Send</button>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Self-Improvement ─────────────────────────────────── -->
+  <section class="view" id="view-self-improvement">
+    <div class="view-title">Self-Improvement</div>
+    <div class="view-sub">TAR's autonomous LoRA fine-tuning pipeline — signal curation → delta assembly → retrain → gate → deploy.</div>
+
+    <!-- Row 1: Readiness + Cycle + Hardware -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px">
+      <div class="card" id="si-readiness"><div class="loading-state">Loading…</div></div>
+      <div class="card" id="si-cycle"><div class="loading-state">Loading…</div></div>
+      <div class="card" id="si-hardware"><div class="loading-state">Loading…</div></div>
+    </div>
+
+    <!-- Row 2: Delta + Anchor + Adapter -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px">
+      <div class="card" id="si-delta"><div class="loading-state">Loading…</div></div>
+      <div class="card" id="si-anchor"><div class="loading-state">Loading…</div></div>
+      <div class="card" id="si-adapter"><div class="loading-state">Loading…</div></div>
+    </div>
+
+    <!-- Row 3: Signal catalog (full width) -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="section-head">Signal Catalog</div>
+      <div id="si-signals"><div class="loading-state">Loading…</div></div>
+    </div>
+
+    <!-- Row 4: Active preregistration (full width) -->
+    <div class="card" style="margin-bottom:12px">
+      <div class="section-head">Active Preregistration (Running Experiment)</div>
+      <div id="si-prereg"><div class="loading-state">Loading…</div></div>
+    </div>
+
+    <!-- Row 5: Actions -->
+    <div class="card">
+      <div class="section-head">Pipeline Actions</div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px">
+        <button class="btn" onclick="siDryRun()" id="si-dryrun-btn">⊙ Dry Run</button>
+        <span id="si-dryrun-result" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-top:8px">
+        To trigger a full retrain: connect a GPU with ≥14GB VRAM and run <code>python hardware_readiness_watchdog.py</code>.
       </div>
     </div>
   </section>
@@ -1353,6 +1416,8 @@ const ENDPOINTS = {
   experiment_history:'/api/experiment_history',
   phases:            '/api/phases',
   results:           '/api/results',
+  evidence:          '/api/evidence',
+  forgetting:        '/api/forgetting_curves',
   papers:            '/api/papers',
   review:            '/api/human_review',
   director:          '/api/research_director',
@@ -1374,6 +1439,8 @@ const ENDPOINTS = {
   director_proposals: '/api/director_proposals',
   budget:             '/api/budget',
   phase2_status:      '/api/phase2/status',
+  self_improvement:   '/api/self_improvement',
+  sprt:               '/api/phase2/checkpoint/run_hpc_replication',
 };
 
 async function loadEndpoint(key) {
@@ -1400,16 +1467,17 @@ async function loadViewData(view) {
   const map = {
     obs:        ['status','hardware','experiments','alerts','processes','log','logs','runpod','review','papers','narration','breakthroughs','director_proposals','budget'],
     experiments:['experiments'],
-    evidence:   ['phases','results','validation'],
+    evidence:   ['phases','results','validation','evidence','forgetting'],
     papers:     ['papers','author'],
     review:     ['review','director_proposals'],
     research:   ['director','scheduler','frontier','coordination','autonomous'],
     literature: ['literature','llm_insights'],
     system:     ['logs','processes'],
     intel:      [],
+    'self-improvement': [],
   };
   const keys = map[view] || [];
-  await Promise.all(keys.map(k => S.data[k] === undefined ? loadEndpoint(k) : Promise.resolve()));
+  await Promise.all(keys.map(k => (k === 'narration' || S.data[k] === undefined) ? loadEndpoint(k) : Promise.resolve()));
 }
 
 /* ── Header render ───────────────────────────────────────── */
@@ -1466,14 +1534,15 @@ updateClock();
 async function renderView(view, opts={}) {
   await loadViewData(view);
   switch(view) {
-    case 'obs':         renderObs(); break;
-    case 'experiments': renderExps(); break;
-    case 'evidence':    renderEvidence(); break;
-    case 'papers':      renderPapers(); break;
-    case 'review':      renderReview(); break;
-    case 'research':    renderResearch(); break;
-    case 'literature':  renderLiterature(); break;
-    case 'system':      renderSystem(); break;
+    case 'obs':              renderObs(); break;
+    case 'experiments':      renderExps(); break;
+    case 'evidence':         renderEvidence(); break;
+    case 'papers':           renderPapers(); break;
+    case 'review':           renderReview(); break;
+    case 'research':         renderResearch(); break;
+    case 'literature':       renderLiterature(); break;
+    case 'system':           renderSystem(); break;
+    case 'self-improvement': loadSelfImprovement(); break;
   }
 }
 
@@ -1642,6 +1711,86 @@ function renderPhase2Launcher() {
       </tr>`;
     }).join('')}</tbody>
   </table>`;
+}
+
+/* ── SPRT boundary chart (Observatory) ───────────────────────
+   Wald's SPRT for the HPC replication. The LLR steps +ln((1-β)/α)
+   per p<α observation (evidence for H1) or +ln(β/(1-α)) otherwise.
+   Crossing A ⇒ accept H1; crossing B ⇒ accept H0; between ⇒ continue.
+   Renders the decision frame even before the first check (n=4) fires. */
+function renderObsSprt(){
+  const el = $('obs-sprt');
+  if(!el) return;
+  if(S.errors.sprt){ el.innerHTML = `<div class="api-err">Error: ${esc(S.errors.sprt)}</div>`; return; }
+  const cp = S.data.sprt;
+  if(!cp){ el.innerHTML = '<div class="loading-state">Loading…</div>'; return; }
+  if(cp.ok === false){ el.innerHTML = `<div class="empty-state">${esc(cp.error||'No SPRT checkpoint')}</div>`; return; }
+  el.innerHTML = sprtChartSVG(cp);
+}
+
+function sprtChartSVG(cp){
+  cp = cp || {};
+  const log = Array.isArray(cp.sprt_log) ? cp.sprt_log : [];
+  const req = Number(cp.required_seeds || 20);
+  const interval = Number(cp.check_interval || 4);
+  const run = Number(cp.seeds_run || 0);
+  const A = Number(cp.A), B = Number(cp.B);
+  const W=520, mT=14, mB=34, mL=40, mR=150, innerH=190;
+  const H = mT+mB+innerH, innerW = W-mL-mR;
+
+  const llrs = log.map(e=>Number(e.log_lr)).filter(v=>isFinite(v));
+  let ymin = Math.min(B, 0, ...llrs), ymax = Math.max(A, 0, ...llrs);
+  const yp=(ymax-ymin)*0.12 || 1; ymin-=yp; ymax+=yp;
+  const X = s => mL + (req>0 ? Math.max(0,Math.min(1, s/req)) : 0)*innerW;
+  const Y = v => mT + (1-(v-ymin)/(ymax-ymin))*innerH;
+
+  let grid='';
+  for(let s=0; s<=req+1e-9; s+=interval){
+    grid += `<line x1="${X(s).toFixed(1)}" x2="${X(s).toFixed(1)}" y1="${mT}" y2="${mT+innerH}" stroke="var(--border)"/>`
+          + `<text x="${X(s).toFixed(1)}" y="${mT+innerH+14}" fill="var(--muted)" font-size="9.5" text-anchor="middle" font-family="var(--font-mono)">${s}</text>`;
+  }
+  const xlab = `<text x="${(mL+innerW/2).toFixed(1)}" y="${mT+innerH+30}" fill="var(--muted)" font-size="9.5" text-anchor="middle">seeds run</text>`;
+  const ylab = `<text x="12" y="${(mT+innerH/2).toFixed(1)}" fill="var(--muted)" font-size="9.5" text-anchor="middle" transform="rotate(-90 12 ${(mT+innerH/2).toFixed(1)})">log-LR</text>`;
+
+  const band = `<rect x="${mL}" y="${Y(A).toFixed(1)}" width="${innerW}" height="${Math.max(0,Y(B)-Y(A)).toFixed(1)}" fill="var(--amber)" opacity="0.06"/>`;
+  const bA = `<line x1="${mL}" x2="${mL+innerW}" y1="${Y(A).toFixed(1)}" y2="${Y(A).toFixed(1)}" stroke="var(--green)" stroke-width="1.5" stroke-dasharray="5 3"/>`
+           + `<text x="${mL+innerW+6}" y="${(Y(A)+3.5).toFixed(1)}" fill="var(--green)" font-size="10">accept H₁ · A=+${A.toFixed(2)}</text>`;
+  const bB = `<line x1="${mL}" x2="${mL+innerW}" y1="${Y(B).toFixed(1)}" y2="${Y(B).toFixed(1)}" stroke="var(--red)" stroke-width="1.5" stroke-dasharray="5 3"/>`
+           + `<text x="${mL+innerW+6}" y="${(Y(B)+3.5).toFixed(1)}" fill="var(--red)" font-size="10">accept H₀ · B=${B.toFixed(2)}</text>`;
+  const z0 = `<line x1="${mL}" x2="${mL+innerW}" y1="${Y(0).toFixed(1)}" y2="${Y(0).toFixed(1)}" stroke="var(--border-s)"/>`
+           + `<text x="${mL-6}" y="${(Y(0)+3.5).toFixed(1)}" fill="var(--muted)" font-size="9" text-anchor="end" font-family="var(--font-mono)">0</text>`;
+
+  let trace='', note='';
+  if(log.length){
+    const pts = [[0,0]].concat(log.map(e=>[Number(e.n_seeds), Number(e.log_lr)]));
+    trace += `<path d="${pts.map((p,i)=>`${i?'L':'M'}${X(p[0]).toFixed(1)} ${Y(p[1]).toFixed(1)}`).join(' ')}" fill="none" stroke="var(--blue)" stroke-width="1.8"/>`;
+    trace += log.map(e=>{
+      const dec=e.decision||'continue';
+      const col = dec==='accept_H1'?'var(--green)':dec==='accept_H0'?'var(--red)':'var(--blue)';
+      return `<circle cx="${X(Number(e.n_seeds)).toFixed(1)}" cy="${Y(Number(e.log_lr)).toFixed(1)}" r="4" fill="${col}" stroke="var(--bg)" stroke-width="1.2"/>`;
+    }).join('');
+  } else {
+    note = `<text x="${(mL+innerW/2).toFixed(1)}" y="${(mT+innerH/2).toFixed(1)}" fill="var(--dim)" font-size="11" text-anchor="middle">Awaiting first SPRT check — see next-check seed below</text>`;
+  }
+
+  const svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block;margin:0 auto" font-family="var(--font-ui)">${band}${grid}${z0}${bA}${bB}${ylab}${xlab}${trace}${note}</svg>`;
+
+  const dec = cp.decision || 'continue';
+  const decBadge = dec==='accept_H1' ? badgeHtml('H₁ accepted — HPC confirmed','green')
+                 : dec==='accept_H0' ? badgeHtml('H₀ — false positive','red')
+                 : badgeHtml('sampling…','amber');
+  const last = log.length ? log[log.length-1] : null;
+  const nextCheck = Math.min(req, Math.ceil((run+1)/interval)*interval);
+  const statTxt = last
+    ? `Wilcoxon p=${last.running_wilcoxon_p!=null?fmtN(last.running_wilcoxon_p,4):'—'} · d=${last.running_cohens_d!=null?fmtN(last.running_cohens_d,2):'—'} · LLR=${fmtN(last.log_lr,2)}`
+    : (run>0 ? 'first check pending' : 'no seeds completed yet');
+  const footer = `<div class="kv-grid" style="margin-top:10px">
+    <span class="kv-k">Decision</span><span class="kv-v">${decBadge}</span>
+    <span class="kv-k">Seeds</span><span class="kv-v">${run} / ${req}${dec==='continue'&&run<req?` · next check at n=${nextCheck}`:''}</span>
+    <span class="kv-k">Running stat</span><span class="kv-v" style="font-family:var(--font-mono);font-size:11px">${statTxt}</span>
+  </div>`;
+
+  return svg + footer;
 }
 
 async function launchPhase2(scriptKey, label) {
@@ -2278,6 +2427,246 @@ function openExpDrawer(jsonStr) {
 /* ══════════════════════════════════════════════════════════
    EVIDENCE VIEW
    ══════════════════════════════════════════════════════════ */
+/* ── Forest plot (Evidence view) ─────────────────────────────
+   Self-contained SVG — no external libraries, matches the dashboard
+   theme via CSS vars. 95% CI derived from Cohen's d + n for a paired
+   comparison: sd_diff = |Δ|/|d|, SE = sd_diff/√n,
+   half-width = t.975(n−1)·SE. Falls back to a point when d≈0 or n<2. */
+const _T95 = {1:12.706,2:4.303,3:3.182,4:2.776,5:2.571,6:2.447,7:2.365,
+  8:2.306,9:2.262,10:2.228,11:2.201,12:2.179,13:2.160,14:2.145,15:2.131,
+  16:2.120,17:2.110,18:2.101,19:2.093,20:2.086,21:2.080,22:2.074,23:2.069,
+  24:2.064,25:2.060,26:2.056,27:2.052,28:2.048,29:2.045,30:2.042};
+function tCrit(df){ if(df<1) return _T95[1]; if(df>30) return 1.96; return _T95[df]||1.96; }
+
+function ci95(delta, d, n){
+  const ad = Math.abs(Number(d));
+  if(!isFinite(ad) || ad < 1e-6 || !n || n < 2) return [delta, delta];
+  const se = (Math.abs(delta)/ad) / Math.sqrt(n);
+  const h  = tCrit(n-1) * se;
+  return [delta - h, delta + h];
+}
+
+function evLabel(id){
+  id = String(id || '?');
+  const m = id.match(/phase(\d+)/i);
+  let head = m ? 'P'+m[1] : (/^hpc/i.test(id) ? 'HPC' : id.slice(0,8));
+  if(/cifar100/i.test(id))           head += ' CIFAR100';
+  else if(/tinyimagenet/i.test(id))  head += ' TinyIN';
+  else if(/class_incremental/i.test(id)) head += ' class-inc';
+  const cm = id.match(/(tcl|full)_vs_([a-z]+)/i);
+  if(cm)                       return head+' · '+cm[1].toUpperCase()+'–'+cm[2].toUpperCase();
+  if(/high_penalty/i.test(id)) return head+' · high-penalty';
+  if(/governor/i.test(id))     return head+' · vs governor';
+  if(/penalty/i.test(id))      return head+' · vs penalty-only';
+  return head;
+}
+
+function forestPlotSVG(rows){
+  rows = (rows||[]).filter(r => r && r.mean_delta_forgetting != null);
+  if(!rows.length) return '<div class="empty-state">No comparison data</div>';
+  const D = rows.map(r => {
+    const delta = Number(r.mean_delta_forgetting);
+    const d = r.cohens_d ?? r.cohens_d_capped_for_power ?? r.cohens_d_reported ?? 0;
+    const [lo,hi] = ci95(delta, d, Number(r.n_seeds));
+    return { label: evLabel(r.experiment_id), delta, lo, hi,
+      n: r.n_seeds, p: r.p_value_uncorrected,
+      cite: r.paper_citation_allowed === true,
+      bonf: r.bonferroni_significant === true };
+  });
+  const W=580, rowH=30, mT=14, mB=46, mL=170, mR=116;
+  const H = mT+mB+D.length*rowH, innerW = W-mL-mR, baseY = mT+D.length*rowH;
+  let dmin = Math.min(0, ...D.map(d=>d.lo));
+  let dmax = Math.max(0.05, ...D.map(d=>d.hi));
+  const pad=(dmax-dmin)*0.05; dmin-=pad; dmax+=pad;
+  const X = v => mL + (v-dmin)/(dmax-dmin)*innerW;
+  const Y = i => mT + i*rowH + rowH/2;
+
+  const range=dmax-dmin, step = range>1.5?0.25 : range>0.6?0.1 : range>0.25?0.05 : 0.02;
+  const ticks=[]; for(let t=Math.ceil(dmin/step)*step; t<=dmax+1e-9; t+=step) ticks.push(+t.toFixed(3));
+
+  const grid = ticks.map(t=>`<line x1="${X(t).toFixed(1)}" x2="${X(t).toFixed(1)}" y1="${mT}" y2="${baseY}" stroke="var(--border)"/>`).join('');
+  const tickLbls = ticks.map(t=>`<text x="${X(t).toFixed(1)}" y="${baseY+16}" fill="var(--muted)" font-size="10" text-anchor="middle" font-family="var(--font-mono)">${t===0?'0':t.toFixed(2)}</text>`).join('');
+  const zero = `<line x1="${X(0).toFixed(1)}" x2="${X(0).toFixed(1)}" y1="${mT}" y2="${baseY}" stroke="var(--border-s)" stroke-width="1.5"/>`;
+
+  const series = D.map((d,i)=>{
+    const col  = d.cite ? 'var(--green)' : d.bonf ? 'var(--amber)' : 'var(--muted)';
+    const fill = (d.cite||d.bonf) ? col : 'var(--bg)';
+    const y = Y(i).toFixed(1), yc=+y;
+    const pTxt = d.p==null ? '' : (d.p<0.001 ? 'p<.001' : 'p='+Number(d.p).toFixed(3));
+    return `
+      <text x="${mL-10}" y="${(yc+3.5).toFixed(1)}" fill="var(--text)" font-size="11" text-anchor="end" font-family="var(--font-mono)">${esc(d.label)}</text>
+      <line x1="${X(d.lo).toFixed(1)}" x2="${X(d.hi).toFixed(1)}" y1="${y}" y2="${y}" stroke="${col}" stroke-width="1.6" opacity="0.85"/>
+      <line x1="${X(d.lo).toFixed(1)}" x2="${X(d.lo).toFixed(1)}" y1="${(yc-4).toFixed(1)}" y2="${(yc+4).toFixed(1)}" stroke="${col}" stroke-width="1.6" opacity="0.85"/>
+      <line x1="${X(d.hi).toFixed(1)}" x2="${X(d.hi).toFixed(1)}" y1="${(yc-4).toFixed(1)}" y2="${(yc+4).toFixed(1)}" stroke="${col}" stroke-width="1.6" opacity="0.85"/>
+      <circle cx="${X(d.delta).toFixed(1)}" cy="${y}" r="5" fill="${fill}" stroke="${col}" stroke-width="1.8"/>
+      <text x="${W-mR+8}" y="${(yc+3.5).toFixed(1)}" fill="var(--muted)" font-size="9.5" text-anchor="start" font-family="var(--font-mono)">${(d.delta>0?'+':'')}${d.delta.toFixed(3)} ${pTxt}</text>`;
+  }).join('');
+
+  const cap = `
+    <text x="${X((dmin)/2).toFixed(1)}" y="${baseY+34}" fill="var(--green)" font-size="9.5" text-anchor="middle">← favors TCL</text>
+    <text x="${X((dmax)/2).toFixed(1)}" y="${baseY+34}" fill="var(--muted)" font-size="9.5" text-anchor="middle">favors baseline →</text>`;
+
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block;margin:0 auto" font-family="var(--font-ui)">${grid}${zero}${series}${tickLbls}${cap}</svg>`;
+}
+
+/* ── Per-task retention curves (Evidence view) ───────────────
+   Final accuracy per task per method, from /api/forgetting_curves
+   (confusion-matrix derived). One colored line per method. */
+function methodStyle(m){
+  m = String(m||'');
+  if(/high_penalty|hpc/i.test(m))         return {c:'var(--green)',  label:'HPC'};
+  if(/tcl/i.test(m))                      return {c:'var(--teal)',   label:'TCL'};
+  if(/(^|_)si(_|$)|si_c/i.test(m))        return {c:'var(--purple)', label:'SI'};
+  if(/ewc.*(1000|1k)/i.test(m))           return {c:'var(--amber)',  label:'EWC λ1k'};
+  if(/ewc/i.test(m))                      return {c:'var(--blue)',   label:'EWC λ100'};
+  if(/sgd/i.test(m))                      return {c:'var(--red)',    label:'SGD'};
+  return {c:'var(--muted)', label:m.slice(0,9)};
+}
+
+function retentionCurveSVG(data){
+  const methods = (data && Array.isArray(data.methods)) ? data.methods : [];
+  const T = Number((data && data.n_tasks) || 0);
+  if(!methods.length || !T) return '<div class="empty-state">No per-task accuracy data</div>';
+  const W=560, mT=14, mB=40, mL=44, mR=96, innerH=210;
+  const H=mT+mB+innerH, innerW=W-mL-mR;
+
+  const vals=[]; methods.forEach(m => (m.mean||[]).forEach(v=>{ if(v!=null) vals.push(Number(v)); }));
+  if(!vals.length) return '<div class="empty-state">No per-task accuracy data</div>';
+  let ymin=Math.min(...vals), ymax=Math.max(...vals);
+  const pad=(ymax-ymin)*0.12 || 0.05; ymin=Math.max(0,ymin-pad); ymax=Math.min(1,ymax+pad);
+  const X = t => mL + (T>1 ? t/(T-1) : 0)*innerW;
+  const Y = v => mT + (1-(v-ymin)/(ymax-ymin))*innerH;
+
+  const ystep = (ymax-ymin)>0.4?0.1:0.05;
+  let grid='';
+  for(let y=Math.ceil(ymin/ystep)*ystep; y<=ymax+1e-9; y+=ystep){
+    grid += `<line x1="${mL}" x2="${mL+innerW}" y1="${Y(y).toFixed(1)}" y2="${Y(y).toFixed(1)}" stroke="var(--border)"/>`
+          + `<text x="${mL-6}" y="${(Y(y)+3.5).toFixed(1)}" fill="var(--muted)" font-size="9" text-anchor="end" font-family="var(--font-mono)">${(y*100).toFixed(0)}</text>`;
+  }
+  let xlab='';
+  for(let t=0;t<T;t++) xlab += `<text x="${X(t).toFixed(1)}" y="${mT+innerH+16}" fill="var(--muted)" font-size="9.5" text-anchor="middle" font-family="var(--font-mono)">T${t+1}</text>`;
+  xlab += `<text x="${(mL+innerW/2).toFixed(1)}" y="${mT+innerH+32}" fill="var(--muted)" font-size="9.5" text-anchor="middle">task (T1 = earliest learned)</text>`;
+  const ylab = `<text x="12" y="${(mT+innerH/2).toFixed(1)}" fill="var(--muted)" font-size="9.5" text-anchor="middle" transform="rotate(-90 12 ${(mT+innerH/2).toFixed(1)})">final accuracy %</text>`;
+
+  let lines='', legend='';
+  methods.forEach((m,i)=>{
+    const st=methodStyle(m.method);
+    const pts=[];
+    (m.mean||[]).forEach((v,t)=>{ if(v!=null) pts.push([t,Number(v)]); });
+    if(!pts.length) return;
+    lines += `<path d="${pts.map((p,j)=>`${j?'L':'M'}${X(p[0]).toFixed(1)} ${Y(p[1]).toFixed(1)}`).join(' ')}" fill="none" stroke="${st.c}" stroke-width="2" opacity="0.9"/>`;
+    lines += pts.map(p=>`<circle cx="${X(p[0]).toFixed(1)}" cy="${Y(p[1]).toFixed(1)}" r="3" fill="${st.c}"/>`).join('');
+    const ly=mT+6+i*15;
+    legend += `<line x1="${mL+innerW+8}" x2="${mL+innerW+22}" y1="${ly}" y2="${ly}" stroke="${st.c}" stroke-width="2"/>`
+            + `<text x="${mL+innerW+26}" y="${ly+3.5}" fill="var(--text)" font-size="9.5">${esc(st.label)}${m.n_seeds?` <tspan fill="var(--muted)">·n${m.n_seeds}</tspan>`:''}</text>`;
+  });
+
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block;margin:0 auto" font-family="var(--font-ui)">${grid}${lines}${ylab}${xlab}${legend}</svg>`;
+}
+
+/* ── Per-experiment chart builders (experiment detail view) ──── */
+function forgettingTrajectorySVG(data){
+  const series = (data && Array.isArray(data.series)) ? data.series : [];
+  const T = Number((data && data.n_tasks) || 0);
+  if(!series.length || !T) return '<div class="empty-state">No trajectory data</div>';
+  const W=520, mT=12, mB=40, mL=44, mR=92, innerH=180;
+  const H=mT+mB+innerH, innerW=W-mL-mR;
+  const allv=[]; series.forEach(s=>s.points.forEach(p=>allv.push(Number(p[1]))));
+  let ymin=Math.min(...allv), ymax=Math.max(...allv);
+  const pad=(ymax-ymin)*0.12||0.05; ymin=Math.max(0,ymin-pad); ymax=Math.min(1,ymax+pad);
+  const X = s => mL + (T>1 ? s/(T-1):0)*innerW;
+  const Y = v => mT + (1-(v-ymin)/(ymax-ymin))*innerH;
+  const palette=['var(--blue)','var(--teal)','var(--purple)','var(--amber)','var(--green)','var(--red)'];
+  const ystep=(ymax-ymin)>0.4?0.1:0.05; let grid='';
+  for(let y=Math.ceil(ymin/ystep)*ystep;y<=ymax+1e-9;y+=ystep)
+    grid+=`<line x1="${mL}" x2="${mL+innerW}" y1="${Y(y).toFixed(1)}" y2="${Y(y).toFixed(1)}" stroke="var(--border)"/><text x="${mL-6}" y="${(Y(y)+3.5).toFixed(1)}" fill="var(--muted)" font-size="9" text-anchor="end" font-family="var(--font-mono)">${(y*100).toFixed(0)}</text>`;
+  let xlab=''; for(let s=0;s<T;s++) xlab+=`<text x="${X(s).toFixed(1)}" y="${mT+innerH+15}" fill="var(--muted)" font-size="9.5" text-anchor="middle" font-family="var(--font-mono)">after T${s+1}</text>`;
+  const ylab=`<text x="12" y="${(mT+innerH/2).toFixed(1)}" fill="var(--muted)" font-size="9.5" text-anchor="middle" transform="rotate(-90 12 ${(mT+innerH/2).toFixed(1)})">accuracy %</text>`;
+  let lines='',legend='';
+  series.forEach((s,i)=>{
+    const c=palette[s.task % palette.length];
+    const pts=s.points;
+    lines+=`<path d="${pts.map((p,j)=>`${j?'L':'M'}${X(p[0]).toFixed(1)} ${Y(p[1]).toFixed(1)}`).join(' ')}" fill="none" stroke="${c}" stroke-width="2" opacity="0.9"/>`;
+    lines+=pts.map(p=>`<circle cx="${X(p[0]).toFixed(1)}" cy="${Y(p[1]).toFixed(1)}" r="2.6" fill="${c}"/>`).join('');
+    const ly=mT+6+i*14;
+    legend+=`<line x1="${mL+innerW+8}" x2="${mL+innerW+20}" y1="${ly}" y2="${ly}" stroke="${c}" stroke-width="2"/><text x="${mL+innerW+24}" y="${ly+3.5}" fill="var(--text)" font-size="9.5">Task ${s.task+1}</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block;margin:0 auto" font-family="var(--font-ui)">${grid}${lines}${ylab}${xlab}${legend}</svg>`;
+}
+
+function perSeedEffectSVG(data){
+  const seeds=(data&&Array.isArray(data.seeds))?data.seeds:[];
+  const deltas=(data&&Array.isArray(data.deltas))?data.deltas:[];
+  if(!seeds.length||!deltas.length) return '<div class="empty-state">No per-seed data</div>';
+  const favNeg = (data.favorable_when||'negative')==='negative';
+  const W=520, mT=14, mB=38, mL=46, mR=20, innerH=170;
+  const H=mT+mB+innerH, innerW=W-mL-mR;
+  const vals=deltas.filter(v=>v!=null).map(Number);
+  let dmin=Math.min(0,...vals), dmax=Math.max(0,...vals);
+  const pad=(dmax-dmin)*0.12||0.02; dmin-=pad; dmax+=pad;
+  const n=seeds.length;
+  const X = i => mL + (n>1? i/(n-1):0.5)*innerW;
+  const Y = v => mT + (1-(v-dmin)/(dmax-dmin))*innerH;
+  const ystep=(dmax-dmin)>0.4?0.1:(dmax-dmin)>0.15?0.05:0.02; let grid='';
+  for(let y=Math.ceil(dmin/ystep)*ystep;y<=dmax+1e-9;y+=ystep)
+    grid+=`<line x1="${mL}" x2="${mL+innerW}" y1="${Y(y).toFixed(1)}" y2="${Y(y).toFixed(1)}" stroke="var(--border)"/><text x="${mL-6}" y="${(Y(y)+3.5).toFixed(1)}" fill="var(--muted)" font-size="9" text-anchor="end" font-family="var(--font-mono)">${y>0?'+':''}${y.toFixed(2)}</text>`;
+  const z0=`<line x1="${mL}" x2="${mL+innerW}" y1="${Y(0).toFixed(1)}" y2="${Y(0).toFixed(1)}" stroke="var(--border-s)" stroke-width="1.4"/>`;
+  let stems='';
+  deltas.forEach((dv,i)=>{
+    if(dv==null) return;
+    const fav = favNeg ? dv<0 : dv>0;
+    const c = fav ? 'var(--green)' : 'var(--red)';
+    const x=X(i).toFixed(1);
+    stems+=`<line x1="${x}" x2="${x}" y1="${Y(0).toFixed(1)}" y2="${Y(dv).toFixed(1)}" stroke="${c}" stroke-width="2" opacity="0.7"/><circle cx="${x}" cy="${Y(dv).toFixed(1)}" r="4" fill="${c}"/><text x="${x}" y="${mT+innerH+14}" fill="var(--muted)" font-size="9" text-anchor="middle" font-family="var(--font-mono)">${esc(String(seeds[i]))}</text>`;
+  });
+  const xlab=`<text x="${(mL+innerW/2).toFixed(1)}" y="${mT+innerH+30}" fill="var(--muted)" font-size="9.5" text-anchor="middle">seed · ${favNeg?'green = HPC better (Δ&lt;0)':'green = better'}</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block;margin:0 auto" font-family="var(--font-ui)">${grid}${z0}${stems}${xlab}</svg>`;
+}
+
+function methodForgettingSVG(data){
+  const methods=(data&&Array.isArray(data.methods))?data.methods.filter(m=>m.mean!=null):[];
+  if(!methods.length) return '<div class="empty-state">No method data</div>';
+  const W=520, mT=10, mB=28, mL=120, mR=54, rowH=30;
+  const innerW=W-mL-mR, H=mT+mB+methods.length*rowH;
+  const xmax=Math.max(...methods.map(m=>Number(m.mean)+(Number(m.std)||0)))*1.12 || 0.1;
+  const X = v => mL + (v/xmax)*innerW;
+  const best=Math.min(...methods.map(m=>Number(m.mean)));
+  let bars='';
+  methods.forEach((m,i)=>{
+    const y=mT+i*rowH+rowH/2;
+    const st=methodStyle(m.label);
+    const c = (Number(m.mean)===best) ? 'var(--green)' : st.c;
+    const w=Math.max(0,X(m.mean)-mL);
+    bars+=`<text x="${mL-8}" y="${(y+3.5).toFixed(1)}" fill="var(--text)" font-size="11" text-anchor="end">${esc(st.label||m.label)}</text>`;
+    bars+=`<rect x="${mL}" y="${(y-8).toFixed(1)}" width="${w.toFixed(1)}" height="16" rx="2" fill="${c}" opacity="0.55"/>`;
+    if(m.std){ const x1=X(Math.max(0,Number(m.mean)-Number(m.std))), x2=X(Number(m.mean)+Number(m.std));
+      bars+=`<line x1="${x1.toFixed(1)}" x2="${x2.toFixed(1)}" y1="${y}" y2="${y}" stroke="var(--text)" stroke-width="1" opacity="0.5"/>`; }
+    bars+=`<text x="${(X(m.mean)+6).toFixed(1)}" y="${(y+3.5).toFixed(1)}" fill="var(--muted)" font-size="9.5" font-family="var(--font-mono)">${Number(m.mean).toFixed(3)}</text>`;
+  });
+  const axis=`<text x="${(mL+innerW/2).toFixed(1)}" y="${H-8}" fill="var(--muted)" font-size="9.5" text-anchor="middle">mean forgetting (lower = better · green = best)</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block;margin:0 auto" font-family="var(--font-ui)">${bars}${axis}</svg>`;
+}
+
+const CHART_RENDERERS = {
+  forgetting_trajectory: forgettingTrajectorySVG,
+  per_seed_effect:       perSeedEffectSVG,
+  sprt:                  sprtChartSVG,
+  method_forgetting:     methodForgettingSVG,
+};
+
+function renderExpCharts(payload){
+  const host = document.getElementById('exp-detail-charts');
+  if(!host) return;
+  const charts = (payload && Array.isArray(payload.charts)) ? payload.charts : [];
+  if(!charts.length){ host.innerHTML = '<div class="empty-state">No visualizations available for this experiment yet</div>'; return; }
+  host.innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px">` + charts.map(c=>{
+    const fn = CHART_RENDERERS[c.type];
+    const body = fn ? fn(c.data) : '<div class="empty-state">Unsupported chart</div>';
+    return `<div style="background:var(--raised);border:1px solid var(--border);border-radius:8px;padding:12px">
+      <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:8px">${esc(c.title||c.type)}</div>${body}</div>`;
+  }).join('') + `</div>`;
+}
+
 function renderEvidence() {
   const phases = S.data.phases || {};
   const rows = Array.isArray(phases.phases) ? phases.phases
@@ -2317,6 +2706,31 @@ function renderEvidence() {
          <span class="kv-v">${esc(vi.status||vi.value||'—')}</span>`
       ).join('')}</div>`
     : '<div class="empty-state">No validation data</div>';
+
+  // Forest plot — rich pairwise inventory from /api/evidence
+  const fc = $('ev-forest');
+  if (fc) {
+    if (S.errors.evidence) {
+      fc.innerHTML = `<div class="api-err">Error: ${esc(S.errors.evidence)}</div>`;
+    } else {
+      const ev = S.data.evidence || {};
+      const evRows = Array.isArray(ev.results) ? ev.results : (Array.isArray(ev) ? ev : []);
+      fc.innerHTML = forestPlotSVG(evRows);
+    }
+  }
+
+  // Per-task retention curves — confusion-matrix derived (/api/forgetting_curves)
+  const rc = $('ev-retention');
+  if (rc) {
+    if (S.errors.forgetting) {
+      rc.innerHTML = `<div class="api-err">Error: ${esc(S.errors.forgetting)}</div>`;
+    } else {
+      const fd = S.data.forgetting || {};
+      rc.innerHTML = (fd.ok === false)
+        ? `<div class="empty-state">${esc(fd.error || 'No per-task accuracy data')}</div>`
+        : retentionCurveSVG(fd);
+    }
+  }
 }
 
 function openEvidenceDrawer(jsonStr) {
@@ -2376,7 +2790,7 @@ function renderPapers() {
         <td>${miniProgress(pct, 100, Math.round(pct)+'%')}</td>
         <td>${badgeHtml(p.compile_status||'—','dim')}</td>
         <td>${waiting > 0 ? badgeHtml(waiting + ' exp.','amber') : '—'}</td>
-        <td onclick="event.stopPropagation()">${p.serve_pdf || p.has_pdf ? `<a href="${esc(p.serve_pdf||'/serve/paper/'+encodeURIComponent(p.project_id||p.paper_id)+'/main.pdf')}" target="_blank" class="btn sm" onclick="event.stopPropagation()">PDF ↗</a>` : '<span style="color:var(--dim)">—</span>'}</td>
+        <td onclick="event.stopPropagation()">${p.serve_pdf || p.has_pdf ? `<a href="${esc(p.serve_pdf ? '/serve/paper/'+p.serve_pdf : '/serve/paper/'+encodeURIComponent(p.project_id||p.paper_id)+'/main.pdf')}" target="_blank" class="btn sm" onclick="event.stopPropagation()">PDF ↗</a>` : '<span style="color:var(--dim)">—</span>'}</td>
         <td onclick="event.stopPropagation()" style="display:flex;gap:4px;flex-wrap:wrap">
           <button class="btn sm danger" onclick="event.stopPropagation();returnToAuthor('${esc(p.paper_id||p.project_id)}')">↩ Return</button>
         </td>
@@ -3139,6 +3553,258 @@ async function loadNamedLog() {
 }
 
 /* ══════════════════════════════════════════════════════════
+   SELF-IMPROVEMENT VIEW
+   ══════════════════════════════════════════════════════════ */
+
+let _siData = null;
+
+function loadSelfImprovement() {
+  fetch(ENDPOINTS.self_improvement)
+    .then(r => r.json())
+    .then(d => { _siData = d; renderSelfImprovement(d); })
+    .catch(() => { $('si-readiness').innerHTML = '<div class="empty-state">Failed to load</div>'; });
+}
+
+function renderSelfImprovement(d) {
+  if (!d) return;
+  renderSiReadiness(d);
+  renderSiCycle(d.cycle || {});
+  renderSiHardware(d.hardware || {});
+  renderSiDelta(d.delta || {}, d.signals || {});
+  renderSiAnchor(d.anchor || {});
+  renderSiAdapter(d.adapter || {});
+  renderSiSignals(d.signals || {});
+  renderSiPrereg(d.active_preregistration || {});
+}
+
+function siStatusBadge(label, ok) {
+  const col = ok ? 'var(--green)' : 'var(--red)';
+  return `<span style="background:${col};color:#fff;border-radius:3px;padding:1px 6px;font-size:10px;font-weight:700">${label}</span>`;
+}
+
+function renderSiReadiness(d) {
+  const r = d.readiness || {};
+  const policy = d.policy || {};
+  const checks = [
+    ['Signals ≥20',       r.signals_ok,   `${(d.signals||{}).total||0} / ${policy.min_delta_signals||20}`],
+    ['Diversity ≥0.4',    r.diversity_ok,  `${Object.keys((d.signals||{}).by_kind||{}).length} kinds`],
+    ['Anchor integrity',  r.anchor_ok,     r.anchor_ok ? 'verified' : 'FAILED'],
+    ['Hardware ≥14GB',    r.hardware_ok,   `${(d.hardware||{}).vram_gb||0}GB / 14GB`],
+  ];
+  const rows = checks.map(([label, ok, detail]) =>
+    `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
+      ${siStatusBadge(ok ? '✓' : '✗', ok)}
+      <span style="flex:1;font-size:12px">${label}</span>
+      <span style="font-size:11px;color:var(--muted)">${detail}</span>
+    </div>`
+  ).join('');
+  const overall = r.can_train;
+  const blocker = r.blocker ? `<div style="font-size:11px;color:var(--amber);margin-top:8px">Blocker: ${esc(r.blocker)}</div>` : '';
+  $('si-readiness').innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <div style="font-weight:700;font-size:13px">Pipeline Readiness</div>
+      ${siStatusBadge(overall ? 'READY TO TRAIN' : 'BLOCKED', overall)}
+    </div>
+    ${rows}${blocker}`;
+}
+
+function renderSiCycle(c) {
+  if (!c.cycle_id) { $('si-cycle').innerHTML = '<div class="kv-grid"><span class="kv-k">Status</span><span class="kv-v">No cycle started</span></div>'; return; }
+  const statusColor = {'curating':'var(--blue)','training':'var(--amber)','completed':'var(--green)','gate_failed':'var(--red)','idle':'var(--dim)'}[c.status] || 'var(--muted)';
+  $('si-cycle').innerHTML = `
+    <div style="font-weight:700;font-size:13px;margin-bottom:8px">Cycle State</div>
+    <div class="kv-grid">
+      <span class="kv-k">Cycle ID</span><span class="kv-v mono">${esc(c.cycle_id)}</span>
+      <span class="kv-k">Status</span><span class="kv-v" style="color:${statusColor};font-weight:700">${esc(c.status||'—')}</span>
+      <span class="kv-k">Cycle #</span><span class="kv-v">${c.cycle_number||'—'}</span>
+      <span class="kv-k">Completed</span><span class="kv-v">${c.total_cycles_completed||0}</span>
+      <span class="kv-k">Gate failures</span><span class="kv-v">${c.consecutive_gate_failures||0} / 3</span>
+      <span class="kv-k">Human resume?</span><span class="kv-v">${c.human_resume_required ? '<span style="color:var(--red)">REQUIRED</span>' : 'No'}</span>
+      <span class="kv-k">Delta</span><span class="kv-v mono">${esc(c.delta_id||'not yet')}</span>
+    </div>`;
+}
+
+function renderSiHardware(h) {
+  const pct = Math.min(100, Math.round((h.vram_gb||0) / (h.required_vram_gb||14) * 100));
+  const barCol = h.sufficient ? 'var(--green)' : (pct > 50 ? 'var(--amber)' : 'var(--red)');
+  $('si-hardware').innerHTML = `
+    <div style="font-weight:700;font-size:13px;margin-bottom:8px">Hardware</div>
+    <div class="kv-grid">
+      <span class="kv-k">GPU</span><span class="kv-v">${esc(h.gpu_name||'none')}</span>
+      <span class="kv-k">VRAM</span><span class="kv-v">${h.vram_gb||0}GB</span>
+      <span class="kv-k">Required</span><span class="kv-v">${h.required_vram_gb||14}GB (Qwen2.5-7B)</span>
+    </div>
+    <div style="margin:8px 0 4px;font-size:11px;color:var(--muted)">VRAM capacity</div>
+    <div style="background:var(--surface2);border-radius:3px;height:8px;width:100%">
+      <div style="background:${barCol};height:8px;border-radius:3px;width:${pct}%;transition:width 0.4s"></div>
+    </div>
+    <div style="font-size:10px;color:var(--dim);margin-top:3px">${pct}% of required</div>
+    <div class="kv-grid" style="margin-top:8px">
+      <span class="kv-k">Watchdog fired</span><span class="kv-v">${h.watchdog_fired ? '<span style="color:var(--green)">Yes</span>' : 'No'}</span>
+      <span class="kv-k">Last poll</span><span class="kv-v">${fmtShort(h.watchdog_last_check||'')}</span>
+    </div>`;
+}
+
+function renderSiDelta(delta, signals) {
+  if (!delta.delta_id) { $('si-delta').innerHTML = '<div style="font-size:12px;color:var(--muted)">No delta assembled yet.</div>'; return; }
+  const kinds = delta.kind_distribution || {};
+  const total = delta.signal_count || 0;
+  const kindColors = {'portfolio_governance':'#6b9bd2','evidence_assessment':'#67b97b','experiment_design':'#e0a040','statistical_judgment':'#c06060','problem_study':'#9b6ec0','research_decision':'#5abdd4'};
+  const kindBars = Object.entries(kinds).map(([k, v]) => {
+    const pct = total > 0 ? Math.round(v/total*100) : 0;
+    const col = kindColors[k] || 'var(--muted)';
+    const label = k.replace(/_/g,' ');
+    return `<div style="margin-bottom:5px">
+      <div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:2px">
+        <span style="color:${col};font-weight:600">${label}</span><span style="color:var(--dim)">${v} (${pct}%)</span>
+      </div>
+      <div style="background:var(--surface2);border-radius:2px;height:6px">
+        <div style="background:${col};height:6px;border-radius:2px;width:${pct}%"></div>
+      </div>
+    </div>`;
+  }).join('');
+  const divScore = (delta.diversity_score||0).toFixed(2);
+  const divOk = (delta.diversity_score||0) >= 0.4;
+  $('si-delta').innerHTML = `
+    <div style="font-weight:700;font-size:13px;margin-bottom:8px">Training Delta <span style="font-size:10px;font-weight:400;color:var(--muted)">${esc(delta.delta_id)}</span></div>
+    <div class="kv-grid" style="margin-bottom:10px">
+      <span class="kv-k">Signals</span><span class="kv-v">${total} <span style="color:var(--green);font-size:10px">✓ ≥20</span></span>
+      <span class="kv-k">Diversity</span><span class="kv-v">${divScore} ${siStatusBadge(divOk?'✓':'✗',divOk)}</span>
+      <span class="kv-k">Overclaims excluded</span><span class="kv-v">${delta.overclaim_excluded||0}</span>
+      <span class="kv-k">Anchor overlaps</span><span class="kv-v">${delta.anchor_overlaps_excluded||0}</span>
+      <span class="kv-k">Ready</span><span class="kv-v">${siStatusBadge(delta.ready?'READY':'NOT READY', delta.ready)}</span>
+    </div>
+    <div style="font-size:11px;font-weight:600;color:var(--muted);margin-bottom:6px">Kind distribution</div>
+    ${kindBars}`;
+}
+
+function renderSiAnchor(a) {
+  $('si-anchor').innerHTML = `
+    <div style="font-weight:700;font-size:13px;margin-bottom:8px">Anchor Pack <span style="font-size:10px;font-weight:400;color:var(--muted)">${esc(a.manifest_id||'—')}</span></div>
+    <div class="kv-grid">
+      <span class="kv-k">Integrity</span><span class="kv-v">${siStatusBadge(a.integrity_ok?'OK':'FAILED', a.integrity_ok)}</span>
+      <span class="kv-k">Items</span><span class="kv-v">${a.item_count||0}</span>
+      <span class="kv-k">Baseline score</span><span class="kv-v">${a.baseline_mean_score||0}</span>
+      <span class="kv-k">Overclaim rate</span><span class="kv-v">${a.baseline_overclaim_rate||0}</span>
+      <span class="kv-k">Sealed</span><span class="kv-v">${fmtShort(a.sealed_at||'')}</span>
+      <span class="kv-k">Sealed by</span><span class="kv-v">${esc(a.sealed_by||'—')}</span>
+    </div>
+    <div style="margin-top:8px;font-size:11px;color:var(--dim)">Item IDs:</div>
+    <div style="font-size:10px;color:var(--muted);font-family:monospace;margin-top:3px">${(a.item_ids||[]).join('<br>')}</div>`;
+}
+
+function renderSiAdapter(a) {
+  const modeColor = a.serving_mode === 'tuned_local' ? 'var(--green)' : 'var(--amber)';
+  $('si-adapter').innerHTML = `
+    <div style="font-weight:700;font-size:13px;margin-bottom:8px">Active Adapter</div>
+    <div class="kv-grid">
+      <span class="kv-k">Serving mode</span><span class="kv-v" style="color:${modeColor};font-weight:700">${esc(a.serving_mode||'base')}</span>
+      <span class="kv-k">Retrain ID</span><span class="kv-v mono">${esc(a.retrain_id||'none')}</span>
+      <span class="kv-k">Base model</span><span class="kv-v">${esc(a.base_model||'—')}</span>
+      <span class="kv-k">Deployed</span><span class="kv-v">${fmtShort(a.deployed_at||'')}</span>
+      <span class="kv-k">Files on disk</span><span class="kv-v">${siStatusBadge(a.files_exist?'PRESENT':'MISSING', a.files_exist)}</span>
+    </div>
+    ${a.adapter_path ? `<div style="font-size:10px;color:var(--dim);margin-top:6px;font-family:monospace">${esc(a.adapter_path)}</div>` : ''}`;
+}
+
+function renderSiSignals(s) {
+  const items = s.items || [];
+  const kindColors = {'portfolio_governance':'#6b9bd2','evidence_assessment':'#67b97b','experiment_design':'#e0a040','statistical_judgment':'#c06060','problem_study':'#9b6ec0','research_decision':'#5abdd4'};
+  if (!items.length) { $('si-signals').innerHTML = '<div class="empty-state">No signals found</div>'; return; }
+  const rows = items.map(sig => {
+    const col = kindColors[sig.kind] || 'var(--muted)';
+    const issues = [];
+    if (sig.overclaim_present) issues.push('<span style="color:var(--red);font-size:10px">⚠ overclaim</span>');
+    if (sig.anchor_pack_overlap) issues.push('<span style="color:var(--amber);font-size:10px">⚠ anchor-overlap</span>');
+    return `<tr>
+      <td style="font-family:monospace;font-size:10px;color:var(--dim)">${esc(sig.signal_id)}</td>
+      <td><span style="color:${col};font-size:10px;font-weight:600">${esc(sig.kind.replace(/_/g,' '))}</span></td>
+      <td style="text-align:center">${sig.quality_score.toFixed(1)}</td>
+      <td style="font-size:10px;color:var(--dim)">${fmtShort(sig.created_at)}</td>
+      <td>${issues.join(' ') || '<span style="color:var(--green);font-size:10px">clean</span>'}</td>
+    </tr>`;
+  }).join('');
+  $('si-signals').innerHTML = `
+    <div style="font-size:11px;color:var(--muted);margin-bottom:8px">${items.length} signals · mean quality ${s.mean_quality} · ${Object.keys(s.by_kind).length} kinds</div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;font-size:11px;border-collapse:collapse">
+        <thead><tr style="text-align:left;border-bottom:1px solid var(--border);color:var(--dim)">
+          <th style="padding:4px 6px">Signal ID</th><th style="padding:4px 6px">Kind</th>
+          <th style="padding:4px 6px;text-align:center">Quality</th>
+          <th style="padding:4px 6px">Created</th><th style="padding:4px 6px">Status</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function renderSiPrereg(p) {
+  if (!p || !p.experiment_id) { $('si-prereg').innerHTML = '<div style="font-size:12px;color:var(--muted)">No experiment currently running with a preregistration.</div>'; return; }
+  const pr = p.preregistration || {};
+  const sprt = pr.sprt_parameters || {};
+  $('si-prereg').innerHTML = `
+    <div class="kv-grid">
+      <span class="kv-k">Experiment</span><span class="kv-v">${esc(p.experiment_name||'—')}</span>
+      <span class="kv-k">PID</span><span class="kv-v mono">${p.pid||'—'}</span>
+      <span class="kv-k">Started</span><span class="kv-v">${fmtShort(p.started_at||'')}</span>
+    </div>
+    <div style="margin-top:10px;font-size:11px;font-weight:600;color:var(--muted)">Hypothesis</div>
+    <div style="font-size:11px;margin-top:4px;line-height:1.5;color:var(--text)">${esc(pr.hypothesis||'—')}</div>
+    <div style="margin-top:10px" class="kv-grid">
+      <span class="kv-k">Primary outcome</span><span class="kv-v">${esc(pr.primary_outcome||'—')}</span>
+      <span class="kv-k">Min detectable d</span><span class="kv-v">${pr.min_detectable_effect_d||'—'}</span>
+      <span class="kv-k">Required seeds</span><span class="kv-v">${pr.required_seeds||'—'}</span>
+      <span class="kv-k">Test type</span><span class="kv-v">${esc(pr.test_type||'—')}</span>
+      <span class="kv-k">Alpha</span><span class="kv-v">${pr.alpha||'—'}</span>
+      <span class="kv-k">Bonferroni k</span><span class="kv-v">${pr.bonferroni_k||'—'} (no correction — pre-registered single hypothesis)</span>
+    </div>
+    ${sprt.alpha !== undefined ? `
+    <div style="margin-top:10px;font-size:11px;font-weight:600;color:var(--muted)">SPRT Parameters</div>
+    <div class="kv-grid" style="margin-top:4px">
+      <span class="kv-k">α</span><span class="kv-v">${sprt.alpha}</span>
+      <span class="kv-k">β</span><span class="kv-v">${sprt.beta}</span>
+      <span class="kv-k">Check interval</span><span class="kv-v">every ${sprt.check_interval_seeds} seeds</span>
+      <span class="kv-k">Log to</span><span class="kv-v mono">${esc(sprt.log_to||'—')}</span>
+    </div>
+    <div style="margin-top:6px;font-size:11px;color:var(--dim)">${esc(pr.stopping_rule||'')}</div>` : ''}
+    ${pr.success_criterion ? `
+    <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div style="background:rgba(103,185,123,0.1);border:1px solid var(--green);border-radius:4px;padding:8px;font-size:11px">
+        <div style="font-weight:700;color:var(--green);margin-bottom:4px">Success criterion</div>
+        ${esc(pr.success_criterion)}
+      </div>
+      <div style="background:rgba(192,96,96,0.1);border:1px solid var(--red);border-radius:4px;padding:8px;font-size:11px">
+        <div style="font-weight:700;color:var(--red);margin-bottom:4px">Failure criterion</div>
+        ${esc(pr.failure_criterion||'—')}
+      </div>
+    </div>` : ''}`;
+}
+
+async function siDryRun() {
+  const btn = $('si-dryrun-btn');
+  const out = $('si-dryrun-result');
+  btn.disabled = true;
+  btn.textContent = '⟳ Running…';
+  out.textContent = '';
+  try {
+    const r = await fetch('/api/self_improvement/dry_run', {method:'POST'});
+    const d = await r.json();
+    if (d.ok) {
+      out.style.color = 'var(--green)';
+      out.textContent = '✓ Dry run passed — all checks OK';
+    } else {
+      out.style.color = 'var(--red)';
+      out.textContent = `✗ Exit ${d.exit_code}: ${d.stderr||d.error||'see logs'}`;
+    }
+  } catch(e) {
+    out.style.color = 'var(--red)';
+    out.textContent = '✗ Request failed';
+  }
+  btn.disabled = false;
+  btn.textContent = '⊙ Dry Run';
+}
+
+/* ══════════════════════════════════════════════════════════
    TAR INTELLIGENCE
    ══════════════════════════════════════════════════════════ */
 async function sendIntel() {
@@ -3391,6 +4057,7 @@ function renderExpDetail(exp) {
   $('dp-badges').innerHTML = badgeHtml(stage, tone) + (exp.priority ? '&nbsp;' + badgeHtml('pri ' + exp.priority, 'dim') : '');
 
   const logPromise = api('/api/experiment/' + encodeURIComponent(exp.id) + '/log').catch(() => ({lines:[]}));
+  const chartsPromise = api('/api/experiment/' + encodeURIComponent(exp.id) + '/charts').catch(() => ({charts:[]}));
 
   $('dp-body').innerHTML = `
     <div class="dp-3col">
@@ -3468,6 +4135,11 @@ function renderExpDetail(exp) {
     </div>
 
     <div class="dp-section">
+      <div class="dp-section-head">Visualizations</div>
+      <div class="dp-section-body" id="exp-detail-charts"><div class="loading-state">Loading charts…</div></div>
+    </div>
+
+    <div class="dp-section">
       <div class="dp-section-head">Live Log
         <button class="btn sm" onclick="refreshExpLog('${esc(exp.id)}')">↻ Reload</button>
       </div>
@@ -3489,6 +4161,8 @@ function renderExpDetail(exp) {
     el.innerHTML = lines.length ? lines.map(logLine).join('\n') : '<span style="color:var(--dim)">No log lines available</span>';
     el.scrollTop = el.scrollHeight;
   });
+
+  chartsPromise.then(renderExpCharts);
 }
 
 async function refreshExpLog(expId) {
@@ -3695,7 +4369,7 @@ function renderPaperDetail(p) {
           <div class="dp-section-body">
             <div style="display:flex;flex-direction:column;gap:10px">
               ${p.has_pdf || p.serve_pdf
-                ? `<a href="${esc(p.serve_pdf||'/serve/paper/'+encodeURIComponent(p.project_id||p.paper_id)+'/main.pdf')}" target="_blank" class="btn primary">📄 Open PDF</a>`
+                ? `<a href="${esc(p.serve_pdf ? '/serve/paper/'+p.serve_pdf : '/serve/paper/'+encodeURIComponent(p.project_id||p.paper_id)+'/main.pdf')}" target="_blank" class="btn primary">📄 Open PDF</a>`
                 : `<div style="padding:10px;text-align:center;color:var(--dim);font-size:12px;border:1px dashed var(--border);border-radius:var(--r)">PDF not yet compiled</div>`}
               ${p.serve_tex ? `<a href="${esc(p.serve_tex)}" target="_blank" class="btn">📝 Download LaTeX (.tex)</a>` : ''}
             </div>
