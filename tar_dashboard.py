@@ -487,7 +487,21 @@ def _author_state_payload(force_refresh: bool = False) -> dict[str, Any]:
             state = write_planned_author_state(_WS)
         except Exception:
             state = state or {}
-    return state if isinstance(state, dict) else {}
+    if not isinstance(state, dict):
+        state = {}
+    # Normalise field names the JS expects
+    if "active_paper_id" not in state:
+        cp = state.get("current_paper") or {}
+        state["active_paper_id"] = (
+            str(cp.get("project_id") or cp.get("paper_id") or "")
+            or str(state.get("current_paper_id") or "")
+        )
+    if "queue_length" not in state:
+        pq = state.get("paper_queue", [])
+        state["queue_length"] = len(pq) if isinstance(pq, list) else 0
+    if not state.get("status"):
+        state["status"] = "idle"
+    return state
 
 
 def _run_paper_revision_async(project_id: str, reason: str) -> None:
@@ -2305,10 +2319,15 @@ def api_experiment_log(exp_id: str):
 _TRAJ_RE = re.compile(r"\[(\w+)\]\s+seed=(\d+)\s+after task (\d+):\s*accs=\[([^\]]*)\]")
 
 
-def _parse_forgetting_trajectory(raw_text: str) -> dict | None:
+def _parse_forgetting_trajectory(raw_text: str, prefer_method: str = "") -> dict | None:
     """Parse '[METHOD] seed=S after task K: accs=[a0,...,aK]' lines from a raw run
-    log into a per-task accuracy trajectory for the most-recently-seen method/seed.
-    Returns a chart spec, or None if no such lines exist."""
+    log into a per-task accuracy trajectory.
+
+    Selects the MOST-COMPLETE trajectory (largest number of tasks logged) rather
+    than the most recent — this keeps the chart stable and informative instead of
+    collapsing to a single point each time a new method/seed begins training. Ties
+    break toward the experiment's primary method (``prefer_method``), then toward
+    the most-recently-seen run. Returns a chart spec, or None if absent."""
     data: dict[tuple, dict[int, list[float]]] = {}
     order: list[tuple] = []
     for m in _TRAJ_RE.finditer(raw_text or ""):
@@ -2323,7 +2342,11 @@ def _parse_forgetting_trajectory(raw_text: str) -> dict | None:
             order.append(key)
     if not order:
         return None
-    method, seed = order[-1]
+    pref = (prefer_method or "").upper()
+    def _rank(key: tuple) -> tuple:
+        mname = key[0]
+        return (max(data[key]), 1 if pref and pref in mname.upper() else 0, order.index(key))
+    method, seed = max(order, key=_rank)
     rows = data[(method, seed)]
     max_k = max(rows)
     n_tasks = max_k + 1
@@ -2384,7 +2407,8 @@ def api_experiment_charts(exp_id: str):
     except Exception:
         raw_log = ""
     if raw_log:
-        traj = _parse_forgetting_trajectory(raw_log)
+        prefer = "HPC" if "hpc" in str(exp.get("method", "")).lower() else ""
+        traj = _parse_forgetting_trajectory(raw_log, prefer_method=prefer)
         if traj:
             charts.append(traj)
 
@@ -3249,21 +3273,33 @@ def api_papers():
             pdf_path = Path(str(rec.get("paper_pdf", "") or "")) if rec.get("paper_pdf") else (paper_dir / "main.pdf" if paper_dir else None)
             serve_pdf = _serve_path_for(str(pdf_path)) if pdf_path and pdf_path.exists() else ""
             serve_tex = _serve_path_for(str(tex_path)) if tex_path and tex_path.exists() else ""
-            # Only show registry-sourced entries that have a compiled PDF on disk
-            if not serve_pdf:
-                continue
             if serve_pdf:
                 seen_serve.add(serve_pdf)
             if serve_tex:
                 seen_serve.add(serve_tex)
             seen_ids.add(pid)
+            # Pull richer status from paper_plan.json if it exists
+            plan: dict = {}
+            if paper_dir and (paper_dir / "paper_plan.json").exists():
+                try:
+                    plan = json.loads((paper_dir / "paper_plan.json").read_text(encoding="utf-8"))
+                except Exception:
+                    plan = {}
+            plan_status = (
+                plan.get("status")
+                or rec.get("paper_status")
+                or rec.get("readiness")
+                or rec.get("status")
+                or "planned"
+            )
+            plan_progress = plan.get("progress", {}) or {}
             papers.append({
                 "project_id":      pid,
                 "title":           rec.get("name", pid),
                 "verdict":         "",
-                "status":          rec.get("status", "planned"),
-                "plan_status":     rec.get("paper_status", rec.get("readiness", rec.get("status", "planned"))),
-                "readiness":       rec.get("readiness", ""),
+                "status":          plan_status,
+                "plan_status":     plan_status,
+                "readiness":       plan.get("readiness") or rec.get("readiness", ""),
                 "truth_status":    rec.get("director_truth_status", "weak"),
                 "recommendation":  rec.get("director_recommendation", ""),
                 "has_pdf":         bool(pdf_path and pdf_path.exists()),
@@ -3273,14 +3309,14 @@ def api_papers():
                 "mean_forgetting": None,
                 "mean_delta":      None,
                 "p_val":           None,
-                "progress_pct":    None,
-                "progress_label":  "",
-                "compile_status":  "",
-                "waiting_for_experiments": [],
-                "complete_count":  0,
+                "progress_pct":    plan_progress.get("pct"),
+                "progress_label":  plan_progress.get("label", ""),
+                "compile_status":  plan.get("compile_status", ""),
+                "waiting_for_experiments": plan.get("waiting_for_experiments", []),
+                "complete_count":  plan_progress.get("experiments_complete_count", 0),
                 "running_count":   0,
                 "pending_count":   0,
-                "total_experiments": 0,
+                "total_experiments": plan_progress.get("experiments_total", 0),
             })
 
     for paper in papers:
@@ -4834,11 +4870,28 @@ def _sync_phase2_progress(script_key: str) -> None:
         changed = False
         for exp in data.get("experiments", []):
             if exp.get("runner_key") == runner_key:
-                prev = (exp.get("progress") or {}).get("seeds_done", -1)
-                if prev != seeds_done:  # only write when changed
-                    exp.setdefault("progress", {})
-                    exp["progress"]["seeds_done"]  = seeds_done
-                    exp["progress"]["seeds_total"] = seeds_total
+                prog = exp.setdefault("progress", {})
+                prev = prog.get("seeds_done", -1)
+                now = time.time()
+                # Self-initializing throughput baseline: the first observation anchors
+                # (seeds, time) — set even before the count advances so the very next
+                # completion can be MEASURED. avg/ETA are then derived from real
+                # completions since that anchor (no fabricated estimate, and correct
+                # under resume — pre-existing seeds are excluded).
+                if prog.get("_rate_base_ts") is None:
+                    prog["_rate_base_seeds"] = seeds_done
+                    prog["_rate_base_ts"]    = now
+                    changed = True
+                if prev != seeds_done:  # the seed count advanced — measure and write
+                    base_seeds = int(prog.get("_rate_base_seeds", seeds_done) or 0)
+                    base_ts    = float(prog.get("_rate_base_ts", now) or now)
+                    done_since = seeds_done - base_seeds
+                    if done_since >= 1 and now > base_ts:
+                        avg_h = ((now - base_ts) / 3600.0) / done_since
+                        prog["avg_per_seed_h"]  = round(avg_h, 3)
+                        prog["eta_remaining_h"] = round(max(0.0, avg_h * (seeds_total - seeds_done)), 2)
+                    prog["seeds_done"]  = seeds_done
+                    prog["seeds_total"] = seeds_total
                     changed = True
                 break
         if changed:
