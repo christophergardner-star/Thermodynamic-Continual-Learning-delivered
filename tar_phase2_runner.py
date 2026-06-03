@@ -31,9 +31,21 @@ from typing import Any, Callable
 _REPO = Path(__file__).resolve().parent
 _PY311 = Path(r"C:\Users\cgard\AppData\Local\Programs\Python\Python311\python.exe")
 _VENV_PYTHON = _REPO.parent / ".venv" / "Scripts" / "python.exe"
-if not _VENV_PYTHON.exists():
-    # Python311 is the only env with working CUDA torch on this machine
-    _VENV_PYTHON = _PY311 if _PY311.exists() else Path(sys.executable)
+# Interpreter for Phase-2 GPU scripts. PREFER the standalone Python 3.11 install:
+# it ran the HPC replication end-to-end (including torch DataLoader worker
+# processes) and is the interpreter the dashboard's /api/phase2/launch already
+# uses. The 3.13 .venv spawns DataLoader/multiprocessing workers under its BASE
+# interpreter (Python313), whose torch is broken ("module 'torch' has no
+# attribute '__version__'"), which silently stalls the run — this is what stalled
+# hp_selection on 2026-06-03 (no output written, queue marked "stalled"). The
+# previous logic preferred the venv when present, contradicting this comment's
+# original intent. Fall back to the venv, then the current interpreter.
+if _PY311.exists():
+    _PHASE2_PYTHON = _PY311
+elif _VENV_PYTHON.exists():
+    _PHASE2_PYTHON = _VENV_PYTHON
+else:
+    _PHASE2_PYTHON = Path(sys.executable)
 
 _TAR_STATE = Path(r"E:\TAR\Thermodynamic-Continual-Learning-delivered\tar_state")
 
@@ -49,7 +61,7 @@ def _run_script(
     if not script.exists():
         raise FileNotFoundError(f"Phase 2 script not found: {script}")
 
-    cmd = [str(_VENV_PYTHON), str(script)] + (extra_args or [])
+    cmd = [str(_PHASE2_PYTHON), str(script)] + (extra_args or [])
     proc = subprocess.Popen(
         cmd,
         cwd=str(_REPO),
