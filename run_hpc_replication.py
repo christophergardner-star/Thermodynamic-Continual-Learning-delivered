@@ -610,29 +610,36 @@ def main() -> None:
                 cmp_sprt = su.compare_methods_paired(
                     hpc_vals, baseline_vals, alternative="less"
                 )
-                # Build list of per-seed indicator p-values for SPRT
-                # Each seed contributes: p_indicator = alpha if evidence for H1,
-                # else (1-alpha). We approximate using running paired p-values
-                # at each checkpoint. For SPRT we feed the running p-values
-                # accumulated in batches.
-                batch_p_values = []
-                for i in range(1, n_run + 1):
-                    if i < 2:
-                        batch_p_values.append(0.5)
-                        continue
-                    sub_hpc = hpc_vals[:i]
-                    sub_base = baseline_vals[:i]
-                    try:
-                        sub_cmp = su.compare_methods_paired(
-                            sub_hpc, sub_base, alternative="less"
-                        )
-                        batch_p_values.append(sub_cmp.p_nonparametric)
-                    except Exception:
-                        batch_p_values.append(0.5)
+                # SPRT input: ONE INDEPENDENT increment per seed (sign test).
+                #
+                # stat_utils.sprt_boundary adds one fixed Wald increment per
+                # element of p_values_so_far, ASSUMING the elements are
+                # independent per-observation likelihood ratios. The previous
+                # implementation fed NESTED CUMULATIVE Wilcoxon p-values
+                # (p over hpc_vals[:i] for i=1..n). Those are strongly correlated
+                # across prefixes — each early seed appears in every later prefix —
+                # so they over-count evidence ~n-fold; and the one-tailed signed-
+                # rank small-n floor (cannot reach p<0.05 until n>=5) forced the
+                # early increments to H0, biasing the test toward accept_H0. That
+                # is exactly what spuriously stopped the n=4 run at d=-1.17.
+                #
+                # Correct structure: each seed is one Bernoulli trial. delta < 0
+                # (HPC has strictly lower forgetting) is one-tailed evidence for
+                # H1 -> a p-proxy below alpha; delta >= 0 -> evidence for H0 -> a
+                # p-proxy above alpha. This is the documented sign-test
+                # approximation and gives sprt_boundary the i.i.d. per-seed input
+                # it requires. The running cumulative Wilcoxon (cmp_sprt) is kept
+                # below as a reported DIAGNOSTIC only, not as SPRT input.
+                per_seed_p = [
+                    (SPRT_ALPHA / 2.0)
+                    if (r["hpc_forgetting"] - r["baseline_forgetting"]) < 0
+                    else (1.0 - SPRT_ALPHA / 2.0)
+                    for r in per_seed_results
+                ]
 
                 sprt_result = su.sprt_boundary(
                     n_seeds_run=n_run,
-                    p_values_so_far=batch_p_values,
+                    p_values_so_far=per_seed_p,
                     alpha=SPRT_ALPHA,
                     beta=SPRT_BETA,
                 )
