@@ -268,6 +268,12 @@ class ContinualLearningBenchmarkConfig(StrictModel):
     # Higher D_PR = more structured representation = stronger penalty.
     # Set to 0.0 to disable (governor-only TCL, no weight consolidation).
     tcl_penalty_lambda: float = 0.01
+    # Canonical TCL (tcl.py ThermalMemory) penalty weight, decoupled from the
+    # uniform-anchor tcl_penalty_lambda above. Used by method="tcl_canonical" and
+    # method="tcl_full" (per-element gradient-energy importance over all past tasks,
+    # with recency decay). Previously the canonical penalty silently reused
+    # tcl_penalty_lambda; decoupling lets the canonical algorithm be tuned on its own.
+    tcl_canonical_lambda: float = 0.01
     tcl_alpha: float = 0.5
     tcl_ordered_lr_scale: float = 0.5
     tcl_disordered_lr_scale: float = 1.2

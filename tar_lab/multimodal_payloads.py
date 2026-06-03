@@ -893,7 +893,16 @@ def run_split_cifar10_benchmark(
         name: torch.zeros_like(param, device="cpu") for name, param in trunk.named_parameters()
     }
 
-    if observer is None and method == "tcl" and config.tcl_governor_enabled:
+    # TCL method families:
+    #   "tcl"           = D_PR-scaled uniform L2 anchor + thermo regime-observer LR control (the published proxy)
+    #   "tcl_canonical" = tcl.py per-element gradient-energy importance penalty over all past tasks (no observer)
+    #   "tcl_full"      = canonical importance penalty AND regime-observer LR control together — the first code
+    #                     path that runs BOTH halves of the intended algorithm. It deliberately does NOT use the
+    #                     uniform L2 weight anchor (the anchor blocks below stay "tcl"/"tcl_penalty_only" only) so
+    #                     the canonical and uniform consolidation penalties never stack.
+    _TCL_OBS = {"tcl", "tcl_full"}              # variants using the thermodynamic regime observer / LR control
+    _TCL_CANON = {"tcl_canonical", "tcl_full"}  # variants using the canonical (tcl.py) importance penalty
+    if observer is None and method in _TCL_OBS and (config.tcl_governor_enabled or method == "tcl_full"):
         # alpha=0.5: "ordered" fires when sigma drops to 50% of the early-task
         # anchor level.  warmup_batches delays anchor collection until the
         # network has had meaningful gradient signal — set to ~2 epochs worth
@@ -937,8 +946,10 @@ def run_split_cifar10_benchmark(
     # D_PR-scaled uniform L2 anchor (see ALGORITHM NOTE above).
     _tcl_canon_memory = None
     _tcl_canon_importance = None
-    _tcl_canon_lambda = float(getattr(config, "tcl_penalty_lambda", 0.01))
-    if method == "tcl_canonical":
+    _tcl_canon_lambda = float(
+        getattr(config, "tcl_canonical_lambda", getattr(config, "tcl_penalty_lambda", 0.01))
+    )
+    if method in _TCL_CANON:
         from tcl import ThermalMemory as _ThermalMemory
         _tcl_canon_memory = _ThermalMemory()
 
@@ -959,14 +970,14 @@ def run_split_cifar10_benchmark(
         # re-established from the first 20 batches of this task and frozen.
         if (
             observer is not None
-            and method == "tcl"
+            and method in _TCL_OBS
             and config.tcl_reset_on_task_boundary
             and train_task_idx > 0
         ):
             observer.reset_for_new_task()
 
         # Canonical TCL: fresh importance accumulator each task.
-        if method == "tcl_canonical":
+        if method in _TCL_CANON:
             from tcl import ThermalImportance as _ThermalImportance
             _tcl_canon_importance = _ThermalImportance(trunk)
 
@@ -1073,7 +1084,7 @@ def run_split_cifar10_benchmark(
 
                 # Canonical TCL penalty (tcl.py ThermalMemory): per-element importance
                 # weighted L2 over all past tasks, with recency decay. Active from task 1.
-                if method == "tcl_canonical" and _tcl_canon_memory and _tcl_canon_memory._tasks:
+                if method in _TCL_CANON and _tcl_canon_memory and _tcl_canon_memory._tasks:
                     loss = loss + _tcl_canon_lambda * _tcl_canon_memory.penalty(trunk, device=device)
 
                 # DER++: replay from reservoir buffer.
@@ -1133,13 +1144,13 @@ def run_split_cifar10_benchmark(
                             ).abs().cpu()
 
                 # Canonical TCL: accumulate per-element gradient energy for importance.
-                if method == "tcl_canonical" and _tcl_canon_importance is not None:
+                if method in _TCL_CANON and _tcl_canon_importance is not None:
                     _tcl_canon_importance.accumulate(trunk)
 
                 # observer.step() reads gradients computed by backward() above.
                 # Must fire BEFORE optimizer.step() so gradients are fresh and
                 # the adjusted LR takes effect on the current weight update.
-                if observer is not None and method == "tcl":
+                if observer is not None and method in _TCL_OBS:
                     snap = observer.step(optimizer)
                     adj_lr = _tcl_lr_adjustment(
                         observer,
@@ -1180,7 +1191,7 @@ def run_split_cifar10_benchmark(
                                 _der_mem_logits[_j] = _der_cur_logits[_i]
 
             # record per-epoch regime summary for diagnostic trace
-            if observer is not None and method == "tcl" and _epoch_regimes:
+            if observer is not None and method in _TCL_OBS and _epoch_regimes:
                 from collections import Counter
                 counts = Counter(_epoch_regimes)
                 total = len(_epoch_regimes)
@@ -1264,7 +1275,7 @@ def run_split_cifar10_benchmark(
             si_prev_params = {name: param.detach().cpu().clone() for name, param in trunk.named_parameters()}
 
         # Canonical TCL: commit completed task checkpoint into memory.
-        if method == "tcl_canonical" and _tcl_canon_memory is not None and _tcl_canon_importance is not None:
+        if method in _TCL_CANON and _tcl_canon_memory is not None and _tcl_canon_importance is not None:
             _tcl_canon_memory.commit(trunk, _tcl_canon_importance, train_task_idx)
 
         # After task 0 training: set the dimensionality anchor so that
