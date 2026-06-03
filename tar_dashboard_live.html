@@ -3348,6 +3348,9 @@ function openLitDetail(type, key) {
 
 function renderLiterature() {
   renderApiError('lit-status', 'literature', 'llm_insights');
+  // Rebuild the drawer-detail cache from scratch so entries from a prior render
+  // (e.g. a source or conflict that has since disappeared) can't be reopened stale.
+  Object.keys(_LIT_DETAIL).forEach(k => delete _LIT_DETAIL[k]);
   const lit     = S.data.literature  || {};
   const summary = lit.summary        || {};
   const srcHealth = lit.source_health || {};
@@ -3421,7 +3424,7 @@ function renderLiterature() {
           <strong>${esc(trunc(c.title||c.gap_id||'conflict',90))}</strong>
           ${c.domain?`<span style="color:var(--dim);font-size:10.5px;margin-left:6px">${esc(c.domain)}</span>`:''}
         </div>`;
-      }).join('')
+      }).join('') + (knowledgeConflicts.length > 5 ? `<div style="font-size:10px;color:var(--dim);margin-top:4px">+${knowledgeConflicts.length - 5} more</div>` : '')
     : '<div class="empty-state">No knowledge conflicts detected ✓</div>';
 
   // ── LLM Insights (4 categories) ───────────────────────────────────────────

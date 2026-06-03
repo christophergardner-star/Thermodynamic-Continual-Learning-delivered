@@ -24,6 +24,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from literature._http_retry import fetch_with_retry, is_retryable_mapping
 from literature.schemas import Author, ExternalIDs, FetchResult, Paper, Venue
 
 
@@ -391,6 +392,13 @@ class SemanticScholarClient:
         return h
 
     def _get(self, url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        # Retry transient transport errors (timeouts, 5xx) with backoff;
+        # never retry a 429 (returned as rate_limited, honoured by cooldown).
+        return fetch_with_retry(
+            lambda: self._get_once(url, params), retryable=is_retryable_mapping
+        )
+
+    def _get_once(self, url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         self._throttle()
         if params:
             qs = urlencode({k: str(v) for k, v in params.items()})
@@ -409,6 +417,16 @@ class SemanticScholarClient:
             return {"ok": False, "error": f"unexpected: {exc}"}
 
     def _post(
+        self,
+        url: str,
+        body: Dict[str, Any],
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return fetch_with_retry(
+            lambda: self._post_once(url, body, params), retryable=is_retryable_mapping
+        )
+
+    def _post_once(
         self,
         url: str,
         body: Dict[str, Any],

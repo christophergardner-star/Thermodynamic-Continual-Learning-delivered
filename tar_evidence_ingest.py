@@ -19,6 +19,7 @@ import math
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1190,6 +1191,37 @@ class ExternalEvidenceIngestor:
 
         return sorted(available, key=_rank)
 
+    def _search_sources_parallel(
+        self, sources: list[str], query: str, *, connected: bool = False
+    ) -> list[tuple[str, SourceRun, list[dict[str, Any]]]]:
+        """Fetch ``query`` from each source concurrently — one task per distinct
+        source. Each source uses its own client instance, so the per-source
+        request throttles stay independent and rate limits are still honoured.
+        Network fetches run in parallel; the caller ingests the results serially
+        (SQLite writes are NOT thread-safe). Results are returned in the same
+        order as ``sources`` so ingestion order stays deterministic.
+        """
+        if not sources:
+            return []
+        if len(sources) == 1:
+            run, items = self._search_source(sources[0], query, connected=connected)
+            return [(sources[0], run, items)]
+        collected: dict[str, tuple[SourceRun, list[dict[str, Any]]]] = {}
+        with ThreadPoolExecutor(max_workers=len(sources)) as pool:
+            futures = {
+                pool.submit(self._search_source, source, query, connected=connected): source
+                for source in sources
+            }
+            for future, source in futures.items():
+                try:
+                    collected[source] = future.result()
+                except Exception as exc:
+                    collected[source] = (
+                        SourceRun(source=source, query=query, ok=False, error=f"parallel_fetch:{exc}"),
+                        [],
+                    )
+        return [(source, *collected[source]) for source in sources]
+
     def _search_source(self, source: str, query: str, *, connected: bool = False) -> tuple[SourceRun, list[dict[str, Any]]]:
         if source == "semantic_scholar":
             result = self.ss.search_by_topic(
@@ -1231,54 +1263,61 @@ class ExternalEvidenceIngestor:
         return run, list(result.items)
 
     def _run_fast_cycle(self, cycle_result: CycleResult, queries: dict[str, Any]) -> None:
-        result = self.arxiv.latest(
-            categories=queries.get("categories") or ["cs.LG", "cs.AI", "stat.ML"],
-            days_back=2,
-            max_results=200,
-        )
-        run = SourceRun(
-            source="arxiv",
-            query="latest",
-            ok=result.ok,
-            fetched_count=len(result.items),
-            rate_limited=bool(getattr(result, "rate_limited", False)),
-        )
-        if not result.ok:
-            run.error = str(result.error or "fetch_failed")
-            cycle_result.errors.append(f"arxiv_latest:{run.error}")
-        else:
-            ingested, verified, weak = self._ingest_papers(result.items)
-            run.ingested_count = ingested
-            run.verified_count = verified
-            run.weak_count = weak
-        cycle_result.source_runs.append(run)
-
+        cats = queries.get("categories") or ["cs.LG", "cs.AI", "stat.ML"]
         latest_topics = list(queries.get("queries", []))[:2] + list(queries.get("connected_queries", []))[:2]
-        oa_result = self.openalex.latest(topics=latest_topics, days_back=5, max_results=30)
-        oa_run = SourceRun(
-            source="openalex",
-            query="latest",
-            ok=oa_result.ok,
-            fetched_count=len(oa_result.items),
-            rate_limited=bool(getattr(oa_result, "rate_limited", False)),
-        )
-        if not oa_result.ok:
-            oa_run.error = str(oa_result.error or "fetch_failed")
-            cycle_result.errors.append(f"openalex_latest:{oa_run.error}")
-        else:
-            ingested, verified, weak = self._ingest_papers(oa_result.items)
-            oa_run.ingested_count = ingested
-            oa_run.verified_count = verified
-            oa_run.weak_count = weak
-        cycle_result.source_runs.append(oa_run)
+
+        def _fetch_arxiv():
+            return self.arxiv.latest(categories=cats, days_back=2, max_results=200)
+
+        def _fetch_openalex():
+            return self.openalex.latest(topics=latest_topics, days_back=5, max_results=30)
+
+        # The two latest-feeds are independent clients — fetch them concurrently
+        # so a slow/timing-out arxiv does not block openalex. Ingestion stays
+        # serial below (SQLite is not thread-safe).
+        def _safe(fn):
+            try:
+                return fn(), None
+            except Exception as exc:  # network/parse error in the worker thread
+                return None, exc
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_arxiv = pool.submit(_safe, _fetch_arxiv)
+            f_openalex = pool.submit(_safe, _fetch_openalex)
+            arxiv_res, arxiv_exc = f_arxiv.result()
+            oa_res, oa_exc = f_openalex.result()
+
+        for src, label, res, exc in (
+            ("arxiv", "arxiv_latest", arxiv_res, arxiv_exc),
+            ("openalex", "openalex_latest", oa_res, oa_exc),
+        ):
+            ok = exc is None and res is not None and res.ok
+            run = SourceRun(
+                source=src,
+                query="latest",
+                ok=ok,
+                fetched_count=len(res.items) if (res is not None and res.ok) else 0,
+                rate_limited=bool(getattr(res, "rate_limited", False)) if res is not None else False,
+            )
+            if not ok:
+                run.error = str(exc) if exc is not None else str((res.error if res is not None else None) or "fetch_failed")
+                cycle_result.errors.append(f"{label}:{run.error}")
+            else:
+                ingested, verified, weak = self._ingest_papers(res.items)
+                run.ingested_count = ingested
+                run.verified_count = verified
+                run.weak_count = weak
+            cycle_result.source_runs.append(run)
 
     def _run_daily_cycle(self, cycle_result: CycleResult, queries: dict[str, Any]) -> None:
         primary_queries = list(queries.get("queries", []))[:5]
         connected_queries = list(queries.get("connected_queries", []))[:6]
 
         for query in primary_queries:
-            for source in self._preferred_sources(connected=False):
-                run, items = self._search_source(source, query, connected=False)
+            # Fetch all sources for this query concurrently, then ingest serially.
+            for source, run, items in self._search_sources_parallel(
+                self._preferred_sources(connected=False), query, connected=False
+            ):
                 if not run.ok:
                     cycle_result.errors.append(f"{source}:{query}:{run.error or 'fetch_failed'}")
                 else:
@@ -1289,8 +1328,9 @@ class ExternalEvidenceIngestor:
                 cycle_result.source_runs.append(run)
 
         for query in connected_queries:
-            for source in self._preferred_sources(connected=True)[:3]:
-                run, items = self._search_source(source, query, connected=True)
+            for source, run, items in self._search_sources_parallel(
+                self._preferred_sources(connected=True)[:3], query, connected=True
+            ):
                 if not run.ok:
                     cycle_result.errors.append(f"{source}:{query}:{run.error or 'fetch_failed'}")
                 else:

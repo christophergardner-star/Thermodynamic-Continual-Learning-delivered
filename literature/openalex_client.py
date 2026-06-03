@@ -17,6 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from literature._http_retry import fetch_with_retry
 from literature.schemas import Author, ExternalIDs, FetchResult, Paper
 from literature.semantic_scholar import _classify_venue
 
@@ -160,6 +161,11 @@ class OpenAlexClient:
         self._last_request = time.monotonic()
 
     def _fetch(self, params: Dict[str, Any]) -> FetchResult:
+        # Retry transient transport errors (timeouts, 5xx) with backoff;
+        # never retry a 429 (rate-limit cooldown handles that).
+        return fetch_with_retry(lambda: self._fetch_once(params))
+
+    def _fetch_once(self, params: Dict[str, Any]) -> FetchResult:
         self._throttle()
         url = f"{_BASE_URL}?{urlencode(params)}"
         req = Request(
@@ -186,6 +192,6 @@ class OpenAlexClient:
             rate_limited = exc.code == 429
             return FetchResult(ok=False, source="openalex", error=f"http_{exc.code}", rate_limited=rate_limited)
         except URLError as exc:
-            return FetchResult(ok=False, source="openalex", error=str(exc.reason))
+            return FetchResult(ok=False, source="openalex", error=f"url_error: {exc.reason}")
         except Exception as exc:
             return FetchResult(ok=False, source="openalex", error=str(exc))

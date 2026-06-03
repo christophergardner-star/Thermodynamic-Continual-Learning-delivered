@@ -1,7 +1,11 @@
 """Unit tests for the literature source retry/backoff helper."""
 from __future__ import annotations
 
-from literature._http_retry import fetch_with_retry, is_retryable
+from literature._http_retry import (
+    fetch_with_retry,
+    is_retryable,
+    is_retryable_mapping,
+)
 from literature.schemas import FetchResult
 
 
@@ -98,5 +102,40 @@ def test_does_not_retry_on_success():
     fetch, calls = _counting_source([_ok()])
     result = fetch_with_retry(fetch, attempts=3, sleep=slept.append)
     assert result.ok is True
+    assert calls["n"] == 1
+    assert slept == []
+
+
+# --------------------------------------------------------------------------- #
+# Mapping (dict) variant — Semantic Scholar's _get/_post shape
+# --------------------------------------------------------------------------- #
+
+def test_is_retryable_mapping_classification():
+    assert is_retryable_mapping({"ok": False, "error": "url_error: timed out"}) is True
+    assert is_retryable_mapping({"ok": False, "error": "http_502: Bad Gateway"}) is True
+    # 429 surfaces as rate_limited in SS — must not retry.
+    assert is_retryable_mapping({"ok": False, "error": "rate_limited", "rate_limited": True}) is False
+    assert is_retryable_mapping({"ok": True, "data": {}}) is False
+    assert is_retryable_mapping({"ok": False, "error": "http_404: Not Found"}) is False
+
+
+def test_fetch_with_retry_mapping_retries_then_succeeds():
+    slept: list[float] = []
+    results = [
+        {"ok": False, "error": "unexpected: The read operation timed out"},
+        {"ok": True, "data": {"x": 1}},
+    ]
+    fetch, calls = _counting_source(results)
+    out = fetch_with_retry(fetch, attempts=3, sleep=slept.append, retryable=is_retryable_mapping)
+    assert out["ok"] is True
+    assert calls["n"] == 2
+    assert slept == [1.0]
+
+
+def test_fetch_with_retry_mapping_no_retry_on_rate_limited():
+    slept: list[float] = []
+    fetch, calls = _counting_source([{"ok": False, "error": "rate_limited", "rate_limited": True}])
+    out = fetch_with_retry(fetch, attempts=3, sleep=slept.append, retryable=is_retryable_mapping)
+    assert out["rate_limited"] is True
     assert calls["n"] == 1
     assert slept == []

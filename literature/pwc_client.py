@@ -27,6 +27,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from literature._http_retry import fetch_with_retry
 from literature.schemas import (
     Benchmark,
     FetchResult,
@@ -270,6 +271,11 @@ class PapersWithCodeClient:
         self._last_request = time.monotonic()
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> FetchResult:
+        # Retry transient transport errors (timeouts, 5xx) with backoff;
+        # never retry a 429 (rate-limit cooldown handles that).
+        return fetch_with_retry(lambda: self._get_once(path, params))
+
+    def _get_once(self, path: str, params: Optional[Dict[str, Any]] = None) -> FetchResult:
         self._throttle()
         url = _BASE + path
         if params:
