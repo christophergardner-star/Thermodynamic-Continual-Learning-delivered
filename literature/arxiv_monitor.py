@@ -32,6 +32,7 @@ from urllib.parse import urlencode, quote
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET
 
+from literature._http_retry import fetch_with_retry
 from literature.schemas import ExternalIDs, FetchResult, Paper
 
 
@@ -380,6 +381,11 @@ class ArXivMonitor:
         self._last_request = time.monotonic()
 
     def _fetch(self, params: Dict[str, Any]) -> FetchResult:
+        # Retry transient transport errors (read timeouts, 5xx) with backoff;
+        # never retry a 429 — the throttle/cooldown already handles rate limits.
+        return fetch_with_retry(lambda: self._fetch_once(params))
+
+    def _fetch_once(self, params: Dict[str, Any]) -> FetchResult:
         self._throttle()
         qs = urlencode(params)
         url = f"{_BASE_URL}?{qs}"

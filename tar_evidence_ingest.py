@@ -1448,6 +1448,25 @@ class ExternalEvidenceIngestor:
                     merged.update(entry)
                     source_health[source_name] = merged
 
+        # 3-state status derived from per-source health, not a single error.
+        #   ok      : every source healthy (0 new papers is a normal no-op cycle)
+        #   partial : some sources failed but ingestion still produced results
+        #   degraded: all sources failed, or failures with nothing ingested
+        # A single transient arxiv timeout no longer poisons the whole panel.
+        health_entries = [e for e in source_health.values() if isinstance(e, dict)]
+        failed_sources = [e for e in health_entries if not bool(e.get("ok", True))]
+        total_ingested = sum(int(e.get("ingested", 0) or 0) for e in health_entries)
+        if not failed_sources:
+            status = "ok"
+        elif total_ingested > 0 and len(failed_sources) < len(health_entries):
+            status = "partial"
+        else:
+            status = "degraded"
+        # degraded_since: stamped when entering degraded, cleared on recovery.
+        prior_summary = prior_state.get("summary", {}) if isinstance(prior_state, dict) else {}
+        prior_degraded_since = str(prior_summary.get("degraded_since", "") or "") if isinstance(prior_summary, dict) else ""
+        degraded_since = (prior_degraded_since or _now_iso()) if status == "degraded" else ""
+
         summary = {
             "literature_total_papers": corpus.total_papers,
             "literature_total_benchmarks": corpus.total_benchmarks,
@@ -1458,7 +1477,8 @@ class ExternalEvidenceIngestor:
             "domain_profile_count": len(domain_profiles),
             "last_literature_sync": cycle_result.completed_at if cycle_result else str(prior_state.get("summary", {}).get("last_literature_sync", "")),
             "last_cycle": cycle_result.cycle if cycle_result else str(prior_state.get("summary", {}).get("last_cycle", "idle")),
-            "status": "ok" if not last_errors else "degraded",
+            "status": status,
+            "degraded_since": degraded_since,
             "cadence_mode": str(cadence.get("mode", "standard")),
             "cadence_reason": str(cadence.get("reason", "")),
             "poll_interval_s": float(cadence.get("poll_interval_s", self.poll_interval_s) or self.poll_interval_s),

@@ -1254,6 +1254,7 @@ const S = {
 /* ── Utilities ───────────────────────────────────────────── */
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const trunc = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n) + '…' : s; };
 const num = (v, fallback='—') => (v !== null && v !== undefined && !isNaN(v)) ? v : fallback;
 const pct = (v) => Math.min(100, Math.max(0, Math.round(Number(v) || 0)));
 const fmtN = (v, d=4) => (v !== null && v !== undefined && !isNaN(v)) ? Number(v).toFixed(d) : '—';
@@ -3355,7 +3356,9 @@ function renderLiterature() {
   const claimsN     = lit.learned_claims || summary.learned_claim_count      || '—';
   const lastSync    = lit.last_sync      || summary.last_literature_sync     || lit.timestamp || '';
   const statStr     = lit.source_status  || summary.status || '—';
-  const statTone    = statStr === 'ok' ? 'green' : statStr === 'degraded' ? 'amber' : 'dim';
+  // 3-state tone: ok=green, partial=amber (some sources failed but ingestion ran), degraded=red.
+  const statTone    = statStr === 'ok' ? 'green' : statStr === 'partial' ? 'amber' : statStr === 'degraded' ? 'red' : 'dim';
+  const degradedSince = summary.degraded_since || '';
 
   const srcRows = Object.entries(srcHealth).map(([src, h]) => {
     if (typeof h !== 'object') return '';
@@ -3367,7 +3370,7 @@ function renderLiterature() {
       <td style="padding:3px 6px;font-size:11.5px">${esc(src)}</td>
       <td style="padding:3px 6px">${dotHtml(tone)} <span style="font-size:10px;color:var(--${tone})">${h.ok?'ok':'error'}</span></td>
       <td style="padding:3px 6px;text-align:right;font-family:var(--font-mono);font-size:11px">${h.ingested||0}</td>
-      <td style="padding:3px 6px;font-size:10px;color:var(--red);max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc((h.last_error||'').substring(0,40))}</td>
+      <td style="padding:3px 6px;font-size:10px;color:var(--red);max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(trunc(h.last_error||'',40))}</td>
     </tr>`;
   }).join('');
 
@@ -3380,6 +3383,7 @@ function renderLiterature() {
       <span class="kv-k">Learned claims</span><span class="kv-v">${esc(String(claimsN))}</span>
       <span class="kv-k">Last sync</span><span class="kv-v">${fmtShort(lastSync)||'—'}</span>
       <span class="kv-k">Status</span><span class="kv-v"><span class="badge ${statTone}" style="font-size:10px">${esc(statStr)}</span></span>
+      ${(statStr === 'degraded' && degradedSince) ? `<span class="kv-k">Degraded since</span><span class="kv-v" style="color:var(--red)">${fmtShort(degradedSince)||esc(degradedSince)}</span>` : ''}
     </div>
     ${topDoms.length ? `<div style="margin-bottom:12px">
       <div style="font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px">Active domains</div>
@@ -3397,6 +3401,9 @@ function renderLiterature() {
     </table>` : ''}`;
 
   // ── Conflicts (source errors + last_errors) ────────────────────────────────
+  // TODO(follow-up, P1): these are transport errors (timeouts, 429s, 404s), NOT
+  // knowledge conflicts. Separate transport errors (→ Source Health only) from
+  // real contradictory-claim conflicts (gap_detector) and relabel accordingly.
   const lastErrors = Array.isArray(lit.last_errors) ? lit.last_errors : [];
   const srcErrors  = Object.entries(srcHealth)
     .filter(([,h]) => typeof h === 'object' && !h.ok && h.last_error)
@@ -3412,7 +3419,7 @@ function renderLiterature() {
         _LIT_DETAIL[key] = {text: cStr};
         return `<div class="warning-banner" style="cursor:pointer"
           onclick="openLitDetail('conflict','${key}')"
-          title="Click for detail">${esc(cStr.substring(0,150))}</div>`;
+          title="Click for detail">${esc(trunc(cStr,150))}</div>`;
       }).join('')
     : '<div class="empty-state">No conflicts detected ✓</div>';
 
@@ -3427,7 +3434,7 @@ function renderLiterature() {
   let insHtml = '';
   if (rationale) insHtml += `<div class="card" style="margin-bottom:8px">
     <div class="section-head" style="margin:0 0 4px">Scheduler Rationale</div>
-    <div style="font-size:12px;color:var(--muted);line-height:1.55">${esc(rationale.substring(0,300))}</div>
+    <div style="font-size:12px;color:var(--muted);line-height:1.55">${esc(trunc(rationale,300))}</div>
   </div>`;
 
   if (gaps.length) insHtml += `<div class="card" style="margin-bottom:8px">
@@ -3440,7 +3447,7 @@ function renderLiterature() {
         <span class="alert-msg" style="font-size:11.5px;pointer-events:none">
           <strong>${esc(g.frontier_id||'')}</strong>
           ${g.priority_delta!=null?`<span style="color:var(--green);margin-left:6px">+${fmtN(g.priority_delta,1)}</span>`:''}
-          ${Array.isArray(g.signals)&&g.signals.length?`<span style="color:var(--dim);font-size:10.5px;display:block;margin-top:2px">${esc(g.signals[0].substring(0,100))}</span>`:''}
+          ${Array.isArray(g.signals)&&g.signals.length?`<span style="color:var(--dim);font-size:10.5px;display:block;margin-top:2px">${esc(trunc(g.signals[0],100))}</span>`:''}
         </span>
       </div>`;
     }).join('')}
