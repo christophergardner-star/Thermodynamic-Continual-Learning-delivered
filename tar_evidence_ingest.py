@@ -45,6 +45,12 @@ _EARLY_DAILY_INTERVAL_S = 12 * 3600
 _EARLY_WEEKLY_INTERVAL_S = 3 * 24 * 3600
 _EARLY_POLL_INTERVAL_S = 300.0
 
+# Per-source circuit breaker: once a source fails this many consecutive cycles
+# it is skipped for a cooldown window (independent of the 429 rate-limit
+# cooldown) so we stop hammering a persistently broken endpoint every cycle.
+_CIRCUIT_BREAKER_THRESHOLD = 3
+_CIRCUIT_BREAKER_COOLDOWN_S = 3600.0
+
 _DEFAULT_DOMAIN_INPUTS: list[dict[str, Any]] = [
     {
         "id": "general_ai",
@@ -306,6 +312,54 @@ def _paper_is_cs_relevant(paper: Paper) -> bool:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _apply_circuit_breaker(
+    source_health: dict[str, dict[str, Any]],
+    prior_health: dict[str, Any],
+    ran_sources: set[str],
+    *,
+    now: datetime | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Track consecutive per-source failures and open a circuit (skip window)
+    once a source fails ``_CIRCUIT_BREAKER_THRESHOLD`` cycles in a row.
+
+    Sources that ran this cycle: a success resets the counter and closes the
+    circuit; a failure increments it and (at/over threshold) opens the circuit
+    for ``_CIRCUIT_BREAKER_COOLDOWN_S``. Sources not attempted this cycle keep
+    their prior counter and any still-open circuit. Deterministic given
+    ``now``, so it is unit-testable. Mutates and returns ``source_health``.
+    """
+    from datetime import timedelta
+
+    now = now or datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    open_until_iso = (now + timedelta(seconds=_CIRCUIT_BREAKER_COOLDOWN_S)).isoformat()
+    prior_health = prior_health if isinstance(prior_health, dict) else {}
+    for src, entry in source_health.items():
+        if not isinstance(entry, dict):
+            continue
+        prior = prior_health.get(src) if isinstance(prior_health.get(src), dict) else {}
+        prior_consec = int(prior.get("consecutive_failures", 0) or 0)
+        prior_circuit = str(prior.get("circuit_open_until", "") or "")
+        if src in ran_sources:
+            if bool(entry.get("ok", True)):
+                entry["consecutive_failures"] = 0
+                entry["circuit_open_until"] = ""
+            else:
+                consec = prior_consec + 1
+                entry["consecutive_failures"] = consec
+                if consec >= _CIRCUIT_BREAKER_THRESHOLD:
+                    entry["circuit_open_until"] = max(prior_circuit, open_until_iso) if prior_circuit else open_until_iso
+                elif prior_circuit > now_iso:
+                    entry["circuit_open_until"] = prior_circuit
+                else:
+                    entry["circuit_open_until"] = ""
+        else:
+            entry["consecutive_failures"] = prior_consec
+            if prior_circuit > now_iso:
+                entry["circuit_open_until"] = prior_circuit
+    return source_health
 
 
 def _jload(path: Path) -> dict[str, Any]:
@@ -1115,12 +1169,16 @@ class ExternalEvidenceIngestor:
 
         def _is_in_cooldown(source_name: str) -> bool:
             entry = health.get(source_name, {}) if isinstance(health, dict) else {}
-            until = entry.get("rate_limited_until") if isinstance(entry, dict) else None
-            return bool(until and until > now_iso)
+            if not isinstance(entry, dict):
+                return False
+            until = entry.get("rate_limited_until") or ""
+            circuit = entry.get("circuit_open_until") or ""
+            return bool((until and until > now_iso) or (circuit and circuit > now_iso))
 
-        # Exclude sources still within their 4h rate-limit cooldown window.
-        # If all sources are in cooldown, the caller gets an empty list and
-        # skips the query — correct behaviour; don't waste API calls.
+        # Exclude sources in their 4h rate-limit cooldown OR with an open circuit
+        # breaker (N consecutive failures). If all sources are excluded, the
+        # caller gets an empty list and skips the query — correct behaviour;
+        # don't waste API calls.
         available = [s for s in base if not _is_in_cooldown(s)]
 
         def _rank(source_name: str) -> tuple[int, int, int]:
@@ -1437,6 +1495,13 @@ class ExternalEvidenceIngestor:
                     prior_until = prior_entry.get("rate_limited_until", "")
                     if prior_until and prior_until > now_iso:
                         source_health.setdefault(source_name, {})["rate_limited_until"] = prior_until
+            # Per-source circuit breaker: open after N consecutive failures.
+            ran_sources = {run.source for run in cycle_result.source_runs}
+            _apply_circuit_breaker(
+                source_health,
+                prior_health if isinstance(prior_health, dict) else {},
+                ran_sources,
+            )
         else:
             source_health = self._source_health(None)
             prior_health = prior_state.get("source_health", {}) if isinstance(prior_state, dict) else {}
@@ -1510,8 +1575,35 @@ class ExternalEvidenceIngestor:
             "recent_connected_queries": self._build_query_plan().get("connected_queries", []),
             "recent_harvests": [asdict(run) for run in (cycle_result.source_runs[:20] if cycle_result else [])],
             "last_errors": last_errors[:12],
+            "knowledge_conflicts": self._knowledge_conflicts(),
         }
         return payload
+
+    def _knowledge_conflicts(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Real contradictory-claim conflicts from the gap detector
+        (gap_type == "conflict"). These are distinct from transport/ingestion
+        errors (timeouts, 429s, 404s), which live in source_health — keeping
+        the two separate stops transport hiccups masquerading as conflicts.
+        """
+        try:
+            gaps = self.graph.get_top_gaps(n=50, status="open")
+        except Exception:
+            return []
+        conflicts: list[dict[str, Any]] = []
+        for gap in gaps:
+            if getattr(gap, "gap_type", "") != "conflict":
+                continue
+            conflicts.append({
+                "gap_id": gap.gap_id,
+                "title": gap.title,
+                "description": gap.description,
+                "domain": gap.domain,
+                "related_paper_ids": list(gap.related_paper_ids or []),
+                "composite_score": gap.composite_score,
+            })
+            if len(conflicts) >= limit:
+                break
+        return conflicts
 
     def _source_health(self, cycle_result: CycleResult | None) -> dict[str, dict[str, Any]]:
         health: dict[str, dict[str, Any]] = {

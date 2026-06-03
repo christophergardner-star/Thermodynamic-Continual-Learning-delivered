@@ -3327,14 +3327,20 @@ function openLitDetail(type, key) {
         <span class="kv-k">Papers ingested</span><span class="kv-v">${esc(String(data.ingested||0))}</span>
         <span class="kv-k">Last sync</span><span class="kv-v">${fmtDate(data.last_sync||'')||'—'}</span>
         <span class="kv-k">Rate limited</span><span class="kv-v">${data.rate_limited?'Yes':'No'}</span>
+        ${data.consecutive_failures?`<span class="kv-k">Consecutive fails</span><span class="kv-v" style="color:var(--amber)">${esc(String(data.consecutive_failures))}</span>`:''}
+        ${(data.circuit_open_until && data.circuit_open_until > new Date().toISOString())?`<span class="kv-k">Circuit open until</span><span class="kv-v" style="color:var(--red);font-size:11px">${fmtDate(data.circuit_open_until)||esc(data.circuit_open_until)}</span>`:''}
         ${data.last_error?`<span class="kv-k">Error</span><span class="kv-v" style="color:var(--red);font-size:11px">${esc(data.last_error)}</span>`:''}
       </div>`;
   } else if (type === 'conflict') {
+    const cTitle = data.title || data.gap_id || 'Knowledge Conflict';
+    const cBody  = data.description || data.text || JSON.stringify(data,null,2);
+    const papers = Array.isArray(data.related_paper_ids) ? data.related_paper_ids : [];
     html = `
-      <strong style="font-size:14px">Conflict / Error</strong>
-      <div class="drawer-sub">System conflict or ingestion error</div>
+      <strong style="font-size:14px">${esc(cTitle)}</strong>
+      <div class="drawer-sub">${esc(data.domain ? 'Contradictory-claim conflict — '+data.domain : 'Contradictory-claim conflict')}</div>
       <h2>Detail</h2>
-      <div class="terminal" style="font-size:11.5px;padding:10px;white-space:pre-wrap">${esc(data.text||JSON.stringify(data,null,2))}</div>`;
+      <div class="terminal" style="font-size:11.5px;padding:10px;white-space:pre-wrap">${esc(cBody)}</div>
+      ${papers.length?`<h2>Related papers</h2><div style="font-size:11px;color:var(--muted);line-height:1.6">${papers.map(p=>esc(p)).join('<br>')}</div>`:''}`;
   }
 
   openDrawer(html);
@@ -3400,28 +3406,23 @@ function renderLiterature() {
       <tbody>${srcRows}</tbody>
     </table>` : ''}`;
 
-  // ── Conflicts (source errors + last_errors) ────────────────────────────────
-  // TODO(follow-up, P1): these are transport errors (timeouts, 429s, 404s), NOT
-  // knowledge conflicts. Separate transport errors (→ Source Health only) from
-  // real contradictory-claim conflicts (gap_detector) and relabel accordingly.
-  const lastErrors = Array.isArray(lit.last_errors) ? lit.last_errors : [];
-  const srcErrors  = Object.entries(srcHealth)
-    .filter(([,h]) => typeof h === 'object' && !h.ok && h.last_error)
-    .map(([src,h]) => `${src}: ${h.last_error}`);
-  const allConflicts = [
-    ...lastErrors.map(e => typeof e === 'string' ? e : JSON.stringify(e)),
-    ...srcErrors,
-  ];
-  $('lit-conflicts').innerHTML = allConflicts.length
-    ? allConflicts.slice(0,5).map((c,i)=>{
-        const cStr = String(c);
+  // ── Knowledge Conflicts (contradictory-claim gaps from the gap detector) ────
+  // Transport/ingestion errors (timeouts, 429s, 404s) are NOT shown here — they
+  // belong to Source Health above. This panel is real contradictory-claim
+  // conflicts only (gap_type=conflict), so a network hiccup never reads here as
+  // a "conflict detection."
+  const knowledgeConflicts = Array.isArray(lit.knowledge_conflicts) ? lit.knowledge_conflicts : [];
+  $('lit-conflicts').innerHTML = knowledgeConflicts.length
+    ? knowledgeConflicts.slice(0,5).map((c,i)=>{
         const key = 'conflict_' + i;
-        _LIT_DETAIL[key] = {text: cStr};
+        _LIT_DETAIL[key] = c;
         return `<div class="warning-banner" style="cursor:pointer"
-          onclick="openLitDetail('conflict','${key}')"
-          title="Click for detail">${esc(trunc(cStr,150))}</div>`;
+          onclick="openLitDetail('conflict','${key}')" title="Click for detail">
+          <strong>${esc(trunc(c.title||c.gap_id||'conflict',90))}</strong>
+          ${c.domain?`<span style="color:var(--dim);font-size:10.5px;margin-left:6px">${esc(c.domain)}</span>`:''}
+        </div>`;
       }).join('')
-    : '<div class="empty-state">No conflicts detected ✓</div>';
+    : '<div class="empty-state">No knowledge conflicts detected ✓</div>';
 
   // ── LLM Insights (4 categories) ───────────────────────────────────────────
   const ins       = S.data.llm_insights || {};
