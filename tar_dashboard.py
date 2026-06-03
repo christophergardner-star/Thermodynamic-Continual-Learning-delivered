@@ -325,6 +325,53 @@ def _suite_checkpoint_progress(experiment_id: str, seeds: list[int]) -> dict[str
     }
 
 
+def _phase2_checkpoint_progress(runner_key: str, *, running: bool) -> dict[str, Any]:
+    """Read a Phase 2 SPRT replication checkpoint (e.g.
+    hpc_replication_checkpoint.json) DIRECTLY, so the active-experiments panel
+    reflects per-seed ground truth: seeds_run, and the real in-flight seed (the
+    next planned seed not yet present in per_seed_results). This does not depend
+    on a prior /api/phase2/status sync having written the queue. Returns {} when
+    the runner has no mapped checkpoint, or it can't be read.
+    """
+    if not runner_key:
+        return {}
+    script_key = next((s for s, r in _SCRIPT_TO_RUNNER_KEY.items() if r == runner_key), None)
+    cfg = _SPRT_CHECKPOINTS.get(script_key or "")
+    if not cfg:
+        return {}
+    ckpt_path = cfg.get("checkpoint")
+    seeds_total = int(cfg.get("required_seeds", 0) or 0)
+    if not ckpt_path or not Path(ckpt_path).exists():
+        return {}
+    try:
+        ckpt = json.loads(Path(ckpt_path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(ckpt, dict):
+        return {}
+    per_seed = ckpt.get("per_seed_results", []) or []
+    completed = sorted(
+        int(r["seed"]) for r in per_seed
+        if isinstance(r, dict) and r.get("seed") is not None
+    )
+    seeds_done = int(ckpt.get("seeds_run", len(completed)) or len(completed))
+    out: dict[str, Any] = {"seeds_done": seeds_done, "checkpoint_source": str(ckpt_path)}
+    if seeds_total:
+        out["seeds_total"] = seeds_total
+    # Real in-flight seed: the first planned seed not yet completed. The planned
+    # window is inferred from the lowest completed seed + the total, so a resume
+    # (which leaves a contiguous completed prefix) still resolves the next seed.
+    if running and completed and (not seeds_total or seeds_done < seeds_total):
+        start = completed[0]
+        span = seeds_total or (completed[-1] - start + 2)
+        completed_set = set(completed)
+        next_seed = next((s for s in range(start, start + span) if s not in completed_set), None)
+        if next_seed is not None:
+            out["current_seed"] = next_seed
+            out["current_method"] = "hpc"
+    return out
+
+
 def _queue_steps(log_dir: Path) -> list[dict]:
     steps = [
         {"n": 1, "label": "Living Research Daemon",       "log": "living_research.log"},
@@ -1248,6 +1295,26 @@ def _runtime_experiment_records() -> list[dict[str, Any]]:
                             + str(progress.get("live_compute_note", "") or "")
                         )
                     entry["context"] = context
+            # Overlay per-seed ground truth from the SPRT checkpoint (seeds_run +
+            # the real in-flight seed) for Phase 2 replication runners. Read here
+            # directly so the panel is correct regardless of /api/phase2/status
+            # sync timing.
+            ckpt_prog = _phase2_checkpoint_progress(_rk, running=(entry.get("status") == "running"))
+            if ckpt_prog:
+                prog = dict(entry.get("progress", {}) or {})
+                prog["seeds_done"] = max(
+                    int(prog.get("seeds_done", 0) or 0),
+                    int(ckpt_prog.get("seeds_done", 0) or 0),
+                )
+                if ckpt_prog.get("seeds_total"):
+                    prog["seeds_total"] = ckpt_prog["seeds_total"]
+                if ckpt_prog.get("current_seed") is not None:
+                    prog["current_seed"] = ckpt_prog["current_seed"]
+                    prog["current_method"] = ckpt_prog.get("current_method") or prog.get("current_method")
+                elif entry.get("status") != "running":
+                    prog.pop("current_seed", None)
+                prog["checkpoint_source"] = ckpt_prog.get("checkpoint_source", prog.get("checkpoint_source"))
+                entry["progress"] = prog
             experiments.append(entry)
 
     seen_ids = {rec.get("id", "") for rec in experiments}
