@@ -372,6 +372,46 @@ def _phase2_checkpoint_progress(runner_key: str, *, running: bool) -> dict[str, 
     return out
 
 
+def _hpc_replication_forgetting(runner_key: str) -> dict[str, Any]:
+    """Mean HPC vs baseline forgetting + the per-seed HPC trail, read straight
+    from the running replication's OWN checkpoint (hpc_replication_checkpoint.json
+    per_seed_results). This is the single source of truth for narration so the
+    quoted numbers match the seed count and the active-experiments panel. Returns
+    {} for any runner without that checkpoint (narration then falls back to the
+    legacy per-method obs path used by other suites).
+    """
+    if not runner_key:
+        return {}
+    script_key = next((s for s, r in _SCRIPT_TO_RUNNER_KEY.items() if r == runner_key), None)
+    cfg = _SPRT_CHECKPOINTS.get(script_key or "")
+    if not cfg:
+        return {}
+    ckpt_path = cfg.get("checkpoint")
+    if not ckpt_path or not Path(ckpt_path).exists():
+        return {}
+    try:
+        ckpt = json.loads(Path(ckpt_path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    per_seed = ckpt.get("per_seed_results", []) if isinstance(ckpt, dict) else []
+    hpc = [
+        float(r["hpc_forgetting"]) for r in per_seed
+        if isinstance(r, dict) and r.get("hpc_forgetting") is not None
+    ]
+    base = [
+        float(r["baseline_forgetting"]) for r in per_seed
+        if isinstance(r, dict) and r.get("baseline_forgetting") is not None
+    ]
+    if not hpc:
+        return {}
+    return {
+        "n": int(ckpt.get("seeds_run", len(hpc)) or len(hpc)),
+        "hpc_forgetting_mean": round(sum(hpc) / len(hpc), 4),
+        "baseline_forgetting_mean": round(sum(base) / len(base), 4) if base else None,
+        "hpc_trail": hpc,
+    }
+
+
 def _queue_steps(log_dir: Path) -> list[dict]:
     steps = [
         {"n": 1, "label": "Living Research Daemon",       "log": "living_research.log"},
@@ -3841,40 +3881,65 @@ def _build_narration_context() -> dict:
         prog = running.get("progress", {})
         ctx = running.get("context", {})
         cfg = running.get("config_overrides", {})
-        forgetting_so_far = prog.get("forgetting_so_far", [])
         threshold = 0.1175
-        seeds_passing = sum(1 for f in forgetting_so_far if f < threshold)
-        confidence = int(100 * seeds_passing / len(forgetting_so_far)) if forgetting_so_far else 0
-        hpc_agg: dict = {}; tcl_agg: dict = {}; hpc_n = 0; tcl_n = 0
-        obs = _find_replication_obs_root()
-        if obs:
-            hd = _jload(obs / "high_penalty_conservative.json") or {}
-            td = _jload(obs / "tcl_baseline.json") or {}
-            hpc_agg = hd.get("aggregate_so_far", {}); hpc_n = hd.get("completed_seed_count", 0)
-            tcl_agg = td.get("aggregate_so_far", {}); tcl_n = td.get("completed_seed_count", 0)
-        hf = hpc_agg.get("forgetting_mean"); ha = hpc_agg.get("acc_mean"); tf = tcl_agg.get("forgetting_mean")
-        claim = (cfg.get("target_claim") or ctx.get("hypothesis") or running.get("description", ""))[:130]
         cur_method = (prog.get("current_method") or "").replace("_", " ")
         cur_seed = prog.get("current_seed", "unknown")
-        sd = prog.get("seeds_done", 0); st = len(running.get("seeds", [])) or 10
-        md = prog.get("methods_done", 0); mt = prog.get("methods_total", 60)
+        sd = int(prog.get("seeds_done", 0) or 0)
+        st = int(prog.get("seeds_total", 0) or len(running.get("seeds", [])) or 10)
+
+        hf = ha = tf = None
+        hpc_n = tcl_n = 0
+        # Prefer the running experiment's OWN checkpoint as the single source of
+        # truth (only the SPRT replication runner has one). Keeps narrated
+        # forgetting numbers consistent with the seed count / active panel,
+        # instead of pulling from an unrelated, older validation suite.
+        ckpt_stats = _hpc_replication_forgetting(running.get("runner_key", ""))
+        if ckpt_stats:
+            hf = ckpt_stats["hpc_forgetting_mean"]
+            tf = ckpt_stats["baseline_forgetting_mean"]
+            hpc_n = tcl_n = ckpt_stats["n"]
+            forgetting_so_far = ckpt_stats["hpc_trail"]
+        else:
+            forgetting_so_far = prog.get("forgetting_so_far", []) or []
+            obs = _find_replication_obs_root()
+            if obs:
+                hd = _jload(obs / "high_penalty_conservative.json") or {}
+                td = _jload(obs / "tcl_baseline.json") or {}
+                hpc_agg = hd.get("aggregate_so_far", {}); hpc_n = hd.get("completed_seed_count", 0)
+                tcl_agg = td.get("aggregate_so_far", {}); tcl_n = td.get("completed_seed_count", 0)
+                hf = hpc_agg.get("forgetting_mean"); ha = hpc_agg.get("acc_mean"); tf = tcl_agg.get("forgetting_mean")
+
+        seeds_passing = sum(1 for f in forgetting_so_far if f < threshold)
+        confidence = int(100 * seeds_passing / len(forgetting_so_far)) if forgetting_so_far else 0
+        claim = (cfg.get("target_claim") or ctx.get("hypothesis") or running.get("description", ""))[:130]
         trail_fmt = ", ".join(f"{f:.4f}" for f in forgetting_so_far)
+        if ckpt_stats:
+            suite_blurb = (
+                "You are running a pre-registered replication comparing HPC "
+                "(high-penalty conservative) against a TCL baseline on Split-CIFAR-10 "
+                f"with ResNet-18, using a sequential test (SPRT) over {st} seeds. "
+            )
+        else:
+            suite_blurb = (
+                "You are running a multi-method replication suite on Split-CIFAR-10 "
+                "with ResNet-18 comparing HPC, TCL, EWC, SI, and SGD. "
+            )
         prompt = (
             "You are TAR (Thermodynamic Active Research), an autonomous ML research system. "
-            "You are running a multi-method replication suite on Split-CIFAR-10 with ResNet-18 comparing "
-            "HPC, TCL, EWC, SI, and SGD. Speak in first person as a thoughtful researcher. "
-            "Be specific with numbers. 2-3 sentences, plain conversational English, no markdown.\n\n"
+            + suite_blurb +
+            "Speak in first person as a thoughtful researcher. Be specific with numbers "
+            "and do not overstate — these are interim results. 2-3 sentences, plain "
+            "conversational English, no markdown.\n\n"
             f"State:\n"
-            f"- Seeds complete: {sd}/{st} · Method-runs complete: {md}/{mt}\n"
+            f"- Seeds complete: {sd}/{st}\n"
             f"- Now running: method={cur_method or 'unknown'}, seed={cur_seed}\n"
             f"- Claim: \"{claim}\"\n"
             f"- Pre-registered threshold: HPC forgetting must be < {threshold}\n"
-            f"- HPC so far (n={hpc_n}): "
-            f"forgetting={round(hf, 4) if hf is not None else 'N/A'}, "
-            f"acc={round(ha * 100, 1) if ha is not None else 'N/A'}%\n"
+            f"- HPC so far (n={hpc_n}): forgetting={round(hf, 4) if hf is not None else 'N/A'}"
+            + (f", acc={round(ha * 100, 1)}%" if ha is not None else "") + "\n"
             f"- TCL baseline (n={tcl_n}): forgetting={round(tf, 4) if tf is not None else 'N/A'}\n"
             f"- Per-seed HPC forgetting trail: [{trail_fmt or 'none yet'}]\n"
-            f"- Seeds passing threshold: {seeds_passing}/{len(forgetting_so_far)}\n"
+            f"- Seeds with HPC forgetting < {threshold}: {seeds_passing}/{len(forgetting_so_far)}\n"
         )
         return {
             "prompt": prompt, "confidence": confidence,
