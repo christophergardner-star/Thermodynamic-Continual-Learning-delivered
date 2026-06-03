@@ -1,0 +1,27 @@
+{
+  "authorised_by": "TAR Director (autonomous)",
+  "content_hash": "9505e217d9e48c248f901b01a6dc4a0a28e33f1728a8e98917ba7e4d29806d91",
+  "created_at": "2026-06-03T18:27:54.423201+00:00",
+  "experiments": [
+    {
+      "allowed_datasets": [
+        "split_cifar10"
+      ],
+      "allowed_methods": [
+        "multi_method"
+      ],
+      "allowed_seeds": [
+        999
+      ],
+      "experiment_id": "f112297c8f6476ce",
+      "name": "HP Selection \u2014 Fair Joint (seed=999 validation)",
+      "notes": "Auto-generated manifest for autonomous run. Spec description: Runs run_hyperparameter_selection.py \u2014 locks baseline HPs before confirmatory runs",
+      "run_limit": 1,
+      "time_limit_h": 2.25
+    }
+  ],
+  "global_time_limit_h": 3.0,
+  "manifest_id": "manifest-auto-f112297c8f6476ce-20260603T182754Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "purpose": "Autonomously generated manifest for experiment 'f112297c8f6476ce' (HP Selection \u2014 Fair Joint (seed=999 validation)). Project: tcl_phd_rehabilitation. Dataset: split_cifar10, method: multi_method, seeds: [999]."
+}
