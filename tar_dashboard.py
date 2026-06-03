@@ -5053,6 +5053,49 @@ def _update_queue_for_phase2(script_key: str, pid: int, started_at: str, status:
         return False
 
 
+def _phase2_run_succeeded(script_key: str, entry: dict | None = None) -> bool:
+    """True only if a Phase-2 run actually produced its expected output.
+
+    Distinguishes a genuine completion from a crashed/killed PID so the queue is
+    not advanced on a false 'complete'. Concretely: an HPC replication that died
+    mid-seed has seeds_run < required and no SPRT decision -> treat as 'failed',
+    NOT 'complete' (this is the bug that silently advanced the queue on 2026-06-03
+    when run_hpc_replication died at 6/20). For the other scripts, success requires
+    an output artifact at least as new as the run's started_at.
+    """
+    comp = _WS / "tar_state" / "comparisons"
+    started_ts = 0.0
+    sa = (entry or {}).get("started_at", "") if isinstance(entry, dict) else ""
+    if sa:
+        try:
+            started_ts = datetime.fromisoformat(str(sa).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            started_ts = 0.0
+    try:
+        if script_key == "run_hpc_replication":
+            ckpt = _jload(comp / "hpc_replication_checkpoint.json") or {}
+            ckpt = ckpt if isinstance(ckpt, dict) else {}
+            required = 20  # pre-registered n; an SPRT early-stop also counts as done
+            seeds_run = int(ckpt.get("seeds_run", len(ckpt.get("per_seed_results", []) or [])) or 0)
+            sprt_log = ckpt.get("sprt_log", []) or []
+            decided = bool(sprt_log) and str(sprt_log[-1].get("decision", "")) in {"accept_H1", "accept_H0"}
+            return decided or seeds_run >= required
+        if script_key == "run_hyperparameter_selection":
+            f = _WS / "tar_state" / "hyperparameter_selection.json"
+            return f.exists() and (started_ts == 0.0 or f.stat().st_mtime >= started_ts - 5)
+        _patterns = {
+            "run_mechanistic_ablation":   "mechanistic_ablation_*.json",
+            "phase16_cifar100_rerun":     "phase16_cifar100_rerun_*.json",
+            "phase17_tinyimagenet_rerun": "phase17_tinyimagenet_rerun_*.json",
+        }
+        pat = _patterns.get(script_key)
+        if pat:
+            return any(p.stat().st_mtime >= started_ts - 5 for p in comp.glob(pat))
+    except Exception:
+        pass
+    return False
+
+
 def _any_phase2_alive() -> bool:
     """Return True if any Phase 2 subprocess is currently alive per psutil."""
     try:
@@ -5217,15 +5260,20 @@ def _start_phase2_watcher() -> None:
                     if alive:
                         _sync_phase2_progress(script_key)
                     if not alive:
+                        # Only mark 'complete' if the run actually produced its output;
+                        # a crashed/killed PID with no result is 'failed' so the queue
+                        # does not advance on false evidence.
+                        outcome = "complete" if _phase2_run_succeeded(script_key, entry) else "failed"
                         _update_queue_for_phase2(
                             script_key, 0,
                             entry.get("started_at", ""),
-                            "complete",
+                            outcome,
                         )
                         pids[script_key] = {
                             **entry,
                             "pid": None,
                             "completed_at": datetime.now(timezone.utc).isoformat(),
+                            "outcome": outcome,
                         }
                         dirty = True
                 if dirty:
@@ -5263,7 +5311,10 @@ def api_phase2_status():
         results[key] = {
             **entry,
             "alive": alive,
-            "status": "running" if alive else ("complete" if entry.get("started_at") else "idle"),
+            "status": "running" if alive else (
+                ("complete" if _phase2_run_succeeded(key, entry) else "failed")
+                if entry.get("started_at") else "idle"
+            ),
         }
         # Bridge: keep experiment_queue.json in sync with actual process state
         if alive:
