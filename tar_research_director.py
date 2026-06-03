@@ -33,6 +33,28 @@ from tar_storage import ensure_workspace_layout, resolve_workspace
 _REPO = Path(__file__).resolve().parent
 _STRICT_REAL_WORLD_FRONTIER_ONLY = True
 
+# Per-domain opt-in for autonomous novel-frontier minting (the human-GATED last
+# step of the stack-bridge rollout — see TAR_Phase0_and_StackBridge_Implementation_Plan.md
+# Part B). When a domain id is in this set, the director MAY mint literature-gap-
+# derived frontier problems for that domain. This is EMPTY by default, so strict
+# mode still blocks ALL autonomous frontier minting and there is no behavior
+# change until a human explicitly opts a domain in. The FrontierRegistry.register
+# real-world guard (well_known_problem + named external baselines/datasets) is NOT
+# relaxed by this — it still applies on top.
+_FRONTIER_AUTONOMY_DOMAINS: frozenset[str] = frozenset()
+
+
+def _frontier_autonomy_allowed(domain_id: str) -> bool:
+    """Whether autonomous novel-frontier minting is permitted for this domain.
+
+    Strict mode (default) blocks everything; a domain becomes eligible only when a
+    human adds it to _FRONTIER_AUTONOMY_DOMAINS. With the default empty set this is
+    equivalent to the previous `_STRICT_REAL_WORLD_FRONTIER_ONLY` hard block.
+    """
+    if not _STRICT_REAL_WORLD_FRONTIER_ONLY:
+        return True
+    return bool(domain_id) and domain_id in _FRONTIER_AUTONOMY_DOMAINS
+
 _DEFAULT_DOMAIN_SPECS: list[dict[str, Any]] = [
     {
         "id": "general_ai",
@@ -1154,7 +1176,7 @@ class ResearchDirector:
             ))
             represented_domain_ids.add(domain.id)
 
-        exploratory_domains = [] if _STRICT_REAL_WORLD_FRONTIER_ONLY else active_domains
+        exploratory_domains = [d for d in active_domains if _frontier_autonomy_allowed(d.id)]
 
         for domain in exploratory_domains:
             candidate = self._pick_novel_problem_for_domain(domain.id)
@@ -1360,7 +1382,7 @@ class ResearchDirector:
             return fallback
 
     def _pick_novel_problem_for_domain(self, domain_id: str) -> dict[str, Any] | None:
-        if _STRICT_REAL_WORLD_FRONTIER_ONLY:
+        if not _frontier_autonomy_allowed(domain_id):
             return None
         literature_domain = _LITERATURE_DOMAIN_MAP.get(domain_id, "")
         if not literature_domain or not self.literature_db_path.exists():
@@ -2217,7 +2239,8 @@ class ResearchDirector:
         return []
 
     def _active_path_experiment_catalog(self, path: ActiveResearchPath) -> list[dict[str, Any]]:
-        if _STRICT_REAL_WORLD_FRONTIER_ONLY:
+        _path_domain = getattr(path, "domain_id", "") or getattr(path, "domain", "")
+        if not _frontier_autonomy_allowed(_path_domain):
             return []
         if path.path_kind not in {"novel_problem", "domain_frontier_scan"}:
             return []

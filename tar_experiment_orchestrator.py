@@ -2197,6 +2197,8 @@ class ExperimentOrchestrator:
             return self._run_nlp_continual(spec)
         if spec.runner_key == "ood_eval":
             return self._run_ood_eval(spec)
+        if spec.runner_key == "science_exec":
+            return self._run_science_exec(spec)
         if spec.dataset == DATASET_CIFAR10:
             return self._run_cifar10(spec)
         elif spec.dataset == DATASET_CIFAR100:
@@ -2209,6 +2211,176 @@ class ExperimentOrchestrator:
             return self._run_ood_eval(spec)
         else:
             raise ValueError(f"Unknown dataset: {spec.dataset}")
+
+    # ── Stack-B bridge: multi-domain experiments via tar_lab.science_exec ───────
+    # Lets the autonomous loop dispatch NON-CL experiments (quantum, graph,
+    # tabular, NLP, RL, CV, generic) through the SAME _execute path as CL runs, so
+    # they inherit the RAIL-3 manifest gate, RAIL-4 veto, runtime lease, append-only
+    # archive, and env snapshot. Stack-B is accuracy-domain (higher-is-better, no
+    # "forgetting"); we therefore build the ExperimentResult directly and DO NOT
+    # route through _build_result (which compares against a TCL forgetting baseline).
+    def _run_science_exec(self, spec: ExperimentSpec) -> ExperimentResult:
+        from tar_lab.science_exec import execute_study_payload
+
+        payload = self._build_study_payload_from_spec(spec)
+        exp_dir = self._exp_dir / spec.id
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        artifact = exp_dir / "environment_probe.json"
+        self._log(
+            f"  [science_exec] domain={payload.get('domain')} "
+            f"experiments={len(payload.get('experiments') or [])}"
+        )
+        report = execute_study_payload(payload, artifact)
+        # Persist the raw Stack-B report for full provenance (manifest hash,
+        # attestation, per-experiment statistics) beyond what ExperimentResult holds.
+        try:
+            try:
+                raw = report.model_dump_json(indent=2)
+            except AttributeError:
+                raw = report.json(indent=2)  # pydantic v1 fallback
+            (exp_dir / "science_exec_report.json").write_text(raw, encoding="utf-8")
+        except Exception as exc:
+            self._log(f"  [science_exec] failed to persist raw report: {exc}")
+        return self._adapt_science_report(spec, report)
+
+    def _build_study_payload_from_spec(self, spec: ExperimentSpec) -> dict:
+        """Translate an ExperimentSpec into a Stack-B study payload (dict).
+
+        The domain and the experiment plan list must be supplied by the Director
+        (or caller) via spec.config_overrides; runtime_context['domain_id'] is a
+        fallback for the domain.
+        """
+        ov = dict(spec.config_overrides or {})
+        domain = (
+            ov.get("domain")
+            or (spec.runtime_context or {}).get("domain_id")
+            or "generic_ml"
+        )
+        experiments = ov.get("experiments")
+        if not experiments:
+            raise ValueError(
+                "science_exec spec requires config_overrides['experiments'] "
+                "(a list of ProblemExperimentPlan-shaped dicts)."
+            )
+        return {
+            "problem_id": spec.frontier_problem_id or spec.id,
+            "problem": spec.hypothesis_name or spec.name,
+            "profile_id": ov.get("profile_id", spec.project_id),
+            "domain": domain,
+            "benchmark_tier": ov.get("benchmark_tier", "validation"),
+            "requested_benchmark": ov.get("requested_benchmark"),
+            "canonical_only": bool(ov.get("canonical_only", False)),
+            "no_proxy_benchmarks": bool(ov.get("no_proxy_benchmarks", False)),
+            "environment": {"validation_imports": ov.get("validation_imports", [])},
+            "benchmark_availability": ov.get("benchmark_availability", []),
+            "experiments": experiments,
+        }
+
+    @staticmethod
+    def _accuracy_verdict(values: list[float], stat: dict, spec: ExperimentSpec) -> str:
+        """Accuracy-domain verdict (higher-is-better).
+
+        Defaults to NULL when there is no external baseline to compare against —
+        multi-domain results are recorded honestly and never auto-promoted to
+        BREAKTHROUGH without a baseline. Provide config_overrides['baseline_metric_value']
+        (and optional 'alpha') to enable a comparison.
+        """
+        if not values:
+            return "ERROR"
+        ov = spec.config_overrides or {}
+        baseline = ov.get("baseline_metric_value")
+        if baseline is None:
+            return "NULL"  # recorded; no comparison available
+        mean_v = sum(values) / len(values)
+        try:
+            p_val = float(stat.get("p_value", stat.get("p", float("nan"))))
+        except (TypeError, ValueError):
+            p_val = float("nan")
+        better = mean_v > float(baseline)
+        sig = (p_val == p_val) and p_val < float(ov.get("alpha", 0.05))  # p==p filters NaN
+        if better and sig:
+            return "BREAKTHROUGH"
+        if better:
+            return "DIRECTIONAL"
+        return "ADVERSE"
+
+    def _adapt_science_report(self, spec: ExperimentSpec, report: Any) -> ExperimentResult:
+        """Adapt a Stack-B ProblemExecutionReport into an ExperimentResult."""
+        completed = [e for e in report.experiments if e.status == "completed"]
+        primary = (spec.config_overrides or {}).get("primary_metric", "accuracy")
+        values = [
+            float(e.metrics[primary])
+            for e in completed
+            if primary in e.metrics and e.metrics[primary] is not None
+        ]
+        stat: dict = {}
+        summ = getattr(report, "benchmark_statistical_summary", None)
+        if summ is not None:
+            try:
+                stat = summ.model_dump()
+            except Exception:
+                stat = {}
+
+        def _mean(xs):
+            return sum(xs) / len(xs) if xs else 0.0
+
+        def _std(xs):
+            if len(xs) < 2:
+                return 0.0
+            m = _mean(xs)
+            return (sum((x - m) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5
+
+        def _f(key, default=0.0):
+            try:
+                return float(stat.get(key, default))
+            except (TypeError, ValueError):
+                return float(default)
+
+        seed_results = [
+            {
+                "experiment": e.name,
+                "benchmark": e.benchmark,
+                "metric": primary,
+                "value": e.metrics.get(primary),
+                "metrics": dict(e.metrics),
+                "status": e.status,
+                "canonical_comparable": e.canonical_comparable,
+                "proxy_benchmark_used": e.proxy_benchmark_used,
+            }
+            for e in report.experiments
+        ]
+        verdict = self._accuracy_verdict(values, stat, spec)
+        notes = (
+            f"[science_exec] domain={report.domain} "
+            f"completed={len(completed)}/{len(report.experiments)} "
+            f"canonical_comparable={report.canonical_comparable} "
+            f"proxy_used={report.proxy_benchmarks_used} "
+            f"manifest={report.manifest_hash} :: {report.summary}"
+        )
+        return ExperimentResult(
+            experiment_id=spec.id,
+            experiment_name=spec.name,
+            project_id=spec.project_id,
+            hypothesis_name=spec.hypothesis_name,
+            dataset=report.domain,
+            method=primary,
+            seeds=spec.seeds,
+            config_overrides=spec.config_overrides,
+            seed_results=seed_results,
+            mean_forgetting=0.0,   # not applicable to accuracy-domain results
+            std_forgetting=0.0,
+            mean_accuracy=_mean(values),
+            std_accuracy=_std(values),
+            baseline_forgetting=[],
+            mean_delta=_f("mean_delta", 0.0),
+            t_stat=_f("t_stat", 0.0),
+            p_val=_f("p_value", _f("p", float("nan"))),
+            cohens_d=_f("cohens_d", _f("effect_size", 0.0)),
+            n_better=0,
+            verdict=verdict,
+            notes=notes,
+            power_analysis=stat if isinstance(stat, dict) else {},
+        )
 
     # ── CIFAR-10 runner (uses tar_lab harness) ────────────────────────────────
     def _run_cifar10(self, spec: ExperimentSpec) -> ExperimentResult:

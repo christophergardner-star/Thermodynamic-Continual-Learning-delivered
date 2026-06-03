@@ -32,7 +32,17 @@ _FINANCIAL_KEYWORDS = frozenset({
 })
 
 # Domains that TAR accepts.  Anything else is out-of-scope.
-_ACCEPTED_DOMAINS = frozenset({"continual_learning", "thermodynamics_ml", "other_ml"})
+# Expanded to the domains Stack-B (tar_lab.science_exec) can actually execute, so
+# intake matches execution capability and the autonomous loop can run multi-domain
+# experiments via the science_exec bridge (tar_experiment_orchestrator._run_science_exec).
+# Finance remains blocked by the finance_hard_block path above (checked BEFORE this
+# set, in _classify_out_of_domain), pending a dedicated FI-2010 adapter and a
+# leakage-controlled (walk-forward / purged-split) protocol.
+_ACCEPTED_DOMAINS = frozenset({
+    "continual_learning", "thermodynamics_ml", "other_ml",
+    "deep_learning", "computer_vision", "natural_language_processing",
+    "reinforcement_learning", "graph_ml", "quantum_ml", "generic_ml",
+})
 
 
 def _is_financial_domain(text: str) -> bool:
