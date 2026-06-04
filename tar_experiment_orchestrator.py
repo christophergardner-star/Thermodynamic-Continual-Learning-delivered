@@ -3288,6 +3288,20 @@ class ExperimentOrchestrator:
                 return vals
         return [0.1269, 0.1294, 0.1697, 0.1007, 0.1108]
 
+    def _mark_result_quarantined(self, result_path: Path, *, reason: str) -> None:
+        """Truth-lock TL-1: stamp an unverified result as quarantined via a sibling
+        marker (audit). The index record is also stamped quarantined=True so
+        classify_trust_tier (TL-4) excludes it from publication / live comparisons."""
+        marker = Path(result_path).with_name("result_quarantine.json")
+        marker.write_text(
+            json.dumps(
+                {"quarantined": True, "reason": reason,
+                 "at": datetime.now(timezone.utc).isoformat()},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
     def _save_result(self, spec: ExperimentSpec, result: ExperimentResult) -> Path:
         exp_dir = self._exp_dir / spec.id
         exp_dir.mkdir(parents=True, exist_ok=True)
@@ -3346,13 +3360,36 @@ class ExperimentOrchestrator:
             except OSError:
                 pass
             raise
-        # Auto-register in canonical JSONL index for immediate publication eligibility.
+        # Truth-lock TL-1 (2026-06-04): verify the just-written result against the
+        # canonical 3 gates (env sibling + committed manifest + deterministic recompute).
+        # A result that does not verify is QUARANTINED (sibling marker + quarantined=True
+        # in the index record) so it is excluded from live comparisons and can never be
+        # counted as publication-grade. Verification is read-only and never raises (a
+        # verify fault must not lose the append-only result already written above).
+        try:
+            from tar_lab.canonical_registry import verify_canonical_3gate
+            _verified, _vreason = verify_canonical_3gate(path)
+        except Exception as exc:
+            _verified, _vreason = False, f"verify_error:{exc}"
+        if _verified:
+            self._log(f"[truth-lock TL-1] canonical-verified {spec.id}")
+        else:
+            self._log(f"[truth-lock TL-1] QUARANTINED {spec.id}: {_vreason}")
+            try:
+                self._mark_result_quarantined(path, reason=f"canonical_unverified: {_vreason}")
+            except Exception as exc:
+                self._log(f"[truth-lock TL-1] quarantine marker failed: {exc}")
+        # Index the result, stamped with the verification outcome. Eligibility itself is
+        # decided downstream by classify_trust_tier (TL-4); never default-allow here.
         # Non-fatal: _iter_queue_experiment_records in build_validation_state provides
         # a fallback scan so papers are never permanently blocked if this call fails.
         try:
             from tar_lab.result_artifacts import write_canonical_comparison_result
             from tar_lab.phase_catalog import phase_catalog_by_logical_name
             _cat = phase_catalog_by_logical_name().get(spec.id)
+            _extra = {"canonical_verified": _verified, "canonical_verify_reason": _vreason}
+            if not _verified:
+                _extra["quarantined"] = True
             write_canonical_comparison_result(
                 workspace=self.workspace,
                 logical_name=spec.id,
@@ -3360,6 +3397,8 @@ class ExperimentOrchestrator:
                 env_payload=env_payload,
                 phase_number=_cat.phase_number if _cat else None,
                 source_script=Path(__file__).name,
+                publication_allowed=False,
+                extra_record=_extra,
             )
         except Exception:
             pass

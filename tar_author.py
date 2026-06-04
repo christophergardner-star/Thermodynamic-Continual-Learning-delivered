@@ -6077,6 +6077,26 @@ class TARAuthor:
             paper_title=spec.title,
             pending_stub_ids=_stub_exp_ids,
         )
+        # Truth-lock TL-3c (2026-06-04): refuse to author a TCL contribution backed ONLY
+        # by the uniform-L2 PROXY (method="tcl"). The published TCL claim must rest on the
+        # canonical gradient-energy algorithm (tcl_canonical/tcl_full). Defense-in-depth atop
+        # TL-4 (which already denies publication eligibility to proxy-only TCL evidence).
+        try:
+            from tar_lab.method_identity import method_identity as _mid
+            _agg = evidence.get("aggregate_results", {})
+            _meth = list(_agg.keys()) if isinstance(_agg, dict) else []
+            _tcl_ids = [_mid(m) for m in _meth if _mid(m)["in_tcl_family"]]
+            _proxy_only_tcl = bool(_tcl_ids) and not any(i["is_canonical_tcl"] for i in _tcl_ids)
+            _is_tcl_paper = "tcl" in (str(spec.title) + " " + str(spec.project_id)).lower()
+        except Exception:
+            _proxy_only_tcl, _is_tcl_paper = False, False
+        if _proxy_only_tcl and _is_tcl_paper:
+            raise RuntimeError(
+                f"Paper '{spec.project_id}' blocked by truth-lock (TL-3c): its TCL evidence is the "
+                f"uniform-L2 PROXY (method='tcl'), not the canonical gradient-energy algorithm. The "
+                f"published TCL claim must be backed by tcl_canonical/tcl_full (run phase18). Refusing "
+                f"to render the proxy as the canonical algorithm."
+            )
         figure_bundle = _generate_validated_result_figures(evidence, out_dir)
         evidence["required_figures"] = figure_bundle.get("required_figures", [])
         evidence["generated_figures"] = figure_bundle.get("generated_figures", [])

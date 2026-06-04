@@ -283,6 +283,11 @@ payload = {
     "primary": primary_stats, "secondary": secondary,
     "lambda_sweep": lambda_sweep_results,
     "correction": {"method": "holm_bonferroni", "k": len(PRIMARY), "alpha": ALPHA},
+    # Truth-lock TL-4 signal: family-wise (Holm, k=6) corrected significance of the
+    # headline canonical-vs-EWC comparison. True only when a CANONICAL variant
+    # (tcl_canonical/tcl_full) beats EWC with Holm-corrected significance + non-trivial
+    # effect. A pilot that is merely directional sets this False (not publication-grade).
+    "family_wise_significant": bool(_beats_ewc(full_vs_ewc) or _beats_ewc(canon_vs_ewc)),
     "verdict": verdict, "completed_at": completed_at,
     "power_note": "n=5 directional pilot; confirmatory claim requires n=10-20 (see preregistration).",
 }
@@ -300,7 +305,12 @@ env_payload = collect_environment_snapshot(
     source_script=Path(__file__).name,
     run_started_at=run_started_at,
     run_ended_at=completed_at,
-    extra={"logical_name": "phase18_tcl_canonical_fullprotocol"},
+    # Truth-lock provenance: bind the result to the committed RAIL-3 manifest so it
+    # passes canonical gate-1/gate-2 (authorization.manifest_hash + git-committed manifest).
+    manifest_path=str(_manifest_path),
+    manifest_hash=getattr(_manifest, "content_hash", "") or "",
+    extra={"logical_name": "phase18_tcl_canonical_fullprotocol",
+           "manifest_id": getattr(_manifest, "manifest_id", "")},
 )
 artifacts = write_canonical_comparison_result(
     workspace=Path(workspace),
