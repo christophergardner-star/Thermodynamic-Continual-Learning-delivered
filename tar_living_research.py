@@ -1445,7 +1445,12 @@ def _build_director_followup_specs(
         }
         _proposed_method = str(directive.get("method", "tcl") or "tcl")
         _runner_key = str(directive.get("runner_key", "") or "")
-        if _proposed_method not in _NATIVE_METHODS:
+        # K2.1: science_exec bridge directives carry a Stack-B payload (config_overrides has
+        # domain + experiments); their "method" is a primary-metric label, NOT a CL method,
+        # so bypass the native-method / synthesis path and dispatch via the science_exec bridge.
+        if _runner_key == "science_exec":
+            pass
+        elif _proposed_method not in _NATIVE_METHODS:
             # Check if already synthesized in a prior cycle.
             from tar_lab.method_registry import METHOD_REGISTRY, load_generated_methods
             _synth_dir = workspace / "tar_state" / "synthesized_methods"

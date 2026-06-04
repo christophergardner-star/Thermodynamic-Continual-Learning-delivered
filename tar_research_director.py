@@ -55,6 +55,49 @@ def _frontier_autonomy_allowed(domain_id: str) -> bool:
         return True
     return bool(domain_id) and domain_id in _FRONTIER_AUTONOMY_DOMAINS
 
+
+def _science_exec_overrides(profile: dict[str, Any]) -> dict[str, Any]:
+    """K2.1 (science-loop unification): build the Stack-B `science_exec` inputs for a
+    directive's config_overrides — domain + experiment plan (from
+    science_profiles/<domain>.json templates) + the primary metric — so the orchestrator's
+    _build_study_payload_from_spec can run the bridge. Falls back to a minimal validation
+    probe if the profile/templates are unavailable. Pure/read-only; inert until a domain is
+    opted into _FRONTIER_AUTONOMY_DOMAINS."""
+    domain = str(profile.get("science_domain") or profile.get("domain") or "generic_ml")
+    experiments: list[dict[str, Any]] = []
+    primary_metric = "accuracy"
+    try:
+        pf = _REPO / "science_profiles" / f"{domain}.json"
+        if pf.exists():
+            d = json.loads(pf.read_text(encoding="utf-8"))
+            for t in (d.get("experiment_templates") or [])[:1]:
+                metrics = list(t.get("metrics") or [])
+                if metrics:
+                    primary_metric = str(metrics[0])
+                experiments.append({
+                    "template_id": t.get("template_id"),
+                    "name": t.get("name"),
+                    "benchmark": t.get("benchmark"),
+                    "metrics": metrics,
+                    "parameter_grid": t.get("parameter_grid", {}),
+                })
+    except Exception:
+        pass
+    if not experiments:
+        experiments = [{
+            "template_id": f"{domain}_validation_probe",
+            "name": f"{domain} validation probe",
+            "benchmark": "validation",
+            "metrics": [primary_metric],
+            "parameter_grid": {},
+        }]
+    return {
+        "domain": domain,
+        "experiments": experiments,
+        "primary_metric": primary_metric,
+        "benchmark_tier": "validation",
+    }
+
 _DEFAULT_DOMAIN_SPECS: list[dict[str, Any]] = [
     {
         "id": "general_ai",
@@ -2325,6 +2368,31 @@ class ResearchDirector:
                 "external_baselines": ["ewc", "sgd_baseline", "experience_replay"],
                 "target_venues": ["NeurIPS", "ICML"],
             },
+            # K2.1 science_exec (Stack-B) domains — routed through the bridge. dataset
+            # "cpu_only" tells the scheduler to bypass GPU gating (quantum is a CPU
+            # simulator; graph/tabular are small). Heavy variants -> RunPod. INERT until
+            # the domain is opted into _FRONTIER_AUTONOMY_DOMAINS.
+            "quantum_ml": {
+                "dataset": "cpu_only", "runner_key": "science_exec", "science_domain": "quantum_ml",
+                "method": "accuracy", "comparison_methods": [], "backbone": "n/a", "epochs": 1,
+                "hardware_budget": {"vram_gb": 0.0, "cpu_cores": 4},
+                "external_baselines": ["classical_svm", "classical_mlp"],
+                "target_venues": ["NeurIPS", "ICML", "Quantum"],
+            },
+            "graph_ml": {
+                "dataset": "cpu_only", "runner_key": "science_exec", "science_domain": "graph_ml",
+                "method": "accuracy", "comparison_methods": [], "backbone": "n/a", "epochs": 1,
+                "hardware_budget": {"vram_gb": 0.0, "cpu_cores": 4},
+                "external_baselines": ["gcn", "gat", "mlp"],
+                "target_venues": ["NeurIPS", "ICML", "LoG"],
+            },
+            "generic_ml": {
+                "dataset": "cpu_only", "runner_key": "science_exec", "science_domain": "generic_ml",
+                "method": "accuracy", "comparison_methods": [], "backbone": "n/a", "epochs": 1,
+                "hardware_budget": {"vram_gb": 0.0, "cpu_cores": 4},
+                "external_baselines": ["logistic_regression", "gradient_boosting"],
+                "target_venues": ["NeurIPS", "ICML", "AISTATS"],
+            },
         }
         profile = supported_profiles.get(path.domain_id)
         if not profile:
@@ -2386,6 +2454,11 @@ class ResearchDirector:
         }
         if profile.get("runner_key"):
             exp_entry["runner_key"] = str(profile["runner_key"])
+        # K2.1: science_exec bridge directives carry the Stack-B payload (domain +
+        # experiment plan + primary metric) in config_overrides so the orchestrator's
+        # _build_study_payload_from_spec can run them. Inert until the domain is opted in.
+        if exp_entry.get("runner_key") == "science_exec":
+            exp_entry["config_overrides"].update(_science_exec_overrides(profile))
         return [exp_entry]
 
     def _apply_answered_questions(
