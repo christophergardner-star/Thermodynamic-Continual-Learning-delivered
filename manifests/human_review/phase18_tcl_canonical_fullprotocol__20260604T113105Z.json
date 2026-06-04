@@ -1,0 +1,39 @@
+{
+  "manifest_id": "human-review-phase18_tcl_canonical_fullprotocol-20260604T113105Z",
+  "manifest_schema": "tar_execution_manifest_v1",
+  "created_at": "2026-06-04T11:31:05.879855+00:00",
+  "authorised_by": "cgard",
+  "purpose": "Human-approved: run phase18 canonical/full TCL head-to-head (protocol of record). Truth-lock P1 re-earn + first full-protocol measurement of the NAMED TCL algorithm (tcl_canonical/tcl_full) vs EWC/SI/SGD and the published uniform-L2 proxy. Headline config, no lambda sweep.",
+  "frontier_problem_id": "fp-catastrophic-forgetting",
+  "target_paper_id": "",
+  "human_review_review_id": "manual:phase18_tcl_canonical_fullprotocol",
+  "global_time_limit_h": 48.0,
+  "experiments": [
+    {
+      "experiment_id": "phase18_tcl_canonical_fullprotocol",
+      "name": "Phase 18 - Canonical/Full TCL head-to-head (protocol of record)",
+      "allowed_datasets": [
+        "split_cifar10"
+      ],
+      "allowed_methods": [
+        "sgd_baseline",
+        "ewc",
+        "si",
+        "tcl",
+        "tcl_canonical",
+        "tcl_full"
+      ],
+      "allowed_seeds": [
+        42,
+        0,
+        1,
+        2,
+        3
+      ],
+      "time_limit_h": 48.0,
+      "run_limit": 1,
+      "notes": "Headline config (TAR_PHASE18_LAMBDA_SWEEP unset). 40 epochs, 5 seeds. First measurement of the named TCL algorithm; resolves proxy-vs-canonical."
+    }
+  ],
+  "content_hash": "17c5a0908907bc313611ac3608293d015f3a6356bbc486c1348cc98af3172e0e"
+}
