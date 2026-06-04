@@ -1,0 +1,84 @@
+"""
+Method-identity — single source of truth for distinguishing the canonical TCL
+algorithm from the published uniform-L2 PROXY (truth-lock TL-3, 2026-06-04).
+
+Background: every previously published "TCL" number used method="tcl", which is a
+D_PR-scaled uniform L2 anchor to the last task (+ a regime-observer LR scaler) — NOT
+the per-element gradient-energy importance method (tcl.py) described in the paper.
+method="tcl_canonical"/"tcl_full" run the real algorithm. Nothing recorded which one
+produced a result, so a proxy number could be (and in the paper, was) presented as the
+canonical algorithm. This utility lets the validation gate (TL-4) and the authoring
+guard (TL-3c) refuse to count/render a proxy result under a canonical-algorithm claim.
+
+Mirrors the families declared in tar_lab/multimodal_payloads.py:
+    _TCL_OBS   = {"tcl", "tcl_full"}            # use the thermodynamic regime observer / LR control
+    _TCL_CANON = {"tcl_canonical", "tcl_full"}  # use the canonical (tcl.py) per-element importance penalty
+"""
+from __future__ import annotations
+
+from typing import Any
+
+# Keep in sync with multimodal_payloads.py:897-904
+_TCL_OBS = frozenset({"tcl", "tcl_full"})
+_TCL_CANON = frozenset({"tcl_canonical", "tcl_full"})
+_TCL_FAMILY = frozenset({"tcl", "tcl_penalty_only", "tcl_canonical", "tcl_full"})
+# Variants that are (entirely or partly) the uniform-L2 proxy, NOT the canonical importance method.
+_TCL_PROXY = frozenset({"tcl", "tcl_penalty_only"})
+
+
+def method_identity(method: str) -> dict[str, Any]:
+    """Return the identity fingerprint of a benchmark method name.
+
+    Keys:
+      method                 - the raw method name
+      family                 - 'tcl' for any TCL variant, else the method name
+      in_tcl_family          - bool
+      is_canonical_tcl       - True only for tcl_canonical / tcl_full (real algorithm)
+      uses_uniform_l2_proxy  - True for tcl / tcl_penalty_only (the published proxy)
+      uses_regime_observer   - True for tcl / tcl_full
+    """
+    m = str(method or "").strip()
+    return {
+        "method": m,
+        "family": "tcl" if m in _TCL_FAMILY else m,
+        "in_tcl_family": m in _TCL_FAMILY,
+        "is_canonical_tcl": m in _TCL_CANON,
+        "uses_uniform_l2_proxy": m in _TCL_PROXY,
+        "uses_regime_observer": m in _TCL_OBS,
+    }
+
+
+def is_proxy_claiming_canonical(method: str, *, claims_canonical_tcl: bool) -> bool:
+    """True iff a uniform-L2 PROXY result is being presented as the canonical TCL algorithm.
+
+    This is the specific overclaim truth-lock forbids: a method="tcl" (proxy) result
+    backing a claim about the canonical gradient-energy importance algorithm.
+    `claims_canonical_tcl` is supplied by the caller (e.g. the result is labeled/cited as
+    "TCL" in a context that derives the canonical mechanism).
+    """
+    ident = method_identity(method)
+    return bool(claims_canonical_tcl) and ident["uses_uniform_l2_proxy"] and not ident["is_canonical_tcl"]
+
+
+def result_method_identities(result_payload: dict | None) -> list[dict[str, Any]]:
+    """Best-effort: derive method identities for a result payload.
+
+    Prefers an explicitly recorded `method_identity` (single-method results); otherwise
+    derives from the method name / the sweep `methods` list / `aggregate` keys, so the gate
+    works on existing and sweep-schema results that predate explicit recording.
+    """
+    if not isinstance(result_payload, dict):
+        return []
+    # unwrap verdict-separation
+    stats = result_payload.get("statistics") if isinstance(result_payload.get("statistics"), dict) else result_payload
+    recorded = stats.get("method_identity") or result_payload.get("method_identity")
+    if isinstance(recorded, dict) and recorded.get("method"):
+        return [recorded]
+    methods: list[str] = []
+    if isinstance(stats.get("methods"), list):
+        methods = [str(m) for m in stats["methods"]]
+    elif isinstance(stats.get("aggregate"), dict):
+        methods = [str(m) for m in stats["aggregate"].keys()]
+    elif stats.get("method"):
+        methods = [str(stats["method"])]
+    return [method_identity(m) for m in methods]

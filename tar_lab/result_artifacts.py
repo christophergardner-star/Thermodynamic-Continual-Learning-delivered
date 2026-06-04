@@ -270,7 +270,11 @@ def write_canonical_comparison_result(
         "trust_tier": trust_tier or "trusted_rerun_with_env",
         "provenance_status": provenance_status or "env_snapshot_present",
         "basis": basis or "append_only_canonical_write_with_env",
-        "publication_allowed": True if publication_allowed is None else bool(publication_allowed),
+        # Truth-lock TL-2 (2026-06-04): DEFAULT DENY. This writer no longer confers
+        # publication eligibility — that is decided downstream by classify_trust_tier
+        # (TL-4), which requires canonical 3-gate verification + method-identity +
+        # family-wise significance. Default False unless an explicit caller proves it.
+        "publication_allowed": False if publication_allowed is None else bool(publication_allowed),
         "supersedes": supersedes or [],
         "superseded_by": superseded_by or "",
     }
