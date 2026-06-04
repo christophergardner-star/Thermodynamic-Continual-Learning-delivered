@@ -124,3 +124,38 @@ def test_tl4_verify_failure_blocks(tmp_path, monkeypatch):
     out = classify_trust_tier(tmp_path, record=rec, result_payload=payload)
     assert out["canonical_verified"] is False
     assert out["publication_allowed"] is False
+
+
+# ── TL-6 tamper-evidence anchor chain ───────────────────────────────────────────
+def _seed_index(tmp_path, text="a\n"):
+    idx = tmp_path / "tar_state" / "comparisons" / "canonical_results_index.jsonl"
+    idx.parent.mkdir(parents=True, exist_ok=True)
+    idx.write_text(text, encoding="utf-8")
+    return idx
+
+
+def test_tl6_anchor_chain_write_and_verify(tmp_path):
+    from tar_lab.canonical_anchor import write_canonical_anchor, verify_canonical_anchor_chain
+    idx = _seed_index(tmp_path, "one\n")
+    a0 = write_canonical_anchor(tmp_path, repo_root=tmp_path)
+    assert a0["seq"] == 0 and a0["prev_anchor_sha256"] == ""
+    idx.write_text("one\ntwo\n", encoding="utf-8")          # index grows
+    a1 = write_canonical_anchor(tmp_path, repo_root=tmp_path)
+    assert a1["seq"] == 1 and a1["prev_anchor_sha256"] == a0["anchor_sha256"]
+    ok, msg = verify_canonical_anchor_chain(tmp_path)
+    assert ok is True and "chain_ok" in msg
+
+
+def test_tl6_anchor_chain_detects_tamper(tmp_path):
+    from tar_lab.canonical_anchor import write_canonical_anchor, verify_canonical_anchor_chain
+    import json as _json
+    _seed_index(tmp_path, "one\n")
+    write_canonical_anchor(tmp_path, repo_root=tmp_path)
+    write_canonical_anchor(tmp_path, repo_root=tmp_path)
+    chain = tmp_path / "anchors" / "canonical_anchor_chain.jsonl"
+    lines = chain.read_text(encoding="utf-8").splitlines()
+    rec0 = _json.loads(lines[0]); rec0["index_sha256"] = "deadbeef"   # tamper a historical anchor
+    lines[0] = _json.dumps(rec0)
+    chain.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    ok, msg = verify_canonical_anchor_chain(tmp_path)
+    assert ok is False  # hash mismatch or chain break detected
