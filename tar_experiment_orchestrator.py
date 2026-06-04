@@ -1773,14 +1773,17 @@ class ExperimentOrchestrator:
         # approved experiment passes silently here. This catches any path that reaches
         # execution without scheduler vetting (or an approval that flipped between
         # scheduling and execution). Autonomous mode only — a manual/human-initiated
-        # run (_autonomous=False) is itself an explicit human override. Fails OPEN on
-        # any error so the approval subsystem can never deadlock autonomous execution.
+        # run (_autonomous=False) is itself an explicit human override. Truth-lock
+        # (TL-5): FAIL CLOSED on any error — an approval-subsystem fault must NOT
+        # auto-approve autonomous execution. The branch below writes an auditable
+        # refuse-note and blocks, so this is a clean refusal, not a silent deadlock.
         if self._autonomous:
             try:
                 from tar_lab.human_review import approved_experiment_ids
                 _is_approved = str(spec.id) in approved_experiment_ids(self.workspace)
-            except Exception:
-                _is_approved = True
+            except Exception as exc:
+                _is_approved = False
+                self._log(f"[veto_gate] approval lookup failed; failing CLOSED (TL-5): {exc}")
             if not _is_approved:
                 msg = (
                     f"Refusing to execute '{spec.id}': not human-approved / still in the "

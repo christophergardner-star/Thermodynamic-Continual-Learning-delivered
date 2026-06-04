@@ -179,10 +179,26 @@ def _check_gate_1_sibling(result_path: Path) -> dict[str, str]:
 
     Returns extracted env_fields dict.  Raises ProvenanceSiblingInvalidError.
     """
-    env_path = result_path.with_name("result_env.json")
+    # Accept both env-sibling naming conventions (TL-7 reconcile, 2026-06-04):
+    #   - orchestrator _save_result writes result_env.json next to result.json
+    #     (stem "result" -> "result_env.json")
+    #   - the standalone comparison writer (write_canonical_comparison_result)
+    #     writes <stem>_env.json next to <stem>.json (e.g. phase10_x_env.json)
+    # The stem rule below yields result_env.json for result.json, so it unifies
+    # both; the literal result_env.json is kept as an explicit fallback. This does
+    # NOT loosen verification — git.head + authorization.manifest_hash are still
+    # required below; it only recognises the producer's real filename so legitimate
+    # results (incl. the comparison files) can be verified rather than quarantined
+    # on a naming technicality.
+    env_path = result_path.with_name(result_path.stem + "_env.json")
+    if not env_path.exists():
+        legacy = result_path.with_name("result_env.json")
+        if legacy.exists():
+            env_path = legacy
     if not env_path.exists():
         raise ProvenanceSiblingInvalidError(
-            f"result_env.json sibling not found: {env_path}"
+            f"env sibling not found (tried {result_path.stem}_env.json and result_env.json): "
+            f"{env_path}"
         )
 
     try:
