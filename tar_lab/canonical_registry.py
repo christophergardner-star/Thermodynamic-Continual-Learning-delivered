@@ -345,6 +345,62 @@ def _check_gate_2_manifest(env_fields: dict[str, str], repo_root: Path) -> None:
         )
 
 
+def _recompute_sweep_schema(
+    result_path: Path, per_seed: list, aggregate: dict
+) -> dict[str, Any]:
+    """Gate-3 recompute for the multi-method SWEEP schema (P2, 2026-06-04).
+
+    The phase comparison sweeps (phase10/11/12/13) and phase18 store results as
+    per_seed rows with <method>_forgetting / <method>_acc columns plus an
+    aggregate[<method>] block of forgetting_mean/std (+ acc). This recomputes each
+    method's aggregate from its per-seed columns using ONLY numpy and verifies
+    against the stored aggregate to atol=1e-9 — the same deterministic guarantee
+    as the seed_results path. Raises DeterministicRecomputeFailure on any deviation
+    (a genuine tamper/inconsistency catch).
+    """
+    atol = 1e-9
+    recomputed: dict[str, Any] = {}
+    for method, agg in aggregate.items():
+        if not isinstance(agg, dict):
+            continue
+        f_vals = [
+            float(r[f"{method}_forgetting"]) for r in per_seed
+            if isinstance(r, dict) and r.get(f"{method}_forgetting") is not None
+        ]
+        a_vals = [
+            float(r[f"{method}_acc"]) for r in per_seed
+            if isinstance(r, dict) and r.get(f"{method}_acc") is not None
+        ]
+        if not f_vals:
+            raise DeterministicRecomputeFailure(
+                f"Sweep recompute: no per_seed '{method}_forgetting' values in {result_path.name}."
+            )
+        fa = numpy.array(f_vals, dtype=numpy.float64)
+        checks = {
+            "forgetting_mean": float(numpy.mean(fa)),
+            "forgetting_std": float(numpy.std(fa, ddof=1)) if len(fa) > 1 else 0.0,
+        }
+        if a_vals:
+            aa = numpy.array(a_vals, dtype=numpy.float64)
+            checks["acc_mean"] = float(numpy.mean(aa))
+            checks["acc_std"] = float(numpy.std(aa, ddof=1)) if len(aa) > 1 else 0.0
+        for fld, rval in checks.items():
+            stored = agg.get(fld)
+            if stored is None:
+                continue  # field not stored -> nothing to verify for it
+            if abs(float(stored) - rval) > atol:
+                raise DeterministicRecomputeFailure(
+                    f"Sweep recompute mismatch for {method}.{fld} in {result_path.name}: "
+                    f"stored={float(stored):.12g} recomputed={rval:.12g} (atol={atol})."
+                )
+        recomputed[method] = checks
+    if not recomputed:
+        raise DeterministicRecomputeFailure(
+            f"Sweep recompute: no verifiable methods in {result_path.name}."
+        )
+    return {"sweep_methods": recomputed}
+
+
 def _check_gate_3_recompute(result_path: Path) -> dict[str, float]:
     """Gate 3 — Deterministic seed-to-aggregate recompute.
 
@@ -375,8 +431,13 @@ def _check_gate_3_recompute(result_path: Path) -> dict[str, float]:
         or []
     )
     if not seed_results:
+        # Multi-method SWEEP schema fallback (P2): per_seed + aggregate per method.
+        per_seed = stats_block.get("per_seed") or raw.get("per_seed") or []
+        aggregate = stats_block.get("aggregate") or raw.get("aggregate") or {}
+        if per_seed and isinstance(aggregate, dict) and aggregate:
+            return _recompute_sweep_schema(result_path, per_seed, aggregate)
         raise DeterministicRecomputeFailure(
-            f"No seed_results found in {result_path}."
+            f"No seed_results and no (per_seed + aggregate) sweep schema in {result_path}."
         )
 
     forgetting_vals = [
