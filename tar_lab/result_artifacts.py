@@ -358,7 +358,9 @@ def _iter_queue_experiment_records(workspace: Path) -> list[dict[str, Any]]:
             "trust_tier": "trusted_rerun_with_env" if env_is_real else "corrected_recomputation_no_env",
             "provenance_status": "env_snapshot_present" if env_is_real else "missing_env_snapshot",
             "basis": "queue_experiment_with_env" if env_is_real else "queue_experiment_spec_only",
-            "publication_allowed": env_is_real,
+            # Truth-lock TL-2: do NOT grant publication by env-file existence; eligibility
+            # is decided by classify_trust_tier (TL-4: verified + method-identity + family-wise).
+            "publication_allowed": False,
             "supersedes": [],
             "superseded_by": "",
         })
