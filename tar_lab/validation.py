@@ -284,10 +284,39 @@ def classify_trust_tier(
         if not seed_count:
             seeds = result_payload.get("seeds") or result_payload.get("seed_results") or []
             seed_count = len(seeds) if isinstance(seeds, (list, dict)) else 0
+    # Truth-lock TL-4 (2026-06-04): publication eligibility now requires, beyond
+    # trust tier + seeds, three honest gates:
+    #   (1) method identity OK — a TCL-family result must include the canonical
+    #       algorithm (tcl_canonical/tcl_full); it may NEVER rest on the uniform-L2
+    #       proxy (method="tcl") alone;
+    #   (2) family-wise-corrected significance explicitly recorded by the producer
+    #       (family_wise_significant) — no multiple-comparison-uncorrected claim counts;
+    #   (3) canonical 3-gate verification of the actual result file (env sibling +
+    #       committed manifest + deterministic recompute). The expensive verify runs
+    #       ONLY for candidates that already pass (1)+(2)+tier+seeds, so it is cheap.
+    from tar_lab.method_identity import result_method_identities
+    _idents = result_method_identities(result_payload)
+    _tcl_idents = [i for i in _idents if i.get("in_tcl_family")]
+    method_ok = (any(i.get("is_canonical_tcl") for i in _tcl_idents) if _tcl_idents else True)
+    _stats = (result_payload or {}).get("statistics")
+    if not isinstance(_stats, dict):
+        _stats = result_payload or {}
+    family_wise_significant = bool(
+        _stats.get("family_wise_significant")
+        or (result_payload or {}).get("family_wise_significant")
+    )
     publication_allowed = (
         trust_tier in TRUST_PUBLICATION_ALLOWED
         and seed_count >= MIN_SEEDS_FOR_PUBLICATION
+        and method_ok
+        and family_wise_significant
     )
+    canonical_verified = False
+    canonical_verify_reason = "not_checked"
+    if publication_allowed:
+        from tar_lab.canonical_registry import verify_canonical_3gate
+        canonical_verified, canonical_verify_reason = verify_canonical_3gate(result_path)
+        publication_allowed = publication_allowed and canonical_verified
     provenance_status = "env_snapshot_present" if env_present else "missing_env_snapshot"
     catalog = phase_catalog_by_logical_name().get(logical_name)
     return {
@@ -299,6 +328,10 @@ def classify_trust_tier(
         "provenance_status": provenance_status,
         "basis": basis,
         "publication_allowed": publication_allowed,
+        "method_identity_ok": method_ok,
+        "family_wise_significant": family_wise_significant,
+        "canonical_verified": canonical_verified,
+        "canonical_verify_reason": canonical_verify_reason,
         "domain_id": catalog.primary_domain_id if catalog else "",
         "frontier_problem_id": catalog.frontier_problem_id if catalog else "",
         "target_paper_id": catalog.target_paper_id if catalog else "",

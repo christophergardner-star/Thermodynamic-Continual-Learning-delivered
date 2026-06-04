@@ -502,6 +502,42 @@ def _check_gate_3_recompute(result_path: Path) -> dict[str, float]:
 
 # ── Main entry point ──────────────────────────────────────────────────────────
 
+def verify_canonical_3gate(result_path: Path, repo_root: "Path | None" = None) -> tuple[bool, str]:
+    """READ-ONLY 3-gate verification of a result file (truth-lock TL-4 helper, 2026-06-04).
+
+    Runs gate-1 (env sibling: git.head + manifest_hash) -> gate-2 (manifest committed
+    + hash match) -> gate-3 (deterministic seed/sweep recompute) WITHOUT writing the
+    index or acquiring any lock. Returns (ok, reason). repo_root defaults to the code
+    repository (the parent of tar_lab/) for the git manifest check, so this works
+    uniformly for both orchestrator results (tar_state/experiments/<run_id>/result.json)
+    and standalone comparison results (tar_state/comparisons/<name>.json).
+
+    Used by validation.classify_trust_tier to confer publication eligibility ONLY on
+    results that actually verify — turning "publication_allowed" from a default into a
+    proven property. Safe to call repeatedly; performs no mutation.
+    """
+    root = Path(repo_root) if repo_root else Path(__file__).resolve().parents[1]
+    try:
+        rp = Path(result_path).resolve()
+    except Exception as exc:
+        return (False, f"bad_path:{exc}")
+    if not rp.exists():
+        return (False, "result_file_missing")
+    try:
+        env_fields = _check_gate_1_sibling(rp)
+    except Exception as exc:
+        return (False, f"gate1:{str(exc)[:160]}")
+    try:
+        _check_gate_2_manifest(env_fields, root)
+    except Exception as exc:
+        return (False, f"gate2:{str(exc)[:160]}")
+    try:
+        _check_gate_3_recompute(rp)
+    except Exception as exc:
+        return (False, f"gate3:{str(exc)[:160]}")
+    return (True, "verified_3gate")
+
+
 def register_canonical_result(validation_result_path: Path) -> dict[str, Any]:
     """Register a validation experiment result into canonical_results_index.jsonl.
 
