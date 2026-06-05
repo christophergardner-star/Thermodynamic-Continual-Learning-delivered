@@ -1714,6 +1714,7 @@ def _write_results_to_knowledge_graph(workspace: Path, pairs: list) -> int:
         _log(workspace, f"kg_writeback skipped: open failed: {exc}")
         return 0
     written = 0
+    gaps = 0
     try:
         for record, spec_record in pairs:
             try:
@@ -1752,6 +1753,39 @@ def _write_results_to_knowledge_graph(workspace: Path, pairs: list) -> int:
                 )
                 graph.upsert_sota_entry(entry)
                 written += 1
+
+                # K2.2c: when a result is a non-win, open a 'negative_result' research gap
+                # so the GapDetector / next cycle pursues ALTERNATIVE mechanisms instead of
+                # re-running a dead end. (Gaps are TAR's own research directions, not
+                # external SoTA, so the no-circular-self-validation rule does not apply.)
+                verdict = str(result.get("verdict", "") or "").upper()
+                is_win = any(tok in verdict for tok in ("BREAKTHROUGH", "SUPPORTED", "CONFIRMED", "POSITIVE"))
+                if not is_win:
+                    try:
+                        from literature.schemas import ResearchGap
+                        gap = ResearchGap(
+                            gap_id=f"tar_internal_gap::{bid}::{method}",
+                            gap_type="negative_result",
+                            title=f"Alternative mechanism needed: {method} did not establish superiority on {dataset}",
+                            description=(
+                                f"TAR autonomous result '{hyp_name}': {method} forgetting="
+                                f"{round(mean_forget, 4)} (verdict={verdict or 'NULL'}, "
+                                f"n_better={result.get('n_better', '?')}). No confirmed advantage over "
+                                f"baselines — broader validation or alternative mechanisms warranted."
+                            ),
+                            domain="continual_learning",  # finalize handles Stack-A CL plans
+                            benchmark_id=bid,
+                            method_names=[method],
+                            impact_score=0.5,
+                            tractability_score=0.5,
+                            novelty_score=0.4,
+                            status="open",
+                        )
+                        gap.recompute_composite()
+                        graph.upsert_gap(gap)
+                        gaps += 1
+                    except Exception as exc:
+                        _log(workspace, f"kg_writeback gap failed: {exc}")
             except Exception as exc:
                 _log(workspace, f"kg_writeback entry failed: {exc}")
                 continue
@@ -1760,8 +1794,8 @@ def _write_results_to_knowledge_graph(workspace: Path, pairs: list) -> int:
             graph.close()
         except Exception:
             pass
-    if written:
-        _log(workspace, f"kg_writeback upserted {written} sota_entries (source=tar_internal)")
+    if written or gaps:
+        _log(workspace, f"kg_writeback upserted {written} sota_entries (source=tar_internal), {gaps} gaps")
     return written
 
 

@@ -104,6 +104,50 @@ def test_writeback_helper_tags_internal_and_excludes(tmp_path):
     g2.close()
 
 
+def test_writeback_opens_negative_result_gap(tmp_path):
+    import tar_living_research as tlr
+
+    ws = Path(tmp_path)
+    db = ws / "tar_state" / "literature" / "literature_graph.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    _mk_graph(db).close()
+
+    record = {
+        "hypothesis": {"name": "deep_anchor"},
+        "result": {"mechanism_forgetting": [0.15, 0.16], "verdict": "NULL", "n_better": 1},
+    }
+    spec = {"method": "tcl", "dataset": "split_cifar10"}
+    tlr._write_results_to_knowledge_graph(ws, [(record, spec)])
+
+    g = LiteratureKnowledgeGraph(str(db))
+    gaps = g.get_top_gaps(domain="continual_learning")
+    target = f"tar_internal_gap::{_BID}::tcl"
+    match = [gp for gp in gaps if gp.gap_id == target]
+    assert match, "non-win result should open a negative_result gap"
+    assert match[0].gap_type == "negative_result" and match[0].status == "open"
+    g.close()
+
+
+def test_winning_result_opens_no_gap(tmp_path):
+    import tar_living_research as tlr
+
+    ws = Path(tmp_path)
+    db = ws / "tar_state" / "literature" / "literature_graph.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    _mk_graph(db).close()
+
+    record = {
+        "hypothesis": {"name": "win"},
+        "result": {"mechanism_forgetting": [0.02, 0.03], "verdict": "BREAKTHROUGH", "n_better": 5},
+    }
+    spec = {"method": "tcl", "dataset": "split_cifar10"}
+    tlr._write_results_to_knowledge_graph(ws, [(record, spec)])
+
+    g = LiteratureKnowledgeGraph(str(db))
+    assert g.gap_count("open") == 0, "a confirmed win should not open a negative_result gap"
+    g.close()
+
+
 def test_writeback_skips_when_db_absent(tmp_path):
     import tar_living_research as tlr
 
