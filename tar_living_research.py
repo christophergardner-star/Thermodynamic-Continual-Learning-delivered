@@ -2406,10 +2406,94 @@ def run_state_observer(
             time.sleep(max(10.0, poll_interval_s))
 
 
+def run_platform(
+    workspace: Path,
+    *,
+    dry_run: bool = False,
+    once: bool = False,
+    poll_interval_s: float = 15.0,
+) -> dict:
+    """K2.4: one supervised entrypoint for the whole TAR platform.
+
+    Brings up the watchdog (tar_watchdog.py), which in turn starts and supervises the
+    living-research daemon, the queue-maintainer, and the dashboard as a single unit.
+    The watchdog enforces single-instance and RAIL-3 (it will NOT (re)start
+    execution-adjacent services without a user-committed manifest), so this entrypoint
+    is safe to invoke: it never bypasses the kill-switch flags or the manifest gate.
+
+    dry_run=True validates and returns the planned launch WITHOUT starting anything
+    (used by tests / `--platform --dry-run` preview). Returns a status dict.
+    """
+    import subprocess
+
+    try:
+        from tar_storage import preferred_python
+        python = str(preferred_python(_REPO))
+    except Exception:
+        python = sys.executable
+
+    watchdog_script = _REPO / "tar_watchdog.py"
+    cmd = [python, str(watchdog_script), "--poll-interval-s", str(poll_interval_s)]
+    if once:
+        cmd.append("--once")
+
+    status: dict = {
+        "entrypoint": "platform",
+        "watchdog_script": str(watchdog_script),
+        "python": python,
+        "command": cmd,
+        "supervises": ["living_research_daemon", "queue_maintainer", "dashboard"],
+        "daemon_paused": (workspace / "tar_state" / "daemon_paused.flag").exists(),
+        "execution_enabled": (workspace / "tar_state" / "execution_enabled.flag").exists(),
+        "launched": False,
+    }
+    if not watchdog_script.exists():
+        status["error"] = f"watchdog script not found: {watchdog_script}"
+        return status
+    if dry_run:
+        return status
+
+    # Detached launch so the supervised platform outlives this launcher process.
+    flags = (
+        getattr(subprocess, "DETACHED_PROCESS", 0)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    )
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags,
+            cwd=str(_REPO),
+        )
+        status["launched"] = True
+        status["watchdog_pid"] = proc.pid
+        _log(workspace, f"platform launched: watchdog pid={proc.pid} supervising daemon+queue+dashboard")
+    except Exception as exc:  # pragma: no cover - launch failure path
+        status["error"] = f"launch failed: {exc}"
+        _log(workspace, f"platform launch failed: {exc}")
+    return status
+
+
 def main() -> None:
     workspace = ensure_workspace_layout(resolve_workspace(_REPO), repo_root=_REPO)
     args = sys.argv[1:]
     arg_set = set(args)
+    if "--platform" in arg_set:
+        status = run_platform(
+            workspace,
+            dry_run=("--dry-run" in arg_set),
+            once=("--once" in arg_set),
+            poll_interval_s=(
+                float(args[args.index("--poll-interval-s") + 1])
+                if "--poll-interval-s" in args and args.index("--poll-interval-s") + 1 < len(args)
+                else 15.0
+            ),
+        )
+        print(json.dumps(status, indent=2))
+        return
     include_scaleup = "--autonomous-only" not in arg_set
     include_autonomous = "--scaleup-only" not in arg_set
     daemon = "--daemon" in arg_set
