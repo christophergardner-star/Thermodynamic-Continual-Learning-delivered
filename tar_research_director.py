@@ -258,6 +258,9 @@ class ResearchDirector:
         # K2.2b: lazily-built, cached VectorVault for prior-trial recall (advisory only).
         self._vault = None
         self._vault_failed = False
+        # K2.3a: per-cycle {domain_id: frontier_problem_id} for gap-derived frontiers
+        # registered this update_state pass (used to link the novel_problem path).
+        self._gap_frontiers: dict[str, str] = {}
 
     def read_state(self) -> dict:
         data = _jload(self.state_path)
@@ -305,6 +308,10 @@ class ResearchDirector:
         return out
 
     def update_state(self) -> dict:
+        # K2.3a: promote opted-in domains' top gaps to registered frontiers BEFORE
+        # loading frontiers, so a gap-derived problem is tracked + queued this cycle.
+        # Gated by _frontier_autonomy_allowed -> inert with the default empty domain set.
+        self._gap_frontiers = self._register_frontiers_from_gaps()
         frontier_problems = self._load_frontier_problems()
         experiments = self._load_experiments()
         project_entries = self._load_project_entries()
@@ -1291,6 +1298,10 @@ class ResearchDirector:
                     experiment_policy=str(candidate["experiment_policy"]),
                     writing_policy=writing_policy,
                     target_paper_id=paper_id,
+                    # K2.3a: link to the frontier registered from this gap so it is tracked
+                    # (path_status active/incubating) and the experiment catalog queues it.
+                    target_frontier_problem_id=str(candidate.get("target_frontier_problem_id", "") or ""),
+                    target_frontier_title=str(candidate["title"]),
                     source_gap_ids=[str(gap_id) for gap_id in candidate.get("source_gap_ids", []) if str(gap_id)],
                     source_problem_ids=[str(problem_id) for problem_id in candidate.get("source_problem_ids", []) if str(problem_id)],
                     verified_source_count=verified_sources,
@@ -1504,11 +1515,57 @@ class ResearchDirector:
                     "experiment_policy": problem.proposed_experiment,
                     "source_gap_ids": problem.gap_ids,
                     "source_problem_ids": [problem.problem_id],
+                    # K2.3a: link this path to the frontier registered from the same gap
+                    # this cycle (so the frontier becomes tracked -> queues an experiment).
+                    "target_frontier_problem_id": (getattr(self, "_gap_frontiers", {}) or {}).get(domain_id, ""),
                 }
             finally:
                 graph.close()
         except Exception:
             return None
+
+    def _register_frontiers_from_gaps(self) -> dict[str, str]:
+        """K2.3a: promote each opted-in domain's top research gap to a registered
+        FrontierProblem (via frontier_problem_from_gap), so a gap-derived problem flows
+        into frontier_directives and gets an experiment queued this cycle. Returns
+        {domain_id: frontier_problem_id}. Fully gated by _frontier_autonomy_allowed
+        (no-op with the default empty _FRONTIER_AUTONOMY_DOMAINS) and fail-safe — never
+        raises into update_state. Idempotent (skips re-registering an existing frontier)."""
+        out: dict[str, str] = {}
+        domains = [d for d in _FRONTIER_AUTONOMY_DOMAINS if _frontier_autonomy_allowed(d)]
+        if not domains or not self.literature_db_path.exists():
+            return out
+        try:
+            from tar_frontier import FrontierRegistry, frontier_problem_from_gap
+            from literature.knowledge_graph import LiteratureKnowledgeGraph
+        except Exception:
+            return out
+        try:
+            reg = FrontierRegistry(self.workspace)
+            graph = LiteratureKnowledgeGraph(str(self.literature_db_path))
+        except Exception:
+            return out
+        try:
+            for domain_id in domains:
+                try:
+                    lit_domain = _LITERATURE_DOMAIN_MAP.get(domain_id, "")
+                    if not lit_domain:
+                        continue
+                    gaps = graph.get_top_gaps(n=1, domain=lit_domain)
+                    if not gaps:
+                        continue
+                    fp = frontier_problem_from_gap(gaps[0], domain_id)
+                    if fp.id not in reg._problems:
+                        reg.register(fp)
+                    out[domain_id] = fp.id
+                except Exception:
+                    continue
+        finally:
+            try:
+                graph.close()
+            except Exception:
+                pass
+        return out
 
     def _apply_active_paths_to_frontiers(
         self,
