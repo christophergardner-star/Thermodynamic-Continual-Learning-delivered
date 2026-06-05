@@ -255,10 +255,54 @@ class ResearchDirector:
         self.autonomous_dir = workspace / "tar_state" / "autonomous_research"
         self.evidence_path = workspace / "tar_state" / "literature" / "evidence_ingest_state.json"
         self.literature_db_path = workspace / "tar_state" / "literature" / "literature_graph.db"
+        # K2.2b: lazily-built, cached VectorVault for prior-trial recall (advisory only).
+        self._vault = None
+        self._vault_failed = False
 
     def read_state(self) -> dict:
         data = _jload(self.state_path)
         return data if isinstance(data, dict) else {}
+
+    def _recall_vault(self):
+        """Lazily build a cached VectorVault for recall. Returns None on any failure
+        (never raises) — mirrors Stack-B's guarded vault construction."""
+        if self._vault is not None:
+            return self._vault
+        if self._vault_failed:
+            return None
+        try:
+            from tar_lab.memory import VectorVault
+            self._vault = VectorVault(str(self.workspace))
+            return self._vault
+        except Exception:
+            self._vault_failed = True
+            return None
+
+    def _recall_prior_trials(self, query: str, n_results: int = 3) -> list[dict]:
+        """K2.2b: recall prior similar trials/results from vector memory so the next
+        directive can build on (not blindly repeat) past work. Advisory context only —
+        attached to directives, never changes a priority score. Returns [] on any
+        failure or empty store (fail-safe)."""
+        if not query or not str(query).strip():
+            return []
+        vault = self._recall_vault()
+        if vault is None:
+            return []
+        try:
+            hits = vault.search(str(query), n_results=n_results)
+        except Exception:
+            return []
+        out: list[dict] = []
+        for hit in hits or []:
+            try:
+                out.append({
+                    "document_id": str(getattr(hit, "document_id", "") or ""),
+                    "score": round(float(getattr(hit, "score", 0.0) or 0.0), 4),
+                    "summary": (str(getattr(hit, "document", "") or ""))[:200],
+                })
+            except Exception:
+                continue
+        return out
 
     def update_state(self) -> dict:
         frontier_problems = self._load_frontier_problems()
@@ -2562,6 +2606,10 @@ class ResearchDirector:
                 _mre.rebuild_variant_proposals(self.workspace)
         except Exception:
             pass
+        # K2.2b prior-trial recall: surface similar past trials/results from vector memory
+        # onto directives so the loop builds on (not blindly repeats) prior work. Advisory
+        # only — never changes a priority score. Disable via tar_state/vault_recall.disabled.
+        _recall_enabled = not (self.workspace / "tar_state" / "vault_recall.disabled").exists()
 
         directives: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
@@ -2584,6 +2632,16 @@ class ResearchDirector:
             base_priority = float(path.priority_score if path else frontier.get("priority_score", 0.0) or 0.0)
             paper_readiness = str(paper.get("readiness", frontier.get("readiness", "")) or "")
             paper_boost = 18.0 if paper_readiness == "write_now" else 12.0 if paper_readiness == "outline_now" else 6.0 if paper_readiness == "prepare_now" else 0.0
+            # K2.2b: recall prior similar trials for this frontier once (reused on every
+            # directive below). Advisory context; empty list if recall disabled/unavailable.
+            _frontier_prior_trials = (
+                self._recall_prior_trials(
+                    f"{frontier.get('title', '')} {frontier.get('global_problem_statement', '')}".strip(),
+                    n_results=3,
+                )
+                if _recall_enabled
+                else []
+            )
 
             def _experiment_status(record: dict[str, Any] | None) -> str:
                 if not record:
@@ -2667,6 +2725,7 @@ class ResearchDirector:
                     "scheduler_intent": intent,
                     "priority_score": priority_score,
                     "outcome_digest": (_ol.outcome_context(_ol_priors, exp_id) if (_ol is not None and _ol_priors and not _ol_disabled) else {}),
+                    "prior_trials": _frontier_prior_trials,
                     "frontier_problem_id": frontier_id,
                     "frontier_problem_title": str(frontier.get("title", "") or ""),
                     "global_problem_statement": str(frontier.get("global_problem_statement", "") or ""),
@@ -2761,6 +2820,7 @@ class ResearchDirector:
                     "status": status,
                     "scheduler_intent": intent,
                     "priority_score": priority_score,
+                    "prior_trials": _frontier_prior_trials,
                     "blocked_by_experiment_ids": unmet_deps,
                     "why_now": (
                         f"{intent.replace('_', ' ')} for the global problem '{frontier.get('title', frontier_id)}'. "
