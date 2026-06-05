@@ -466,12 +466,13 @@ class LiteratureKnowledgeGraph:
             INSERT INTO sota_entries (
                 entry_id, benchmark_id, method_name, metric_name, metric_value,
                 higher_is_better, paper_id, paper_title, year, venue, venue_tier,
-                extra_metrics, code_available, code_url, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                extra_metrics, code_available, code_url, fetched_at, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(entry_id) DO UPDATE SET
                 metric_value = excluded.metric_value,
                 year = COALESCE(excluded.year, year),
-                code_available = excluded.code_available
+                code_available = excluded.code_available,
+                source = excluded.source
             """,
             (
                 entry.entry_id,
@@ -489,6 +490,7 @@ class LiteratureKnowledgeGraph:
                 int(entry.code_available),
                 entry.code_url,
                 entry.fetched_at,
+                getattr(entry, "source", "external") or "external",
             ),
         )
         # Update coverage table
@@ -718,6 +720,7 @@ class LiteratureKnowledgeGraph:
             code_available=bool(row["code_available"]),
             code_url=row["code_url"],
             fetched_at=row["fetched_at"],
+            source=(row["source"] if "source" in row.keys() else "external") or "external",
         )
 
     def _row_to_gap(self, row: sqlite3.Row) -> ResearchGap:

@@ -1663,6 +1663,108 @@ def _result_from_orchestrator(spec_record: dict, plan: HypothesisPlan) -> dict |
     }
 
 
+def _normalize_bench_key(s: object) -> str:
+    return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+
+def _resolve_internal_benchmark_id(graph, dataset: str) -> str | None:
+    """Map an experiment dataset (e.g. 'split_cifar10') to an existing benchmark_id in
+    the literature DB by normalized-name containment, so internal results link to the
+    SAME benchmark the director recalls. Returns None if no benchmark matches."""
+    key = _normalize_bench_key(dataset)
+    if not key:
+        return None
+    try:
+        rows = graph.conn.execute("SELECT benchmark_id, name FROM benchmarks").fetchall()
+    except Exception:
+        return None
+    for r in rows:
+        try:
+            bid, name = r["benchmark_id"], r["name"]
+        except Exception:
+            bid, name = r[0], r[1]
+        if key in _normalize_bench_key(name):
+            return bid
+    return None
+
+
+def _write_results_to_knowledge_graph(workspace: Path, pairs: list) -> int:
+    """K2.2 (write-back): upsert each finalized autonomous result into the SAME literature
+    DB the ResearchDirector recalls, tagged source='tar_internal'. NoveltyGate excludes
+    tar_internal entries from the external SoTA it compares against
+    (best_result(exclude_source='tar_internal')), preventing circular self-validation.
+    Fail-safe: logs and returns on any error, never raises into the finalize path."""
+    if not pairs:
+        return 0
+    db_path = workspace / "tar_state" / "literature" / "literature_graph.db"
+    if not db_path.exists():
+        # Require an externally-grounded DB first: writing internal results into an empty
+        # DB would leave NoveltyGate with no external SoTA to compare against.
+        _log(workspace, "kg_writeback skipped: literature DB absent")
+        return 0
+    try:
+        from literature.knowledge_graph import LiteratureKnowledgeGraph
+        from literature.schemas import SoTAEntry
+    except Exception as exc:
+        _log(workspace, f"kg_writeback skipped: import failed: {exc}")
+        return 0
+    try:
+        graph = LiteratureKnowledgeGraph(str(db_path))
+    except Exception as exc:
+        _log(workspace, f"kg_writeback skipped: open failed: {exc}")
+        return 0
+    written = 0
+    try:
+        for record, spec_record in pairs:
+            try:
+                method = str((spec_record or {}).get("method") or "").strip()
+                dataset = str(
+                    (spec_record or {}).get("benchmark")
+                    or (spec_record or {}).get("dataset")
+                    or ""
+                ).strip()
+                if not method or not dataset:
+                    continue
+                result = record.get("result", {}) if isinstance(record, dict) else {}
+                forgetting = [v for v in (result.get("mechanism_forgetting") or []) if isinstance(v, (int, float))]
+                accuracy = [v for v in (result.get("mechanism_accuracy") or []) if isinstance(v, (int, float))]
+                if not forgetting:
+                    continue
+                mean_forget = sum(forgetting) / len(forgetting)
+                bid = _resolve_internal_benchmark_id(graph, dataset) or f"benchmark:internal:{_normalize_bench_key(dataset)}"
+                hyp_name = record.get("hypothesis", {}).get("name", method) if isinstance(record, dict) else method
+                extra = {}
+                if accuracy:
+                    extra["accuracy"] = round(sum(accuracy) / len(accuracy), 6)
+                entry = SoTAEntry(
+                    entry_id=f"tar_internal::{bid}::{method}::forgetting",
+                    benchmark_id=bid,
+                    method_name=method,
+                    metric_name="forgetting",
+                    metric_value=round(mean_forget, 6),
+                    higher_is_better=False,  # forgetting: lower is better
+                    paper_title=f"TAR autonomous result: {hyp_name}",
+                    year=datetime.now(timezone.utc).year,
+                    venue="TAR internal",
+                    venue_tier="unknown",
+                    extra_metrics=extra,
+                    source="tar_internal",
+                )
+                graph.upsert_sota_entry(entry)
+                written += 1
+            except Exception as exc:
+                _log(workspace, f"kg_writeback entry failed: {exc}")
+                continue
+    finally:
+        try:
+            graph.close()
+        except Exception:
+            pass
+    if written:
+        _log(workspace, f"kg_writeback upserted {written} sota_entries (source=tar_internal)")
+    return written
+
+
 def finalize_autonomous_results(workspace: Path, plans: list[HypothesisPlan]) -> list[dict]:
     experiment_records: dict[str, dict] = {}
     for path in [
@@ -1684,6 +1786,7 @@ def finalize_autonomous_results(workspace: Path, plans: list[HypothesisPlan]) ->
     out_dir.mkdir(parents=True, exist_ok=True)
 
     finalized: list[dict] = []
+    kg_pairs: list[tuple[dict, dict]] = []
     for plan in plans:
         spec_record = by_id.get(f"ar-{plan.name}")
         if not spec_record or spec_record.get("status") != "complete":
@@ -1693,6 +1796,7 @@ def finalize_autonomous_results(workspace: Path, plans: list[HypothesisPlan]) ->
             continue
         (out_dir / f"{plan.name}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
         finalized.append(record)
+        kg_pairs.append((record, spec_record))
 
     summary = {
         "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -1711,6 +1815,13 @@ def finalize_autonomous_results(workspace: Path, plans: list[HypothesisPlan]) ->
         ],
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    # K2.2: make research compound — write each result back into the literature DB the
+    # director recalls (tagged source='tar_internal'; excluded from external-SoTA novelty).
+    try:
+        _write_results_to_knowledge_graph(workspace, kg_pairs)
+    except Exception as exc:
+        _log(workspace, f"kg_writeback wrapper failed: {exc}")
     return finalized
 
 

@@ -152,6 +152,11 @@ class SoTAEntry(StrictModel):
     code_available: bool = False
     code_url: Optional[str] = None
     fetched_at: str = Field(default_factory=_utc_now)
+    # Provenance. "external" = drawn from the literature; "tar_internal" = TAR's own
+    # experiment result. tar_internal entries are EXCLUDED from the external-SoTA used
+    # by NoveltyGate (via best_result(exclude_source="tar_internal")) to prevent
+    # circular self-validation — TAR must not cite its own result as the prior art to beat.
+    source: str = "external"
 
 
 class SoTATable(StrictModel):
