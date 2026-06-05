@@ -258,6 +258,91 @@ _DEFAULT_PROBLEM_BY_ID: dict[str, dict[str, Any]] = {
 }
 
 
+# ── gap → frontier primitive (K2.3a building block) ───────────────────────────
+def _catalog_defaults_for_domain(domain_id: str) -> dict[str, Any]:
+    """First well-known catalog template for a domain (source of real-world grounding
+    fields). Falls back to continual_learning, then the first default."""
+    for tmpl in _DEFAULT_PROBLEMS:
+        if str(tmpl.get("domain", "")) == str(domain_id):
+            return tmpl
+    for tmpl in _DEFAULT_PROBLEMS:
+        if str(tmpl.get("domain", "")) == "continual_learning":
+            return tmpl
+    return _DEFAULT_PROBLEMS[0] if _DEFAULT_PROBLEMS else {}
+
+
+def _frontier_slug(text: str) -> str:
+    s = "".join(ch if ch.isalnum() else "-" for ch in str(text).lower())
+    return "-".join(p for p in s.split("-") if p)[:48] or "gap"
+
+
+def frontier_problem_from_gap(gap: Any, domain_id: str | None = None, *, problem_id: str | None = None) -> FrontierProblem:
+    """K2.3a primitive: build a register-ready FrontierProblem from a research gap.
+
+    The real-world grounding fields the FrontierRegistry guard requires
+    (candidate_datasets/backbones, external_baselines, the four required_text fields,
+    well_known_problem, domain) are sourced from the per-domain well-known catalog, so
+    the resulting problem is anchored to real external benchmarks/baselines even when
+    the gap was *triggered* by an internal result. The problem the frontier represents
+    (e.g. beat EWC/SI on Split-CIFAR-10) is a genuine external ML problem; only the
+    decision to pursue it came from TAR's own negative result. Pure constructor — the
+    caller decides whether/when to register (gated by _frontier_autonomy_allowed).
+
+    Accepts a ResearchGap (pydantic) or any object/dict exposing gap_id, title,
+    description, domain, method_names.
+    """
+    def _f(name: str, default: Any = "") -> Any:
+        if isinstance(gap, dict):
+            return gap.get(name, default)
+        return getattr(gap, name, default)
+
+    domain = str(domain_id or _f("domain") or "continual_learning").strip() or "continual_learning"
+    tmpl = _catalog_defaults_for_domain(domain)
+    gid = str(_f("gap_id") or "gap")
+    pid = problem_id or f"fp-gap-{_frontier_slug(gid)}"
+    title = str(_f("title") or "Unresolved ML problem").strip() or "Unresolved ML problem"
+    description = (str(_f("description") or "").strip()) or title
+
+    datasets = [str(d) for d in (tmpl.get("candidate_datasets") or []) if str(d).strip()] or ["split_cifar10"]
+    backbones = [str(b) for b in (tmpl.get("candidate_backbones") or []) if str(b).strip()] or ["resnet18"]
+    baselines = [str(b) for b in (tmpl.get("external_baselines") or []) if str(b).strip()] or ["ewc", "si", "sgd_baseline"]
+    methods = [str(m) for m in (_f("method_names") or []) if str(m).strip()]
+
+    return FrontierProblem(
+        id=pid,
+        title=title,
+        domain=domain,
+        description=description,
+        why_important=(
+            f"Surfaced by TAR's gap detector as an unresolved problem in {domain}. "
+            f"Real external baselines ({', '.join(baselines[:4])}) define the bar to beat "
+            f"on {', '.join(datasets[:2])}."
+        ),
+        tcl_approach=(
+            "Evaluate TAR/TCL/ASC and alternative mechanisms against real external "
+            "baselines on the named benchmark(s); do not assume the internal methods win."
+        ),
+        industry_problem_title=title,
+        global_problem_statement=(
+            description if len(description) > 20
+            else f"Achieve competitive performance on {datasets[0]} versus established baselines."
+        ),
+        industry_contexts=[str(c) for c in (tmpl.get("industry_contexts") or []) if str(c).strip()],
+        well_known_problem=True,
+        target_venues=[str(v) for v in (tmpl.get("target_venues") or []) if str(v).strip()],
+        candidate_datasets=datasets,
+        candidate_backbones=backbones,
+        external_baselines=baselines,
+        research_guidance=(
+            "Treat TAR/TCL/ASC as unpublished internal candidate methods"
+            + (f" (gap implicates: {', '.join(methods[:4])})" if methods else "")
+            + ". Compare against the named external baselines on the smallest benchmark "
+            "that can genuinely falsify the claim."
+        ),
+        notes=f"Auto-derived from gap {gid} (source: TAR gap detector).",
+    )
+
+
 # ── registry ──────────────────────────────────────────────────────────────────
 class FrontierRegistry:
     """JSON-backed registry of frontier research problems."""
