@@ -38,7 +38,7 @@ _DEFAULT_GPU_PREFERENCE = [
 ]
 _DEFAULT_MIN_VRAM_GB    = 24
 _DEFAULT_MAX_COST_PER_H = 2.0
-_DEFAULT_IMAGE = "runpod/pytorch:1.0.3-cu1290-torch280-ubuntu2204"
+_DEFAULT_IMAGE = "runpod/pytorch:1.0.3-cu1281-torch280-ubuntu2204"  # cu12.8 = broader host-driver compat than cu12.9
 _DEFAULT_THRESHOLD_H = 12.0
 _DEFAULT_THRESHOLD_VRAM = 3.9
 _WATCHDOG_MULT = 2.5
