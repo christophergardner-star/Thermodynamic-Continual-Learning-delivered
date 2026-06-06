@@ -215,6 +215,9 @@ class TARWatchdog:
                 health_mode="living_daemon",
                 state_file="living_research_daemon.json",
                 restart_cooldown_s=30.0,
+                # Daemon heartbeats its state file every ~30s; >180s stale = dead, so a
+                # reused stale PID can't be trusted as "alive" (see living_daemon health).
+                stale_after_s=180.0,
                 process_match="tar_living_research.py --daemon",
                 # RAIL 3: this service has execution-adjacent authority.
                 requires_manifest=True,
@@ -423,6 +426,7 @@ class TARWatchdog:
             elif adopted_pid and state_age is not None and state_age > config.stale_after_s:
                 reason = f"stale_state:{state_age:.0f}s"
         elif config.health_mode == "living_daemon":
+            fresh_state = config.stale_after_s <= 0 or state_age is None or state_age <= config.stale_after_s
             if worker_pid and _pid_exists(worker_pid):
                 healthy = True
                 adopted_pid = worker_pid
@@ -431,11 +435,13 @@ class TARWatchdog:
                 healthy = True
                 adopted_pid = matched_pid
                 reason = "daemon_process_match"
-            elif adopted_pid and adopted_pid in {worker_pid, state_pid, matched_pid}:
-                # Only trust adopted_pid when corroborated by a current observation
-                # (state file, process registry, or process match). A stale tracked_pid
-                # alone — e.g. a Windows zombie that OpenProcess returns as "alive" —
-                # must not suppress a restart.
+            elif adopted_pid and fresh_state and adopted_pid in {worker_pid, state_pid, matched_pid}:
+                # Trust a corroborating PID only when the daemon's state file is FRESH.
+                # The fallback exists for Windows process-match flakiness (the daemon IS
+                # alive + heartbeating but cmdline match missed it). A STALE state_pid /
+                # tracked_pid whose PID was reused by an unrelated process
+                # (state_age >> stale_after_s) must NOT be trusted — that previously made
+                # a long-dead daemon look "healthy" and suppressed its restart.
                 healthy = True
                 reason = "daemon_pid_alive"
         if not healthy and config.health_mode != "dashboard_http" and matched_pid and _pid_exists(matched_pid):
