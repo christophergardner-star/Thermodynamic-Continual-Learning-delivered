@@ -1919,6 +1919,7 @@ class ExternalEvidenceIngestor:
         """
         import hashlib as _hashlib
         from tar_lab.result_artifacts import iter_canonical_comparison_records
+        from tar_lab.method_identity import internal_source_tag
 
         self._tar_internal_benchmarks: set[str] = set()
 
@@ -2035,7 +2036,7 @@ class ExternalEvidenceIngestor:
                             float(forgetting), 0,
                             None, f"TAR phase {phase_int} ({logical_name})",
                             None, "tar_internal", "internal",
-                            extra_metrics, 1, None, now, "tar_internal",
+                            extra_metrics, 1, None, now, internal_source_tag(str(raw_method)),
                         ),
                     )
                     self.graph.conn.execute(
@@ -2073,7 +2074,7 @@ class ExternalEvidenceIngestor:
                             float(acc), 1,
                             None, f"TAR phase {phase_int} ({logical_name})",
                             None, "tar_internal", "internal",
-                            extra_metrics, 1, None, now, "tar_internal",
+                            extra_metrics, 1, None, now, internal_source_tag(str(raw_method)),
                         ),
                     )
                     self._tar_internal_benchmarks.add(benchmark_id)
