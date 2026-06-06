@@ -138,7 +138,7 @@ def test_autonomous_auto_manifest_content_hash_nonnull(tmp_path, monkeypatch):
 
     workspace = tmp_path / "ws"
     (workspace / "tar_state").mkdir(parents=True)
-    orch = orch_mod.TAROrchestrator(workspace)
+    orch = orch_mod.ExperimentOrchestrator(workspace)
     orch.set_autonomous(True)
 
     spec = ExperimentSpec(
