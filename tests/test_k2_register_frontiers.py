@@ -79,10 +79,12 @@ def test_end_to_end_gap_to_queued_experiment(tmp_path, monkeypatch):
     assert str(e.get("dataset", "")).strip() and str(e.get("method", "")).strip()
 
 
-def test_catalog_generates_experiment_for_gap_frontier(tmp_path):
+def test_catalog_generates_experiment_for_gap_frontier(tmp_path, monkeypatch):
     """_frontier_experiment_catalog now builds a default probe for fp-gap-* frontiers
     from their own grounding fields (the live path; the hardcoded id/domain blocks miss
-    gap-derived frontiers, which is why arming produced no experiment on live state)."""
+    gap-derived frontiers, which is why arming produced no experiment on live state).
+    Requires the domain to be armed."""
+    monkeypatch.setattr(trd, "_FRONTIER_AUTONOMY_DOMAINS", frozenset({"continual_learning"}))
     d = trd.ResearchDirector(tmp_path)
     frontier = {
         "problem_id": "fp-gap-test-tcl",
@@ -100,6 +102,17 @@ def test_catalog_generates_experiment_for_gap_frontier(tmp_path):
     assert e["dataset"] == "split_cifar10" and e["method"] == "tcl"
     assert "ewc" in e["comparison_methods"]
     assert e["frontier_problem_id"] == "fp-gap-test-tcl"
+
+
+def test_catalog_gap_frontier_gated_when_domain_not_armed(tmp_path):
+    """Defense-in-depth: with the default empty _FRONTIER_AUTONOMY_DOMAINS, even a
+    registered gap-frontier yields no experiment -> disarming fully stops generation."""
+    d = trd.ResearchDirector(tmp_path)
+    frontier = {
+        "problem_id": "fp-gap-test-tcl", "title": "X", "domain": "continual_learning",
+        "candidate_datasets": ["split_cifar10"], "external_baselines": ["ewc"],
+    }
+    assert d._frontier_experiment_catalog(frontier, {}, None) == []
 
 
 def test_catalog_unmatched_non_gap_frontier_still_empty(tmp_path):

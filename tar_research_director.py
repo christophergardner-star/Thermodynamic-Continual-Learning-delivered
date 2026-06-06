@@ -2387,7 +2387,14 @@ class ResearchDirector:
         # Generate a default probe from the frontier's own fields so a gap actually becomes
         # a queued experiment. Gated to fp-gap- ids -> existing frontiers are unaffected,
         # and gap-frontiers only exist when a domain is opted into _FRONTIER_AUTONOMY_DOMAINS.
-        if frontier_id.startswith("fp-gap-") and candidate_datasets and external_baselines:
+        if (
+            frontier_id.startswith("fp-gap-")
+            and candidate_datasets and external_baselines
+            and _frontier_autonomy_allowed(str(frontier.get("domain", "")))
+        ):
+            # Gated on the domain being armed (defense-in-depth): a previously-registered
+            # gap-frontier produces NO experiment once its domain is removed from
+            # _FRONTIER_AUTONOMY_DOMAINS, so disarming fully stops autonomous generation.
             _method = "tcl"  # internal method under evaluation, vs the external baselines
             _cmp = [_method] + [b for b in external_baselines if b != _method][:5]
             return [{
