@@ -1124,64 +1124,51 @@ class MemoryIndexer:
             self._thread.join(timeout=2.0)
             self._thread = None
 
+    def _run_source(self, name: str, path, mtime_attr: str, index_fn, failures: list[str]) -> None:
+        """Index one source in ISOLATION: a stale / un-parseable source (e.g. an on-disk
+        schema drift in knowledge_graph.json) is recorded in `failures` and skipped, never
+        allowed to abort the whole rebuild and leave the vault degraded. Its mtime is left
+        unset so the next sync retries it once the source is fixed. A genuine
+        MemoryIntegrityError (embedder/collection incompatibility) still propagates as fatal."""
+        try:
+            if not path.exists():
+                return
+            current_mtime = path.stat().st_mtime
+            if getattr(self, mtime_attr) == current_mtime:
+                return
+            index_fn()
+            setattr(self, mtime_attr, current_mtime)
+        except MemoryIntegrityError:
+            raise
+        except Exception as exc:
+            failures.append(f"{name}: {exc}")
+
     def sync_once(self) -> None:
         if self.vault.memory_manifest.state in {"rebuild_required", "degraded"}:
             self.vault.begin_rebuild()
+        failures: list[str] = []
         try:
-            metrics_path = self.store.metrics_log_path
-            if metrics_path.exists():
-                current_mtime = metrics_path.stat().st_mtime
-                if self._metrics_mtime != current_mtime:
-                    for metric in self.store.iter_metrics():
-                        self.vault.index_metric(metric)
-                    self._metrics_mtime = current_mtime
-
-            graph_path = self.store.knowledge_graph_path
-            if graph_path.exists():
-                current_mtime = graph_path.stat().st_mtime
-                if self._graph_mtime != current_mtime:
-                    self.vault.index_knowledge_graph(self.store.load_knowledge_graph())
-                    self._graph_mtime = current_mtime
-
-            research_path = self.store.research_intel_path
-            if research_path.exists():
-                current_mtime = research_path.stat().st_mtime
-                if self._research_mtime != current_mtime:
-                    for document in self.store.iter_research_documents():
-                        self.vault.index_research_document(document)
-                    self._research_mtime = current_mtime
-
-            verification_path = self.store.verification_reports_path
-            if verification_path.exists():
-                current_mtime = verification_path.stat().st_mtime
-                if self._verification_mtime != current_mtime:
-                    for report in self.store.iter_verification_reports():
-                        self.vault.index_verification_report(report)
-                    self._verification_mtime = current_mtime
-
-            breakthrough_path = self.store.breakthrough_reports_path
-            if breakthrough_path.exists():
-                current_mtime = breakthrough_path.stat().st_mtime
-                if self._breakthrough_mtime != current_mtime:
-                    for report in self.store.iter_breakthrough_reports():
-                        self.vault.index_breakthrough_report(report)
-                    self._breakthrough_mtime = current_mtime
-
-            problem_studies_path = self.store.problem_studies_path
-            if problem_studies_path.exists():
-                current_mtime = problem_studies_path.stat().st_mtime
-                if self._problem_studies_mtime != current_mtime:
-                    for report in self.store.iter_problem_studies():
-                        self.vault.index_problem_study(report)
-                    self._problem_studies_mtime = current_mtime
-
-            problem_executions_path = self.store.problem_executions_path
-            if problem_executions_path.exists():
-                current_mtime = problem_executions_path.stat().st_mtime
-                if self._problem_executions_mtime != current_mtime:
-                    for report in self.store.iter_problem_executions():
-                        self.vault.index_problem_execution(report)
-                    self._problem_executions_mtime = current_mtime
+            self._run_source(
+                "metrics", self.store.metrics_log_path, "_metrics_mtime",
+                lambda: [self.vault.index_metric(m) for m in self.store.iter_metrics()], failures)
+            self._run_source(
+                "knowledge_graph", self.store.knowledge_graph_path, "_graph_mtime",
+                lambda: self.vault.index_knowledge_graph(self.store.load_knowledge_graph()), failures)
+            self._run_source(
+                "research", self.store.research_intel_path, "_research_mtime",
+                lambda: [self.vault.index_research_document(d) for d in self.store.iter_research_documents()], failures)
+            self._run_source(
+                "verification", self.store.verification_reports_path, "_verification_mtime",
+                lambda: [self.vault.index_verification_report(r) for r in self.store.iter_verification_reports()], failures)
+            self._run_source(
+                "breakthrough", self.store.breakthrough_reports_path, "_breakthrough_mtime",
+                lambda: [self.vault.index_breakthrough_report(r) for r in self.store.iter_breakthrough_reports()], failures)
+            self._run_source(
+                "problem_studies", self.store.problem_studies_path, "_problem_studies_mtime",
+                lambda: [self.vault.index_problem_study(r) for r in self.store.iter_problem_studies()], failures)
+            self._run_source(
+                "problem_executions", self.store.problem_executions_path, "_problem_executions_mtime",
+                lambda: [self.vault.index_problem_execution(r) for r in self.store.iter_problem_executions()], failures)
         except MemoryIntegrityError:
             raise
         except Exception as exc:  # pragma: no cover - defensive sync boundary
@@ -1189,7 +1176,18 @@ class MemoryIndexer:
             self.vault.mark_degraded(message)
             raise MemoryIntegrityError(message) from exc
         else:
+            # Good sources are indexed even if some were skipped; the vault returns to
+            # "healthy" rather than being stuck "degraded" on one stale source.
             self.vault.complete_rebuild()
+        if failures:
+            try:
+                print(
+                    f"[MemoryIndexer] rebuild skipped {len(failures)} stale source(s): "
+                    f"{', '.join(f.split(':')[0] for f in failures)}",
+                    flush=True,
+                )
+            except Exception:
+                pass
 
     def _worker(self) -> None:
         while not self._stop.is_set():
