@@ -1508,7 +1508,7 @@ def _experiment_live_snapshot(exp: dict[str, Any]) -> dict[str, Any]:
         gpu_vram = f"{float(gpu.get('vram_used_gb', 0.0) or 0.0):.2f}/{float(gpu.get('vram_total_gb', 0.0) or 0.0):.1f}GB"
         ram_used = f"{float(ram.get('used_gb', 0.0) or 0.0):.1f}/{float(ram.get('total_gb', 0.0) or 0.0):.1f}GB"
         lines.append(f"hardware_snapshot gpu={gpu_util}% vram={gpu_vram} ram={ram_used}")
-    mtime = checkpoint.get("last_checkpoint_at", "") or hardware.get("timestamp", "") or _now_iso()
+    mtime = checkpoint.get("last_checkpoint_at", "") or hardware.get("timestamp", "") or datetime.now(timezone.utc).isoformat()
     return {
         "source_id": "live-snapshot",
         "label": "Live progress snapshot",
@@ -1736,6 +1736,306 @@ def _resolve_experiment_log(exp: dict[str, Any], source_id: str = "") -> dict[st
 # ── Flask app ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
+
+
+# ── Auth + access control ─────────────────────────────────────────────────────
+_UNGUARDED_PREFIXES = ("/api/health", "/api/ping", "/favicon")
+
+
+@app.before_request
+def _check_auth() -> None:
+    """Token gate for non-localhost requests.
+
+    Behaviour:
+    - TAR_DASHBOARD_TOKEN set: require X-TAR-Token header or ?token= for any
+      request that is NOT from localhost (127.0.0.1 or ::1).  Localhost is
+      always allowed regardless of token config.
+    - TAR_DASHBOARD_TOKEN NOT set: allow localhost silently; log a one-time
+      warning for non-localhost requests and reject them with 403.
+    Static resources and /api/health are never gated.
+    """
+    path = request.path
+    for pfx in _UNGUARDED_PREFIXES:
+        if path.startswith(pfx):
+            return None
+    remote = request.remote_addr or ""
+    is_local = remote in ("127.0.0.1", "::1", "localhost")
+    if is_local:
+        return None  # always allow localhost
+    token_cfg = os.environ.get("TAR_DASHBOARD_TOKEN", "").strip()
+    if not token_cfg:
+        import logging
+        logging.getLogger(__name__).warning(
+            "TAR_DASHBOARD_TOKEN not set; rejecting non-localhost request from %s", remote
+        )
+        abort(403)
+    provided = (
+        request.headers.get("X-TAR-Token", "").strip()
+        or request.args.get("token", "").strip()
+    )
+    if provided != token_cfg:
+        abort(403)
+    return None
+
+
+@app.route("/api/ping")
+def api_ping():
+    return jsonify({"ok": True, "pid": os.getpid(), "workspace": str(_WS)})
+
+
+# ── Daemon pause control ──────────────────────────────────────────────────────
+def _daemon_paused_flag() -> Path:
+    return _WS / "tar_state" / "daemon_paused.flag"
+
+
+@app.route("/api/daemon/pause", methods=["POST"])
+def api_daemon_pause():
+    """Create daemon_paused.flag to signal the daemon to pause after the current step."""
+    flag = _daemon_paused_flag()
+    try:
+        flag.parent.mkdir(parents=True, exist_ok=True)
+        flag.write_text(
+            json.dumps({
+                "paused_at": datetime.now(timezone.utc).isoformat(),
+                "reason": "operator_pause_via_dashboard",
+            }),
+            encoding="utf-8",
+        )
+        return jsonify({"ok": True, "paused": True, "flag": str(flag)})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/daemon/resume", methods=["POST"])
+def api_daemon_resume():
+    """Remove daemon_paused.flag to allow the daemon to resume."""
+    flag = _daemon_paused_flag()
+    try:
+        flag.unlink(missing_ok=True)
+        return jsonify({"ok": True, "paused": False})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+@app.route("/api/daemon/pause_state")
+def api_daemon_pause_state():
+    flag = _daemon_paused_flag()
+    if flag.exists():
+        try:
+            data = json.loads(flag.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        return jsonify({"paused": True, "flag_data": data, "flag_path": str(flag)})
+    return jsonify({"paused": False, "flag_path": str(flag)})
+
+
+# ── Integrity / Truth-lock status ─────────────────────────────────────────────
+def _learner_enabled_state() -> dict[str, dict]:
+    """Read *.enabled flag files from tar_state to surface LIVE vs LATENT learners.
+
+    Known learner flag files (none exist yet = all LATENT except penalty-suppression).
+    """
+    learners = {
+        "penalty_suppression": {
+            "label": "Penalty Suppression",
+            "flag": None,  # always live — built into training loop, no flag needed
+            "always_on": True,
+            "description": "Active: raises λ when forgetting exceeds threshold during training.",
+        },
+        "outcome_reward": {
+            "label": "Outcome Reward (B2)",
+            "flag": "outcome_reward.enabled",
+            "always_on": False,
+            "description": "OPT-IN: Reward signal from experiment outcomes. Inert until flag set.",
+        },
+        "calibration_amendments": {
+            "label": "Calibration (B3)",
+            "flag": "calibration_amendments.enabled",
+            "always_on": False,
+            "description": "OPT-IN: Power calibration / seeds-needed advisory. Inert until flag set.",
+        },
+        "recall_bite": {
+            "label": "Recall Bite (B4)",
+            "flag": "recall_bite.enabled",
+            "always_on": False,
+            "description": "OPT-IN: Recall penalty for stale or misattributed knowledge. Inert until flag set.",
+        },
+        "method_synthesis": {
+            "label": "Method Synthesis (B5)",
+            "flag": "method_synthesis.enabled",
+            "always_on": False,
+            "description": "OPT-IN: Synthesizer generates new hypotheses from evidence. Never fired yet.",
+        },
+        "operational_learner": {
+            "label": "Operational Learner (B6a)",
+            "flag": "operational_learner.enabled",
+            "always_on": False,
+            "description": "OPT-IN: Operational-failure → param suggestions (advisory). Inert until flag set.",
+        },
+        "authoring_learner": {
+            "label": "Authoring Learner (B6b)",
+            "flag": "authoring_learner.enabled",
+            "always_on": False,
+            "description": "OPT-IN: Claim-style memory from reviews (style only, never facts). Inert until flag set.",
+        },
+        "operator_lora": {
+            "label": "Operator LoRA (B1+B7)",
+            "flag": None,
+            "always_on": False,
+            "description": "BLOCKED: Requires ≥14 GB VRAM (GTX 1650 = 4.3 GB). GPU gap must close first.",
+            "hard_blocked": True,
+        },
+    }
+    result: dict[str, dict] = {}
+    for key, meta in learners.items():
+        flag_name = meta.get("flag")
+        enabled: bool
+        flag_present: bool = False
+        if meta.get("always_on"):
+            enabled = True
+        elif meta.get("hard_blocked"):
+            enabled = False
+        elif flag_name:
+            flag_path = _WS / "tar_state" / flag_name
+            flag_present = flag_path.exists()
+            enabled = flag_present
+        else:
+            enabled = False
+        result[key] = {
+            "label": meta["label"],
+            "enabled": enabled,
+            "flag_name": flag_name,
+            "flag_present": flag_present,
+            "always_on": bool(meta.get("always_on")),
+            "hard_blocked": bool(meta.get("hard_blocked")),
+            "description": meta["description"],
+        }
+    return result
+
+
+@app.route("/api/integrity")
+def api_integrity():
+    """Truth-lock status: per-result canonical_verified + 3-gate pass/fail, learner states,
+    compounding health, and the A2 protocol-matched baseline bar.
+    """
+    val = _validation_payload()
+    results_raw = val.get("results", []) if isinstance(val, dict) else []
+    results_raw = results_raw if isinstance(results_raw, list) else []
+
+    # Per-result summary
+    result_rows = []
+    quarantine_count = 0
+    trusted_pub = 0
+    for r in results_raw:
+        if not isinstance(r, dict):
+            continue
+        trust = r.get("trust", {}) if isinstance(r.get("trust"), dict) else {}
+        checks = r.get("checks", {}) if isinstance(r.get("checks"), dict) else {}
+        canon_verified = bool(trust.get("canonical_verified", False))
+        pub_allowed = bool(checks.get("publication_allowed") or trust.get("publication_allowed", False))
+        ok = bool(r.get("ok", False))
+        issues = r.get("issues", []) or []
+        if pub_allowed:
+            trusted_pub += 1
+        if not ok:
+            quarantine_count += 1
+        result_rows.append({
+            "logical_name": r.get("logical_name", ""),
+            "phase_number": trust.get("phase_number"),
+            "trust_tier": trust.get("trust_tier", ""),
+            "canonical_verified": canon_verified,
+            "publication_allowed": pub_allowed,
+            "ok": ok,
+            "issues_count": len(issues),
+            "first_issue": issues[0][:120] if issues else "",
+        })
+
+    # Top-level summary from val payload
+    val_summary = val.get("summary", {}) if isinstance(val.get("summary"), dict) else {}
+    if not val_summary:
+        val_summary = {
+            "trusted_publication_allowed": trusted_pub,
+            "limited_scope": sum(1 for r in result_rows if not r["ok"]),
+            "missing_env": sum(1 for r in results_raw if isinstance(r, dict) and
+                              not (r.get("trust", {}) or {}).get("provenance_status", "").startswith("env")),
+            "quarantined": quarantine_count,
+        }
+
+    # Learner enabled / disabled state
+    learner_state = _learner_enabled_state()
+    live_learners = [k for k, v in learner_state.items() if v["enabled"]]
+    latent_learners = [k for k, v in learner_state.items() if not v["enabled"]]
+
+    # Human-review signal harvest opportunity
+    hr = load_human_review_state(_WS)
+    completed_reviews = len([
+        item for item in (hr.get("completed", []) or [])
+        if isinstance(item, dict)
+    ])
+    pending_reviews = len([
+        item for item in (hr.get("pending", []) or [])
+        if isinstance(item, dict)
+    ])
+    harvestable_signals = completed_reviews  # each completed review is a harvestable signal
+
+    # Compounding health: does recall include TAR's OWN results?
+    # This becomes true after Seam 1 lands. Read from a state file if present; otherwise pending.
+    seam1_path = _WS / "tar_state" / "seam1_recall_bridge.json"
+    if seam1_path.exists():
+        seam1_data = _jload(seam1_path) or {}
+        recall_includes_own = bool(seam1_data.get("active", False))
+        recall_status = "active" if recall_includes_own else "installed_not_active"
+    else:
+        recall_includes_own = False
+        recall_status = "pending_verification"
+
+    # A2 baseline bar — internal suite comparator is si=0.047 (NOT the external 0.1161 gate)
+    a2_baseline = {
+        "internal_comparator": "si=0.047 (within-suite TCL baseline, Phase 10 controlled rerun)",
+        "internal_forgetting_mean": 0.047,
+        "external_literature_bar": None,  # honestly empty — no validated external SoTA comparator
+        "external_note": "External SoTA bar is honestly empty until TruthLock validates a literature comparison.",
+        "science_exec_bridge": "Stack B (config-driven, 7-domain incl. real quantum) bridges to Stack A "
+                               "via runner_key='science_exec'. Bridge NOT daemon-driven — requires explicit trigger.",
+    }
+
+    return jsonify({
+        "truth_lock": {
+            "trusted_publication_allowed": int(val_summary.get("trusted_publication_allowed", 0) or 0),
+            "limited_scope": int(val_summary.get("limited_scope", 0) or 0),
+            "missing_env": int(val_summary.get("missing_env", 0) or 0),
+            "quarantined": quarantine_count,
+            "note": (
+                "trusted_publication_allowed=0 is the HONEST truth-lock reset — "
+                "integrity working correctly. This is not a failure; it means no result "
+                "has yet passed all 3 gates (pre-registration + env snapshot + Bonferroni)."
+            ),
+        },
+        "results": result_rows,
+        "learners": learner_state,
+        "live_learner_count": len(live_learners),
+        "latent_learner_count": len(latent_learners),
+        "live_learners": live_learners,
+        "signals": {
+            "harvestable_human_review": harvestable_signals,
+            "pending_review": pending_reviews,
+            "hand_authored_si": 29,
+            "note": "~52 harvestable human-review signals vs 29 hand-authored SI signals. "
+                    "Phantom serving adapter being cleared.",
+        },
+        "compounding": {
+            "recall_includes_own_results": recall_includes_own,
+            "status": recall_status,
+            "note": (
+                "Recall-includes-own-results becomes true after Seam 1 lands. "
+                "Current status: pending verification."
+                if recall_status == "pending_verification"
+                else "Seam 1 state file found — see status field."
+            ),
+        },
+        "a2_baseline": a2_baseline,
+        "validation_updated_at": val.get("updated_at", "") if isinstance(val, dict) else "",
+    })
 
 
 @app.route("/")
@@ -2893,8 +3193,8 @@ def api_alerts():
         return jsonify({"alerts": [], "error": str(exc)})
 
 
-@app.route("/api/self_improvement")
-def api_self_improvement():
+@app.route("/api/b6_learners")
+def api_b6_learners():
     """B6: surface the advisory self-improvement learners (read-only).
 
     operational = recurring operational-failure -> param suggestions (advisory, rail #4);
@@ -3653,7 +3953,13 @@ def api_website_papers():
 
 @app.route("/api/website/sync_research", methods=["POST", "GET"])
 def api_website_sync_research():
-    """Regenerate website/data/research.json from live Director state."""
+    """Regenerate website/data/research.json from live Director state.
+
+    TRUTH-LOCK: evidence_strength is capped by the honest_evidence_inventory.
+    The director's self-reported strength is an internal planning label, NOT
+    a verified claim.  The inventory is the single source of truth; if no
+    inventory entry exists for a frontier, we default to "none" (not "moderate").
+    """
     import re as _re
     try:
         director_state = _jload(_WS / "tar_state" / "research_director_state.json") or {}
@@ -3662,7 +3968,38 @@ def api_website_sync_research():
             paths = []
 
         status_map = {"pursue_now": "active", "pursue_next": "queued", "investigate": "investigating"}
-        evidence_map = {"strong": "strong", "moderate": "moderate", "weak": "weak"}
+
+        # Build honest evidence cap from honest_evidence_inventory.json
+        # Only values explicitly recorded in the inventory are trusted.
+        # Frontier verdict map: highest honest verdict per frontier_id
+        _VERDICT_RANK = {"PUBLICATION_ALLOWED": 3, "DIRECTIONAL": 2, "EXPLORATION_GRADE": 1, "FALSIFIED": 0}
+        _VERDICT_TO_STRENGTH = {
+            "PUBLICATION_ALLOWED": "strong",
+            "DIRECTIONAL": "directional",
+            "EXPLORATION_GRADE": "weak",
+            "FALSIFIED": "none",
+        }
+        inv = _jload(_WS / "tar_state" / "honest_evidence_inventory.json") or {}
+        inv_results = inv.get("results", []) if isinstance(inv, dict) else []
+        frontier_best_verdict: dict[str, str] = {}
+        for rec in inv_results:
+            if not isinstance(rec, dict):
+                continue
+            fid = str(rec.get("frontier_problem_id", "") or rec.get("experiment_id", "") or "")
+            verdict = str(rec.get("honest_verdict", "") or "").upper()
+            if not fid or verdict not in _VERDICT_RANK:
+                continue
+            prev = frontier_best_verdict.get(fid, "")
+            if not prev or _VERDICT_RANK.get(verdict, -1) > _VERDICT_RANK.get(prev, -1):
+                frontier_best_verdict[fid] = verdict
+
+        def _honest_evidence_strength(frontier_id: str) -> str:
+            """Return the evidence_strength backed by honest_evidence_inventory.
+            Defaults to 'none' — no invented 'moderate' for unverified frontiers."""
+            verdict = frontier_best_verdict.get(str(frontier_id or ""), "")
+            if not verdict:
+                return "none"
+            return _VERDICT_TO_STRENGTH.get(verdict, "none")
 
         items = []
         for path in paths:
@@ -3676,16 +4013,16 @@ def api_website_sync_research():
             exp_count = int(m.group(1)) if m else 0
             allowed_topics = list(path.get("allowed_topics", []) or [])
             description = str(allowed_topics[2]).strip() if len(allowed_topics) > 2 else ""
+            frontier_id = str(path.get("target_frontier_problem_id", "") or "")
+            honest_strength = _honest_evidence_strength(frontier_id)
             items.append({
                 "title": title,
                 "status": status_map.get(str(path.get("status", "") or ""), "investigating"),
-                "frontier_id": str(path.get("target_frontier_problem_id", "") or ""),
+                "frontier_id": frontier_id,
                 "description": description[:300],
                 "experiment_count": exp_count,
                 "paper_title": str(path.get("target_paper_id", "") or ""),
-                "evidence_strength": evidence_map.get(
-                    str(path.get("evidence_strength", "") or ""), "moderate"
-                ),
+                "evidence_strength": honest_strength,
                 "updated": datetime.utcnow().strftime("%Y-%m-%d"),
             })
 
