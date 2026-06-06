@@ -164,3 +164,41 @@ def test_novelty_gate_finds_semantic_match_after_backfill(tmp_path):
     assert p1.similarity_reason == "embedding_similarity"
     assert p1.similarity_score >= 0.60
     g.close()
+
+
+# ---- A1b: embed-on-ingest helper (off by default, never breaks ingest) ---------
+
+class _Obj:
+    def __init__(self, pid, title, abstract=None):
+        self.paper_id, self.title, self.abstract = pid, title, abstract
+
+
+class _Boom:
+    model_name = "boom"
+
+    def embed(self, text):
+        raise RuntimeError("model exploded")
+
+
+def test_embed_on_ingest_noop_when_disabled(tmp_path):
+    g = _graph(tmp_path)
+    assert ce.embed_paper_if_configured(g, _Obj("p1", "x"), None) is False  # no embedder
+    assert g.papers_without_embeddings(limit=10)  # nothing written
+    g.close()
+
+
+def test_embed_on_ingest_writes_when_enabled(tmp_path):
+    g = _graph(tmp_path)
+    ok = ce.embed_paper_if_configured(g, _Obj("p1", "Continual learning", "forgetting"), _StubEmbedder())
+    assert ok is True
+    row = g.conn.execute("SELECT embedding FROM papers WHERE paper_id='p1'").fetchone()
+    assert row["embedding"] is not None and len(json.loads(row["embedding"])) == len(_StubEmbedder._VOCAB)
+    g.close()
+
+
+def test_embed_on_ingest_never_raises(tmp_path):
+    g = _graph(tmp_path)
+    # empty text -> no-op; exploding embedder -> swallowed; both return False, no crash
+    assert ce.embed_paper_if_configured(g, _Obj("p1", "", ""), _StubEmbedder()) is False
+    assert ce.embed_paper_if_configured(g, _Obj("p1", "title", "abs"), _Boom()) is False
+    g.close()

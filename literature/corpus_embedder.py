@@ -82,6 +82,34 @@ def paper_embed_text(title: Optional[str], abstract: Optional[str]) -> str:
     return title or abstract
 
 
+def embed_paper_if_configured(
+    graph: LiteratureKnowledgeGraph,
+    paper: Any,
+    embedder: Optional[_Embedder],
+) -> bool:
+    """Embed a single freshly-ingested paper IF an embedder is provided.
+
+    No-op (returns False) when ``embedder`` is None — which is the default, since
+    the live ingestor only builds an embedder when TAR_NOVELTY_EMBEDDER_MODEL is
+    set. Never raises: an embedding failure must not break ingestion.
+    """
+    if embedder is None:
+        return False
+    text = paper_embed_text(getattr(paper, "title", None), getattr(paper, "abstract", None))
+    if not text:
+        return False
+    try:
+        vec = embedder.embed(text)
+    except Exception:
+        return False
+    if not vec:
+        return False
+    try:
+        return graph.update_paper_embedding(paper.paper_id, vec)
+    except Exception:
+        return False
+
+
 def embed_corpus(
     graph: LiteratureKnowledgeGraph,
     embedder: _Embedder,

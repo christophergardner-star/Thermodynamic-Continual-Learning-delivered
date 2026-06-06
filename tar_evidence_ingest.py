@@ -29,6 +29,10 @@ import re
 from literature.arxiv_monitor import AI_CATEGORIES, ArXivMonitor
 from literature.crossref_client import CrossrefClient
 from literature.gap_detector import GapDetector
+from literature.corpus_embedder import (
+    embed_paper_if_configured,
+    novelty_embedder_configured,
+)
 from literature.knowledge_graph import LiteratureKnowledgeGraph
 from literature.openalex_client import OpenAlexClient
 from literature.pwc_client import BENCHMARK_REGISTRY, PapersWithCodeClient
@@ -868,6 +872,12 @@ class ExternalEvidenceIngestor:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
+        # Embed-on-ingest is OFF unless TAR_NOVELTY_EMBEDDER_MODEL is set. The
+        # embedder is built lazily once and a failure is cached, so ingestion
+        # never repeatedly pays for a broken/absent model.
+        self._novelty_embedder: Any = None
+        self._novelty_embedder_attempted: bool = False
+
     def read_state(self) -> dict[str, Any]:
         return _jload(self.state_path)
 
@@ -1431,10 +1441,30 @@ class ExternalEvidenceIngestor:
         except Exception as exc:
             cycle_result.errors.append(f"velocity_update:{exc}")
 
+    def _get_novelty_embedder(self) -> Any:
+        """Lazily build the corpus embedder IFF TAR_NOVELTY_EMBEDDER_MODEL is set.
+
+        Returns None by default (env unset) -> ingest writes no embedding, exactly
+        as before. Built once; a load failure is cached so ingest does not retry a
+        broken model on every paper.
+        """
+        if not self._novelty_embedder_attempted:
+            self._novelty_embedder_attempted = True
+            if novelty_embedder_configured():
+                try:
+                    from literature.corpus_embedder import build_corpus_embedder
+                    self._novelty_embedder = build_corpus_embedder()
+                except Exception as exc:
+                    self._novelty_embedder = None
+                    print(f"[evidence_ingest] novelty embedder unavailable, "
+                          f"ingest will not embed: {exc}")
+        return self._novelty_embedder
+
     def _ingest_papers(self, items: list[dict[str, Any]]) -> tuple[int, int, int]:
         ingested = 0
         verified = 0
         weak = 0
+        embedder = self._get_novelty_embedder()
         for item in items:
             try:
                 paper = Paper(**item)
@@ -1443,6 +1473,9 @@ class ExternalEvidenceIngestor:
             if not _paper_is_cs_relevant(paper):
                 continue
             self.graph.upsert_paper(paper)
+            # Embed-on-ingest so new papers join the same coherent space the
+            # backfill writes (no-op unless an embedder is configured).
+            embed_paper_if_configured(self.graph, paper, embedder)
             ingested += 1
             for sota_entry in _extract_sota_from_abstract(paper):
                 try:
