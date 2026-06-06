@@ -336,10 +336,14 @@ def _sync_si_state(client: Any, workspace: Path, delta_data: dict) -> None:
     pack_path_rel = anchor_data.get("pack_path", "tar_state/eval_packs/baseline_eval_v1")
     pack_dir = workspace / pack_path_rel
     pack_remote = f"{_REMOTE_SI_STATE}/{pack_path_rel}"
-    for fname in ("run_manifest.json", "eval_items.jsonl"):
-        local_f = pack_dir / fname
-        if local_f.exists():
-            _put(local_f, f"{pack_remote}/{fname}")
+    # Sync the ENTIRE eval pack dir, not a hardcoded 2 files: evaluate_eval_pack needs
+    # eval_manifest.json and load_eval_items reads eval_core.jsonl (+ suite files +
+    # scoring_rubrics.json + run_manifest.json). A 2-file hardcode caused the earlier
+    # FileNotFoundError(eval_manifest.json) on the pod.
+    if pack_dir.is_dir():
+        for local_f in sorted(pack_dir.glob("*")):
+            if local_f.is_file():
+                _put(local_f, f"{pack_remote}/{local_f.name}")
 
     # human_review_state.json — needed for harvest_human_review_signals()
     # Non-fatal if missing (harvest() treats unreadable state as non-fatal)
