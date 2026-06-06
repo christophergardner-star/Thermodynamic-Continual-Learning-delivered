@@ -124,6 +124,110 @@ class SelfImprovementEngine:
             )
         return sorted(signals, key=lambda item: (item.created_at, item.signal_id))
 
+    @staticmethod
+    def _hr_signal_kind(bucket: str, entry_kind: str, decision: str) -> str:
+        """Map a human-review entry to a TrainingSignalKind, faithful to its nature."""
+        d = (decision or "").lower()
+        if "evidence" in d or "hold" in d:
+            return "evidence_assessment"   # the human asked for more evidence
+        if bucket == "claim_reviews" or entry_kind == "claim":
+            return "claim_verdict"
+        return "research_decision"
+
+    def harvest_human_review_signals(
+        self,
+        *,
+        state_path: Optional[str] = None,
+        max_signals: Optional[int] = None,
+    ) -> dict:
+        """B7: harvest REAL self-improvement signals from human review decisions.
+
+        The operator-LoRA loop has trained only on 29 hand-authored signals. Every human
+        review entry that carries an ACTUAL decision is a free, real supervision example:
+        the situation (reconstructed faithfully from the entry's own fields) maps to the
+        human's REAL decision + notes as the gold response. No fabrication — the decision
+        and notes are the human's own. Routed through curate_signal(), so anchor-pack
+        overlaps and overclaims are still rejected. Idempotent: a stable signal_id per
+        review_id means re-harvesting overwrites rather than duplicates.
+
+        Requires an initialized anchor pack (curate_signal enforces it); returns an error
+        summary instead of raising when it is missing or the state is unreadable. Returns:
+        scanned / harvested / skipped_no_decision / rejected / by_kind.
+        """
+        base = {"scanned": 0, "harvested": 0, "skipped_no_decision": 0, "rejected": 0, "by_kind": {}}
+        if not self._anchor_path.exists():
+            return {**base, "error": "anchor_pack_not_initialized"}
+        path = Path(state_path) if state_path else (
+            self._workspace / "tar_state" / "human_review_state.json"
+        )
+        try:
+            state = json.loads(path.read_text(encoding="utf-8-sig"))
+        except Exception:
+            return {**base, "error": "state_unreadable"}
+
+        summary = dict(base)
+        summary["by_kind"] = {}
+        seen: set[str] = set()
+        buckets = [
+            ("claim_reviews", state.get("claim_reviews", []) or []),
+            ("proposals", state.get("proposals", []) or []),
+            ("history", state.get("history", []) or []),
+        ]
+        for bucket, rows in buckets:
+            if not isinstance(rows, list):
+                continue
+            for entry in rows:
+                if not isinstance(entry, dict):
+                    continue
+                review_id = str(entry.get("review_id", "") or "")
+                if not review_id or review_id in seen:
+                    continue
+                decision = str(entry.get("decision", "") or "").strip()
+                summary["scanned"] += 1
+                if not decision:
+                    summary["skipped_no_decision"] += 1
+                    continue
+                seen.add(review_id)
+                entry_kind = str(entry.get("kind", "") or "")
+                notes = str(entry.get("human_notes", "") or "").strip()
+                title = str(entry.get("title", "") or entry.get("paper_id", "") or review_id)
+                frontier = str(entry.get("frontier_problem_id", "") or "")
+                status = str(entry.get("status", "") or "")
+                kind = self._hr_signal_kind(bucket, entry_kind, decision)
+
+                situation = [f"Human review request ({bucket.rstrip('s')}): {title}"]
+                if frontier:
+                    situation.append(f"Frontier problem: {frontier}")
+                if status:
+                    situation.append(f"Status: {status}")
+                situation.append("What is the appropriate human-review decision?")
+                gold: dict[str, str] = {"decision": decision}
+                if notes:
+                    gold["rationale"] = notes
+
+                signal = TrainingSignalRecord(
+                    signal_id=f"hr-{hashlib.sha1(review_id.encode('utf-8')).hexdigest()[:12]}",
+                    kind=kind,
+                    source_id=review_id,
+                    project_id=frontier or None,
+                    messages=[{"role": "user", "content": "\n".join(situation)}],
+                    gold_response=json.dumps(gold, sort_keys=True),
+                    quality_score=0.9 if notes else 0.7,
+                    overclaim_present=False,
+                )
+                try:
+                    accepted = self.curate_signal(signal)
+                except Exception:
+                    accepted = False
+                if accepted:
+                    summary["harvested"] += 1
+                    summary["by_kind"][kind] = summary["by_kind"].get(kind, 0) + 1
+                else:
+                    summary["rejected"] += 1
+                if max_signals is not None and summary["harvested"] >= max_signals:
+                    return summary
+        return summary
+
     def assemble_delta(self, cycle_id: str) -> CuratedDeltaRecord:
         signals = self.list_signals()
         anchor = self.load_anchor_manifest()
