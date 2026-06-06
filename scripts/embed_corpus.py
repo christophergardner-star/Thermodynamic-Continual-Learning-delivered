@@ -65,6 +65,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     graph = LiteratureKnowledgeGraph(str(db))
+    # The live daemon may hold the same DB open (WAL: one writer at a time). A
+    # busy_timeout lets a full backfill wait out the daemon's brief, occasional
+    # writes instead of crashing mid-corpus on a transient lock.
+    try:
+        graph.conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
     try:
         total = graph.conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
         missing = graph.conn.execute(
