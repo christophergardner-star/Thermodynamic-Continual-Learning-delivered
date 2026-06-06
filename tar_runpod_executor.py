@@ -42,7 +42,7 @@ _DEFAULT_IMAGE = "runpod/pytorch:1.0.3-cu1281-torch280-ubuntu2204"  # cu12.8 = b
 _DEFAULT_THRESHOLD_H = 12.0
 _DEFAULT_THRESHOLD_VRAM = 3.9
 _WATCHDOG_MULT = 2.5
-_SSH_READY_TIMEOUT = 900  # cold pulls of large CUDA/torch images can exceed 6min; allow 15
+_SSH_READY_TIMEOUT = 1500  # cold/uncached pulls of large CUDA/torch images can exceed 15min; allow 25
 _PROGRESS_POLL_S = 30
 _POD_CREATE_RETRY_WAIT_S = 45
 _DATASET_DOWNLOAD_TIMEOUT = 600
