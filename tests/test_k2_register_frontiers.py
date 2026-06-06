@@ -36,10 +36,11 @@ def _setup_db(ws: Path) -> Path:
     return db
 
 
-def test_register_frontiers_inert_by_default(tmp_path):
+def test_register_frontiers_inert_when_no_domain_armed(tmp_path, monkeypatch):
+    monkeypatch.setattr(trd, "_FRONTIER_AUTONOMY_DOMAINS", frozenset())
     _setup_db(tmp_path)
     d = trd.ResearchDirector(tmp_path)
-    # default _FRONTIER_AUTONOMY_DOMAINS is empty -> the bridge does nothing
+    # with no domain armed, the bridge does nothing
     assert d._register_frontiers_from_gaps() == {}
 
 
@@ -104,9 +105,10 @@ def test_catalog_generates_experiment_for_gap_frontier(tmp_path, monkeypatch):
     assert e["frontier_problem_id"] == "fp-gap-test-tcl"
 
 
-def test_catalog_gap_frontier_gated_when_domain_not_armed(tmp_path):
-    """Defense-in-depth: with the default empty _FRONTIER_AUTONOMY_DOMAINS, even a
-    registered gap-frontier yields no experiment -> disarming fully stops generation."""
+def test_catalog_gap_frontier_gated_when_domain_not_armed(tmp_path, monkeypatch):
+    """Defense-in-depth: with no domain armed, even a registered gap-frontier yields no
+    experiment -> disarming fully stops generation."""
+    monkeypatch.setattr(trd, "_FRONTIER_AUTONOMY_DOMAINS", frozenset())
     d = trd.ResearchDirector(tmp_path)
     frontier = {
         "problem_id": "fp-gap-test-tcl", "title": "X", "domain": "continual_learning",

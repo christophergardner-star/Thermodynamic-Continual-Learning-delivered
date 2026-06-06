@@ -36,12 +36,14 @@ _STRICT_REAL_WORLD_FRONTIER_ONLY = True
 # Per-domain opt-in for autonomous novel-frontier minting (the human-GATED last
 # step of the stack-bridge rollout — see TAR_Phase0_and_StackBridge_Implementation_Plan.md
 # Part B). When a domain id is in this set, the director MAY mint literature-gap-
-# derived frontier problems for that domain. This is EMPTY by default, so strict
-# mode still blocks ALL autonomous frontier minting and there is no behavior
-# change until a human explicitly opts a domain in. The FrontierRegistry.register
-# real-world guard (well_known_problem + named external baselines/datasets) is NOT
-# relaxed by this — it still applies on top.
-_FRONTIER_AUTONOMY_DOMAINS: frozenset[str] = frozenset()
+# derived frontier problems for that domain. A human explicitly opts a domain in here;
+# every other domain stays hard-blocked. The FrontierRegistry.register real-world guard
+# (well_known_problem + named external baselines/datasets) is NOT relaxed by this — it
+# still applies on top, as do the autonomy ramp and the 24h veto window. Autonomy only
+# activates when the supervised daemon is running (`tar_living_research.py --platform`).
+# Opted in 2026-06-06 (human decision, after the controlled end-to-end demo):
+#   continual_learning — autonomous CL gap -> frontier -> experiment, behind ramp+veto.
+_FRONTIER_AUTONOMY_DOMAINS: frozenset[str] = frozenset({"continual_learning"})
 
 
 def _frontier_autonomy_allowed(domain_id: str) -> bool:
