@@ -290,6 +290,16 @@ def write_canonical_comparison_result(
         _safe_unlink(env_path)
         raise
 
+    # Seam 3 (2026-06-06, TL-6b): extend the tamper-evident anchor chain over the
+    # canonical index after every append, and replicate it into the code working
+    # copy. Best-effort and strictly AFTER the unlink-guard block above: an anchor
+    # fault must never lose the append-only result/env already written.
+    try:
+        from tar_lab.canonical_anchor import write_canonical_anchor
+        write_canonical_anchor(workspace)
+    except Exception:
+        pass
+
     return {
         "result_path": result_path,
         "env_path": env_path,

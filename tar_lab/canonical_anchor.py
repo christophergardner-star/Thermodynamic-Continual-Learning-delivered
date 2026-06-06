@@ -91,6 +91,21 @@ def write_canonical_anchor(workspace: Path, repo_root: "Path | None" = None) -> 
     tmp = head.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(rec, indent=2), encoding="utf-8")
     tmp.replace(head)
+
+    # Seam 3 (2026-06-06): replicate the anchor chain into the code working copy when
+    # the live workspace is a separate mirror (E: state vs C: checkout), so the
+    # tamper-evidence is also captured under version control. Best-effort: a mirror
+    # fault must never break the authoritative anchor write above.
+    try:
+        if Path(repo_root).resolve() != Path(workspace).resolve():
+            repo_anchors = Path(repo_root) / "anchors"
+            repo_anchors.mkdir(parents=True, exist_ok=True)
+            for src in (chain, head):
+                if src.exists():
+                    (repo_anchors / src.name).write_bytes(src.read_bytes())
+    except Exception:
+        pass
+
     return rec
 
 
