@@ -463,6 +463,101 @@ class SelfImprovementEngine:
         )
         return retrain
 
+    def probe_adapter(
+        self,
+        retrain_id: str,
+        *,
+        predictor=None,
+        eval_pack_dir: Optional[str] = None,
+        max_items: Optional[int] = None,
+    ) -> RetrainRecord:
+        """GAP-1 fix: evaluate a trained adapter to populate probe_mean_score +
+        probe_overclaim_rate, run the safety gate, and persist the verdict onto the
+        RetrainRecord (and the cycle).
+
+        Without this step run1() left probe_mean_score=None, so evaluate_gate() ALWAYS
+        failed below the floor and no self-improvement adapter could ever deploy — the
+        operator-LoRA loop never closed. The adapter is evaluated on the held-out anchor
+        pack (excluded from training), so the score is a genuine generalisation + overclaim
+        check, not a memorisation read-out.
+
+        The predictor is injectable, so this is testable offline / on CPU; by default it
+        loads the retrain's base model + adapter via HFCausalLMPredictor (the real run wants
+        a GPU; CPU is buildable with a small TAR_WS38_BASE_MODEL). It NEVER deploys — deploy()
+        remains a separate, gate-guarded step.
+        """
+        retrain = self.load_retrain(retrain_id)
+        if retrain is None:
+            raise ValueError(f"Retrain record not found: {retrain_id}")
+        if not retrain.adapter_output_path:
+            raise ValueError(f"Retrain {retrain_id} has no adapter_output_path to evaluate")
+
+        anchor = self.load_anchor_manifest()
+        pack_dir = self._resolve_path(eval_pack_dir or anchor.pack_path)
+
+        if predictor is None:
+            predictor = self._build_default_probe_predictor(retrain)
+
+        from tar_lab.eval_harness import evaluate_eval_pack
+
+        output_dir = Path(retrain.adapter_output_path) / "probe_eval"
+        result = evaluate_eval_pack(
+            eval_pack_dir=pack_dir,
+            output_dir=output_dir,
+            predictor=predictor,
+            max_items=max_items,
+        )
+        overall = result.get("overall", {}) if isinstance(result, dict) else {}
+        mean_score = float(overall.get("mean_score", 0.0) or 0.0)
+        overclaim_rate = float(overall.get("overclaim_rate", 0.0) or 0.0)
+
+        anchor_ok = self.verify_anchor_integrity()
+        passed, reason = self.evaluate_gate(mean_score, overclaim_rate, anchor_ok)
+
+        probed = retrain.model_copy(
+            update={
+                "probe_mean_score": round(mean_score, 6),
+                "probe_overclaim_rate": round(overclaim_rate, 6),
+                "anchor_hash_verified": anchor_ok,
+                "gate_passed": passed,
+                "gate_failure_reason": None if passed else reason,
+                "completed_at": utc_now_iso(),
+            }
+        )
+        self.save_retrain(probed)
+
+        cycle = self.load_cycle(retrain.cycle_id)
+        if cycle is not None:
+            cycle = cycle.model_copy(update={"probe_retrain_id": probed.retrain_id})
+            if passed:
+                self.save_cycle(cycle.model_copy(update={"updated_at": utc_now_iso()}))
+            else:
+                # record_gate_failure increments the counter, may pause the cycle, and saves.
+                self.record_gate_failure(cycle, reason)
+        return probed
+
+    def _build_default_probe_predictor(self, retrain: RetrainRecord):
+        """Construct the default adapter-eval predictor (base model + trained adapter).
+        Used only when probe_adapter() is called without an injected predictor."""
+        import torch
+        from tar_lab.eval_harness import HFCausalLMPredictor
+
+        base_model_id = self._note_value(retrain.notes, "base_model=") or self._resolve_base_model_id()
+        cuda = bool(torch.cuda.is_available())
+        # Prefer bfloat16 (CPU-safe and fine on modern GPUs); float16 only on old CUDA GPUs.
+        bf16 = (not cuda) or bool(torch.cuda.is_bf16_supported())
+        allow_download = os.environ.get("TAR_ALLOW_MODEL_DOWNLOAD", "").strip() == "1"
+        return HFCausalLMPredictor(
+            model_name_or_path=base_model_id,
+            adapter_path=retrain.adapter_output_path,
+            local_files_only=not allow_download,
+            max_new_tokens=512,
+            temperature=0.0,
+            top_p=1.0,
+            use_4bit=False,
+            bf16=bf16,
+        )
+
     def deploy(self, cycle_id: str, retrain_id: str) -> str:
         retrain = self.load_retrain(retrain_id)
         if retrain is None:
