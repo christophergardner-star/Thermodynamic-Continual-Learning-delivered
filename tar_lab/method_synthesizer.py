@@ -442,6 +442,7 @@ def synthesize_and_validate_method(
     workspace: str,
     *,
     log_fn: Any = print,
+    out_dir: Any = None,
 ) -> dict[str, Any]:
     """
     Synthesise a CLMethod from a plain-English description of an idea.
@@ -451,6 +452,10 @@ def synthesize_and_validate_method(
     idea      : free-text description of the CL technique to implement
     workspace : TAR workspace root (used to locate synth dir + Docker executor)
     log_fn    : callable(str) for progress messages
+    out_dir   : optional directory to save the validated method into (default
+                <workspace>/tar_state/synthesized_methods). B5's synthesis loop passes a
+                QUARANTINE dir so a validated-but-unapproved candidate is never picked up by
+                load_generated_methods() and auto-adopted into the live METHOD_REGISTRY.
 
     Returns
     -------
@@ -464,7 +469,7 @@ def synthesize_and_validate_method(
     """
     from tar_lab.llm_bridge import call_claude
 
-    synth_dir = Path(workspace) / "tar_state" / "synthesized_methods"
+    synth_dir = Path(out_dir) if out_dir is not None else (Path(workspace) / "tar_state" / "synthesized_methods")
     synth_dir.mkdir(parents=True, exist_ok=True)
 
     prior_error = ""
