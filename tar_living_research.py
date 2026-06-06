@@ -1663,6 +1663,96 @@ def _result_from_orchestrator(spec_record: dict, plan: HypothesisPlan) -> dict |
     }
 
 
+def _result_from_spec_record(spec_record: dict) -> dict | None:
+    """Seam 1 (2026-06-06): build a finalized result record from a COMPLETED orchestrator
+    spec that has no HypothesisPlan — e.g. a director-*-probe, the highest-autonomy
+    experiments, which finalize previously skipped (so they never wrote back to the
+    literature DB nor entered the recall vault). Mirrors _result_from_orchestrator but
+    sources the hypothesis framing from the spec itself. Returns None if no result file."""
+    result_path = spec_record.get("result_path", "")
+    if not result_path:
+        return None
+    path = Path(result_path)
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    seed_results = raw.get("seed_results", [])
+    forgetting = [row.get("forgetting") for row in seed_results if isinstance(row, dict) and "forgetting" in row]
+    accuracy = [row.get("accuracy") for row in seed_results if isinstance(row, dict) and "accuracy" in row]
+    name = str(
+        spec_record.get("hypothesis_name")
+        or spec_record.get("name")
+        or spec_record.get("id")
+        or "director_probe"
+    )
+    return {
+        "hypothesis": {
+            "name": name,
+            "mechanism_description": str(spec_record.get("description", "") or ""),
+            "prediction": "",
+            "breakthrough_criteria": "",
+            "null_prediction": "",
+            "registered_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "result": {
+            "hypothesis_name": name,
+            "seeds": raw.get("seeds", spec_record.get("seeds", [])),
+            "mechanism_forgetting": forgetting,
+            "baseline_forgetting": raw.get("baseline_forgetting", []),
+            "mechanism_accuracy": accuracy,
+            "mean_delta": raw.get("mean_delta", 0.0),
+            "t_stat": raw.get("t_stat", 0.0),
+            "p_val": raw.get("p_val", 1.0),
+            "cohens_d": raw.get("cohens_d", 0.0),
+            "n_better": raw.get("n_better", 0),
+            "verdict": raw.get("verdict", "NULL"),
+            "notes": raw.get("notes", ""),
+            "run_at": raw.get("completed_at", datetime.now(timezone.utc).isoformat()),
+        },
+    }
+
+
+def _index_finalized_into_vault(workspace: Path, pairs: list) -> int:
+    """Seam 1 (2026-06-06): index every finalized (record, spec_record) into the recall
+    VectorVault so the Research Director recalls TAR's OWN latest work. This closes the
+    loop the audit found open — the write-back store (literature DB) and the recall store
+    (vault) previously never touched. Fail-safe: a single shared vault, never raises into
+    the finalize path (mirrors _write_results_to_knowledge_graph's stance)."""
+    if not pairs:
+        return 0
+    try:
+        from tar_lab.memory import VectorVault
+    except Exception as exc:
+        _log(workspace, f"vault recall-index skipped: import failed: {exc}")
+        return 0
+    try:
+        vault = VectorVault(str(workspace))
+    except Exception as exc:
+        _log(workspace, f"vault recall-index skipped: vault open failed: {exc}")
+        return 0
+    indexed = 0
+    for record, spec_record in pairs:
+        try:
+            method = str((spec_record or {}).get("method") or "")
+            dataset = str(
+                (spec_record or {}).get("benchmark")
+                or (spec_record or {}).get("dataset")
+                or ""
+            )
+            exp_id = str((spec_record or {}).get("id") or "")
+            vault.index_experiment_result(record, method=method, dataset=dataset, experiment_id=exp_id)
+            indexed += 1
+        except Exception as exc:
+            _log(workspace, f"vault recall-index entry failed: {exc}")
+            continue
+    if indexed:
+        _log(workspace, f"vault recall-index: indexed {indexed} finalized result(s) for director recall")
+    return indexed
+
+
 def _normalize_bench_key(s: object) -> str:
     return "".join(ch for ch in str(s).lower() if ch.isalnum())
 
@@ -1836,6 +1926,23 @@ def finalize_autonomous_results(workspace: Path, plans: list[HypothesisPlan]) ->
         finalized.append(record)
         kg_pairs.append((record, spec_record))
 
+    # Seam 1 (2026-06-06): also finalize completed director-*-probe experiments — the
+    # highest-autonomy runs, which the ar-* keying above skipped, so they never compounded
+    # (no literature write-back, no recall index). Build a plan-less record from each so it
+    # flows through the SAME write-back + recall path. Fail-safe per experiment.
+    ar_ids = {f"ar-{plan.name}" for plan in plans}
+    for exp_id, spec_record in by_id.items():
+        if exp_id in ar_ids or not str(exp_id).startswith("director-"):
+            continue
+        if spec_record.get("status") != "complete":
+            continue
+        record = _result_from_spec_record(spec_record)
+        if not record:
+            continue
+        (out_dir / f"{exp_id}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+        finalized.append(record)
+        kg_pairs.append((record, spec_record))
+
     summary = {
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "total_hypotheses_tested": len(finalized),
@@ -1860,6 +1967,13 @@ def finalize_autonomous_results(workspace: Path, plans: list[HypothesisPlan]) ->
         _write_results_to_knowledge_graph(workspace, kg_pairs)
     except Exception as exc:
         _log(workspace, f"kg_writeback wrapper failed: {exc}")
+
+    # Seam 1: index every finalized result into the recall vault so the next directive's
+    # prior_trials reflects TAR's own latest work (not just external arXiv). Fail-safe.
+    try:
+        _index_finalized_into_vault(workspace, kg_pairs)
+    except Exception as exc:
+        _log(workspace, f"vault recall-index wrapper failed: {exc}")
     return finalized
 
 

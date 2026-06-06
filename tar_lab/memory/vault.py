@@ -609,6 +609,57 @@ class VectorVault:
         }
         self._upsert(f"problem_execution:{report.problem_id}", text, metadata)
 
+    def index_experiment_result(
+        self,
+        record: dict,
+        *,
+        method: str = "",
+        dataset: str = "",
+        experiment_id: str = "",
+    ) -> None:
+        """Index a finalized autonomous experiment result so the Research Director can
+        RECALL TAR's own current work (Seam 1, 2026-06-06).
+
+        Before this, the write-back store (the literature DB) and the recall store
+        (this vault) never touched, so the autonomous loop could not close: the
+        director recalled external papers but never its own just-finished trials.
+        Mirrors index_problem_execution. Idempotent per experiment (a re-finalize
+        updates the same document in place rather than spamming the store)."""
+        hyp = record.get("hypothesis", {}) if isinstance(record.get("hypothesis"), dict) else {}
+        res = record.get("result", {}) if isinstance(record.get("result"), dict) else {}
+        name = str(hyp.get("name") or res.get("hypothesis_name") or experiment_id or "experiment")
+        verdict = str(res.get("verdict", "") or "")
+        mechanism = str(hyp.get("mechanism_description", "") or "")
+        notes = str(res.get("notes", "") or "")
+
+        def _num(value: Any, default: float = 0.0) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        text = (
+            f"TAR experiment result for hypothesis '{name}'"
+            + (f" using method {method}" if method else "")
+            + (f" on benchmark {dataset}" if dataset else "")
+            + f". Verdict={verdict or 'NULL'}. "
+            f"mean_delta={_num(res.get('mean_delta')):.4f} "
+            f"p_val={_num(res.get('p_val'), 1.0):.4f} "
+            f"cohens_d={_num(res.get('cohens_d')):.4f} "
+            f"n_better={res.get('n_better', 0)}. "
+            + (f"Mechanism: {mechanism}. " if mechanism else "")
+            + (f"Notes: {notes}." if notes else "")
+        )
+        metadata = {
+            "kind": "experiment_result",
+            "hypothesis_name": name,
+            "experiment_id": str(experiment_id or ""),
+            "method": str(method or ""),
+            "dataset": str(dataset or ""),
+            "verdict": verdict,
+        }
+        self._upsert(f"experiment_result:{experiment_id or name}", text, metadata)
+
     def search(
         self,
         query: str,
