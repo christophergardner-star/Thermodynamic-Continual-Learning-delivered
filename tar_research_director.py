@@ -58,6 +58,62 @@ def _frontier_autonomy_allowed(domain_id: str) -> bool:
     return bool(domain_id) and domain_id in _FRONTIER_AUTONOMY_DOMAINS
 
 
+# B4 (make recall bite): a deterministic "don't blindly repeat / perturb" guard. Recall
+# (prior_trials) was advisory-only — it never changed anything. This turns a clear
+# memory match into an actionable signal so the loop builds on prior work instead of
+# re-running an identical experiment.
+_RECALL_REPEAT_MIN_SCORE = 0.55       # vault similarity floor to consider a prior relevant
+_RECALL_REPEAT_PENALTY = 10.0         # bounded deprioritisation (<< status boosts 36-58)
+
+
+def _recall_repeat_guard(
+    method: str,
+    dataset: str,
+    prior_trials: "list[dict] | None",
+    *,
+    min_score: float = _RECALL_REPEAT_MIN_SCORE,
+) -> "dict | None":
+    """Deterministic check: does a recalled prior trial clearly correspond to THIS
+    method x dataset? Returns a guard dict (or None).
+
+    A match = a prior trial with vault similarity >= min_score whose summary mentions the
+    method as a token AND the (normalised) dataset name. Pure + deterministic (string
+    containment, no vector store), so it is unit-testable. Short method tokens (e.g. "si")
+    are matched as whole tokens to avoid substring false positives ("using" -> "si").
+    """
+    m = (method or "").strip().lower()
+    d_norm = re.sub(r"[^a-z0-9]+", "", (dataset or "").strip().lower())
+    if not m or not d_norm or not prior_trials:
+        return None
+    best: "tuple[float, str] | None" = None
+    for t in prior_trials:
+        if not isinstance(t, dict):
+            continue
+        try:
+            score = float(t.get("score", 0.0) or 0.0)
+        except Exception:
+            continue
+        if score < min_score:
+            continue
+        summary = str(t.get("summary", "") or "").lower()
+        tokens = set(re.findall(r"[a-z0-9]+", summary))
+        summary_norm = re.sub(r"[^a-z0-9]+", "", summary)
+        if m in tokens and d_norm in summary_norm:
+            if best is None or score > best[0]:
+                best = (score, str(t.get("document_id", "") or ""))
+    if best is None:
+        return None
+    return {
+        "repeat_detected": True,
+        "matched_prior": best[1],
+        "similarity": round(best[0], 4),
+        "suggestion": (
+            "a prior trial on this method×dataset already exists in memory — perturb "
+            "(vary seeds or a hyperparameter) rather than running an identical re-run"
+        ),
+    }
+
+
 def _science_exec_overrides(profile: dict[str, Any]) -> dict[str, Any]:
     """K2.1 (science-loop unification): build the Stack-B `science_exec` inputs for a
     directive's config_overrides — domain + experiment plan (from
@@ -2737,6 +2793,13 @@ class ResearchDirector:
         # onto directives so the loop builds on (not blindly repeats) prior work. Advisory
         # only — never changes a priority score. Disable via tar_state/vault_recall.disabled.
         _recall_enabled = not (self.workspace / "tar_state" / "vault_recall.disabled").exists()
+        # B4 (make recall bite, OPT-IN): when enabled, a clear memory match (same method x
+        # dataset as a recalled prior trial) attaches a perturbation suggestion AND applies a
+        # bounded deprioritisation, so the loop perturbs instead of blindly re-running. OFF
+        # unless tar_state/recall_bite.enabled exists -> recall stays advisory by default.
+        _recall_bite_enabled = _recall_enabled and (
+            self.workspace / "tar_state" / "recall_bite.enabled"
+        ).exists()
 
         directives: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
@@ -2809,7 +2872,7 @@ class ResearchDirector:
                     return 0.0, ""
 
             def _priority_for(exp_id: str, status: str, unmet_deps: list[str], bias: float = 0.0,
-                              method: str = "", dataset: str = "") -> float:
+                              method: str = "", dataset: str = "", repeat_penalty: float = 0.0) -> float:
                 status_boost = {
                     "running": 52.0,
                     "stalled": 58.0,
@@ -2841,7 +2904,8 @@ class ResearchDirector:
                         outcome_pen = 0.0
                 # Bounded, opt-in reward for a reliable config (exploration-safe; 0 by default).
                 outcome_reward, _ = _reliability_reward(exp_id, method, dataset)
-                return round(base_priority + paper_boost + status_boost + bias + special_boost - dependency_penalty - hf_penalty - outcome_pen + outcome_reward, 1)
+                # B4: bounded, opt-in deprioritisation of a blind repeat (0 unless recall bites).
+                return round(base_priority + paper_boost + status_boost + bias + special_boost - dependency_penalty - hf_penalty - outcome_pen + outcome_reward - repeat_penalty, 1)
 
             for exp in experiments:
                 if str(exp.get("frontier_problem_id", "") or "") != frontier_id:
@@ -2857,12 +2921,19 @@ class ResearchDirector:
                 intent = _intent_for(status, unmet_deps)
                 _exp_method = str(exp.get("method", "tcl") or "tcl")
                 _exp_dataset = str(exp.get("dataset", "") or "")
-                priority_score = _priority_for(exp_id, status, unmet_deps, method=_exp_method, dataset=_exp_dataset)
+                _recall_guard = (
+                    _recall_repeat_guard(_exp_method, _exp_dataset, _frontier_prior_trials)
+                    if _recall_bite_enabled else None
+                )
+                _repeat_pen = _RECALL_REPEAT_PENALTY if _recall_guard else 0.0
+                priority_score = _priority_for(exp_id, status, unmet_deps, method=_exp_method,
+                                               dataset=_exp_dataset, repeat_penalty=_repeat_pen)
                 _rel_reward, _rel_why = _reliability_reward(exp_id, _exp_method, _exp_dataset)
                 directives.append({
                     "experiment_id": exp_id,
                     "reliability_reward": _rel_reward,
                     "reliability_reward_reason": _rel_why,
+                    "recall_guard": _recall_guard,
                     "title": str(exp.get("name", exp_id) or exp_id),
                     "status": status,
                     "scheduler_intent": intent,
@@ -2952,19 +3023,27 @@ class ResearchDirector:
                 intent = _intent_for(status, unmet_deps)
                 if status == "proposed" and unmet_deps:
                     intent = "hold_dependency"
+                _prop_method = str(proposal.get("method", "") or "")
+                _prop_dataset = str(proposal.get("dataset", "") or "")
+                _prop_guard = (
+                    _recall_repeat_guard(_prop_method, _prop_dataset, _frontier_prior_trials)
+                    if _recall_bite_enabled else None
+                )
                 priority_score = _priority_for(
                     exp_id,
                     status,
                     unmet_deps,
                     float(proposal.get("priority_bias", 0.0) or 0.0),
-                    method=str(proposal.get("method", "") or ""),
-                    dataset=str(proposal.get("dataset", "") or ""),
+                    method=_prop_method,
+                    dataset=_prop_dataset,
+                    repeat_penalty=(_RECALL_REPEAT_PENALTY if _prop_guard else 0.0),
                 )
                 directives.append({
                     **proposal,
                     "status": status,
                     "scheduler_intent": intent,
                     "priority_score": priority_score,
+                    "recall_guard": _prop_guard,
                     "prior_trials": _frontier_prior_trials,
                     "blocked_by_experiment_ids": unmet_deps,
                     "why_now": (
