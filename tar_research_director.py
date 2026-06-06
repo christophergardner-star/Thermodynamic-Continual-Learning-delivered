@@ -2380,6 +2380,50 @@ class ResearchDirector:
                 new_entry["runner_key"] = cfg["runner_key"]
             return [new_entry]
 
+        # K2.3a: gap-derived frontiers (fp-gap-*, minted from a research gap by
+        # _register_frontiers_from_gaps) carry their own real-world grounding
+        # (candidate_datasets/backbones/external_baselines) but match none of the
+        # hardcoded id/domain blocks above, so they would silently produce no experiment.
+        # Generate a default probe from the frontier's own fields so a gap actually becomes
+        # a queued experiment. Gated to fp-gap- ids -> existing frontiers are unaffected,
+        # and gap-frontiers only exist when a domain is opted into _FRONTIER_AUTONOMY_DOMAINS.
+        if frontier_id.startswith("fp-gap-") and candidate_datasets and external_baselines:
+            _method = "tcl"  # internal method under evaluation, vs the external baselines
+            _cmp = [_method] + [b for b in external_baselines if b != _method][:5]
+            return [{
+                **base_common,
+                "experiment_id": f"director-{_slug(frontier_id)}-probe",
+                "title": f"Gap probe - {frontier_title}",
+                "proposal_origin": "director",
+                "proposal_kind": "gap_probe",
+                "hypothesis_name": f"gap_probe_{_slug(frontier_id)}"[:64],
+                "dataset": candidate_datasets[0],
+                "method": _method,
+                "comparison_methods": _cmp,
+                "backbone": candidate_backbones[0] if candidate_backbones else "resnet18",
+                "epochs": 40,
+                "seeds": [42, 0, 1, 2, 3],
+                "estimated_runtime_h": 8.0,
+                "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
+                "depends_on": [],
+                "mechanism_focus": (
+                    f"Probe the autonomously-derived problem '{frontier_title}' with the internal "
+                    "TAR/TCL/ASC family against the named external baselines."
+                ),
+                "experiment_goal": str(frontier.get("global_problem_statement", "") or frontier_title),
+                "description": (
+                    f"Director-generated probe for the gap-derived frontier {frontier_title}. Tests the "
+                    "internal methods against real external baselines on the smallest benchmark that can "
+                    "falsify the claim."
+                ),
+                "research_strategy": (
+                    "Smallest runnable benchmark that answers the gap; compare internal methods against the "
+                    "real external baselines before any superiority claim."
+                ),
+                "config_overrides": {"comparison_methods": _cmp, "external_baselines": external_baselines},
+                "priority_bias": 10.0,
+            }]
+
         return []
 
     def _active_path_experiment_catalog(self, path: ActiveResearchPath) -> list[dict[str, Any]]:

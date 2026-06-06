@@ -79,6 +79,40 @@ def test_end_to_end_gap_to_queued_experiment(tmp_path, monkeypatch):
     assert str(e.get("dataset", "")).strip() and str(e.get("method", "")).strip()
 
 
+def test_catalog_generates_experiment_for_gap_frontier(tmp_path):
+    """_frontier_experiment_catalog now builds a default probe for fp-gap-* frontiers
+    from their own grounding fields (the live path; the hardcoded id/domain blocks miss
+    gap-derived frontiers, which is why arming produced no experiment on live state)."""
+    d = trd.ResearchDirector(tmp_path)
+    frontier = {
+        "problem_id": "fp-gap-test-tcl",
+        "title": "Alternative mechanism needed: TCL on Split-CIFAR-10",
+        "domain": "continual_learning",
+        "candidate_datasets": ["split_cifar10"],
+        "candidate_backbones": ["resnet18"],
+        "external_baselines": ["ewc", "si", "sgd_baseline"],
+        "global_problem_statement": "Beat established baselines on Split-CIFAR-10.",
+    }
+    out = d._frontier_experiment_catalog(frontier, {}, None)
+    assert len(out) == 1
+    e = out[0]
+    assert e["experiment_id"].startswith("director-") and "fp-gap-" in e["experiment_id"]
+    assert e["dataset"] == "split_cifar10" and e["method"] == "tcl"
+    assert "ewc" in e["comparison_methods"]
+    assert e["frontier_problem_id"] == "fp-gap-test-tcl"
+
+
+def test_catalog_unmatched_non_gap_frontier_still_empty(tmp_path):
+    """Safety: the fallback is gated to fp-gap- ids, so an unmatched NON-gap frontier
+    still returns [] (existing behavior unchanged)."""
+    d = trd.ResearchDirector(tmp_path)
+    frontier = {
+        "problem_id": "fp-unknown-xyz", "title": "X", "domain": "some_unhandled_domain",
+        "candidate_datasets": ["split_cifar10"], "external_baselines": ["ewc"],
+    }
+    assert d._frontier_experiment_catalog(frontier, {}, None) == []
+
+
 def test_register_frontiers_idempotent(tmp_path, monkeypatch):
     _setup_db(tmp_path)
     monkeypatch.setattr(trd, "_FRONTIER_AUTONOMY_DOMAINS", frozenset({"continual_learning"}))
