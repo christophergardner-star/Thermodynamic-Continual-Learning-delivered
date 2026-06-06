@@ -1979,7 +1979,7 @@ class ExternalEvidenceIngestor:
                 try:
                     from literature.schemas import Benchmark as _Benchmark, _stable_id as _sid
                     new_bmark = _Benchmark(
-                        benchmark_id=_sid(f"benchmark:{benchmark_name}"),
+                        benchmark_id=_sid("benchmark", benchmark_name),
                         name=benchmark_name,
                         task="continual_learning",
                         domain="continual_learning",
