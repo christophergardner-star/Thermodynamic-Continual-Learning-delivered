@@ -33,6 +33,7 @@ from literature.corpus_embedder import (
     embed_paper_if_configured,
     novelty_embedder_configured,
 )
+from literature.curated_sota import load_curated_external_sota
 from literature.knowledge_graph import LiteratureKnowledgeGraph
 from literature.openalex_client import OpenAlexClient
 from literature.pwc_client import BENCHMARK_REGISTRY, PapersWithCodeClient
@@ -1363,7 +1364,26 @@ class ExternalEvidenceIngestor:
         except Exception as exc:
             cycle_result.errors.append(f"gap_detect:{exc}")
 
+    def _load_curated_external_sota(self, path=None) -> int:
+        """A2: load human-curated, CITED external SoTA (source='external') into the graph
+        so NoveltyGate has a real external bar to compare against. PapersWithCode's API is
+        dead; this is the sanctioned replacement. The loader REFUSES uncited entries
+        (anti-fabrication); the shipped JSON is empty until a human adds real cited rows.
+        Returns the number written. Never raises (must not break the ingest cycle)."""
+        try:
+            return load_curated_external_sota(self.graph, path)
+        except Exception:
+            return 0
+
     def _run_weekly_cycle(self, cycle_result: CycleResult, queries: dict[str, Any]) -> None:
+        # A2: refresh the curated external SoTA bar first (replaces the dead PwC source).
+        try:
+            _curated = self._load_curated_external_sota()
+            cycle_result.source_runs.append(
+                SourceRun(source="curated_sota", query="external_bar", ok=True, ingested_count=_curated)
+            )
+        except Exception as exc:
+            cycle_result.errors.append(f"curated_sota:{exc}")
         domain_ids = [str(domain.get("id", "")) for domain in queries.get("domains", [])]
         benchmark_domains: set[str] = set()
         for domain_id in domain_ids:

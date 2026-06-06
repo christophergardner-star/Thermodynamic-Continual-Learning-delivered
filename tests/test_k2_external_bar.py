@@ -92,3 +92,31 @@ def test_shipped_template_is_empty_no_fabrication(tmp_path):
     # default path = the shipped literature/curated_external_sota.json (entries: [])
     assert load_curated_external_sota(g) == 0
     g.close()
+
+
+def test_ingestor_wires_curated_external_sota(tmp_path):
+    """A2: the live ingestor loads cited external SoTA into the graph (becomes the
+    NoveltyGate external bar); uncited rows are refused."""
+    from tar_evidence_ingest import ExternalEvidenceIngestor
+
+    ing = ExternalEvidenceIngestor(tmp_path)
+    ing.graph.upsert_benchmark(Benchmark(
+        benchmark_id=_BID, name="Continual Learning On Split Cifar 10",
+        task="continual_learning", domain="continual_learning",
+        metrics=["forgetting"], metrics_higher_better={"forgetting": False}))
+    f = tmp_path / "curated.json"
+    f.write_text(json.dumps({"entries": [
+        {  # cited -> accepted (illustrative TEST fixture value, not shipped data)
+            "benchmark_id": _BID, "method_name": "ewc", "metric_name": "forgetting",
+            "metric_value": 0.10, "higher_is_better": False,
+            "paper_title": "Overcoming catastrophic forgetting in neural networks",
+            "citation": "arXiv:1612.00796"},
+        {  # uncited -> refused
+            "benchmark_id": _BID, "method_name": "uncited", "metric_name": "forgetting",
+            "metric_value": 0.05, "higher_is_better": False, "paper_title": "X"},
+    ]}), encoding="utf-8")
+
+    n = ing._load_curated_external_sota(f)
+    assert n == 1
+    best = ing.graph.best_result(_BID, "forgetting", higher_is_better=False, exclude_source="tar_internal")
+    assert best is not None and best.method_name == "ewc" and best.source == "external"
