@@ -138,6 +138,23 @@ def main(dry_run: bool = False) -> None:
     print(f"  run_kind         : {retrain.run_kind}")
     print()
 
+    # Free the Phase-1 training model's GPU memory before the probe reloads the model.
+    # Otherwise the trained model stays resident and probe_adapter() loading a fresh
+    # base+adapter = two 7B models on one GPU -> CUDA OOM on a 24GB card (observed on
+    # RTX 3090). run1()'s model/trainer are local and GC-eligible once it returns;
+    # gc.collect() + empty_cache() reclaims the VRAM so the probe's single model fits.
+    try:
+        import gc as _gc
+        import torch as _torch
+        _gc.collect()
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
+            _torch.cuda.ipc_collect()
+        print("  [mem] freed Phase-1 GPU memory before probe")
+        print()
+    except Exception as _mem_exc:
+        print(f"  [mem] cache-free skipped: {_mem_exc}")
+
     # --- Phase 2: Probe adapter + gate evaluation (T1 — closes GAP-1) ---
     # probe_adapter() evaluates the trained adapter on the frozen anchor pack,
     # sets probe_mean_score + probe_overclaim_rate, runs evaluate_gate(), records

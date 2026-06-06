@@ -446,6 +446,7 @@ def _run_si_worker(client: Any, workspace_path: str) -> int:
         f"cd {_REMOTE_REPO} && "
         "PYTHONPATH=/workspace/repo "
         "TAR_ALLOW_MODEL_DOWNLOAD=1 "
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
         "HF_HOME=/workspace/hf_cache "
         "TORCH_HOME=/workspace/torch_cache "
         "python si_runpod_shim.py "
