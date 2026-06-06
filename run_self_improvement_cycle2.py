@@ -2,29 +2,17 @@
 run_self_improvement_cycle2.py
 TAR Self-Improvement Cycle 2 launcher.
 
-Runs the full cycle: run1() -> gate_eval() -> deploy()
-using the pre-assembled delta-24de4a79 (29 signals, 4 kinds, diversity=0.8).
+Runs the full cycle:
+  harvest_human_review_signals()   — pull real human-review decisions into signals store
+  run1()                           — LoRA fine-tune on the curated delta
+  probe_adapter()                  — evaluate adapter on anchor pack, run safety gate
+  deploy()                         — deploy ONLY if gate PASSED (separate guarded step)
 
 Hardware requirement: GPU with >=14GB VRAM (Qwen2.5-7B-Instruct in fp16).
-  - RunPod A40/3090/4090 or equivalent.
-  - Set TAR_WS38_BASE_MODEL=/workspace/models/Qwen2.5-7B-Instruct if model
-    is pre-cached in the RunPod volume; otherwise HF download will be used.
-
-NOTE (GAP 1 — pre-RunPod TODO): run1() trains the adapter but does not evaluate
-it.  probe_mean_score on the RetrainRecord will be None after run1().  Before
-calling evaluate_gate(), you must run the eval harness against baseline_eval_v1
-using the trained adapter, read overall.mean_score from results.json, and set
-probe_mean_score on the retrain record:
-
-    from tar_lab.eval_harness import run_eval_suite  # or equivalent
-    eval_result = run_eval_suite(adapter_path, anchor_pack_path)
-    retrain = retrain.model_copy(update={
-        "probe_mean_score": eval_result["overall"]["mean_score"],
-        "probe_overclaim_rate": eval_result["overall"].get("overclaim_rate", 0.0),
-    })
-    engine.save_retrain(retrain)
-
-Without this step, probe_mean_score defaults to 0.0 and the gate always fails.
+  - RunPod A40 / 3090 / 4090 or equivalent.
+  - Set TAR_WS38_BASE_MODEL=/workspace/models/Qwen2.5-7B-Instruct if the model
+    is pre-cached in the RunPod volume; otherwise HF Hub download is used.
+  - Set TAR_ALLOW_MODEL_DOWNLOAD=1 to permit HF Hub download inside probe_adapter.
 
 Usage:
     python run_self_improvement_cycle2.py
@@ -38,7 +26,7 @@ import json
 import sys
 from pathlib import Path
 
-# Allow running from the delivered directory root or E:\TAR
+# Allow running from the delivered directory root or C:\Users\cgard\TAR
 DELIVERED = Path(__file__).resolve().parent
 SOURCE = Path("C:/Users/cgard/TAR/Thermodynamic-Continual-Learning-delivered")
 for p in (DELIVERED, SOURCE):
@@ -116,83 +104,102 @@ def main(dry_run: bool = False) -> None:
         print("ERROR: Anchor integrity check failed. Aborting.")
         sys.exit(1)
 
+    # --- T2: Harvest human-review signals (B7) ---
+    # Idempotent: stable signal_id per review_id; re-harvesting is safe.
+    # Fail-safe: errors are logged but do NOT abort the cycle.
+    print()
+    print("=== Pre-training: Harvesting human-review signals ===")
+    try:
+        harvest = engine.harvest_human_review_signals()
+        if "error" in harvest:
+            print(f"  WARNING: harvest returned error={harvest['error']} — continuing with existing signals.")
+        else:
+            print(f"  scanned          : {harvest.get('scanned', 0)}")
+            print(f"  harvested        : {harvest.get('harvested', 0)}")
+            print(f"  skipped_no_decision: {harvest.get('skipped_no_decision', 0)}")
+            print(f"  rejected         : {harvest.get('rejected', 0)}")
+            print(f"  by_kind          : {harvest.get('by_kind', {})}")
+    except Exception as exc:
+        print(f"  WARNING: harvest_human_review_signals() raised {type(exc).__name__}: {exc}")
+        print("  Continuing cycle with existing signals (harvest error is non-fatal).")
+    print()
+
     if dry_run:
-        print()
         print("DRY RUN complete — all checks passed. Re-run without --dry-run to train.")
         return
 
-    # Run1: LoRA fine-tune
-    print()
+    # --- Phase 1: LoRA fine-tune ---
     print("=== Phase 1: LoRA fine-tuning (run1) ===")
     retrain = engine.run1(CYCLE_ID, DELTA_ID)
-    print(f"retrain_id       : {retrain.retrain_id}")
-    print(f"adapter_output   : {retrain.adapter_output_path}")
-    print(f"anchor_verified  : {retrain.anchor_hash_verified}")
-    print(f"probe_mean_score : {retrain.probe_mean_score}")
-    print(f"probe_overclaim  : {retrain.probe_overclaim_rate}")
-    print(f"run_kind         : {retrain.run_kind}")
-
-    # --- GAP 1 placeholder ---
-    # probe_mean_score is None here because run1() does not evaluate the adapter.
-    # Before this script can successfully pass the gate, insert an eval step here:
-    #   eval_result = run_eval_suite(retrain.adapter_output_path, anchor_pack_path)
-    #   retrain = retrain.model_copy(update={"probe_mean_score": ..., "probe_overclaim_rate": ...})
-    #   engine.save_retrain(retrain)
-    # See module docstring for the full pattern.
-    if retrain.probe_mean_score is None:
-        print()
-        print("WARNING: probe_mean_score is None — eval step not yet implemented (GAP 1).")
-        print("         Gate will fail with mean_score=0.0 < floor=0.40.")
-        print("         Implement eval harness call before RunPod session.")
-
-    # Gate evaluation
+    print(f"  retrain_id       : {retrain.retrain_id}")
+    print(f"  adapter_output   : {retrain.adapter_output_path}")
+    print(f"  anchor_verified  : {retrain.anchor_hash_verified}")
+    print(f"  probe_mean_score : {retrain.probe_mean_score}  (None = not yet evaluated)")
+    print(f"  run_kind         : {retrain.run_kind}")
     print()
-    print("=== Phase 2: Gate evaluation ===")
-    gate_passed, reason = engine.evaluate_gate(
-        probe_mean_score=retrain.probe_mean_score or 0.0,
-        probe_overclaim_rate=retrain.probe_overclaim_rate or 0.0,
-        anchor_hash_verified=retrain.anchor_hash_verified or False,
-    )
-    print(f"gate_passed : {gate_passed}")
-    print(f"reason      : {reason}")
 
-    if not gate_passed:
-        print()
-        print("Gate FAILED — recording failure, adapter NOT deployed.")
-        updated_cycle = engine.record_gate_failure(cycle, reason)
-        print(f"cycle status updated to: {updated_cycle.status}")
-        print(f"consecutive_failures   : {updated_cycle.consecutive_gate_failures}")
+    # --- Phase 2: Probe adapter + gate evaluation (T1 — closes GAP-1) ---
+    # probe_adapter() evaluates the trained adapter on the frozen anchor pack,
+    # sets probe_mean_score + probe_overclaim_rate, runs evaluate_gate(), records
+    # gate_passed / gate_failure_reason on the RetrainRecord, and (on failure)
+    # calls record_gate_failure() on the cycle. It does NOT deploy.
+    # The predictor is injectable for CPU/offline testing; by default it constructs
+    # HFCausalLMPredictor (base model + adapter) — requires GPU for Qwen2.5-7B.
+    print("=== Phase 2: Probe adapter + gate evaluation ===")
+    try:
+        retrain = engine.probe_adapter(retrain.retrain_id)
+    except Exception as exc:
+        print(f"ERROR: probe_adapter() raised {type(exc).__name__}: {exc}")
+        print("Gate cannot be evaluated — recording cycle failure and aborting.")
+        engine.record_gate_failure(cycle, f"probe_adapter_exception: {exc}")
         sys.exit(2)
 
-    # Save gate_passed=True to retrain record before deploy (required by deploy() guard)
-    retrain = retrain.model_copy(update={"gate_passed": True})
-    engine.save_retrain(retrain)
-
-    # Deploy
+    print(f"  probe_mean_score    : {retrain.probe_mean_score}")
+    print(f"  probe_overclaim_rate: {retrain.probe_overclaim_rate}")
+    print(f"  anchor_verified     : {retrain.anchor_hash_verified}")
+    print(f"  gate_passed         : {retrain.gate_passed}")
+    print(f"  gate_failure_reason : {retrain.gate_failure_reason}")
     print()
+
+    if not retrain.gate_passed:
+        print("Gate FAILED — adapter NOT deployed.")
+        print(f"  reason: {retrain.gate_failure_reason}")
+        print("  (cycle gate-failure counter incremented by probe_adapter; check cycle record.)")
+        sys.exit(2)
+
+    print("Gate PASSED.")
+    print()
+
+    # --- Phase 3: Deploy (only fires on genuine gate PASS) ---
+    # gate_passed=True is already set on the retrain record by probe_adapter().
+    # deploy() re-checks gate_passed and raises RuntimeError if it is not True,
+    # so this step is doubly guarded.
     print("=== Phase 3: Deploying adapter ===")
     engine.deploy(retrain_id=retrain.retrain_id, cycle_id=CYCLE_ID)
 
     # Update serving mode
+    import os
+    from datetime import datetime, timezone
     serving_path = WORKSPACE / "tar_state/operator_serving.json"
     serving = json.loads(serving_path.read_text(encoding="utf-8"))
     serving["mode"] = "tuned_local"
     serving.pop("_note", None)
-    import os
-    from datetime import datetime, timezone
     serving["selected_at"] = datetime.now(timezone.utc).isoformat()
     serving_path.write_text(json.dumps(serving, indent=2), encoding="utf-8")
 
-    print("Adapter deployed. operator_serving.json updated to mode=tuned_local.")
+    print("  Adapter deployed. operator_serving.json updated to mode=tuned_local.")
     print()
 
     active = json.loads((WORKSPACE / "tar_state/serving/active_adapter.json").read_text(encoding="utf-8"))
-    print("active_adapter.json:")
+    print("  active_adapter.json:")
     for k, v in active.items():
-        print(f"  {k}: {v}")
+        print(f"    {k}: {v}")
 
     print()
     print("=== Cycle 2 COMPLETE ===")
+    print(f"  probe_mean_score : {retrain.probe_mean_score}")
+    print(f"  gate             : PASSED")
+    print(f"  adapter          : {retrain.adapter_output_path}")
 
 
 if __name__ == "__main__":
