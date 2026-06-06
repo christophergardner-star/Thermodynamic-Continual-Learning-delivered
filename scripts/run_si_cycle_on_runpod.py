@@ -725,7 +725,25 @@ def main(dry_run: bool = False) -> None:
     try:
         # Step 1: Create pod
         print(f"[bridge] Creating pod (target: >={_MIN_VRAM_GB_SI}GB VRAM, est {estimated_h:.1f}h)…", flush=True)
-        pod_id, gpu_type, price_per_hour = exec_._create_pod(spec)
+        # Robust GPU selection: try each preferred GPU in turn, falling through on
+        # "no instances available" / driver / quota errors, so we auto-grab whatever
+        # card is free (datacenter A40/A6000/L40 first for current drivers + 48GB;
+        # community 3090/4090 last). _create_pod raises on a single unavailable GPU,
+        # so we drive the fall-through here.
+        _gpu_list = list(config.get("gpu_preference") or [])
+        _create_errors: list[str] = []
+        gpu_type = ""
+        for _gpu in _gpu_list:
+            exec_.config["gpu_preference"] = [_gpu]
+            try:
+                pod_id, gpu_type, price_per_hour = exec_._create_pod(spec)
+                break
+            except Exception as _ce:
+                _create_errors.append(f"{_gpu}: {str(_ce)[:120]}")
+                print(f"[bridge] {_gpu} unavailable/failed: {str(_ce)[:120]} — trying next", flush=True)
+        exec_.config["gpu_preference"] = _gpu_list  # restore full list
+        if not pod_id:
+            raise RuntimeError("No GPU could be provisioned. Tried:\n  " + "\n  ".join(_create_errors))
         exec_._pod_id = pod_id
 
         if price_per_hour > 0:
