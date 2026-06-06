@@ -1705,6 +1705,7 @@ def _write_results_to_knowledge_graph(workspace: Path, pairs: list) -> int:
     try:
         from literature.knowledge_graph import LiteratureKnowledgeGraph
         from literature.schemas import SoTAEntry
+        from tar_lab.method_identity import internal_source_tag
     except Exception as exc:
         _log(workspace, f"kg_writeback skipped: import failed: {exc}")
         return 0
@@ -1749,7 +1750,10 @@ def _write_results_to_knowledge_graph(workspace: Path, pairs: list) -> int:
                     venue="TAR internal",
                     venue_tier="unknown",
                     extra_metrics=extra,
-                    source="tar_internal",
+                    # TCL family -> 'tar_internal' (excluded from the bar; no self-validation).
+                    # Established baselines reproduced under TAR's protocol (ewc/si/sgd/...) ->
+                    # 'tar_internal_baseline' (they ARE the protocol-matched comparison bar).
+                    source=internal_source_tag(method),
                 )
                 graph.upsert_sota_entry(entry)
                 written += 1
@@ -1795,7 +1799,7 @@ def _write_results_to_knowledge_graph(workspace: Path, pairs: list) -> int:
         except Exception:
             pass
     if written or gaps:
-        _log(workspace, f"kg_writeback upserted {written} sota_entries (source=tar_internal), {gaps} gaps")
+        _log(workspace, f"kg_writeback upserted {written} sota_entries (tar_internal novel / tar_internal_baseline by method), {gaps} gaps")
     return written
 
 

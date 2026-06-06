@@ -48,6 +48,22 @@ def method_identity(method: str) -> dict[str, Any]:
     }
 
 
+def internal_source_tag(method: str) -> str:
+    """Source tag for a TAR-produced result, by method provenance.
+
+    - TAR's NOVEL methods (the TCL family) -> 'tar_internal'. These are EXCLUDED from the
+      NoveltyGate comparison bar (best_result(exclude_source='tar_internal')) so TAR never
+      cites its own novel method as the prior art it must beat (circular self-validation).
+    - TAR's reproduction of an ESTABLISHED external baseline (ewc/si/sgd/experience_replay/
+      agem/der/lwf/gem/icarl/...) -> 'tar_internal_baseline'. These DO serve as the
+      protocol-matched comparison bar (they are NOT excluded). Important: an established
+      baseline reproduced by TAR is NOT external LITERATURE, so a result that only beats it
+      is a capability comparison under TAR's own protocol, NOT an external-SoTA/novelty
+      claim — NoveltyGate must label it as such.
+    """
+    return "tar_internal" if method_identity(method)["in_tcl_family"] else "tar_internal_baseline"
+
+
 def is_proxy_claiming_canonical(method: str, *, claims_canonical_tcl: bool) -> bool:
     """True iff a uniform-L2 PROXY result is being presented as the canonical TCL algorithm.
 

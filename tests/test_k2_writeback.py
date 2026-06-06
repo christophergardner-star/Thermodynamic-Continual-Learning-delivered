@@ -148,6 +148,32 @@ def test_winning_result_opens_no_gap(tmp_path):
     g.close()
 
 
+def test_writeback_tags_baselines_vs_novel(tmp_path):
+    """Write-back tags TAR's reproduced established baselines (ewc) as
+    'tar_internal_baseline' (the comparison bar) and its novel methods (tcl_canonical) as
+    'tar_internal' (excluded from the bar)."""
+    import tar_living_research as tlr
+
+    ws = Path(tmp_path)
+    db = ws / "tar_state" / "literature" / "literature_graph.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    _mk_graph(db).close()
+    pairs = [
+        ({"hypothesis": {"name": "p_ewc"}, "result": {"mechanism_forgetting": [0.20, 0.19], "verdict": "NULL"}},
+         {"method": "ewc", "dataset": "split_cifar10"}),
+        ({"hypothesis": {"name": "p_tcl"}, "result": {"mechanism_forgetting": [0.15, 0.16], "verdict": "NULL"}},
+         {"method": "tcl_canonical", "dataset": "split_cifar10"}),
+    ]
+    tlr._write_results_to_knowledge_graph(ws, pairs)
+
+    g = LiteratureKnowledgeGraph(str(db))
+    rows = {r["method_name"]: r["source"] for r in
+            g.conn.execute("SELECT method_name, source FROM sota_entries").fetchall()}
+    assert rows.get("ewc") == "tar_internal_baseline"
+    assert rows.get("tcl_canonical") == "tar_internal"
+    g.close()
+
+
 def test_writeback_skips_when_db_absent(tmp_path):
     import tar_living_research as tlr
 

@@ -349,6 +349,33 @@ class NoveltyGate:
         )
         delta_str = f"+{sota_delta:.4f}" if sota_delta and sota_delta > 0 else str(round(sota_delta or 0, 4))
 
+        # When the comparison "bar" is TAR's OWN protocol-matched reproduction of an
+        # established baseline (source='tar_internal_baseline'), this is a CAPABILITY
+        # comparison under TAR's protocol, NOT a claim against external literature SoTA.
+        # Be honest: never label it "novel"/"new state of the art"; cap at marginal and
+        # state explicitly that no external literature bar exists.
+        if sota_best is not None and getattr(sota_best, "source", "external") == "tar_internal_baseline":
+            base_desc = f"{sota_best.method_name} ({sota_best.metric_value:.4f}, TAR protocol-matched baseline)"
+            if sota_verdict == "worse":
+                return (
+                    "known_result", 0.85,
+                    f"{method_name} does not beat TAR's protocol-matched internal baseline {base_desc} "
+                    f"(delta {delta_str}). Capability comparison, NOT a novelty claim — no external "
+                    f"literature SoTA is on record for this benchmark.",
+                )
+            if sota_verdict in ("equal", "marginal"):
+                return (
+                    "marginal_improvement", 0.60,
+                    f"{method_name} is on par with TAR's protocol-matched internal baseline {base_desc} "
+                    f"(delta {delta_str}). Capability comparison only; no external literature bar exists.",
+                )
+            return (
+                "marginal_improvement", 0.60,
+                f"{method_name} beats TAR's protocol-matched internal baseline {base_desc} by {delta_str}. "
+                f"Capability result under TAR's own protocol, NOT a new external SoTA — no external "
+                f"literature bar is on record for this benchmark.",
+            )
+
         if sota_verdict == "equal":
             if max_similarity >= _SIMILARITY_THRESHOLD:
                 verdict: NoveltyVerdict = "replication"

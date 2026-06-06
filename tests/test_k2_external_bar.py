@@ -94,6 +94,40 @@ def test_shipped_template_is_empty_no_fabrication(tmp_path):
     g.close()
 
 
+def test_internal_source_tag_novel_vs_baseline():
+    """TCL family -> tar_internal (excluded from bar); established baselines reproduced
+    under TAR's protocol -> tar_internal_baseline (the comparison bar)."""
+    from tar_lab.method_identity import internal_source_tag
+    for novel in ("tcl", "tcl_canonical", "tcl_full", "tcl_penalty_only"):
+        assert internal_source_tag(novel) == "tar_internal", novel
+    for base in ("ewc", "si", "sgd_baseline", "experience_replay", "agem", "der_plus_plus", "lwf"):
+        assert internal_source_tag(base) == "tar_internal_baseline", base
+
+
+def test_novelty_gate_internal_baseline_is_not_external_sota(tmp_path):
+    """A TAR novel-method result judged against TAR's protocol-matched internal baselines
+    must NOT be labeled external SoTA/novel — it's a capability comparison."""
+    g = _graph_with_benchmark(tmp_path)
+    # TAR protocol-matched baselines (phase18 values) = the bar (source=tar_internal_baseline)
+    g.upsert_sota_entry(SoTAEntry(
+        entry_id="b::si", benchmark_id=_BID, method_name="si", metric_name="forgetting",
+        metric_value=0.047, higher_is_better=False, source="tar_internal_baseline"))
+    g.upsert_sota_entry(SoTAEntry(
+        entry_id="b::ewc", benchmark_id=_BID, method_name="ewc", metric_name="forgetting",
+        metric_value=0.198, higher_is_better=False, source="tar_internal_baseline"))
+    gate = NoveltyGate(g, load_embedding_model=False)
+    # tcl_canonical forgetting 0.154 -> worse than the SI baseline 0.047
+    rep = gate.evaluate(
+        method_name="tcl_canonical", method_description="thermodynamic continual learning",
+        benchmark_id=_BID, metric_name="forgetting", metric_value=0.154, higher_is_better=False)
+    txt = rep.contribution_statement.lower()
+    assert rep.verdict == "known_result"
+    assert "baseline" in txt and "not a novelty" in txt
+    assert "state of the art" not in txt  # must NOT claim external SoTA off an internal baseline
+    assert rep.sota_rank is not None       # the baseline IS the bar (not excluded)
+    g.close()
+
+
 def test_ingestor_wires_curated_external_sota(tmp_path):
     """A2: the live ingestor loads cited external SoTA into the graph (becomes the
     NoveltyGate external bar); uncited rows are refused."""
