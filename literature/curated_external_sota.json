@@ -1,0 +1,17 @@
+{
+  "_README": "Human-curated EXTERNAL SoTA entries (source=external) for the NoveltyGate's external bar. PapersWithCode's API is dead, so these are added BY HAND from real papers actually in hand. Every entry MUST have paper_title + a citation (citation/url/arxiv_id/doi) and is REFUSED otherwise. NEVER add a metric value you cannot cite to a real paper. benchmark_id must match a benchmark in the literature DB (e.g. 'benchmark:402cf4341499b795' = Continual Learning On Split CIFAR-10). For forgetting, higher_is_better=false.",
+  "_entry_schema": {
+    "benchmark_id": "benchmark:<hash>",
+    "method_name": "ewc",
+    "metric_name": "forgetting",
+    "metric_value": 0.0,
+    "higher_is_better": false,
+    "paper_title": "<exact paper title>",
+    "citation": "<arxiv id / doi / url>",
+    "year": 2017,
+    "venue": "PNAS",
+    "venue_tier": "top",
+    "code_url": "<optional>"
+  },
+  "entries": []
+}

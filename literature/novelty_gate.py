@@ -214,7 +214,11 @@ class NoveltyGate:
         rank = sota_table.rank_of(metric_value) if sota_table.entries else 1
 
         if best is None:
-            return "better", 1, None, None, None
+            # No external SoTA on record -> there is NO bar to beat, so this is NOT a
+            # SoTA win. (PapersWithCode's API is dead; external SoTA must be curated by
+            # hand from real papers via literature/curated_external_sota.json.) Novelty
+            # is assessed against TAR's internal results + the paper corpus only.
+            return "no_external_baseline", None, None, None, None
 
         delta = metric_value - best.metric_value
         if not higher_is_better:
@@ -392,13 +396,36 @@ class NoveltyGate:
                     f"This constitutes a genuine contribution subject to statistical validation."
                 )
 
+        elif sota_verdict == "no_external_baseline":
+            # No external SoTA on record -> no bar to beat. Be honest: do NOT claim a new
+            # state of the art. Novelty is assessed against internal results + the corpus.
+            if max_similarity >= _SIMILARITY_THRESHOLD:
+                verdict = "known_result"
+                conf = 0.55
+                contribution = (
+                    f"No external SoTA is on record for this benchmark, so no superiority claim "
+                    f"can be made for {method_name}. It is semantically similar to existing work "
+                    f"(similarity {max_similarity:.2f}); treat as a known direction pending a "
+                    f"curated external baseline."
+                )
+            else:
+                verdict = "novel"
+                conf = 0.50
+                contribution = (
+                    f"No external SoTA is on record for this benchmark. {method_name} appears "
+                    f"semantically distinct (max similarity {max_similarity:.2f}), but with no external "
+                    f"bar this CANNOT be claimed as state of the art. Novelty is provisional, assessed "
+                    f"against TAR's internal results + the paper corpus only (add a real, cited external "
+                    f"bar via literature/curated_external_sota.json)."
+                )
+
         else:
-            # sota_verdict == "better" with no prior — first result on this benchmark
+            # Defensive fallback for any unrecognised sota_verdict.
             verdict = "novel"
-            conf = 0.70
+            conf = 0.50
             contribution = (
-                f"{method_name} is the first reported result on this benchmark. "
-                f"Novelty is inherent but significance depends on whether the benchmark itself is meaningful."
+                f"{method_name}: novelty could not be assessed against an external baseline; "
+                f"treat as provisional pending a curated external SoTA."
             )
 
         return verdict, conf, contribution
