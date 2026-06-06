@@ -2893,6 +2893,26 @@ def api_alerts():
         return jsonify({"alerts": [], "error": str(exc)})
 
 
+@app.route("/api/self_improvement")
+def api_self_improvement():
+    """B6: surface the advisory self-improvement learners (read-only).
+
+    operational = recurring operational-failure -> param suggestions (advisory, rail #4);
+    authoring = which claim STYLES survive review (style-only, never facts);
+    calibration = predicted-vs-observed power + seeds-needed (advisory). Each returns {}
+    until its learner has run, so this is always safe.
+    """
+    try:
+        from tar_lab import operational_learner, authoring_learner, calibration_learner
+        return jsonify({
+            "operational": operational_learner.load_recommendations(_WS),
+            "authoring": authoring_learner.load_style_memory(_WS),
+            "calibration": calibration_learner.load_calibration(_WS),
+        })
+    except Exception as exc:
+        return jsonify({"operational": {}, "authoring": {}, "calibration": {}, "error": str(exc)})
+
+
 @app.route("/api/coordination")
 def api_coordination():
     raw = _jload(_WS / "tar_state" / "research_coordination_state.json") or {}

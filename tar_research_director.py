@@ -2789,6 +2789,26 @@ class ResearchDirector:
                 _mre.rebuild_variant_proposals(self.workspace)
         except Exception:
             pass
+        # B6 self-improvement: refresh the two previously-DORMANT advisory learners so they
+        # stop being write-only/unwired. Both are read-only aggregators with hard safety
+        # rails — operational (#4): never tunes/executes anything, only SUGGESTS params for a
+        # human; authoring: shapes STYLE only, never a fact and never edits a paper. OPT-IN +
+        # inert by default: each runs only when its enable flag exists, and its own .disabled
+        # remains a hard kill (defense in depth). Surfaced read-only at /api/self_improvement.
+        try:
+            from tar_lab import operational_learner as _opl
+            if ((self.workspace / "tar_state" / "operational_learner.enabled").exists()
+                    and not _opl.is_disabled(self.workspace)):
+                _opl.rebuild_operational_recommendations(self.workspace)
+        except Exception:
+            pass
+        try:
+            from tar_lab import authoring_learner as _aul
+            if ((self.workspace / "tar_state" / "authoring_learner.enabled").exists()
+                    and not _aul.is_disabled(self.workspace)):
+                _aul.rebuild_style_memory(self.workspace)
+        except Exception:
+            pass
         # K2.2b prior-trial recall: surface similar past trials/results from vector memory
         # onto directives so the loop builds on (not blindly repeats) prior work. Advisory
         # only — never changes a priority score. Disable via tar_state/vault_recall.disabled.
