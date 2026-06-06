@@ -73,15 +73,23 @@ def _keyword_similarity(text_a: str, text_b: str) -> float:
 
 
 def _try_load_sentence_transformer():
-    """Load sentence-transformers if available; return None otherwise."""
+    """Load sentence-transformers if available; return None otherwise.
+
+    The model is resolved from TAR_NOVELTY_EMBEDDER_MODEL (default allenai-specter,
+    which is purpose-built for scientific papers). Set it to the VectorVault's
+    bge-small model to unify corpus novelty on the SAME space the corpus backfill
+    writes — otherwise a query embedding and the stored embeddings live in
+    different spaces and cosine similarity silently degrades to 0.0.
+    local_files_only=True prevents silent network calls; set
+    TAR_ALLOW_MODEL_DOWNLOAD=1 for the one-time initial download.
+    """
     try:
         import os
         from sentence_transformers import SentenceTransformer  # type: ignore
+        from literature.corpus_embedder import novelty_embedder_model
         allow_download = os.environ.get("TAR_ALLOW_MODEL_DOWNLOAD", "").strip() == "1"
-        # allenai-specter is purpose-built for scientific papers.
-        # local_files_only=True prevents silent network calls; set
-        # TAR_ALLOW_MODEL_DOWNLOAD=1 for the one-time initial download.
-        return SentenceTransformer("allenai-specter", local_files_only=not allow_download)
+        model_name = novelty_embedder_model()
+        return SentenceTransformer(model_name, local_files_only=not allow_download)
     except Exception:
         return None
 

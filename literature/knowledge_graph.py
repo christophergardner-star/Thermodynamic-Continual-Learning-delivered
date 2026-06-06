@@ -281,6 +281,23 @@ class LiteratureKnowledgeGraph:
         ).fetchall()
         return [r["paper_id"] for r in rows]
 
+    def update_paper_embedding(self, paper_id: str, embedding: List[float]) -> bool:
+        """Overwrite the stored embedding for a paper. Returns True if a row changed.
+
+        Unlike ``upsert_paper`` (which COALESCEs and therefore never replaces a
+        non-NULL embedding), this writes the embedding outright. That is what lets
+        the corpus be RE-embedded into a single coherent model space — necessary
+        because the historical ~115 embeddings came from a different model
+        (SPECTER2 passthrough) than the bge-small embedder TAR now unifies on, and
+        a dimension mismatch silently scores 0.0 in cosine similarity.
+        """
+        cur = self.conn.execute(
+            "UPDATE papers SET embedding = ?, updated_at = ? WHERE paper_id = ?",
+            (json.dumps([float(x) for x in embedding]), _utc_now(), paper_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def search_papers_by_field(
         self,
         field: str,
