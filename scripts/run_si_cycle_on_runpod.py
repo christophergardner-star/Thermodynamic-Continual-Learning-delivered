@@ -219,11 +219,17 @@ def _preflight(workspace: Path, api_key: str, *, dry_run: bool) -> None:
             pack_path_rel = anchor_data.get("pack_path", "")
             pack_dir = (workspace / pack_path_rel) if not Path(pack_path_rel).is_absolute() else Path(pack_path_rel)
             run_manifest = pack_dir / "run_manifest.json"
-            eval_items = pack_dir / "eval_items.jsonl"
+            eval_manifest = pack_dir / "eval_manifest.json"
+            items_file = next(
+                (pack_dir / n for n in ("eval_core.jsonl", "eval_items.jsonl") if (pack_dir / n).exists()),
+                None,
+            )
             if not run_manifest.exists():
                 errors.append(f"Anchor run_manifest.json not found: {run_manifest}")
-            elif not eval_items.exists():
-                errors.append(f"Anchor eval_items.jsonl not found: {eval_items}")
+            elif not eval_manifest.exists():
+                errors.append(f"Anchor eval_manifest.json not found (evaluate_eval_pack requires it): {eval_manifest}")
+            elif items_file is None:
+                errors.append(f"Anchor items file (eval_core.jsonl / eval_items.jsonl) not found in {pack_dir}")
             else:
                 # Verify anchor integrity (sha256 hash check — same logic as engine.verify_anchor_integrity)
                 import hashlib
