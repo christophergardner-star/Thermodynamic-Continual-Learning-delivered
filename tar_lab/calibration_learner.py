@@ -16,6 +16,13 @@ INTEGRITY RAIL (#3): this is ADVISORY ONLY. It NEVER edits a pre-registration, n
 a hypothesis post-hoc, and never lowers an evidence standard. Any sample-size change a human
 makes from these recommendations must be pre-registered with an amendment-log entry BEFORE
 running. Off-switch: tar_state/calibration.disabled.
+
+Consumer (B3): propose_seed_amendments() finally CONSUMES the registry — it materialises each
+underpowered result as a PROPOSED pre-registration seed amendment in a durable, human-gated
+log (calibration/preregistration_amendments.json). It still NEVER edits a pre-registration or
+a seed count: proposals sit at status "proposed_pending_human_approval" until a human acts, and
+the log is append-only-safe (human decisions are preserved across cycles). The director only
+calls it when tar_state/calibration_amendments.enabled exists (OFF by default).
 """
 from __future__ import annotations
 
@@ -25,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 REGISTRY_REL = Path("calibration") / "calibration_registry.json"
+AMENDMENTS_REL = Path("calibration") / "preregistration_amendments.json"
 DISABLE_FLAG = "calibration.disabled"
 _TARGET_POWER = 0.8
 
@@ -177,3 +185,94 @@ def rebuild_calibration(workspace) -> dict:
 
 def load_calibration(workspace) -> dict:
     return _jload(_state(workspace, *REGISTRY_REL.parts)) or {}
+
+
+def load_seed_amendments(workspace) -> dict:
+    return _jload(_state(workspace, *AMENDMENTS_REL.parts)) or {}
+
+
+def propose_seed_amendments(workspace, registry: dict | None = None) -> dict:
+    """RAIL #3 consumer: materialise underpowered calibration rows as PROPOSED
+    pre-registration seed amendments.
+
+    Each underpowered result (achieved power < target AND power-based seeds-needed >
+    seeds-run) yields one amendment recommending that a confirmatory re-run pre-register
+    the larger seed count. STRICTLY advisory + human-gated:
+      * writes only its own log (calibration/preregistration_amendments.json);
+      * NEVER edits a pre-registration, a hypothesis, or a seed count;
+      * append-only-safe + idempotent — an existing amendment_id is preserved untouched
+        (so a human-set status like "approved"/"rejected" survives every cycle), only
+        genuinely new proposals are added.
+    Returns the amendments doc.
+    """
+    if registry is None:
+        registry = load_calibration(workspace)
+    rows = registry.get("effect_size_calibration", []) if isinstance(registry, dict) else []
+
+    existing_doc = load_seed_amendments(workspace)
+    existing = existing_doc.get("amendments", []) if isinstance(existing_doc, dict) else []
+    by_id: dict[str, dict] = {
+        str(a.get("amendment_id")): a
+        for a in existing if isinstance(a, dict) and a.get("amendment_id")
+    }
+
+    added = 0
+    for r in rows:
+        if not isinstance(r, dict) or r.get("calibration_flag") != "underpowered":
+            continue
+        rec_n = r.get("seeds_needed_for_80pct_power")
+        if rec_n is None:
+            continue
+        try:
+            rec_n = int(rec_n)
+        except Exception:
+            continue
+        seeds_run = int(r.get("seeds_run", 0) or 0)
+        if rec_n <= seeds_run:
+            continue
+        result_id = str(r.get("result_id", "") or "")
+        if not result_id:
+            continue
+        amendment_id = f"seed-amend::{result_id}::n{rec_n}"
+        if amendment_id in by_id:
+            continue  # preserve the existing entry (incl. any human decision)
+        by_id[amendment_id] = {
+            "amendment_id": amendment_id,
+            "rail": 3,
+            "status": "proposed_pending_human_approval",
+            "result_id": result_id,
+            "observed_cohens_d": r.get("observed_cohens_d"),
+            "seeds_run": seeds_run,
+            "recommended_seeds": rec_n,
+            "rationale": str(
+                r.get("recommendation", "")
+                or f"underpowered at n={seeds_run}; ~{rec_n} seeds needed for 80% power"
+            ),
+            "proposed_at": _now(),
+            "note": (
+                "ADVISORY. A human must pre-register this larger n with an amendment-log "
+                "entry BEFORE any confirmatory re-run. TAR does not change seeds itself."
+            ),
+        }
+        added += 1
+
+    pending = sum(
+        1 for a in by_id.values()
+        if a.get("status") == "proposed_pending_human_approval"
+    )
+    doc = {
+        "generated_at": _now(),
+        "advisory_only": True,
+        "rail": 3,
+        "summary": {"total": len(by_id), "added_this_cycle": added, "pending": pending},
+        "amendments": sorted(by_id.values(), key=lambda a: str(a.get("amendment_id", ""))),
+    }
+    try:
+        p = _state(workspace, *AMENDMENTS_REL.parts)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        tmp.replace(p)
+    except Exception:
+        pass
+    return doc

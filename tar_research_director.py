@@ -2716,7 +2716,13 @@ class ResearchDirector:
         try:
             from tar_lab import calibration_learner as _cal
             if not _cal.is_disabled(self.workspace):
-                _cal.rebuild_calibration(self.workspace)
+                _cal_reg = _cal.rebuild_calibration(self.workspace)
+                # B3 (RAIL #3, OPT-IN): consume the calibration registry — materialise
+                # underpowered results as PROPOSED, human-gated pre-registration seed
+                # amendments (never auto-applied, never edits a prereg/seed). OFF unless
+                # tar_state/calibration_amendments.enabled exists -> inert by default.
+                if (self.workspace / "tar_state" / "calibration_amendments.enabled").exists():
+                    _cal.propose_seed_amendments(self.workspace, _cal_reg)
         except Exception:
             pass
         # Phase 3.1a self-improvement: refresh advisory method-variant proposals (no code
