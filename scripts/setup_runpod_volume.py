@@ -121,7 +121,7 @@ def main() -> None:
 
     # Spin up a temporary pod to pre-download datasets
     print("\nSpinning up temp pod to pre-download datasets...")
-    image = str(config.get("image", "runpod/pytorch:2.2.0-py3.11-cuda12.1.1-devel-ubuntu22.04"))
+    image = str(config.get("image", "runpod/pytorch:1.0.3-cu1290-torch280-ubuntu2204"))
 
     # Use CPU-only for dataset download (cheaper)
     setup_pod = None

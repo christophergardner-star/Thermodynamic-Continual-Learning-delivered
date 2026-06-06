@@ -320,7 +320,7 @@ def cmd_setup(ws: Path) -> None:
             "threshold_vram_gb": 3.9,
             "gpu_preference": ["NVIDIA RTX 4090", "NVIDIA A40", "NVIDIA A100-SXM4-80GB"],
             "cloud_type": "COMMUNITY",
-            "image": "runpod/pytorch:2.2.0-py3.11-cuda12.1.1-devel-ubuntu22.04",
+            "image": "runpod/pytorch:1.0.3-cu1290-torch280-ubuntu2204",
             "volume_id": "",
             "datacenter_id": "",
             "watchdog_multiplier": 2.5,
