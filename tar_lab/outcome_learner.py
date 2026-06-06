@@ -18,9 +18,18 @@ Director use (conservative, penalty-only — preserves exploration; rail #5):
   - outcome_context(): surfaces the latest finding / failure-diagnosis so they reach the
     director state and the LLM follow-up proposer (closes the write-only gap).
 
-The method x dataset priors are recorded for the operator and the Phase-2 calibration loop;
-they are deliberately NOT used as a scoring BOOST (never reinforce a single method —
-that would collapse exploration).
+The method x dataset priors are recorded for the operator and the Phase-2 calibration loop.
+
+Reward (Phase 1.3b, OPT-IN, exploration-safe — see reliability_reward()):
+  TAR could previously only PUNISH a priority (vetoes, failure penalty), never reinforce.
+  reliability_reward() adds a small, bounded boost for an experiment whose method x dataset
+  config has a RELIABLE OPERATIONAL track record (clean completions + reproducible low
+  variance). Crucially it rewards measurement RELIABILITY, NOT a favourable scientific
+  outcome — a config that reliably does *badly* earns the same reward — so it does NOT
+  reinforce a single winning method (which would collapse exploration), and a novel config
+  with no track record earns 0 rather than a penalty (exploration is never pushed down).
+  It is OFF unless the operator creates tar_state/outcome_reward.enabled, and bounded well
+  below the failure penalty + status boosts so it nudges, never dominates.
 """
 from __future__ import annotations
 
@@ -36,6 +45,12 @@ _FAILURE_PENALTY = 50.0
 _REPRO_MIN_SAMPLES = 3
 _REPRO_MAX_STD = 0.08
 _MEMO_MAXLEN = 600
+
+# Reward (opt-in) — bounded well below _FAILURE_PENALTY (50) and the status boosts (36-58)
+# so a reliable config is nudged, never allowed to dominate or collapse exploration.
+_RELIABILITY_REWARD_CAP = 12.0
+_REWARD_MIN_COMPLETED = 3          # need a real track record, not one lucky run
+_REWARD_MIN_COMPLETION_RATE = 0.5  # a config that mostly fails is not "reliable"
 
 
 def _now() -> str:
@@ -167,6 +182,57 @@ def failure_penalty(priors: dict, experiment_id: str) -> tuple[float, str]:
         why = (rec.get("error") or "previous run failed")[:120]
         return _FAILURE_PENALTY, f"prior run failed operationally: {why}"
     return 0.0, ""
+
+
+def reliability_reward(
+    priors: dict,
+    experiment_id: str,
+    method: str = "",
+    dataset: str = "",
+) -> tuple[float, str]:
+    """Bounded reward (>=0) to ADD: lightly prefer an experiment whose method x dataset
+    config has a RELIABLE operational track record.
+
+    Exploration-safe by construction:
+      * rewards measurement RELIABILITY (clean completions + reproducible low variance),
+        NOT a favourable scientific outcome — a config that reliably does *badly* earns the
+        same reward, so a single winning method is never reinforced;
+      * a novel config (no track record) earns 0, never a penalty, so exploration is not
+        pushed down;
+      * capped at _RELIABILITY_REWARD_CAP, far below the failure penalty + status boosts.
+
+    method/dataset describe the experiment being scored (the per-experiment record may not
+    exist yet for a fresh proposal); they fall back to the archived record when omitted.
+    """
+    if not isinstance(priors, dict) or not experiment_id:
+        return 0.0, ""
+    rec = (priors.get("by_experiment", {}) or {}).get(str(experiment_id)) or {}
+    method = str(method or rec.get("method", "") or "")
+    dataset = str(dataset or rec.get("dataset", "") or "")
+    if not method or not dataset:
+        return 0.0, ""
+    md = (priors.get("by_method_dataset", {}) or {}).get(f"{method}::{dataset}")
+    if not isinstance(md, dict):
+        return 0.0, ""
+    n = int(md.get("n", 0) or 0)
+    completed = int(md.get("completed", 0) or 0)
+    if n <= 0 or completed < _REWARD_MIN_COMPLETED:
+        return 0.0, ""
+    completion_rate = completed / n
+    if completion_rate < _REWARD_MIN_COMPLETION_RATE:
+        return 0.0, ""
+    # 60% of the cap scales with how cleanly the config runs; the remaining 40% is a bonus
+    # for reproducible (low-variance) measurements. Bounded to the cap.
+    reward = _RELIABILITY_REWARD_CAP * 0.6 * completion_rate
+    reproducible = bool(md.get("reproducible"))
+    if reproducible:
+        reward += _RELIABILITY_REWARD_CAP * 0.4
+    reward = round(min(reward, _RELIABILITY_REWARD_CAP), 1)
+    if reward <= 0.0:
+        return 0.0, ""
+    why = (f"reliable config {method}/{dataset}: {completed}/{n} clean"
+           + (", reproducible" if reproducible else ""))
+    return reward, why
 
 
 def outcome_context(priors: dict, experiment_id: str) -> dict:

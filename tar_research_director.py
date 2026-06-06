@@ -2699,6 +2699,17 @@ class ResearchDirector:
             _ol = None
             _ol_priors = {}
             _ol_disabled = True
+        # Phase 1.3b reward (OPT-IN, exploration-safe): a small bounded BOOST for an
+        # experiment whose method x dataset config has a reliable operational track record
+        # (clean + reproducible runs). This is the only reinforcement signal — TAR could
+        # previously only punish. OFF unless tar_state/outcome_reward.enabled exists ->
+        # inert by default. It rewards reliability, NOT a scientific outcome, so it cannot
+        # collapse exploration onto a single winning method.
+        _ol_reward_enabled = (
+            (not _ol_disabled)
+            and _ol is not None
+            and (self.workspace / "tar_state" / "outcome_reward.enabled").exists()
+        )
         # Phase 2.1 self-improvement: refresh the calibration registry (advisory only —
         # predicted-vs-observed + power-based sample-size recommendations). Changes NO
         # score and NO pre-registration; integrity rail #3.
@@ -2783,7 +2794,16 @@ class ResearchDirector:
                     return "queue_now"
                 return "propose_now"
 
-            def _priority_for(exp_id: str, status: str, unmet_deps: list[str], bias: float = 0.0) -> float:
+            def _reliability_reward(exp_id: str, method: str, dataset: str) -> tuple[float, str]:
+                if not (_ol_reward_enabled and _ol_priors and _ol is not None):
+                    return 0.0, ""
+                try:
+                    return _ol.reliability_reward(_ol_priors, exp_id, method, dataset)
+                except Exception:
+                    return 0.0, ""
+
+            def _priority_for(exp_id: str, status: str, unmet_deps: list[str], bias: float = 0.0,
+                              method: str = "", dataset: str = "") -> float:
                 status_boost = {
                     "running": 52.0,
                     "stalled": 58.0,
@@ -2813,7 +2833,9 @@ class ResearchDirector:
                         outcome_pen, _ = _ol.failure_penalty(_ol_priors, exp_id)
                     except Exception:
                         outcome_pen = 0.0
-                return round(base_priority + paper_boost + status_boost + bias + special_boost - dependency_penalty - hf_penalty - outcome_pen, 1)
+                # Bounded, opt-in reward for a reliable config (exploration-safe; 0 by default).
+                outcome_reward, _ = _reliability_reward(exp_id, method, dataset)
+                return round(base_priority + paper_boost + status_boost + bias + special_boost - dependency_penalty - hf_penalty - outcome_pen + outcome_reward, 1)
 
             for exp in experiments:
                 if str(exp.get("frontier_problem_id", "") or "") != frontier_id:
@@ -2827,9 +2849,14 @@ class ResearchDirector:
                 depends_on = [str(dep) for dep in exp.get("depends_on", []) or [] if str(dep or "")]
                 unmet_deps = [dep for dep in depends_on if dep not in complete_ids]
                 intent = _intent_for(status, unmet_deps)
-                priority_score = _priority_for(exp_id, status, unmet_deps)
+                _exp_method = str(exp.get("method", "tcl") or "tcl")
+                _exp_dataset = str(exp.get("dataset", "") or "")
+                priority_score = _priority_for(exp_id, status, unmet_deps, method=_exp_method, dataset=_exp_dataset)
+                _rel_reward, _rel_why = _reliability_reward(exp_id, _exp_method, _exp_dataset)
                 directives.append({
                     "experiment_id": exp_id,
+                    "reliability_reward": _rel_reward,
+                    "reliability_reward_reason": _rel_why,
                     "title": str(exp.get("name", exp_id) or exp_id),
                     "status": status,
                     "scheduler_intent": intent,
@@ -2924,6 +2951,8 @@ class ResearchDirector:
                     status,
                     unmet_deps,
                     float(proposal.get("priority_bias", 0.0) or 0.0),
+                    method=str(proposal.get("method", "") or ""),
+                    dataset=str(proposal.get("dataset", "") or ""),
                 )
                 directives.append({
                     **proposal,
@@ -2971,7 +3000,11 @@ class ResearchDirector:
                     status = "proposed"
                     unmet: list[str] = []
                     intent = "propose_now"
-                    priority_score = _priority_for(exp_id, status, unmet, 0.0)
+                    priority_score = _priority_for(
+                        exp_id, status, unmet, 0.0,
+                        method="tcl",
+                        dataset=str(proposal.get("dataset", "") or "split_cifar10"),
+                    )
                     directives.append({
                         "experiment_id": exp_id,
                         "title": str(proposal.get("title", "") or f"LLM Follow-up - {frontier_title}"),
