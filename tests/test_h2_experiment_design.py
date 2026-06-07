@@ -148,6 +148,41 @@ def test_director_fp_gap_uses_powered_protocol_only_when_enabled(tmp_path):
     assert powered == _solve_n_for_power(0.5, 0.8)
 
 
+def test_director_helper_designs_probes_but_skips_suite_and_resume(tmp_path):
+    """_apply_experiment_design upgrades fresh director frontier_probe/gap_probe arms,
+    but NEVER touches suite/resume reruns (fixed protocols), is idempotent, and no-ops
+    when the flag is absent. Torch-free."""
+    from tar_research_director import ResearchDirector
+    (tmp_path / "tar_state").mkdir()
+    d = ResearchDirector(tmp_path)
+    flag = tmp_path / "tar_state" / "experiment_design.enabled"
+    flag.write_text("", encoding="utf-8")
+    frontier = {"domain": "continual_learning"}
+
+    probe = {"experiment_id": "director-x-probe", "proposal_origin": "director",
+             "proposal_kind": "frontier_probe", "method": "tcl", "dataset": "split_cifar10",
+             "external_baselines": ["ewc", "si", "sgd_baseline"], "seeds": [42, 0, 1, 2, 3],
+             "estimated_runtime_h": 8.0, "config_overrides": {}}
+    out = d._apply_experiment_design(probe, frontier)
+    assert out["config_overrides"]["experiment_design"] is True
+    assert out["seeds"] != [42, 0, 1, 2, 3]
+    assert any(m in out["comparison_methods"] for m in ("tcl_penalty_only", "tcl_canonical", "tcl_full"))
+
+    suite = {"experiment_id": "phase16", "proposal_origin": "suite", "proposal_kind": "resume_suite",
+             "method": "tcl", "dataset": "split_cifar100", "external_baselines": ["ewc", "sgd_baseline"],
+             "seeds": [42, 0, 1, 2, 3], "config_overrides": {}}
+    out2 = d._apply_experiment_design(suite, frontier)
+    assert out2["seeds"] == [42, 0, 1, 2, 3]                      # untouched
+    assert out2["config_overrides"].get("experiment_design") is None
+
+    designed = {"proposal_origin": "director", "proposal_kind": "frontier_probe",
+                "config_overrides": {"experiment_design": True}, "seeds": [1, 2]}
+    assert d._apply_experiment_design(designed, frontier)["seeds"] == [1, 2]   # idempotent
+
+    flag.unlink()
+    assert d._apply_experiment_design(dict(probe), frontier)["seeds"] == [42, 0, 1, 2, 3]  # flag off -> no-op
+
+
 def test_preregistration_frozen_with_primary_endpoint_and_stop_rule():
     p = design_experiment(_tcl_hyp(direction="less"), available_baselines=["ewc", "si"])
     pre = p.preregistration

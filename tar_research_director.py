@@ -2531,6 +2531,72 @@ class ResearchDirector:
 
         return []
 
+    def _apply_experiment_design(self, exp: dict[str, Any], frontier: dict[str, Any]) -> dict[str, Any]:
+        """H2: upgrade a FRESH director probe to a powered, DISCRIMINATING protocol when
+        tar_state/experiment_design.enabled exists — falsifying baselines + mechanism
+        ablations + a stat_utils._solve_n_for_power seed count (honest over-budget seed
+        amendment instead of silent under-power). Generalises the fp-gap wiring to the
+        director frontier_probe arms (regime / hyperparameter / catastrophic-forgetting).
+
+        Guards (all must hold, else exp is returned UNCHANGED):
+          - flag present; not already designed (idempotent, e.g. the fp-gap inline);
+          - proposal_origin == 'director' AND proposal_kind in {frontier_probe, gap_probe}
+            -> NEVER touches suite/resume/follow_on reruns (they reproduce fixed protocols).
+        Fail-safe: any fault -> exp unchanged. OFF by default."""
+        try:
+            if not isinstance(exp, dict):
+                return exp
+            co = dict(exp.get("config_overrides") or {})
+            if co.get("experiment_design"):
+                return exp  # already designed (fp-gap handles itself inline)
+            if not (self.workspace / "tar_state" / "experiment_design.enabled").exists():
+                return exp
+            if str(exp.get("proposal_origin", "") or "") != "director":
+                return exp
+            if str(exp.get("proposal_kind", "") or "") not in {"frontier_probe", "gap_probe"}:
+                return exp
+            method = str(exp.get("method", "") or "")
+            dataset = str(exp.get("dataset", "") or "")
+            baselines = [str(b) for b in (exp.get("external_baselines")
+                         or co.get("external_baselines")
+                         or exp.get("comparison_methods") or []) if str(b)]
+            if not method or not dataset or not baselines:
+                return exp
+            from tar_lab.experiment_design import design_experiment, HypothesisSpec
+            proto = design_experiment(
+                HypothesisSpec(
+                    hypothesis_id=str(exp.get("hypothesis_name", "") or exp.get("experiment_id", ""))[:64],
+                    claim=str(exp.get("experiment_goal", "") or exp.get("mechanism_focus", "") or exp.get("title", "")),
+                    primary_method=method,
+                    domain_id=str(frontier.get("domain", "") or ""),
+                    dataset=dataset,
+                    direction="less",
+                    min_effect_d=0.5,
+                    backbone=str(exp.get("backbone", "") or "resnet18"),
+                    epochs=int(exp.get("epochs", 40) or 40),
+                ),
+                available_baselines=baselines,
+                runtime_budget_h=float(exp.get("estimated_runtime_h", 8.0) or 8.0),
+            )
+            out = dict(exp)
+            out["comparison_methods"] = proto.methods
+            out["seeds"] = proto.seeds
+            out["estimated_runtime_h"] = proto.estimated_runtime_h
+            out["config_overrides"] = {
+                **co,
+                "comparison_methods": proto.methods,
+                "experiment_design": True,
+                "design_rationale": proto.design_rationale,
+                "achieved_power": proto.achieved_power,
+                "min_effect_d": proto.min_effect_d,
+                "powered_seeds": proto.preregistration.get("n_seeds"),
+                "seed_amendment": proto.seed_amendment,
+                "preregistration": proto.preregistration,
+            }
+            return out
+        except Exception:
+            return exp
+
     def _active_path_experiment_catalog(self, path: ActiveResearchPath) -> list[dict[str, Any]]:
         _path_domain = getattr(path, "domain_id", "") or getattr(path, "domain", "")
         if not _frontier_autonomy_allowed(_path_domain):
@@ -3070,6 +3136,9 @@ class ResearchDirector:
                 and not frontier.get("waiting_on_experiment_ids")
             )
             _catalog_proposals = [] if _falsified_dead else self._frontier_experiment_catalog(frontier, paper, path)
+            # H2: upgrade fresh director probes to powered, discriminating protocols (flag-gated,
+            # idempotent, suite/resume arms untouched) — extends the fp-gap wiring to all frontiers.
+            _catalog_proposals = [self._apply_experiment_design(_p, frontier) for _p in _catalog_proposals]
             for proposal in _catalog_proposals:
                 exp_id = str(proposal.get("experiment_id", "") or "")
                 if not exp_id or exp_id in seen_ids:
