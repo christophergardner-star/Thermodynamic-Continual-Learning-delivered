@@ -2960,10 +2960,25 @@ def api_autonomous():
         phase2_running = [k for k in phase2_running if _ps.pid_exists(int(phase2_pids[k]["pid"]))]
     except Exception:
         pass
+    # Liveness: a crashed daemon leaves status="running" stale forever. Trust it only if
+    # the recorded PID is alive, or (no PID) the heartbeat file is fresh. A recorded-but-dead
+    # PID is definitive -> report idle + daemon_stale so a dead daemon never reads as live.
+    daemon_claims_running = daemon.get("status") == "running"
+    _dpid = daemon.get("pid") or 0
+    daemon_pid_alive = None
+    try:
+        import psutil as _ps2
+        if _dpid:
+            daemon_pid_alive = _ps2.pid_exists(int(_dpid))
+    except Exception:
+        daemon_pid_alive = None
+    daemon_fresh = bool(_fresh_state("living_research_daemon.json"))
+    daemon_running = False if daemon_pid_alive is False else (daemon_claims_running and (bool(daemon_pid_alive) or daemon_fresh))
     return jsonify({
         "hypotheses": results,
         "summary": summary,
-        "status": "running" if (daemon.get("status") == "running" or phase2_running) else "idle",
+        "status": "running" if (daemon_running or phase2_running) else "idle",
+        "daemon_stale": daemon_claims_running and not daemon_running,
         "current_phase": "Phase 2 — GPU Experiments" if phase2_running else daemon.get("current_phase", "—"),
         "cycle_count": daemon.get("cycle_count", 0) or summary.get("total_hypotheses_tested", 0),
         "phase2_running": phase2_running,
@@ -3350,8 +3365,11 @@ def api_scheduler():
             "vram_total_gb": getattr(hw, "vram_total_gb", 0.0),
             "gpu_temp_c":   getattr(hw, "gpu_temp_c", 0),
         }
-    except Exception:
-        state = {}
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception("scheduler decide() failed")
+        # Distinguish "scheduler crashed" from "nothing scheduled" for the UI.
+        state = {"error": f"scheduler unavailable: {exc}"}
     return jsonify({**state, **gpu_fields})
 
 
@@ -3434,7 +3452,8 @@ def api_queue_run_next():
             try:
                 ExperimentOrchestrator(_WS).run_next()
             except Exception:
-                pass
+                import logging
+                logging.getLogger(__name__).exception("background run_next() failed to start/complete")
 
         threading.Thread(target=_run, daemon=True).start()
         return jsonify({"ok": True, "name": next_spec.name, "id": next_spec.id, "runner_key": getattr(next_spec, "runner_key", "")})
@@ -3467,7 +3486,8 @@ def api_queue_launch_by_id(exp_id: str):
             try:
                 ExperimentOrchestrator(_WS)._execute(spec)  # noqa: SLF001
             except Exception:
-                pass
+                import logging
+                logging.getLogger(__name__).exception("background _execute(%s) failed to start/complete", getattr(spec, "id", "?"))
 
         threading.Thread(target=_run, daemon=True).start()
         return jsonify({"ok": True, "name": spec.name, "id": spec.id, "runner_key": getattr(spec, "runner_key", "")})
@@ -4750,7 +4770,7 @@ def api_llm_insights():
 @app.route("/api/self_improvement")
 def api_self_improvement():
     """Self-improvement pipeline state — cycle, delta, signals, anchor, adapter, hardware."""
-    import os, hashlib, torch
+    import os, hashlib
     from pathlib import Path
 
     si_dir = _WS / "tar_state" / "self_improvement"
@@ -4838,6 +4858,7 @@ def api_self_improvement():
     # ── Hardware ────────────────────────────────────────────
     required_vram = 14.0
     try:
+        import torch  # lazy: absent on CPU-only / minimal installs -> handled here, not a 500
         cuda_ok = torch.cuda.is_available()
         if cuda_ok:
             props = torch.cuda.get_device_properties(0)
@@ -4845,8 +4866,10 @@ def api_self_improvement():
             gpu_name = torch.cuda.get_device_name(0)
         else:
             vram_gb, gpu_name = 0.0, "none"
-    except Exception:
-        cuda_ok, vram_gb, gpu_name = False, 0.0, "error"
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("self_improvement hardware probe failed: %s", exc)
+        cuda_ok, vram_gb, gpu_name = False, 0.0, "unavailable"
     watchdog_state = _jload(si_dir / "hardware_watchdog_state.json") or {}
     hardware_info = {
         "cuda_available": cuda_ok,
