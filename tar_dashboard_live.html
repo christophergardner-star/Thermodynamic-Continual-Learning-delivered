@@ -14,8 +14,8 @@
   --border:       #252530;
   --border-s:     #3a3a50;
   --text:         #e4e4f0;
-  --muted:        #8888a4;
-  --dim:          #44445a;
+  --muted:        #9a9ab8;   /* A9: raised from #8888a4 -> >=6:1 on --raised (was ~3.7:1, failed WCAG AA) */
+  --dim:          #8585a0;   /* A9: raised from #44445a -> ~4.9:1 on --raised (was ~2.1:1); used for real text (timestamps/axis labels) */
 
   --green:        #22c55e;
   --amber:        #f59e0b;
@@ -770,6 +770,22 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
   border-top:1px solid var(--border);
   background:var(--raised);
 }
+
+/* ── A9 accessibility (AuDHD persona): reduced motion + readability floor ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .dot.pulse, .seed-pip.active { animation: none !important; }
+}
+/* 12px readability floor for persistent label/prose text (overrides earlier
+   sub-12px sizes). Dense data badges and inline SVG axis ticks are intentionally
+   left smaller to avoid reflow/overlap in the compact grid — raise separately. */
+.prog-label, .gauge-lbl, .gauge-val, .metric-note, .alert-ts,
+.chat-msg .role { font-size: 12px !important; }
 </style>
 </head>
 <body>
@@ -1015,6 +1031,17 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
   <section class="view" id="view-evidence">
     <div class="view-title">Evidence &amp; Results</div>
     <div class="view-sub">Phase results traced to honest_evidence_inventory.json. Click a row for full statistical breakdown.</div>
+
+    <details class="verdict-legend" style="margin-bottom:14px;background:var(--raised);border:1px solid var(--border);border-radius:var(--r-md);padding:10px 12px">
+      <summary style="cursor:pointer;font-size:12px;color:var(--muted)">Verdict legend — what each class means</summary>
+      <div style="display:grid;grid-template-columns:max-content 1fr;gap:8px 12px;margin-top:10px;align-items:start;justify-items:start">
+        <span class="verd-PUB">PUBLICATION_ALLOWED</span><span style="font-size:12px;color:var(--muted);line-height:1.5">Survives Bonferroni, n&ge;5, trust_tier=trusted. Citable as a headline claim.</span>
+        <span class="verd-DIR">DIRECTIONAL</span><span style="font-size:12px;color:var(--muted);line-height:1.5">Real signal but fails Bonferroni or n&lt;5. Cannot be a headline claim; motivates further work.</span>
+        <span class="verd-EXP">EXPLORATION_GRADE</span><span style="font-size:12px;color:var(--muted);line-height:1.5">n&lt;5 or trust_tier below trusted_rerun. Hypothesis-generating only. Not citable.</span>
+        <span class="verd-FLS">FALSIFIED</span><span style="font-size:12px;color:var(--muted);line-height:1.5">Preponderance of evidence against the hypothesis across conditions.</span>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin-top:10px">Definitions: honest_evidence_inventory.json &rarr; _meta.verdict_key</div>
+    </details>
 
     <div class="tbl-wrap" style="margin-bottom:16px">
       <table id="ev-table">
@@ -4581,6 +4608,14 @@ function renderPhaseDetail(r) {
               : ''}
           </div>
         </div>
+        ${(r.cohens_d_note || r.ci95_note || r.correction_note) ? `<div class="dp-section">
+          <div class="dp-section-head">Inventory Caveats</div>
+          <div class="dp-section-body">
+            ${r.cohens_d_note ? `<div class="warning-banner" style="margin-bottom:8px"><strong>Effect-size caveat:</strong> ${esc(r.cohens_d_note)}</div>` : ''}
+            ${r.ci95_note ? `<div class="warning-banner" style="margin-bottom:8px"><strong>Confidence interval:</strong> ${esc(r.ci95_note)}</div>` : ''}
+            ${r.correction_note ? `<div class="warning-banner"><strong>Correction history:</strong> ${esc(r.correction_note)}</div>` : ''}
+          </div>
+        </div>` : ''}
         <div class="dp-section">
           <div class="dp-section-head">Publication Gates</div>
           <div class="dp-section-body">
