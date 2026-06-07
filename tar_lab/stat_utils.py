@@ -747,22 +747,23 @@ def sprt_boundary(
 
     Log-likelihood ratio
     --------------------
-    Each p-value contributes a fixed increment to the log-likelihood ratio
-    using Wald's binary decision rule (Wald, 1947):
+    Each seed is treated as one Bernoulli SIGN trial: ``p < alpha`` marks a
+    favorable seed (one-tailed evidence for H1), otherwise unfavorable. The
+    per-trial increment is the true log-likelihood ratio log(f1/f0) under
 
-        if p < alpha: increment = log((1 - beta) / alpha)   # evidence for H1
-        else:         increment = log(beta / (1 - alpha))    # evidence for H0
+        H0: P(favorable) = 0.5            (no preference)
+        H1: P(favorable) = Phi(h1_effect_size)   (min meaningful Cohen's d)
 
-    Both increments are constants determined solely by alpha and beta.
-    Under H1, most p-values fall below alpha, driving LLR toward boundary A.
-    Under H0, most p-values exceed alpha, driving LLR toward boundary B (negative).
-    This is correct Wald SPRT accumulation — NOT log(alpha/p), which is an
-    informal heuristic that gives wrong sign for the H0 branch.
+        favorable:   increment = log(p1 / 0.5)
+        unfavorable: increment = log((1 - p1) / 0.5)
 
-    The increments are clipped to [-50, 50] per observation to prevent
-    numerical blow-up from extreme p-values near 0 or 1.  The caller
-    is responsible for invoking this function after each batch of seeds
-    (every 4 seeds is recommended in practice).
+    so a near-even sign split sits between the boundaries (decision="continue")
+    and only a genuine excess of favorable seeds crosses A. Earlier versions used
+    the BOUNDARY value log((1-beta)/alpha) as the increment, which let a single
+    favorable trial reach A — accepting H1 on near-even evidence (the n=12 HPC bug).
+
+    The caller invokes this after each batch of seeds (every 4 is recommended);
+    p-proxies are clamped to (0, 1) to avoid log blow-up.
 
     Parameters
     ----------
@@ -775,24 +776,40 @@ def sprt_boundary(
     beta : float
         Target Type II error rate (1 - power); default 0.10.
     h1_effect_size : float
-        Expected effect size under H1 (used for context only in this
-        p-value approximation formulation).
+        Minimum meaningful effect (Cohen's d) under H1; sets the favorable-trial
+        probability p1 = Phi(d) that scales each per-seed LLR increment. Default
+        0.5 matches the d>=0.5 success bar of the HPC replication.
 
     Returns
     -------
     SPRTResult
     """
-    A = math.log((1.0 - beta) / alpha)       # upper boundary
-    B = math.log(beta / (1.0 - alpha))        # lower boundary
+    A = math.log((1.0 - beta) / alpha)       # upper boundary (accept H1)
+    B = math.log(beta / (1.0 - alpha))        # lower boundary (accept H0)
 
-    # Wald SPRT fixed increments — constants for given alpha and beta
-    _h1_increment = math.log((1.0 - beta) / alpha)       # positive: evidence for H1
-    _h0_increment = math.log(beta / (1.0 - alpha))        # negative: evidence for H0
+    # Per-observation log-likelihood-ratio increments for the per-seed SIGN test.
+    # Each seed is ONE Bernoulli trial: p < alpha == "favorable" (one-tailed
+    # evidence for H1), else "unfavorable". The increment is the TRUE per-trial
+    # LLR log(f1/f0) — NOT the boundary value:
+    #   H0: P(favorable) = 0.5         (no preference)
+    #   H1: P(favorable) = Phi(d)      (d = h1_effect_size, the minimum meaningful
+    #                                   Cohen's d; a single paired delta lands
+    #                                   favorable with probability Phi(d))
+    # Using the boundary log((1-beta)/alpha) AS the increment (the previous
+    # implementation) is a textbook SPRT error: a single favorable trial would
+    # already reach boundary A, so a near-even sign split spuriously crosses it.
+    # That is what stopped the HPC replication at n=12 (7 vs 5) with log_LR=8.98
+    # while the effect was honestly inconclusive (d=-0.44, power=0.41).
+    p0 = 0.5
+    p1 = 0.5 * (1.0 + math.erf(abs(h1_effect_size) / math.sqrt(2.0)))   # Phi(d)
+    p1 = min(max(p1, 0.5 + 1e-6), 1.0 - 1e-9)                           # H1 must favor success
+    _succ_inc = math.log(p1 / p0)                        # favorable seed (p < alpha)
+    _fail_inc = math.log((1.0 - p1) / (1.0 - p0))        # unfavorable seed
 
     log_lr = 0.0
     for p in p_values_so_far:
         p = max(1e-300, min(1.0 - 1e-10, float(p)))
-        increment = _h1_increment if p < alpha else _h0_increment
+        increment = _succ_inc if p < alpha else _fail_inc
         log_lr += increment
 
     if log_lr >= A:
