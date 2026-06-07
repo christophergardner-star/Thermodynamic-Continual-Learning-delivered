@@ -55,10 +55,32 @@ RUNNERS: dict[str, dict[str, Any]] = {
         },
         "sync_inputs": ["preregistrations/phase16_rerun.json"],
         "create_flags": [f"{_POD_STATE}/execution_enabled.flag"],
+        "output_dir": _POD_OUT,
         "output_glob": "phase16_cifar100_rerun_*.json",
         "est_h": 5.0,
     },
-    # phase17 + mechanistic_ablation added after phase16 is proven (phase17 needs TinyImageNet data).
+    "mechanistic_ablation_7c": {
+        "script": "run_mechanistic_ablation.py",
+        "module": "run_mechanistic_ablation",
+        "patch_paths": {
+            "_TAR_STATE": _POD_STATE,
+            "PREREG_FILE": f"{_POD_STATE}/preregistrations/mechanistic_ablation_7condition.json",
+            "EXEC_FLAG": f"{_POD_STATE}/execution_enabled.flag",
+            "CHECKPOINT_FILE": f"{_POD_STATE}/comparisons/mechanistic_ablation_checkpoint.json",
+            "PHASE11_FILE": f"{_POD_STATE}/comparisons/phase11_ablation__20260511T113318Z.json",
+        },
+        "sync_inputs": [
+            "preregistrations/mechanistic_ablation_7condition.json",
+            "comparisons/phase11_ablation__20260511T113318Z.json",
+        ],
+        "create_flags": [f"{_POD_STATE}/execution_enabled.flag"],
+        "args": ["--conditions", "anchor_frozen_init,warmup_batches_60,ewc_best_lambda"],
+        "output_dir": f"{_POD_STATE}/comparisons",
+        "output_glob": "mechanistic_ablation_*.json",
+        "output_exclude": "checkpoint",
+        "est_h": 4.0,
+    },
+    # phase17 added after these prove (needs TinyImageNet data staging).
 }
 
 _PIP = ("pip install -q --no-warn-script-location "
@@ -126,6 +148,8 @@ def _make_shim(cfg: dict) -> str:
         f'pathlib.Path({f!r}).parent.mkdir(parents=True, exist_ok=True); pathlib.Path({f!r}).write_text("1")'
         for f in cfg.get("create_flags", [])
     )
+    args = cfg.get("args", [])
+    argv = f"sys.argv = [{cfg['script']!r}] + {list(args)!r}\n" if args else ""
     return (
         "#!/usr/bin/env python3\n"
         "import sys, pathlib, importlib\n"
@@ -133,6 +157,7 @@ def _make_shim(cfg: dict) -> str:
         f"{flags}\n"
         f"_m = importlib.import_module({cfg['module']!r})\n"
         f"{patch}\n"
+        f"{argv}"
         "print('[shim] patched paths + flags; launching main()', flush=True)\n"
         "_m.main()\n"
     )
@@ -183,26 +208,30 @@ def _run_remote(client: Any, cfg: dict) -> int:
 
 
 def _retrieve(client: Any, ws: Path, cfg: dict) -> Optional[Path]:
+    out_dir = cfg.get("output_dir", _POD_OUT)
+    exclude = cfg.get("output_exclude")
     sftp = client.open_sftp()
     try:
-        names = [n for n in sftp.listdir(_POD_OUT)
-                 if n.startswith(cfg["output_glob"].split("*")[0]) and n.endswith(".json")]
+        names = [n for n in sftp.listdir(out_dir)
+                 if n.startswith(cfg["output_glob"].split("*")[0]) and n.endswith(".json")
+                 and not (exclude and exclude in n)]
     except Exception:
         names = []
     if not names:
         print("[bridge] no comparison JSON produced on the pod", flush=True)
         sftp.close()
         return None
-    names.sort()
+    # newest by pod mtime (alphabetical can misorder timestamp vs literal-name siblings)
+    names.sort(key=lambda n: getattr(sftp.stat(f"{out_dir}/{n}"), "st_mtime", 0))
     latest = names[-1]
     local_dir = ws / "tar_state" / "comparisons"
     local_dir.mkdir(parents=True, exist_ok=True)
     local = local_dir / latest
-    sftp.get(f"{_POD_OUT}/{latest}", str(local))
+    sftp.get(f"{out_dir}/{latest}", str(local))
     # env sibling, if the script wrote one
     for sib in (latest.replace(".json", "_env.json"),):
         try:
-            sftp.get(f"{_POD_OUT}/{sib}", str(local_dir / sib))
+            sftp.get(f"{out_dir}/{sib}", str(local_dir / sib))
         except Exception:
             pass
     sftp.close()
