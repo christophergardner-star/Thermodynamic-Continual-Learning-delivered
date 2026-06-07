@@ -110,6 +110,44 @@ def test_critic_is_advisory_only_never_touches_gate():
     assert not hasattr(p, "quarantined")
 
 
+def test_director_fp_gap_uses_powered_protocol_only_when_enabled(tmp_path):
+    """Wiring test: the director's fp-gap probe keeps the hardcoded seeds= when the flag
+    is absent, and switches to a powered + discriminating protocol when
+    tar_state/experiment_design.enabled exists. Torch-free (reasoning layer)."""
+    from tar_research_director import ResearchDirector
+    from tar_lab.stat_utils import _solve_n_for_power
+
+    (tmp_path / "tar_state").mkdir()
+    d = ResearchDirector(tmp_path)
+    frontier = {
+        "problem_id": "fp-gap-test-cl-tcl",
+        "title": "Gap test",
+        "domain": "continual_learning",          # must be in _FRONTIER_AUTONOMY_DOMAINS
+        "global_problem_statement": "tcl reduces forgetting vs established baselines",
+        "candidate_datasets": ["split_cifar10"],
+        "candidate_backbones": ["resnet18"],
+        "external_baselines": ["ewc", "si", "sgd_baseline"],
+    }
+    flag = tmp_path / "tar_state" / "experiment_design.enabled"
+
+    legacy = d._frontier_experiment_catalog(frontier, {}, None)
+    assert legacy and legacy[0]["seeds"] == [42, 0, 1, 2, 3]
+    assert legacy[0]["config_overrides"].get("experiment_design") is None
+
+    flag.write_text("", encoding="utf-8")
+    designed = d._frontier_experiment_catalog(frontier, {}, None)
+    assert designed
+    spec = designed[0]
+    co = spec["config_overrides"]
+    assert co.get("experiment_design") is True
+    assert spec["seeds"] != [42, 0, 1, 2, 3]               # not a constant
+    assert any(m in spec["comparison_methods"]            # mechanism-isolating ablations
+               for m in ("tcl_penalty_only", "tcl_canonical", "tcl_full"))
+    # the powered n is stat_utils-derived (in the amendment when budget-capped, else powered_seeds)
+    powered = (co.get("seed_amendment") or {}).get("powered_n") or co.get("powered_seeds")
+    assert powered == _solve_n_for_power(0.5, 0.8)
+
+
 def test_preregistration_frozen_with_primary_endpoint_and_stop_rule():
     p = design_experiment(_tcl_hyp(direction="less"), available_baselines=["ewc", "si"])
     pre = p.preregistration

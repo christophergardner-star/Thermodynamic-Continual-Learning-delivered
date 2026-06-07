@@ -2455,6 +2455,46 @@ class ResearchDirector:
             # _FRONTIER_AUTONOMY_DOMAINS, so disarming fully stops autonomous generation.
             _method = "tcl"  # internal method under evaluation, vs the external baselines
             _cmp = [_method] + [b for b in external_baselines if b != _method][:5]
+            _seeds = [42, 0, 1, 2, 3]
+            _est_h = 8.0
+            _design_extra: dict[str, Any] = {}
+            # H2 (experiment design): when tar_state/experiment_design.enabled exists, replace
+            # the hardcoded comparison list + seeds= with a POWERED, DISCRIMINATING protocol —
+            # falsifying baselines + mechanism-isolating ablations + a power-derived seed count
+            # (stat_utils._solve_n_for_power). OFF by default -> legacy probe unchanged.
+            # Fail-safe: NonDiscriminatingProtocolError or any fault -> legacy defaults.
+            if (self.workspace / "tar_state" / "experiment_design.enabled").exists():
+                try:
+                    from tar_lab.experiment_design import design_experiment, HypothesisSpec
+                    _proto = design_experiment(
+                        HypothesisSpec(
+                            hypothesis_id=f"gap_probe_{_slug(frontier_id)}"[:64],
+                            claim=str(frontier.get("global_problem_statement", "") or frontier_title),
+                            primary_method=_method,
+                            domain_id=str(frontier.get("domain", "") or ""),
+                            dataset=candidate_datasets[0],
+                            direction="less",
+                            min_effect_d=0.5,
+                            backbone=candidate_backbones[0] if candidate_backbones else "resnet18",
+                            epochs=40,
+                        ),
+                        available_baselines=external_baselines,
+                        runtime_budget_h=8.0,
+                    )
+                    _cmp = _proto.methods
+                    _seeds = _proto.seeds
+                    _est_h = _proto.estimated_runtime_h
+                    _design_extra = {
+                        "experiment_design": True,
+                        "design_rationale": _proto.design_rationale,
+                        "achieved_power": _proto.achieved_power,
+                        "min_effect_d": _proto.min_effect_d,
+                        "powered_seeds": _proto.preregistration.get("n_seeds"),
+                        "seed_amendment": _proto.seed_amendment,
+                        "preregistration": _proto.preregistration,
+                    }
+                except Exception as _de:
+                    _design_extra = {"experiment_design_fallback": f"{type(_de).__name__}: {str(_de)[:120]}"}
             return [{
                 **base_common,
                 "experiment_id": f"director-{_slug(frontier_id)}-probe",
@@ -2467,8 +2507,8 @@ class ResearchDirector:
                 "comparison_methods": _cmp,
                 "backbone": candidate_backbones[0] if candidate_backbones else "resnet18",
                 "epochs": 40,
-                "seeds": [42, 0, 1, 2, 3],
-                "estimated_runtime_h": 8.0,
+                "seeds": _seeds,
+                "estimated_runtime_h": _est_h,
                 "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
                 "depends_on": [],
                 "mechanism_focus": (
@@ -2485,7 +2525,7 @@ class ResearchDirector:
                     "Smallest runnable benchmark that answers the gap; compare internal methods against the "
                     "real external baselines before any superiority claim."
                 ),
-                "config_overrides": {"comparison_methods": _cmp, "external_baselines": external_baselines},
+                "config_overrides": {"comparison_methods": _cmp, "external_baselines": external_baselines, **_design_extra},
                 "priority_bias": 10.0,
             }]
 
