@@ -34,6 +34,10 @@ from tar_lab.human_review import (
 from tar_lab.validation import build_validation_state, load_validation_state
 from tar_storage import ensure_workspace_layout
 from tar_lab.result_artifacts import read_advisory_verdict, read_statistics, iter_canonical_comparison_records
+from tar_lab.method_identity import (
+    method_identity as _method_identity,
+    result_method_identities as _result_method_identities,
+)
 
 try:
     import psutil as _psutil
@@ -1913,6 +1917,129 @@ def _learner_enabled_state() -> dict[str, dict]:
     return result
 
 
+# ── truth-lock surfacing helpers (method identity, provenance, design, ramp) ────
+def _identity_from_text(*parts: Any) -> dict[str, Any] | None:
+    """Best-effort method identity from free text (e.g. a 'tcl_vs_ewc' comparison
+    label or an experiment_id). Surfaces the canonical-vs-uniform-L2-proxy distinction
+    (TL-3) wherever the explicit method name was never recorded. Returns None when the
+    text shows no TCL-family method (nothing load-bearing to badge)."""
+    blob = " ".join(str(p or "") for p in parts).lower()
+    if not blob:
+        return None
+    if "tcl_full" in blob:
+        return _method_identity("tcl_full")
+    if "tcl_canonical" in blob:
+        return _method_identity("tcl_canonical")
+    if "tcl_penalty_only" in blob:
+        return _method_identity("tcl_penalty_only")
+    if "tcl" in blob:
+        return _method_identity("tcl")  # the published uniform-L2 PROXY
+    return None
+
+
+def _experiment_design_summary(rec: dict[str, Any]) -> dict[str, Any] | None:
+    """Surface H2 experiment-design provenance from an experiment record's
+    config_overrides (the director writes it there; see tar_research_director
+    _apply_experiment_design / fp-gap probe). None when the experiment was not
+    H2-designed (legacy hardcoded probe)."""
+    if not isinstance(rec, dict):
+        return None
+    co = rec.get("config_overrides")
+    co = co if isinstance(co, dict) else {}
+    if co.get("experiment_design"):
+        prereg = co.get("preregistration") if isinstance(co.get("preregistration"), dict) else {}
+        return {
+            "enabled": True,
+            "design_rationale": str(co.get("design_rationale", "") or ""),
+            "achieved_power": co.get("achieved_power"),
+            "min_effect_d": co.get("min_effect_d"),
+            "powered_seeds": co.get("powered_seeds") or prereg.get("n_seeds"),
+            "correction": prereg.get("multiple_testing_correction", "holm"),
+            "primary_endpoint": prereg.get("primary_endpoint", ""),
+            "stop_rule": prereg.get("stop_rule", ""),
+            "seed_amendment": co.get("seed_amendment"),
+            "methods": co.get("comparison_methods") or rec.get("comparison_methods") or [],
+        }
+    fb = co.get("experiment_design_fallback")
+    if fb:
+        return {"enabled": False, "fallback": str(fb)}
+    return None
+
+
+def _resolve_result_path(exp_id: str) -> Path | None:
+    """Read-only resolution of the result.json that backs an experiment id, for the
+    provenance chain. Checks the canonical experiments/<id>/result.json layout first
+    (matches register_canonical_result), then comparison artifacts by stem."""
+    if not exp_id:
+        return None
+    cand = _WS / "tar_state" / "experiments" / exp_id / "result.json"
+    if cand.exists():
+        return cand
+    if _COMP.exists():
+        exact = _COMP / f"{exp_id}.json"
+        if exact.exists():
+            return exact
+        for p in sorted(_COMP.glob("*.json")):
+            if exp_id in p.stem:
+                return p
+    return None
+
+
+def _ramp_auth_staleness(st: dict[str, Any]) -> dict[str, Any]:
+    """C1: is the banked human authorization still valid for the CURRENT capability set?
+
+    The pre-banked `confirmed_by_human` was a point-in-time judgement. If an autonomy-
+    affecting capability (e.g. H2 experiment-design) was switched on AFTER that judgement
+    was banked, the authorization predates a capability it never saw — surface that so the
+    operator can re-affirm before the ramp auto-promotes. Read-only (flag mtimes only)."""
+    if not st.get("confirmed_by_human"):
+        return {"stale": False, "reason": "No banked human authorization."}
+    # The banked-authorization instant is promotion time if promoted, else the arming
+    # time (created_at). NOT updated_at — the daemon refreshes that every evaluation, so
+    # using it would mask every post-authorization capability change (the whole point).
+    authorized_at = str(st.get("promoted_at") or st.get("created_at") or "")
+    watched = [
+        ("experiment_design.enabled", "H2 experiment-design (powered, discriminating protocols)"),
+        ("outcome_reward.enabled", "B2 outcome-reward prior"),
+        ("method_synthesis.enabled", "B5 method synthesis"),
+        ("recall_bite.enabled", "B4 recall-bite"),
+    ]
+    changes: list[dict[str, Any]] = []
+    for flag, label in watched:
+        fp = _WS / "tar_state" / flag
+        if not fp.exists():
+            continue
+        try:
+            mt = datetime.fromtimestamp(fp.stat().st_mtime, timezone.utc).isoformat()
+        except OSError:
+            continue
+        if authorized_at and mt > authorized_at:
+            changes.append({"capability": label, "flag": flag, "activated_at": mt[:19]})
+    return {
+        "stale": bool(changes),
+        "authorized_at": authorized_at[:19],
+        "capability_changes": changes,
+        "reason": (
+            "Capabilities were enabled AFTER the human authorization was banked — the banked "
+            "approval predates them. Re-affirm before the ramp auto-promotes."
+            if changes else "Authorization is current with the active capability set."
+        ),
+    }
+
+
+# What promotion to full autonomy (L4) actually grants / never grants. Honest, static.
+_L4_GRANTS = [
+    "Director-generated experiments execute unattended (no per-experiment human approval).",
+    "Frontier probes auto-dispatch for opted-in domains — the well_known_problem guard stays.",
+    "The 24h veto window becomes the primary human checkpoint (gate → audit).",
+]
+_L4_HARD_GATED = [
+    "Frontier minting stays per-domain opt-in; medical data stays human-cleared (DUA/CITI).",
+    "No 'quantum advantage' / 'tradeable alpha' / 'clinical validity' / hardware-energy claims.",
+    "Truth-lock gates (3-gate verify + method-identity + Bonferroni) apply to every result.",
+]
+
+
 @app.route("/api/integrity")
 def api_integrity():
     """Truth-lock status: per-result canonical_verified + 3-gate pass/fail, learner states,
@@ -1939,6 +2066,11 @@ def api_integrity():
             trusted_pub += 1
         if not ok:
             quarantine_count += 1
+        # Method identity (TL-3): prefer an explicitly recorded identity; else derive
+        # from the logical name so the canonical-vs-proxy distinction is always visible.
+        _mids = _result_method_identities(r if isinstance(r, dict) else {})
+        _mi = next((m for m in _mids if m.get("in_tcl_family")), None) or _identity_from_text(
+            r.get("logical_name", ""), trust.get("method", ""), r.get("method", ""))
         result_rows.append({
             "logical_name": r.get("logical_name", ""),
             "phase_number": trust.get("phase_number"),
@@ -1948,6 +2080,8 @@ def api_integrity():
             "ok": ok,
             "issues_count": len(issues),
             "first_issue": issues[0][:120] if issues else "",
+            "method_identity": _mi,
+            "method_identity_ok": bool(trust.get("method_identity_ok", True)),
         })
 
     # Top-level summary from val payload
@@ -2551,6 +2685,15 @@ def api_evidence():
         r for r in raw
         if isinstance(r, dict) and r.get("mean_delta_forgetting") is not None
     ]
+    # TL-3: stamp each comparison with the identity of the TCL variant it actually used.
+    # Every historical inventory row is method_comparison='tcl_vs_*' with no full/canonical
+    # marker -> the uniform-L2 PROXY. Surfacing it stops a proxy number being read as the
+    # canonical algorithm in the forest plot / evidence table.
+    for r in comparisons:
+        mi = _identity_from_text(r.get("method_comparison", ""), r.get("experiment_id", ""),
+                                 r.get("label", ""))
+        if mi is not None:
+            r["method_identity"] = mi
     return jsonify({
         "results":      comparisons,
         "total":        len(comparisons),
@@ -2697,6 +2840,9 @@ def api_experiments():
                 "started_at":       e.get("started_at", "")[:16],
                 "completed_at":     e.get("completed_at", "")[:16],
                 "result_path":      e.get("result_path", ""),
+                "method_identity":  (_method_identity(str(e.get("method", "")))
+                                     if e.get("method") else None),
+                "experiment_design": _experiment_design_summary(e),
             }
             for e in experiments
         ],
@@ -3007,10 +3153,16 @@ def api_autonomy_ramp():
             "phase2_runner_keys": st.get("phase2_runner_keys", []),
             "confirmed_by_human": bool(st.get("confirmed_by_human")),
             "promoted_at": st.get("promoted_at", ""),
+            "created_at": st.get("created_at", ""),
             "updated_at": st.get("updated_at", ""),
             "needs_confirm": stage == STAGE_AWAITING_CONFIRM,
             "on_hold": stage == STAGE_HOLD,
             "summary": status_line(_WS),
+            # C1: decision-grade governance — what L4 grants, what stays gated, and
+            # whether the banked human authorization predates a now-live capability.
+            "l4_grants": _L4_GRANTS,
+            "l4_hard_gated": _L4_HARD_GATED,
+            "auth_staleness": _ramp_auth_staleness(st),
         })
     except Exception as exc:
         return jsonify({"configured": False, "stage": "error", "error": str(exc)}), 200
@@ -3048,6 +3200,168 @@ def api_autonomy_ramp_disable():
         return jsonify({"ok": True})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
+
+
+# ── calibration (A1) ───────────────────────────────────────────────────────────
+@app.route("/api/calibration")
+def api_calibration():
+    """Scientific calibration — is TAR's confidence/promise matched by outcomes?
+
+    Two grounded views from tar_lab.calibration_learner's purpose-built registry:
+      * power calibration: observed |Cohen's d| vs achieved power (were experiments
+        adequately powered for the effect they found?);
+      * frontier-promise calibration: predicted priority rank vs realized breakthrough
+        rate (did highly-ranked frontiers pan out, or is the prior over-optimistic?).
+    Read-only on experiment data; rebuilds the registry only if it is missing (the same
+    load-then-build pattern as validation/director state). Does NOT touch runs or GPU.
+    """
+    try:
+        from tar_lab.calibration_learner import load_calibration, rebuild_calibration, is_disabled
+        reg = load_calibration(_WS)
+        if not reg:
+            reg = rebuild_calibration(_WS)
+        reg = reg if isinstance(reg, dict) else {}
+        effect = reg.get("effect_size_calibration", []) or []
+        frontier = reg.get("frontier_calibration", []) or []
+        powers = [r.get("achieved_power") for r in effect
+                  if isinstance(r, dict) and r.get("achieved_power") is not None]
+        mean_power = round(sum(powers) / len(powers), 4) if powers else None
+        return jsonify({
+            "configured": True,
+            "disabled": bool(is_disabled(_WS)),
+            "generated_at": str(reg.get("generated_at", "") or "")[:19],
+            "summary": reg.get("summary", {}),
+            "mean_achieved_power": mean_power,
+            "effect_size_calibration": effect,
+            "frontier_calibration": frontier,
+            "note": (
+                "Calibration — not omniscience — is what 'accuracy' means operationally: a "
+                "claim made at 80% confidence should be right ~80% of the time. Classic "
+                "ECE/Brier needs a probabilistic-forecast log TAR does not yet persist; what "
+                "is shown is grounded in the calibration registry (power + frontier promise)."
+            ),
+        })
+    except Exception as exc:
+        return jsonify({"configured": False, "error": str(exc)}), 200
+
+
+# ── provenance chain / re-verify (A3) ───────────────────────────────────────────
+@app.route("/api/provenance/<path:exp_id>")
+def api_provenance(exp_id: str):
+    """Per-result provenance chain + a live, READ-ONLY 3-gate re-verification.
+
+    Runs verify_canonical_3gate (env-sibling + committed-manifest + deterministic
+    recompute) against the result.json that backs `exp_id` and surfaces the chain
+    fields. Pure read: it returns a (bool, reason) and writes nothing — safe to call
+    while experiments run."""
+    rp = _resolve_result_path(exp_id)
+    if rp is None:
+        return jsonify({"ok": False, "found": False,
+                        "error": f"no result.json resolved for '{exp_id}'"}), 404
+    data = _jload(rp) or {}
+    data = data if isinstance(data, dict) else {}
+    stats = data.get("statistics") if isinstance(data.get("statistics"), dict) else data
+    env_path = rp.parent / "env_snapshot.json"
+    verified, reason = (False, "verifier_unavailable")
+    try:
+        from tar_lab.canonical_registry import verify_canonical_3gate
+        verified, reason = verify_canonical_3gate(rp)
+    except Exception as exc:
+        verified, reason = False, f"verify_error:{exc}"
+    mids = _result_method_identities(data)
+    mi = next((m for m in mids if m.get("in_tcl_family")), None) or _identity_from_text(
+        str(rp.stem), stats.get("method", ""))
+    chain = [
+        {"gate": "Result artifact", "ok": True, "detail": rp.name,
+         "value": str(rp.relative_to(_WS)) if str(rp).startswith(str(_WS)) else str(rp)},
+        {"gate": "Env snapshot (gate 1)", "ok": env_path.exists(),
+         "detail": "sibling env_snapshot.json present" if env_path.exists() else "missing env sibling",
+         "value": str(data.get("env_snapshot_hash", "") or stats.get("env_snapshot_hash", ""))[:16]},
+        {"gate": "Manifest hash (gate 2)",
+         "ok": bool(data.get("manifest_hash") or stats.get("manifest_hash")),
+         "detail": "committed manifest hash recorded",
+         "value": str(data.get("manifest_hash", "") or stats.get("manifest_hash", ""))[:16]},
+        {"gate": "Deterministic recompute (gate 3)", "ok": bool(verified),
+         "detail": reason, "value": ""},
+    ]
+    return jsonify({
+        "ok": True, "found": True,
+        "exp_id": exp_id,
+        "result_path": str(rp),
+        "canonical_verified": bool(verified),
+        "verify_reason": reason,
+        "env_snapshot_present": env_path.exists(),
+        "method_identity": mi,
+        "chain": chain,
+    })
+
+
+# ── compounding (B1) ────────────────────────────────────────────────────────────
+@app.route("/api/compounding")
+def api_compounding():
+    """Compounding made visible: the director's evidence/frontier directives ARE the
+    'a result changed the next decision' links (Seam 1 round-trips finalized results
+    through the recall vault so director-*-probe runs compound). Read-only."""
+    director = _director_state()
+    ev = director.get("evidence_directives", []) or []
+    fr = director.get("frontier_directives", []) or []
+    seam1 = _jload(_WS / "tar_state" / "seam1_recall_bridge.json") or {}
+    recall_active = bool(seam1.get("active", False)) if isinstance(seam1, dict) else False
+    return jsonify({
+        "recall_includes_own_results": recall_active,
+        "status": "active" if recall_active else "wired_pending_verification",
+        "evidence_directive_count": len(ev),
+        "frontier_directive_count": len(fr),
+        "evidence_directives": ev[:40] if isinstance(ev, list) else [],
+        "frontier_directives": fr[:40] if isinstance(fr, list) else [],
+        "note": (
+            "Each evidence directive is a prior result feeding the next directive — compounding. "
+            "Seam 1 unified the write-back and recall stores so director probes recall their own "
+            "finalized results, not only seed plans."
+        ),
+    })
+
+
+# ── falsification / retired graveyard (B2) ──────────────────────────────────────
+@app.route("/api/falsified")
+def api_falsified():
+    """Refuted & retired: frontiers TAR ranked then falsified, plus optimistic
+    miscalibrations (ranked high, did not pan out). Honesty surfaced as an asset."""
+    fp = _jload(_WS / "tar_state" / "frontier_problems.json") or {}
+    problems = fp.get("problems", []) if isinstance(fp, dict) else []
+    falsified = [
+        {
+            "id": str(p.get("id", "") or p.get("problem_id", "")),
+            "title": p.get("title") or p.get("name", ""),
+            "truth_status": p.get("truth_status", ""),
+            "priority": p.get("priority"),
+            "null_count": p.get("null_count", 0),
+            "adverse_count": p.get("adverse_count", 0),
+            "breakthroughs": p.get("breakthroughs_found", p.get("breakthrough_count", 0)),
+        }
+        for p in problems
+        if isinstance(p, dict) and str(p.get("truth_status", "") or "").lower() in {"falsified", "retired"}
+    ]
+    optimistic: list[dict[str, Any]] = []
+    try:
+        from tar_lab.calibration_learner import load_calibration
+        cal = load_calibration(_WS)
+        optimistic = [
+            r for r in (cal.get("frontier_calibration", []) or [])
+            if isinstance(r, dict) and r.get("calibration_flag") == "optimistic_miscalibration"
+        ]
+    except Exception:
+        optimistic = []
+    return jsonify({
+        "falsified": falsified,
+        "falsified_count": len(falsified),
+        "optimistic_miscalibrations": optimistic,
+        "optimistic_count": len(optimistic),
+        "note": (
+            "Retiring refuted frontiers (Phase-1.1 guard) and flagging over-optimistic priors "
+            "is an honesty feature: TAR does not headline what it could not reproduce."
+        ),
+    })
 
 
 # ── frontier problems ─────────────────────────────────────────────────────────

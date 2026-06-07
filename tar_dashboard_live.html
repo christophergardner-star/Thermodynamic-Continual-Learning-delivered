@@ -844,6 +844,9 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
     <div class="nav-item" data-view="evidence">
       <span class="nav-icon">⟁</span> Evidence
     </div>
+    <div class="nav-item" data-view="calibration">
+      <span class="nav-icon">◴</span> Calibration
+    </div>
     <div class="nav-item" data-view="papers">
       <span class="nav-icon">○</span> Papers
     </div>
@@ -1082,6 +1085,51 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
     <div id="ev-validation"><div class="loading-state">Loading…</div></div>
   </section>
 
+  <!-- ── Calibration ──────────────────────────────────────── -->
+  <section class="view" id="view-calibration">
+    <div class="view-title">Calibration</div>
+    <div class="view-sub">
+      Is TAR's confidence matched by outcomes? Accuracy operationally <em>is</em> calibration —
+      a claim made at 80% confidence should be right ~80% of the time, not certainty.
+    </div>
+
+    <div id="cal-summary-strip" class="metrics-strip" style="margin-bottom:12px">
+      <div class="loading-state">Loading…</div>
+    </div>
+
+    <div class="grid-2">
+      <div>
+        <div class="section-head">Power Calibration — observed effect vs achieved power</div>
+        <div class="view-sub" style="margin-bottom:6px">
+          Each point is a result with a Cohen's d. Above the 80% line = adequately powered for the
+          effect it found; below = underpowered (a larger n is advised, human-gated).
+        </div>
+        <div id="cal-power" class="forest-wrap"><div class="loading-state">Loading…</div></div>
+      </div>
+      <div>
+        <div class="section-head">Frontier-Promise Calibration — predicted rank vs realized</div>
+        <div class="view-sub" style="margin-bottom:6px">
+          Did frontiers TAR ranked highly actually pan out? Amber = optimistic miscalibration
+          (ranked high, low breakthrough rate / falsified).
+        </div>
+        <div id="cal-frontier" class="forest-wrap"><div class="loading-state">Loading…</div></div>
+      </div>
+    </div>
+
+    <div class="section-head">Underpowered Results — seed amendments advised (human-gated)</div>
+    <div class="tbl-wrap" style="margin-bottom:16px">
+      <table id="cal-effect-table">
+        <thead><tr>
+          <th>Result</th><th class="right">d</th><th class="right">seeds run</th>
+          <th class="right">power</th><th class="right">seeds for 80%</th><th>flag</th>
+        </tr></thead>
+        <tbody id="cal-effect-tbody"><tr><td colspan="6" class="loading-state">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="card" id="cal-note" style="font-size:12px;line-height:1.6;color:var(--muted)"></div>
+  </section>
+
   <!-- ── Papers ───────────────────────────────────────────── -->
   <section class="view" id="view-papers">
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
@@ -1148,6 +1196,17 @@ thead th[data-sort="desc"]::after { content: ' ▼'; font-size:9px; color:var(--
     </div>
     <div class="section-head">Coordination &amp; Autonomous State</div>
     <div id="res-coord"><div class="loading-state">Loading…</div></div>
+
+    <div class="grid-2">
+      <div>
+        <div class="section-head">Compounding — result → next decision</div>
+        <div id="res-compounding"><div class="loading-state">Loading…</div></div>
+      </div>
+      <div>
+        <div class="section-head">Refuted &amp; Retired</div>
+        <div id="res-falsified"><div class="loading-state">Loading…</div></div>
+      </div>
+    </div>
   </section>
 
   <!-- ── Literature ───────────────────────────────────────── -->
@@ -1431,6 +1490,50 @@ function badgeHtml(text, tone) {
   return `<span class="badge ${tone}">${esc(text)}</span>`;
 }
 
+/* ── Method-identity trust badge (TL-3) — shared component (A2/D1) ────────────
+   Surfaces the load-bearing canonical-vs-uniform-L2-proxy distinction wherever a
+   TCL-family result appears. Returns '' for non-TCL methods (nothing to disambiguate)
+   so tables stay uncluttered. `mi` is the method_identity dict from the API. */
+function methodBadge(mi, opts={}) {
+  if (!mi || !mi.in_tcl_family) return '';
+  const mini = !!opts.mini;
+  let bg, fg, label, title;
+  if (mi.is_canonical_tcl) {
+    bg = 'rgba(46,160,67,.16)'; fg = 'var(--green)';
+    label = mini ? '✓ canon' : '✓ canonical TCL';
+    title = 'Canonical gradient-energy importance algorithm (tcl_full / tcl_canonical).';
+  } else if (mi.uses_uniform_l2_proxy) {
+    bg = 'rgba(210,153,34,.18)'; fg = 'var(--amber)';
+    label = mini ? '⚠ proxy' : '⚠ uniform-L2 proxy';
+    title = 'Uniform-L2 proxy (method="' + (mi.method||'tcl') + '") — NOT the canonical importance algorithm. Truth-lock forbids citing it as canonical TCL.';
+  } else {
+    bg = 'rgba(139,148,158,.15)'; fg = 'var(--muted)';
+    label = mini ? 'tcl-fam' : 'TCL family';
+    title = 'TCL-family method.';
+  }
+  const pad = mini ? '1px 5px' : '2px 7px';
+  const fs = mini ? '9.5px' : '10.5px';
+  return `<span title="${esc(title)}" style="display:inline-block;background:${bg};color:${fg};`
+       + `font-size:${fs};font-weight:700;padding:${pad};border-radius:4px;`
+       + `border:1px solid ${fg};letter-spacing:.02em;white-space:nowrap">${esc(label)}</span>`;
+}
+
+/* Client-side identity fallback (mirrors tar_lab.method_identity) for rows whose
+   route did not attach method_identity server-side (e.g. the /api/phases evidence
+   table). Same canonical-vs-proxy precedence as _identity_from_text. */
+function miFromText(...parts) {
+  const b = parts.map(p => String(p ?? '')).join(' ').toLowerCase();
+  if (!b) return null;
+  const mk = (m) => ({ method:m, in_tcl_family:true,
+    is_canonical_tcl: m==='tcl_full'||m==='tcl_canonical',
+    uses_uniform_l2_proxy: m==='tcl'||m==='tcl_penalty_only' });
+  if (b.includes('tcl_full')) return mk('tcl_full');
+  if (b.includes('tcl_canonical')) return mk('tcl_canonical');
+  if (b.includes('tcl_penalty_only')) return mk('tcl_penalty_only');
+  if (b.includes('tcl')) return mk('tcl');
+  return null;
+}
+
 function normalizeVerdict(v) {
   const s = (v||'').toUpperCase();
   if (s.includes('PUBLICATION_ALLOWED') || s === 'PUB' || s.includes('PUBLISHABLE')) return 'PUBLICATION_ALLOWED';
@@ -1550,6 +1653,9 @@ const ENDPOINTS = {
   phase2_status:      '/api/phase2/status',
   self_improvement:   '/api/self_improvement',
   sprt:               '/api/phase2/checkpoint/run_hpc_replication',
+  calibration:        '/api/calibration',
+  compounding:        '/api/compounding',
+  falsified:          '/api/falsified',
 };
 
 async function loadEndpoint(key) {
@@ -1577,9 +1683,10 @@ async function loadViewData(view) {
     obs:        ['status','hardware','experiments','alerts','processes','log','logs','runpod','review','papers','narration','breakthroughs','director_proposals','budget'],
     experiments:['experiments'],
     evidence:   ['phases','results','validation','evidence','forgetting'],
+    calibration:['calibration'],
     papers:     ['papers','author'],
     review:     ['review','director_proposals'],
-    research:   ['director','scheduler','frontier','coordination','autonomous'],
+    research:   ['director','scheduler','frontier','coordination','autonomous','compounding','falsified'],
     literature: ['literature','llm_insights'],
     system:     ['logs','processes'],
     intel:      [],
@@ -1647,6 +1754,7 @@ async function renderView(view, opts={}) {
     case 'obs':              renderObs(); break;
     case 'experiments':      renderExps(); break;
     case 'evidence':         renderEvidence(); break;
+    case 'calibration':      renderCalibration(); break;
     case 'papers':           renderPapers(); break;
     case 'review':           renderReview(); break;
     case 'research':         renderResearch(); break;
@@ -2411,11 +2519,50 @@ async function renderObsRamp() {
   let html = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
       ${dotHtml(tone, stage==='full_autonomy'||stage==='awaiting_confirm')}
       <span>${esc(labelMap[stage]||stage)}</span>
+      ${r.confirmed_by_human ? `<span style="font-size:9.5px;color:var(--green);border:1px solid var(--green);border-radius:4px;padding:1px 5px">human auth banked</span>` : ''}
     </div>`;
   if (r.blocked_reason) html += `<div style="font-size:11px;color:var(--dim);margin-bottom:8px;line-height:1.5">${esc(r.blocked_reason)}</div>`;
+
+  // C1 — banked-authorization staleness: did a capability go live AFTER the human banked approval?
+  const stale = r.auth_staleness || {};
+  if (stale.stale) {
+    const chg = (stale.capability_changes||[]).map(c => `<li style="margin-top:2px">${esc(c.capability)} <span style="color:var(--dim)">(${esc(c.activated_at||'')})</span></li>`).join('');
+    html += `<div class="warning-banner" style="margin-bottom:8px">
+      <strong>⚠ Re-affirm recommended.</strong> The banked human authorization (${esc(stale.authorized_at||'—')}) predates capabilities now live:
+      <ul style="margin:4px 0 0 16px;padding:0;font-size:11px">${chg}</ul>
+      <div style="font-size:11px;margin-top:4px">Auto-promotion would compound L4 execution with a capability set the approval never saw.</div>
+    </div>`;
+  }
+
+  // C1 — per-gate report (what's blocking promotion)
+  const gr = (r.gate_report||{});
+  const p2 = gr.phase2_terminal || {};
+  if (p2.detail && typeof p2.detail === 'object') {
+    const items = Object.entries(p2.detail).map(([k,v]) => {
+      const ok = String(v).toLowerCase()==='complete';
+      return `<div style="display:flex;align-items:center;gap:6px;font-size:11px;padding:1px 0">
+        <span style="color:${ok?'var(--green)':'var(--dim)'}">${ok?'✓':'◻'}</span>
+        <span style="font-family:var(--font-mono);flex:1;${ok?'':'color:var(--dim)'}">${esc(k)}</span>
+        <span style="color:${ok?'var(--green)':'var(--muted)'}">${esc(String(v))}</span>
+      </div>`;
+    }).join('');
+    const doneN = Object.values(p2.detail).filter(v=>String(v).toLowerCase()==='complete').length;
+    const totN = Object.keys(p2.detail).length;
+    html += `<div style="margin:6px 0 8px"><div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:3px">Phase-2 gate ${doneN}/${totN} terminal</div>${items}</div>`;
+  }
+
+  // C1 — what promotion grants / what stays gated (collapsed by default)
+  if ((r.l4_grants||[]).length) {
+    html += `<details style="margin-bottom:6px"><summary style="font-size:11px;color:var(--muted);cursor:pointer">What full autonomy (L4) grants</summary>
+      <ul style="margin:4px 0 0 16px;padding:0;font-size:11px;color:var(--dim);line-height:1.5">${r.l4_grants.map(g=>`<li>${esc(g)}</li>`).join('')}</ul>
+      ${(r.l4_hard_gated||[]).length?`<div style="font-size:10px;color:var(--muted);margin-top:5px">Stays hard-gated:</div><ul style="margin:2px 0 0 16px;padding:0;font-size:11px;color:var(--dim);line-height:1.5">${r.l4_hard_gated.map(g=>`<li>${esc(g)}</li>`).join('')}</ul>`:''}
+    </details>`;
+  }
+
   if (r.needs_confirm) {
+    const warn = stale.stale ? '\n\n⚠ NOTE: capabilities changed since your authorization was banked — re-affirm deliberately.' : '';
     html += `<div style="display:flex;gap:6px;flex-wrap:wrap">
-      <button class="btn sm green-btn" onclick="if(confirm('Promote TAR to FULL AUTONOMY? Director-generated experiments will begin running.')) rampConfirm()">Confirm full autonomy</button>
+      <button class="btn sm green-btn" onclick="if(confirm('Promote TAR to FULL AUTONOMY? Director-generated experiments will begin running.${warn}')) rampConfirm()">Confirm full autonomy</button>
     </div>`;
   }
   el.innerHTML = html;
@@ -2497,7 +2644,7 @@ function renderExps() {
         <div style="font-family:var(--font-mono);font-size:10.5px;color:var(--dim)">${esc(exp.id||'')}</div>
       </td>
       <td>${badgeHtml(exp.dataset||'—','dim')}</td>
-      <td><span style="font-family:var(--font-mono);font-size:11.5px">${esc(exp.method||'—')}</span></td>
+      <td><span style="font-family:var(--font-mono);font-size:11.5px">${esc(exp.method||'—')}</span> ${methodBadge(exp.method_identity||miFromText(exp.method),{mini:true})}${exp.experiment_design&&exp.experiment_design.enabled?' '+badgeHtml('H2','teal'):''}</td>
       <td class="mono">${esc(String(seeds))}</td>
       <td style="min-width:100px">${mt > 0 ? miniProgress(md, mt, md+'/'+mt) : '<span class="dim" style="font-size:11px">—</span>'}</td>
       <td class="mono right">${esc(String(exp.priority||'—'))}</td>
@@ -2838,7 +2985,7 @@ function renderEvidence() {
       return `<tr data-verdict="${normalizeVerdict(verd)}" data-ev-json="${esc(JSON.stringify(r))}" onclick="openDetail('phase', JSON.parse(this.dataset.evJson))">
         <td class="mono">${esc(String(r.phase||r.experiment_id||'—'))}</td>
         <td>${esc(r.dataset||'—')}</td>
-        <td style="font-size:11.5px">${esc(r.method_comparison||r.label||'—')}</td>
+        <td style="font-size:11.5px">${esc(r.method_comparison||r.label||'—')} ${methodBadge(r.method_identity||miFromText(r.method_comparison,r.experiment_id,r.label),{mini:true})}</td>
         <td class="mono right">${esc(String(r.n_seeds||'—'))}</td>
         <td class="mono right">${pVal != null ? fmtN(pVal,4) : '—'}</td>
         <td class="mono right">${dVal != null ? fmtN(dVal,2) : '—'}</td>
@@ -2913,6 +3060,103 @@ function openEvidenceDrawer(jsonStr) {
     ${r.honest_verdict_detail ? `<p style="font-size:12px;color:var(--muted);line-height:1.55;border-left:2px solid var(--border-s);padding-left:10px">${esc(r.honest_verdict_detail)}</p>` : ''}
     ${r.paper_citation_caveat ? `<div class="warning-banner" style="margin-top:10px">${esc(r.paper_citation_caveat)}</div>` : ''}
   `);
+}
+
+/* ══════════════════════════════════════════════════════════
+   CALIBRATION VIEW (A1) — power + frontier-promise calibration
+   Zero-dependency inline SVG, same idiom as the forest plot.
+   ══════════════════════════════════════════════════════════ */
+function _scatterFrame(W, H, mL, mT, innerW, innerH, xticks, yticks, xfmt, yfmt, X, Y, xlab, ylab){
+  const grid = []
+    .concat(xticks.map(t=>`<line x1="${X(t).toFixed(1)}" x2="${X(t).toFixed(1)}" y1="${mT}" y2="${mT+innerH}" stroke="var(--border)"/>`
+      +`<text x="${X(t).toFixed(1)}" y="${mT+innerH+14}" fill="var(--muted)" font-size="9" text-anchor="middle" font-family="var(--font-mono)">${xfmt(t)}</text>`))
+    .concat(yticks.map(t=>`<line x1="${mL}" x2="${mL+innerW}" y1="${Y(t).toFixed(1)}" y2="${Y(t).toFixed(1)}" stroke="var(--border)"/>`
+      +`<text x="${mL-6}" y="${(Y(t)+3.5).toFixed(1)}" fill="var(--muted)" font-size="9" text-anchor="end" font-family="var(--font-mono)">${yfmt(t)}</text>`))
+    .join('');
+  const labels = `<text x="${mL+innerW/2}" y="${H-4}" fill="var(--dim)" font-size="10" text-anchor="middle">${esc(xlab)}</text>`
+    + `<text x="12" y="${mT+innerH/2}" fill="var(--dim)" font-size="10" text-anchor="middle" transform="rotate(-90 12 ${mT+innerH/2})">${esc(ylab)}</text>`;
+  return grid + labels;
+}
+
+function powerCalibrationSVG(rows){
+  rows = (rows||[]).filter(r => r && r.observed_cohens_d != null && r.achieved_power != null);
+  if(!rows.length) return '<div class="empty-state">No effect-size calibration data yet</div>';
+  const W=540, H=300, mL=44, mT=14, mR=16, mB=44, innerW=W-mL-mR, innerH=H-mT-mB;
+  const dmax = Math.max(1.0, ...rows.map(r=>Math.abs(Number(r.observed_cohens_d))))*1.08;
+  const X = v => mL + Math.min(1, Math.abs(v)/dmax)*innerW;
+  const Y = p => mT + (1-Math.min(1,Math.max(0,p)))*innerH;
+  const xticks=[]; for(let t=0;t<=dmax+1e-9;t+= (dmax>2?0.5:0.25)) xticks.push(+t.toFixed(2));
+  const yticks=[0,0.2,0.4,0.6,0.8,1.0];
+  const frame = _scatterFrame(W,H,mL,mT,innerW,innerH,xticks,yticks,t=>t.toFixed(2),t=>(t*100).toFixed(0),X,Y,"observed |Cohen's d|","achieved power %");
+  const target = `<line x1="${mL}" x2="${mL+innerW}" y1="${Y(0.8).toFixed(1)}" y2="${Y(0.8).toFixed(1)}" stroke="var(--green)" stroke-dasharray="4 3" stroke-width="1.3"/>`
+    + `<text x="${mL+innerW}" y="${(Y(0.8)-4).toFixed(1)}" fill="var(--green)" font-size="9" text-anchor="end">80% target</text>`;
+  const pts = rows.map(r=>{
+    const under = r.calibration_flag==='underpowered';
+    const col = under ? 'var(--amber)' : 'var(--green)';
+    const x=X(Math.abs(Number(r.observed_cohens_d))).toFixed(1), y=Y(Number(r.achieved_power)).toFixed(1);
+    return `<circle cx="${x}" cy="${y}" r="4.5" fill="${col}" fill-opacity="0.55" stroke="${col}" stroke-width="1.4"><title>${esc(r.result_id||'')}: d=${Number(r.observed_cohens_d).toFixed(2)}, power=${(Number(r.achieved_power)*100).toFixed(0)}%, n=${r.seeds_run}</title></circle>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block;margin:0 auto" font-family="var(--font-ui)">${frame}${target}${pts}</svg>`;
+}
+
+function frontierCalibrationSVG(rows){
+  rows = (rows||[]).filter(r => r && r.priority_rank != null && r.breakthrough_rate != null);
+  if(!rows.length) return '<div class="empty-state">No frontier-promise calibration data yet</div>';
+  const W=540, H=300, mL=44, mT=14, mR=16, mB=44, innerW=W-mL-mR, innerH=H-mT-mB;
+  const rmax = Math.max(20, ...rows.map(r=>Number(r.priority_rank)));
+  // invert: high promise (rank 1) on the LEFT
+  const X = v => mL + (Math.min(rmax,Math.max(1,v))-1)/(rmax-1)*innerW;
+  const Y = p => mT + (1-Math.min(1,Math.max(0,p)))*innerH;
+  const xticks=[1]; for(let t=Math.ceil(rmax/4);t<rmax;t+=Math.ceil(rmax/4)) xticks.push(t); xticks.push(Math.round(rmax));
+  const yticks=[0,0.25,0.5,0.75,1.0];
+  const frame = _scatterFrame(W,H,mL,mT,innerW,innerH,xticks,yticks,t=>String(t),t=>(t*100).toFixed(0),X,Y,"predicted priority rank (1 = most promise)","realized breakthrough rate %");
+  const pts = rows.map(r=>{
+    const opt = r.calibration_flag==='optimistic_miscalibration';
+    const col = opt ? 'var(--amber)' : 'var(--teal)';
+    const x=X(Number(r.priority_rank)).toFixed(1), y=Y(Number(r.breakthrough_rate)).toFixed(1);
+    const rad = 3.5 + Math.min(6, Number(r.total_verdicts||0)*0.4);
+    return `<circle cx="${x}" cy="${y}" r="${rad.toFixed(1)}" fill="${col}" fill-opacity="0.5" stroke="${col}" stroke-width="1.4"><title>${esc(r.frontier_id||'')}: rank=${r.priority_rank}, breakthrough=${(Number(r.breakthrough_rate)*100).toFixed(0)}%, verdicts=${r.total_verdicts}${opt?' — OPTIMISTIC MISCALIBRATION':''}</title></circle>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block;margin:0 auto" font-family="var(--font-ui)">${frame}${pts}</svg>`;
+}
+
+function renderCalibration() {
+  const d = S.data.calibration || {};
+  const sum = d.summary || {};
+  const effect = Array.isArray(d.effect_size_calibration) ? d.effect_size_calibration : [];
+  const frontier = Array.isArray(d.frontier_calibration) ? d.frontier_calibration : [];
+
+  const strip = $('cal-summary-strip');
+  if (strip) {
+    if (S.errors.calibration || d.configured === false) {
+      strip.innerHTML = `<div class="api-err">Calibration unavailable: ${esc(S.errors.calibration||d.error||'not configured')}</div>`;
+    } else {
+      strip.innerHTML = [
+        metricCell(sum.effect_results ?? effect.length, 'Effect results', 'var(--blue)'),
+        metricCell(sum.underpowered ?? 0, 'Underpowered', (sum.underpowered||0)>0?'var(--amber)':'var(--muted)'),
+        metricCell(d.mean_achieved_power!=null?(d.mean_achieved_power*100).toFixed(0)+'%':'—', 'Mean power', Number(d.mean_achieved_power)>=0.8?'var(--green)':'var(--amber)'),
+        metricCell(sum.frontiers ?? frontier.length, 'Frontiers', null),
+        metricCell(sum.optimistic_miscalibrations ?? 0, 'Optimistic', (sum.optimistic_miscalibrations||0)>0?'var(--amber)':'var(--muted)'),
+      ].join('');
+    }
+  }
+  const pe = $('cal-power'); if (pe) pe.innerHTML = powerCalibrationSVG(effect);
+  const fe = $('cal-frontier'); if (fe) fe.innerHTML = frontierCalibrationSVG(frontier);
+
+  const tb = $('cal-effect-tbody');
+  if (tb) {
+    const under = effect.filter(r => r.calibration_flag==='underpowered');
+    tb.innerHTML = under.length ? under.map(r => `<tr>
+        <td style="font-size:11px;font-family:var(--font-mono)">${esc(r.result_id||'—')}</td>
+        <td class="right mono">${r.observed_cohens_d!=null?fmtN(r.observed_cohens_d,2):'—'}</td>
+        <td class="right mono">${esc(String(r.seeds_run??'—'))}</td>
+        <td class="right mono" style="color:var(--amber)">${r.achieved_power!=null?(r.achieved_power*100).toFixed(0)+'%':'—'}</td>
+        <td class="right mono">${esc(String(r.seeds_needed_for_80pct_power??'—'))}</td>
+        <td>${badgeHtml('underpowered','amber')}</td>
+      </tr>`).join('') : `<tr><td colspan="6" class="empty-state">No underpowered results — all adequately powered, or no effect-size data yet.</td></tr>`;
+  }
+  const note = $('cal-note');
+  if (note) note.innerHTML = `${esc(d.note||'')}${d.generated_at?`<div style="font-size:11px;color:var(--dim);margin-top:6px">Registry generated: ${esc(d.generated_at)}${d.disabled?' · <span style="color:var(--amber)">calibration learner DISABLED</span>':''}</div>`:''}`;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -3401,6 +3645,62 @@ function renderResearch() {
         <span class="kv-v" style="font-size:11px;color:var(--dim)">${fmtShort(auto.daemon_timestamp)}</span>` : ''}
       </div>
     </div>
+  </div>`;
+
+  renderCompounding();
+  renderFalsified();
+}
+
+/* B1 — compounding: the director's evidence/frontier directives are the
+   'a result changed the next decision' links (Seam 1). */
+function renderCompounding() {
+  const el = $('res-compounding');
+  if (!el) return;
+  const d = S.data.compounding || {};
+  if (S.errors.compounding) { el.innerHTML = `<div class="api-err">Error: ${esc(S.errors.compounding)}</div>`; return; }
+  const ev = Array.isArray(d.evidence_directives) ? d.evidence_directives : [];
+  const recallColor = d.recall_includes_own_results ? 'var(--green)' : 'var(--amber)';
+  const links = ev.slice(0,8).map(x => {
+    const src = x.frontier_problem_id || x.source || x.basis || x.evidence_id || '—';
+    const act = x.directive || x.action || x.recommendation || x.next || x.decision || '';
+    return `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
+        <div style="font-size:11px;font-family:var(--font-mono);color:var(--muted)">${esc(String(src).substring(0,46))}</div>
+        <div style="font-size:11.5px;color:var(--text);margin-top:2px">→ ${esc(String(act||'directive recorded').substring(0,120))}</div>
+      </div>`;
+  }).join('');
+  el.innerHTML = `<div class="card">
+    <div class="kv-grid">
+      <span class="kv-k">Recall includes TAR's own results</span>
+      <span class="kv-v" style="color:${recallColor};font-weight:700">${d.recall_includes_own_results?'Yes — active':'Wired — pending verification'}</span>
+      <span class="kv-k">Evidence directives</span><span class="kv-v mono">${d.evidence_directive_count ?? ev.length}</span>
+      <span class="kv-k">Frontier directives</span><span class="kv-v mono">${d.frontier_directive_count ?? 0}</span>
+    </div>
+    ${links ? `<div style="margin-top:8px">${links}</div>` : '<div class="empty-state" style="margin-top:8px">No evidence→directive links yet — compounding wired, awaiting finalized director-probe results.</div>'}
+    <div style="font-size:11px;color:var(--dim);margin-top:8px;line-height:1.5">${esc(d.note||'')}</div>
+  </div>`;
+}
+
+/* B2 — refuted & retired graveyard: honesty as a visible asset. */
+function renderFalsified() {
+  const el = $('res-falsified');
+  if (!el) return;
+  const d = S.data.falsified || {};
+  if (S.errors.falsified) { el.innerHTML = `<div class="api-err">Error: ${esc(S.errors.falsified)}</div>`; return; }
+  const fals = Array.isArray(d.falsified) ? d.falsified : [];
+  const opt = Array.isArray(d.optimistic_miscalibrations) ? d.optimistic_miscalibrations : [];
+  const falsHtml = fals.length ? fals.slice(0,10).map(f => `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:6px">
+        ${badgeHtml(f.truth_status||'falsified','red')}
+        <span style="font-size:12px;font-weight:600">${esc(String(f.title||f.id||'—').substring(0,48))}</span>
+      </div>
+      <div style="font-size:10.5px;color:var(--dim);margin-top:2px">priority ${esc(String(f.priority??'—'))} · ${esc(String(f.null_count||0))} null · ${esc(String(f.adverse_count||0))} adverse · ${esc(String(f.breakthroughs||0))} breakthrough</div>
+    </div>`).join('') : '<div class="empty-state">No falsified/retired frontiers — none refuted yet.</div>';
+  const optHtml = opt.length ? `<div class="section-head" style="margin-top:10px">Optimistic miscalibrations</div>` + opt.slice(0,8).map(o => `<div style="padding:5px 0;border-bottom:1px solid var(--border)">
+      <span style="font-size:11.5px">${esc(String(o.frontier_id||'—').substring(0,44))}</span>
+      <span style="font-size:10.5px;color:var(--amber);margin-left:6px">rank ${esc(String(o.priority_rank??'—'))} · ${o.breakthrough_rate!=null?(o.breakthrough_rate*100).toFixed(0)+'% breakthrough':''}</span>
+    </div>`).join('') : '';
+  el.innerHTML = `<div class="card">${falsHtml}${optHtml}
+    <div style="font-size:11px;color:var(--dim);margin-top:8px;line-height:1.5">${esc(d.note||'')}</div>
   </div>`;
 }
 
@@ -4072,7 +4372,7 @@ function renderIntegrity(d) {
         const gateColor = r.ok ? 'var(--green)' : 'var(--red)';
         const pubColor = r.publication_allowed ? 'var(--green)' : 'var(--dim)';
         return `<tr>
-          <td style="font-size:11px;font-family:var(--font-mono)">${esc(r.logical_name||'—')}</td>
+          <td style="font-size:11px;font-family:var(--font-mono)">${esc(r.logical_name||'—')} ${methodBadge(r.method_identity||miFromText(r.logical_name),{mini:true})}</td>
           <td class="right mono">${r.phase_number!=null?r.phase_number:'—'}</td>
           <td><span style="font-size:10px;color:${tierColor}">${esc(r.trust_tier||'—')}</span></td>
           <td><span style="color:${gateColor};font-size:11px">${r.ok?'✓ pass':'✗ fail'}</span></td>
@@ -4410,10 +4710,47 @@ function renderExpDetail(exp) {
 
   $('dp-crumb').innerHTML = `<span>Experiments</span> &rsaquo; <span style="color:var(--muted);font-family:var(--font-mono)">${esc(String(exp.id||'').substring(0,8))}</span>`;
   $('dp-title').textContent = exp.name || exp.id || 'Experiment';
-  $('dp-badges').innerHTML = badgeHtml(stage, tone) + (exp.priority ? '&nbsp;' + badgeHtml('pri ' + exp.priority, 'dim') : '');
+  const _expMi = exp.method_identity || miFromText(exp.method);
+  $('dp-badges').innerHTML = badgeHtml(stage, tone)
+    + (exp.priority ? '&nbsp;' + badgeHtml('pri ' + exp.priority, 'dim') : '')
+    + (_expMi ? '&nbsp;' + methodBadge(_expMi) : '')
+    + (exp.experiment_design && exp.experiment_design.enabled ? '&nbsp;' + badgeHtml('H2 designed','teal') : '');
 
   const logPromise = api('/api/experiment/' + encodeURIComponent(exp.id) + '/log').catch(() => ({lines:[]}));
+  const provPromise = api('/api/provenance/' + encodeURIComponent(exp.id)).catch(() => null);
   const chartsPromise = api('/api/experiment/' + encodeURIComponent(exp.id) + '/charts').catch(() => ({charts:[]}));
+
+  // A4 — H2 experiment-design rationale (powered, discriminating protocol)
+  const ed = exp.experiment_design;
+  let designSectionHtml = '';
+  if (ed && ed.enabled) {
+    const sa = ed.seed_amendment;
+    designSectionHtml = `
+    <div class="dp-section">
+      <div class="dp-section-head">Experiment Design — H2 (powered &amp; discriminating)</div>
+      <div class="dp-section-body">
+        <p style="font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:10px">${esc(ed.design_rationale||'')}</p>
+        <div class="kv-grid">
+          <span class="kv-k">Powered seeds</span><span class="kv-v mono">${esc(String(ed.powered_seeds??'—'))}</span>
+          <span class="kv-k">Achieved power</span><span class="kv-v mono">${ed.achieved_power!=null?(Number(ed.achieved_power)*100).toFixed(0)+'%':'—'}</span>
+          <span class="kv-k">Min effect d</span><span class="kv-v mono">${esc(String(ed.min_effect_d??'—'))}</span>
+          <span class="kv-k">Correction</span><span class="kv-v">${esc(ed.correction||'holm')}</span>
+          <span class="kv-k">Primary endpoint</span><span class="kv-v">${esc(ed.primary_endpoint||'—')}</span>
+          <span class="kv-k">Stop rule</span><span class="kv-v" style="font-size:11px">${esc(ed.stop_rule||'—')}</span>
+          <span class="kv-k">Arms</span><span class="kv-v" style="font-size:11px">${esc((ed.methods||[]).join(', ')||'—')}</span>
+        </div>
+        ${sa ? `<div class="warning-banner" style="margin-top:10px">Powered n=${esc(String(sa.powered_n??'?'))} exceeds the runtime budget — running n=${esc(String(sa.budget_feasible_n??'?'))} and proposing a human-gated seed amendment (status: ${esc(sa.status||'proposed')}). Never silently under-powered.</div>` : ''}
+        <div style="font-size:11px;color:var(--dim);margin-top:8px;line-height:1.5">A discriminating protocol = falsifying baselines + mechanism-isolating ablations + a power-derived seed count. Truth-lock precedence is absolute: the design planner has no authority over the gate.</div>
+      </div>
+    </div>`;
+  } else if (ed && ed.fallback) {
+    designSectionHtml = `
+    <div class="dp-section">
+      <div class="dp-section-head">Experiment Design — H2</div>
+      <div class="dp-section-body"><div style="font-size:12px;color:var(--amber)">Fell back to legacy defaults: ${esc(ed.fallback)}</div>
+      <div style="font-size:11px;color:var(--dim);margin-top:6px">H2 fails safe: a non-discriminating protocol (no falsifying baseline / no mechanism ablation) reverts to the legacy probe rather than running a sweep.</div></div>
+    </div>`;
+  }
 
   $('dp-body').innerHTML = `
     <div class="dp-3col">
@@ -4491,6 +4828,15 @@ function renderExpDetail(exp) {
       </div>
     </div>
 
+    ${designSectionHtml}
+
+    <div class="dp-section">
+      <div class="dp-section-head">Provenance &amp; 3-Gate Verification
+        <button class="btn sm" onclick="reverifyProvenance('${esc(exp.id)}')">↻ Re-verify (recompute)</button>
+      </div>
+      <div class="dp-section-body" id="exp-provenance"><div class="loading-state">Resolving provenance chain…</div></div>
+    </div>
+
     <div class="dp-section">
       <div class="dp-section-head">Visualizations</div>
       <div class="dp-section-body" id="exp-detail-charts"><div class="loading-state">Loading charts…</div></div>
@@ -4520,6 +4866,53 @@ function renderExpDetail(exp) {
   });
 
   chartsPromise.then(renderExpCharts);
+  provPromise.then(renderProvenance);
+}
+
+/* A3 — provenance chain + 3-gate verification (read-only recompute) */
+function renderProvenance(p) {
+  const el = $('exp-provenance');
+  if (!el) return;
+  if (!p || p.found === false) {
+    el.innerHTML = `<div class="empty-state">${esc((p&&p.error)||'No canonical result.json resolved for this experiment yet (provenance chain appears once a result is written).')}</div>`;
+    return;
+  }
+  const verColor = p.canonical_verified ? 'var(--green)' : 'var(--amber)';
+  const chain = Array.isArray(p.chain) ? p.chain : [];
+  const links = chain.map((c,i) => {
+    const ok = c.ok;
+    const dot = dotHtml(ok ? 'green' : 'amber');
+    const val = c.value ? `<span style="font-family:var(--font-mono);font-size:10.5px;color:var(--dim)"> ${esc(c.value)}</span>` : '';
+    const conn = i < chain.length-1 ? `<div style="margin-left:5px;width:1px;height:10px;background:var(--border-s)"></div>` : '';
+    return `<div style="display:flex;align-items:center;gap:8px">
+        ${dot}
+        <div style="flex:1">
+          <span style="font-size:12px;font-weight:600">${esc(c.gate)}</span>
+          <span style="font-size:11px;color:${ok?'var(--muted)':'var(--amber)'}"> — ${esc(c.detail||'')}</span>${val}
+        </div>
+      </div>${conn}`;
+  }).join('');
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <span style="font-size:12px;color:var(--muted)">Canonical 3-gate verification:</span>
+      <span style="color:${verColor};font-weight:700;font-size:12.5px">${p.canonical_verified ? '✓ VERIFIED' : '⚠ NOT VERIFIED'}</span>
+      ${p.method_identity ? methodBadge(p.method_identity,{mini:true}) : ''}
+    </div>
+    <div style="display:flex;flex-direction:column">${links}</div>
+    ${!p.canonical_verified ? `<div style="font-size:11px;color:var(--dim);margin-top:8px;line-height:1.5">Reason: ${esc(p.verify_reason||'')}. An unverified result is quarantined — excluded from publication, never destroyed.</div>` : ''}
+    <div style="font-size:10.5px;color:var(--dim);margin-top:8px;word-break:break-all">${esc(p.result_path||'')}</div>`;
+}
+
+async function reverifyProvenance(expId) {
+  const el = $('exp-provenance');
+  if (el) el.innerHTML = '<div class="loading-state">Re-running 3-gate verification (read-only recompute)…</div>';
+  try {
+    const p = await api('/api/provenance/' + encodeURIComponent(expId));
+    renderProvenance(p);
+    toast('Provenance re-verified: ' + (p.canonical_verified ? 'VERIFIED' : 'not verified'));
+  } catch(e) {
+    if (el) el.innerHTML = `<div class="api-err">Verify error: ${esc(e.message)}</div>`;
+  }
 }
 
 async function refreshExpLog(expId) {
@@ -4545,9 +4938,10 @@ function renderPhaseDetail(r) {
   const verdU = verd.toUpperCase();
   const verdCls = verdU.includes('PUB') ? 'pub' : verdU === 'DIRECTIONAL' ? 'dir' : verdU.includes('EXPL') ? 'exp' : verdU === 'FALSIFIED' ? 'fls' : '';
 
+  const _phMi = r.method_identity || miFromText(r.method_comparison, r.experiment_id, r.label, r.phase);
   $('dp-crumb').innerHTML = `<span>Evidence &amp; Results</span> &rsaquo; <strong>Phase ${esc(String(r.phase||r.id||''))}</strong>`;
   $('dp-title').textContent = r.title || r.label || ('Phase ' + (r.phase||r.id||''));
-  $('dp-badges').innerHTML = verdictHtml(verd);
+  $('dp-badges').innerHTML = verdictHtml(verd) + (_phMi ? '&nbsp;' + methodBadge(_phMi) : '');
 
   $('dp-body').innerHTML = `
     <div class="stat-grid">
