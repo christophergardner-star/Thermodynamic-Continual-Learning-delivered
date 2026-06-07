@@ -1,0 +1,121 @@
+"""H2 experiment-design skeleton — exit tests (offline, torch-free).
+
+Covers the [ENG] core of TAR_H2_ExperimentDesign_Spec.md: the discriminating
+invariant, the powered seed count, over-power -> amendment (never silent
+under-power), the executor contract shape, critic-is-advisory-only, and
+prereg-frozen.
+"""
+import json
+
+import pytest
+
+from tar_lab.experiment_design import (
+    HypothesisSpec,
+    DiscriminatingProtocol,
+    NonDiscriminatingProtocolError,
+    design_experiment,
+)
+from tar_lab.stat_utils import _solve_n_for_power, _nct_power
+
+
+def _tcl_hyp(**kw):
+    base = dict(
+        hypothesis_id="h-tcl-full-cifar10",
+        claim="tcl_full reduces forgetting vs EWC on Split-CIFAR-10",
+        primary_method="tcl_full",
+        domain_id="continual_learning",
+        dataset="split_cifar10",
+        direction="less",
+        min_effect_d=0.5,
+    )
+    base.update(kw)
+    return HypothesisSpec(**base)
+
+
+def test_protocol_is_discriminating():
+    p = design_experiment(_tcl_hyp(), available_baselines=["ewc", "si", "sgd_baseline"])
+    # falsifying baselines present (non-TCL family)
+    assert "ewc" in p.baselines and "si" in p.baselines
+    # mechanism-isolating ablations present (proxy / canonical arms)
+    assert "tcl_penalty_only" in p.ablations and "tcl_canonical" in p.ablations
+    # methods = primary + baselines + ablations, primary first, deduped
+    assert p.methods[0] == "tcl_full"
+    assert set(p.baselines).issubset(set(p.methods))
+    assert set(p.ablations).issubset(set(p.methods))
+
+
+def test_non_discriminating_raises():
+    # no falsifying baseline (only same-family members) -> raise
+    with pytest.raises(NonDiscriminatingProtocolError):
+        design_experiment(_tcl_hyp(), available_baselines=["tcl", "tcl_canonical"])
+    # non-TCL primary with no mechanism_components -> no ablation -> raise
+    with pytest.raises(NonDiscriminatingProtocolError):
+        design_experiment(
+            _tcl_hyp(primary_method="ewc", claim="ewc beats sgd"),
+            available_baselines=["sgd_baseline", "si"],
+        )
+
+
+def test_seed_count_is_powered():
+    p = design_experiment(_tcl_hyp(min_effect_d=0.5), available_baselines=["ewc", "si"],
+                          power_target=0.80)
+    expected_n = _solve_n_for_power(0.5, power_target=0.80)
+    assert len(p.seeds) == expected_n
+    # the achieved power at that n actually meets the target
+    assert _nct_power(0.5, len(p.seeds)) >= 0.80
+    assert p.achieved_power >= 0.80
+
+
+def test_overpower_emits_amendment_not_silent_underpower():
+    # tiny effect -> huge powered n; a tight budget forces fewer seeds, but it must
+    # PROPOSE an amendment rather than silently under-power.
+    p = design_experiment(
+        _tcl_hyp(min_effect_d=0.05),
+        available_baselines=["ewc", "si"],
+        power_target=0.80,
+        runtime_budget_h=6.0,
+        per_arm_seed_h=0.25,
+    )
+    assert p.seed_amendment is not None
+    assert p.seed_amendment["status"] == "proposed"           # human-gated, not auto-applied
+    assert p.seed_amendment["powered_n"] > p.seed_amendment["budget_feasible_n"]
+    # run the budget-feasible n, but never below the statistical floor of 2 seeds
+    assert len(p.seeds) == max(p.seed_amendment["budget_feasible_n"], 2)
+    assert len(p.seeds) < p.seed_amendment["powered_n"]       # genuinely capped, not silent-full
+
+
+def test_config_overrides_match_executor_contract():
+    p = design_experiment(_tcl_hyp(), available_baselines=["ewc", "si", "sgd_baseline"])
+    co = p.config_overrides
+    for k in ("dataset", "methods", "seeds", "backbone", "epochs"):
+        assert k in co
+    # must be JSON-serializable (it rides into ExperimentSpec.config_overrides)
+    json.dumps(co)
+    assert co["seeds"] == p.seeds and co["dataset"] == p.dataset
+
+
+def test_critic_is_advisory_only_never_touches_gate():
+    captured = {}
+
+    def fake_critic(proto: DiscriminatingProtocol):
+        captured["seen"] = proto.hypothesis_id
+        return ["confound: arms not matched on optimizer", "alt: effect may be seed variance"]
+
+    p = design_experiment(_tcl_hyp(), available_baselines=["ewc", "si"], critic=fake_critic)
+    assert captured["seen"] == p.hypothesis_id
+    assert len(p.critic_notes) == 2
+    # the planner has NO authority over the truth-lock gate
+    assert not hasattr(p, "publication_allowed")
+    assert not hasattr(p, "canonical_verified")
+    assert not hasattr(p, "quarantined")
+
+
+def test_preregistration_frozen_with_primary_endpoint_and_stop_rule():
+    p = design_experiment(_tcl_hyp(direction="less"), available_baselines=["ewc", "si"])
+    pre = p.preregistration
+    assert pre["frozen"] is True
+    assert pre["primary_endpoint"] == "mean_forgetting"
+    assert pre["direction"] == "less"
+    assert pre["n_seeds"] == len(p.seeds)
+    assert pre["multiple_testing_correction"] == "holm"
+    assert "stop_rule" in pre
