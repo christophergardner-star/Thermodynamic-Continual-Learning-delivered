@@ -80,6 +80,25 @@ RUNNERS: dict[str, dict[str, Any]] = {
         "output_exclude": "checkpoint",
         "est_h": 4.0,
     },
+    "hpc_replication_phase2": {
+        "script": "run_hpc_replication.py",
+        "module": "run_hpc_replication",
+        "patch_paths": {
+            "_TAR_STATE": _POD_STATE,
+            "PREREG_FILE": f"{_POD_STATE}/preregistrations/hpc_replication.json",
+            "EXEC_FLAG": f"{_POD_STATE}/execution_enabled.flag",
+            "CHECKPOINT_FILE": f"{_POD_STATE}/comparisons/hpc_replication_checkpoint.json",
+        },
+        # FRESH run (no checkpoint synced) -> all 20 seeds on one GPU with the FIXED
+        # SPRT (f58eed3): one code version, one hardware, fully reproducible. The
+        # bridge syncs the working copy, so the pod gets the fixed stat_utils.py.
+        "sync_inputs": ["preregistrations/hpc_replication.json"],
+        "create_flags": [f"{_POD_STATE}/execution_enabled.flag"],
+        "output_dir": f"{_POD_STATE}/comparisons",
+        "output_glob": "hpc_replication_*.json",
+        "output_exclude": "checkpoint",
+        "est_h": 6.0,
+    },
     # phase17 added after these prove (needs TinyImageNet data staging).
 }
 
@@ -320,9 +339,89 @@ def main(runner_key: str, dry_run: bool = False) -> None:
             print(f"[bridge] pod {pod_id} terminated", flush=True)
 
 
+def _verify_phase2_success(runner_key: str, result_path: Path) -> tuple[bool, str]:
+    """Self-contained genuine-completion guard (mirrors tar_dashboard._phase2_run_succeeded).
+    Reads the retrieved result JSON; hpc requires seeds_run>=20 OR an SPRT decision, so a
+    crashed/truncated run is never registered 'complete' (the 2026-06-03 6/20 false-advance)."""
+    if not result_path or not result_path.exists():
+        return False, f"result file missing: {result_path}"
+    try:
+        res = json.loads(result_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return False, f"result unreadable: {e}"
+    if runner_key == "hpc_replication_phase2":
+        seeds = int(res.get("seeds_run", 0) or 0)
+        decided = str(res.get("sprt_final_decision", "")) in {"accept_H1", "accept_H0"}
+        if not (seeds >= 20 or decided):
+            return False, (f"hpc not genuinely complete (seeds_run={seeds}, "
+                           f"decision={res.get('sprt_final_decision')!r})")
+    if not (res.get("verdict") or res.get("result_id")
+            or res.get("honest_verdict") or res.get("honest_verdict_detail")):
+        return False, "result JSON lacks verdict/result_id (not a finished comparison)"
+    return True, "ok"
+
+
+def register_phase2_result(runner_key: str, result_path: str, *,
+                           dry_run: bool = False, ws: Optional[Path] = None) -> bool:
+    """Lock-aware registration of a retrieved Phase-2 result as the TERMINAL queue entry the
+    autonomy ramp counts (tar_autonomy_ramp._phase2_status + evidence gate, status=='complete').
+    REFUSES unless the run genuinely produced its output. Atomic .tmp+os.replace write.
+
+    NB: the live daemon also manages experiment_queue.json; run this in a quiescent window
+    (or it may clobber a concurrent daemon write — last-writer-wins)."""
+    ws = ws or _resolve_workspace()
+    rp = Path(result_path).resolve()
+    ok, why = _verify_phase2_success(runner_key, rp)
+    if not ok:
+        print(f"[register] REFUSED for {runner_key}: {why}", flush=True)
+        return False
+    qpath = ws / "tar_state" / "experiment_queue.json"
+    try:
+        data = json.loads(qpath.read_text(encoding="utf-8")) if qpath.exists() else {"experiments": []}
+        if not isinstance(data, dict):
+            data = {"experiments": []}
+    except Exception:
+        data = {"experiments": []}
+    exps = data.setdefault("experiments", [])
+    now = datetime.now(timezone.utc).isoformat()
+    action = "appended new"
+    for e in exps:
+        if isinstance(e, dict) and str(e.get("runner_key", "")) == runner_key:
+            e.update(status="complete", stage="complete", result_path=str(rp),
+                     completed_at=now, pid=0)
+            action = "updated existing"
+            break
+    else:
+        exps.append({
+            "id": f"phase2-{runner_key}",
+            "runner_key": runner_key,
+            "status": "complete",
+            "stage": "complete",
+            "result_path": str(rp),
+            "name": f"Phase-2 {runner_key} (RunPod bridge)",
+            "completed_at": now,
+            "started_at": now,
+            "pid": 0,
+        })
+    if dry_run:
+        print(f"[register] DRY RUN — would {action} TERMINAL entry: "
+              f"runner_key={runner_key} status=complete result={rp.name}", flush=True)
+        return True
+    tmp = qpath.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, qpath)
+    print(f"[register] {runner_key} -> complete ({action}; result {rp.name})", flush=True)
+    return True
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("runner_key")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--register", metavar="RESULT_PATH",
+                    help="Register a retrieved result as the terminal queue entry (skips dispatch).")
     a = ap.parse_args()
-    main(a.runner_key, dry_run=a.dry_run)
+    if a.register:
+        register_phase2_result(a.runner_key, a.register, dry_run=a.dry_run)
+    else:
+        main(a.runner_key, dry_run=a.dry_run)
