@@ -99,7 +99,43 @@ RUNNERS: dict[str, dict[str, Any]] = {
         "output_exclude": "checkpoint",
         "est_h": 6.0,
     },
-    # phase17 added after these prove (needs TinyImageNet data staging).
+    "phase17_tinyimagenet_rerun": {
+        "script": "phase17_tinyimagenet_rerun.py",
+        "module": "phase17_tinyimagenet_rerun",
+        "patch_paths": {
+            "OUTPUT_DIR": _POD_OUT,
+            "PREREG_FILE": f"{_POD_STATE}/preregistrations/phase17_rerun.json",
+            "EXEC_FLAG": f"{_POD_STATE}/execution_enabled.flag",
+        },
+        "sync_inputs": ["preregistrations/phase17_rerun.json"],
+        # TinyImageNet arrow cache (~216MB) — read via _REPO/dataset_artifacts on the pod;
+        # _sync_code EXCLUDES dataset_artifacts, so push it explicitly to /workspace/repo/...
+        "sync_repo_files": [
+            "dataset_artifacts/tinyimagenet/Maysee___tiny-imagenet/default/0.0.0/5a77092c28e51558c5586e9c5eb71a7e17a5e43f/dataset_info.json",
+            "dataset_artifacts/tinyimagenet/Maysee___tiny-imagenet/default/0.0.0/5a77092c28e51558c5586e9c5eb71a7e17a5e43f/tiny-imagenet-train.arrow",
+            "dataset_artifacts/tinyimagenet/Maysee___tiny-imagenet/default/0.0.0/5a77092c28e51558c5586e9c5eb71a7e17a5e43f/tiny-imagenet-valid.arrow",
+        ],
+        "create_flags": [f"{_POD_STATE}/execution_enabled.flag"],
+        "output_dir": _POD_OUT,
+        "output_glob": "phase17_tinyimagenet_rerun_*.json",
+        "est_h": 12.0,   # heaviest: 200 classes, 20 tasks x 40 epochs x 7 methods x 5 seeds
+    },
+    "hpc_lambda_momentum_abl": {
+        "script": "run_hpc_lambda_momentum_ablation.py",
+        "module": "run_hpc_lambda_momentum_ablation",
+        "patch_paths": {
+            "TAR_STATE": _POD_STATE,
+            "PREREG_FILE": f"{_POD_STATE}/preregistrations/hpc_lambda_momentum_ablation.json",
+            "EXEC_FLAG": f"{_POD_STATE}/execution_enabled.flag",
+            "CHECKPOINT_FILE": f"{_POD_STATE}/comparisons/hpc_lambda_momentum_ablation_checkpoint.json",
+        },
+        "sync_inputs": ["preregistrations/hpc_lambda_momentum_ablation.json"],
+        "create_flags": [f"{_POD_STATE}/execution_enabled.flag"],
+        "output_dir": f"{_POD_STATE}/comparisons",
+        "output_glob": "hpc_lambda_momentum_ablation_*.json",
+        "output_exclude": "checkpoint",
+        "est_h": 6.0,
+    },
 }
 
 _PIP = ("pip install -q --no-warn-script-location "
@@ -197,6 +233,33 @@ def _sync_inputs(client: Any, ws: Path, cfg: dict) -> None:
     print(f"[bridge] synced {len(cfg.get('sync_inputs', []))} input(s) to {_POD_STATE}", flush=True)
 
 
+def _sync_repo_files(client: Any, ws: Path, cfg: dict) -> None:
+    """Sync repo-relative files that _sync_code skips (it excludes dataset_artifacts).
+    Used for phase17's ~216MB TinyImageNet arrow cache, which the rerun reads from
+    _REPO/dataset_artifacts/... (== /workspace/repo/... on the pod)."""
+    files = cfg.get("sync_repo_files", [])
+    if not files:
+        return
+    sftp = client.open_sftp()
+    made: set[str] = set()
+    total = 0
+    for rel in files:
+        rel = rel.replace("\\", "/")
+        local = ws / rel
+        if not local.exists():
+            print(f"[bridge] WARN sync_repo_files missing locally: {local}", flush=True)
+            continue
+        remote = f"{_REMOTE_REPO}/{rel}"
+        rd = remote.rsplit("/", 1)[0]
+        if rd not in made:
+            _ssh(client, f"mkdir -p {rd}", 30)
+            made.add(rd)
+        sftp.put(str(local), remote)
+        total += local.stat().st_size
+    sftp.close()
+    print(f"[bridge] synced {len(files)} repo file(s) ({total // (1024 * 1024)} MB) to {_REMOTE_REPO}", flush=True)
+
+
 def _run_remote(client: Any, cfg: dict) -> int:
     shim = _make_shim(cfg)
     sftp = client.open_sftp()
@@ -268,8 +331,11 @@ def main(runner_key: str, dry_run: bool = False) -> None:
     print(f"[bridge] runner={runner_key} script={cfg['script']} workspace={ws} dry_run={dry_run}")
     _preflight(ws, cfg, api_key, dry_run=dry_run)
     if dry_run:
+        _repo_files = cfg.get("sync_repo_files", [])
+        _repo_note = f" + {len(_repo_files)} repo file(s)" if _repo_files else ""
         print(f"[dry-run] would: pod(>= {_MIN_VRAM_GB}GB, datacenter-first) -> sync code + "
-              f"{cfg.get('sync_inputs')} -> pip torchvision+stats -> shim(patch {list(cfg['patch_paths'])}) "
+              f"{cfg.get('sync_inputs')}{_repo_note} -> pip torchvision+stats -> "
+              f"shim(patch {list(cfg['patch_paths'])}) "
               f"-> run {cfg['script']} -> retrieve {cfg['output_glob']} -> terminate.")
         return
 
@@ -315,6 +381,7 @@ def main(runner_key: str, dry_run: bool = False) -> None:
         client = exr._get_ssh_client(ssh_info)
         exr._sync_code(client, spec)
         _sync_inputs(client, ws, cfg)
+        _sync_repo_files(client, ws, cfg)
         print("[bridge] installing torchvision + stats deps ...", flush=True)
         code, out, err = _ssh(client, _PIP, timeout=600)
         if code != 0:
