@@ -130,7 +130,12 @@ RUNNERS: dict[str, dict[str, Any]] = {
             "EXEC_FLAG": f"{_POD_STATE}/execution_enabled.flag",
             "CHECKPOINT_FILE": f"{_POD_STATE}/comparisons/hpc_lambda_momentum_ablation_checkpoint.json",
         },
-        "sync_inputs": ["preregistrations/hpc_lambda_momentum_ablation.json"],
+        "sync_inputs": [
+            "preregistrations/hpc_lambda_momentum_ablation.json",
+            # Task 2.1 dependency: _check_prerequisites requires a hpc_replication_*.json
+            # with verdict==REPLICATION_SUCCESS present in comparisons/ on the pod.
+            "comparisons/hpc_replication_20260607T211013Z.json",
+        ],
         "create_flags": [f"{_POD_STATE}/execution_enabled.flag"],
         "output_dir": f"{_POD_STATE}/comparisons",
         "output_glob": "hpc_lambda_momentum_ablation_*.json",
