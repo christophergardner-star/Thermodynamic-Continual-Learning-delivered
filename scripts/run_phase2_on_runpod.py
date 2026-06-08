@@ -78,7 +78,8 @@ RUNNERS: dict[str, dict[str, Any]] = {
         "output_dir": f"{_POD_STATE}/comparisons",
         "output_glob": "mechanistic_ablation_*.json",
         "output_exclude": "checkpoint",
-        "est_h": 4.0,
+        "resumable": True,   # condition+seed checkpoint; survives a watchdog kill
+        "est_h": 8.0,        # ~20h actual -> 20h ceiling; resumable covers any overrun
     },
     "hpc_replication_phase2": {
         "script": "run_hpc_replication.py",
@@ -134,6 +135,7 @@ RUNNERS: dict[str, dict[str, Any]] = {
         "output_dir": f"{_POD_STATE}/comparisons",
         "output_glob": "hpc_lambda_momentum_ablation_*.json",
         "output_exclude": "checkpoint",
+        "resumable": True,   # per-seed checkpoint; survives a watchdog kill
         "est_h": 6.0,
     },
 }
@@ -260,7 +262,62 @@ def _sync_repo_files(client: Any, ws: Path, cfg: dict) -> None:
     print(f"[bridge] synced {len(files)} repo file(s) ({total // (1024 * 1024)} MB) to {_REMOTE_REPO}", flush=True)
 
 
-def _run_remote(client: Any, cfg: dict) -> int:
+# ── Resumable checkpoints — survive a watchdog HARD KILL ───────────────────────
+# The watchdog terminates the pod (destroying its disk) when the time ceiling is hit.
+# For runners that checkpoint (resumable=True), pull CHECKPOINT_FILE to local staging
+# periodically during the run; on the next dispatch, push it back so the script RESUMES
+# (skips done conditions/seeds) instead of restarting. So a kill costs <pull_interval of
+# progress, and a long run completes across as many dispatches as it needs.
+def _resume_local(ws: Path, runner_key: str) -> Path:
+    return ws / "tar_state" / "_resume" / f"{runner_key}.json"
+
+
+def _pull_checkpoint(client: Any, cfg: dict, ws: Path, runner_key: str) -> bool:
+    pod_ckpt = cfg.get("patch_paths", {}).get("CHECKPOINT_FILE")
+    if not (cfg.get("resumable") and pod_ckpt):
+        return False
+    local = _resume_local(ws, runner_key)
+    try:
+        local.parent.mkdir(parents=True, exist_ok=True)
+        tmp = local.with_suffix(".tmp")
+        sftp = client.open_sftp()
+        sftp.get(pod_ckpt, str(tmp))   # checkpoint is written atomically on the pod
+        sftp.close()
+        os.replace(tmp, local)          # keep the previous good copy if a pull fails mid-transfer
+        return True
+    except Exception:
+        return False
+
+
+def _sync_resume_in(client: Any, cfg: dict, ws: Path, runner_key: str) -> None:
+    pod_ckpt = cfg.get("patch_paths", {}).get("CHECKPOINT_FILE")
+    local = _resume_local(ws, runner_key)
+    if not (cfg.get("resumable") and pod_ckpt and local.exists()):
+        return
+    try:
+        _ssh(client, f"mkdir -p {pod_ckpt.rsplit('/', 1)[0]}", 20)
+        sftp = client.open_sftp()
+        sftp.put(str(local), pod_ckpt)
+        sftp.close()
+        try:
+            d = json.loads(local.read_text(encoding="utf-8"))
+            done = (sum(len(v) for v in (d.get("per_condition_per_seed") or {}).values())
+                    or d.get("seeds_run") or "?")
+        except Exception:
+            done = "?"
+        print(f"[bridge] RESUMING {runner_key} from staged checkpoint ({done} unit(s) done)", flush=True)
+    except Exception as e:
+        print(f"[bridge] resume-sync skipped ({e})", flush=True)
+
+
+def _clear_resume(ws: Path, runner_key: str) -> None:
+    try:
+        _resume_local(ws, runner_key).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _run_remote(client: Any, cfg: dict, ws: Path, runner_key: str) -> int:
     shim = _make_shim(cfg)
     sftp = client.open_sftp()
     with sftp.open(f"{_REMOTE_REPO}/_phase2_shim.py", "w") as fh:
@@ -273,11 +330,17 @@ def _run_remote(client: Any, cfg: dict) -> int:
     chan = client.get_transport().open_session()
     chan.get_pty()
     chan.exec_command(cmd)
+    _last_pull = time.time()
+    _interval = float(cfg.get("checkpoint_pull_s", 300))
     while not chan.exit_status_ready():
         if chan.recv_ready():
             for ln in chan.recv(8192).decode("utf-8", "replace").splitlines():
                 if ln.strip():
                     print(f"  [pod] {ln}", flush=True)
+        if cfg.get("resumable") and time.time() - _last_pull >= _interval:
+            if _pull_checkpoint(client, cfg, ws, runner_key):
+                print("  [bridge] checkpoint staged locally (resumable)", flush=True)
+            _last_pull = time.time()
         time.sleep(0.5)
     while chan.recv_ready():
         for ln in chan.recv(8192).decode("utf-8", "replace").splitlines():
@@ -382,17 +445,21 @@ def main(runner_key: str, dry_run: bool = False) -> None:
         exr._sync_code(client, spec)
         _sync_inputs(client, ws, cfg)
         _sync_repo_files(client, ws, cfg)
+        _sync_resume_in(client, cfg, ws, runner_key)
         print("[bridge] installing torchvision + stats deps ...", flush=True)
         code, out, err = _ssh(client, _PIP, timeout=600)
         if code != 0:
             print(f"[bridge] WARNING dep install rc={code}: {(out + err)[-400:]}", flush=True)
-        rc = _run_remote(client, cfg)
+        rc = _run_remote(client, cfg, ws, runner_key)
         result = _retrieve(client, ws, cfg)
         print("=" * 60)
         print(f"[bridge] {runner_key}: exit={rc} result={'retrieved' if result else 'NONE'}")
         if result:
+            _clear_resume(ws, runner_key)   # genuine completion -> next dispatch starts fresh
             print(f"  -> {result}")
             print(f"  REGISTER (lock-aware, separate step) to flip the ramp gate for this runner_key.")
+        elif cfg.get("resumable"):
+            print(f"  RESUMABLE: progress staged at {_resume_local(ws, runner_key)} — re-dispatch to continue.")
         print("=" * 60)
     finally:
         if client:
