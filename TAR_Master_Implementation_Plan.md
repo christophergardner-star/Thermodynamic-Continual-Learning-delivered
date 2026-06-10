@@ -279,6 +279,8 @@ For `tar_experiment_orchestrator.py`, add a code comment at the `set_autonomous`
 
 ### Task 0.3 — Fix active_session.json stale DORMANT state
 
+> **PARTIAL (verified 2026-06-10).** Start-write **VERIFIED**: `manifests/active_session.json` reads `{"manifest_path":"AUTONOMOUS_MODE", …, "started_at": …}`, written and owned by the watchdog (`tar_watchdog.py:610`). Stop-write (`DORMANT_NO_MANIFEST`) **UNVERIFIED** — cannot be checked without a daemon stop/start, which is unsafe while the watchdog auto-restarts (15 s poll). **Deferred to a watchdog-paused maintenance window, bundled with Task 0.8** (both need the same paused window).
+
 The file reads `DORMANT_NO_MANIFEST` despite the daemon having restarted today. The batch file `START_TAR.bat` resets service state files but not this one.
 
 - Locate the write path for `active_session.json` in the daemon startup sequence.
@@ -290,6 +292,8 @@ The file reads `DORMANT_NO_MANIFEST` despite the daemon having restarted today. 
 ---
 
 ### Task 0.4 — Fix the queue maintainer NoneType error
+
+> **RESOLVED / STALE (verified 2026-06-10).** The `NoneType` error last fired **2026-05-28 15:45:17 UTC** (`tar_state/living_research.log:8785-8787`); it has not recurred in the ~13 days since, across the 2026-06-01 daemon restart, and the queue maintainer is running clean now. Logged as a one-line caught error, not a traceback. Description retained for history; no action required.
 
 The error `'<=' not supported between instances of 'NoneType' and 'int'` has fired every 30 seconds since 2026-05-28. It is a null `priority` field in the queue sorting logic.
 
@@ -348,6 +352,8 @@ Gap scan reports repeatedly surface "mean-variance-skewness-kurtosis portfolio o
 
 ### Task 0.7 — Fix the watchdog restart loop
 
+> **RESOLVED / WORKING AS DESIGNED (verified 2026-06-10).** `tar_watchdog.py` implements per-service restart history, a 6-restarts-per-hour circuit breaker (`_set_circuit_open` → `circuit_breakers.json`), and 30→300 s exponential backoff. Runtime evidence: **172 `watchdog_started`, 0 `CIRCUIT_OPEN`, 0 `watchdog_error`**; no restart in ~3 days; `circuit_breakers.json` absent. The "respawns indefinitely" risk no longer exists. **Superseded by Task 0.12** — the live reliability concern is dashboard restart churn, not a watchdog loop.
+
 The watchdog has a 30-second cooldown but no maximum restart count. A daemon that fails immediately on startup respawns every 30 seconds indefinitely.
 
 **Implementation in `tar_watchdog.py`:**
@@ -381,6 +387,8 @@ Circuit resets only via `tar_cli.py --reset-service-circuit <name>`.
 ---
 
 ### Task 0.8 — Fix process lifecycle to prevent orphaned experiments
+
+> **Maintenance-window bundle (2026-06-10):** do Task 0.3's stop-write verification (`DORMANT_NO_MANIFEST` on shutdown) in the same watchdog-paused window as this lifecycle fix — both require the daemon stopped.
 
 Daemons are launched with `DETACHED_PROCESS` flags. On daemon crash, running experiment subprocesses continue unmonitored. On restart a duplicate can launch.
 
@@ -428,6 +436,19 @@ Phase 11 ablation shows governor-alone is worse than SGD (0.250 vs 0.219 forgett
 Separate machine-owned vs curated fields in paper_plan.json; enforce append-only manifest writes (no in-place re-serialization). Found via working-tree triage: daemon recompute overwrote 4 curated labels and re-hashed 1 auto-manifest.
 
 **Verification:** A daemon recompute of `paper_plan.json` changes only machine-owned fields (counts, timestamps, progress); curated fields (titles, narrative labels) are preserved. Auto-manifest writes append a new file rather than re-serializing an existing one in place.
+
+---
+
+### Task 0.12 — Dashboard chronic instability (intermittent `http_unhealthy`)
+
+**Priority:** LOW — reliability-signal noise, not a functional outage. Supersedes the (resolved) watchdog concern in Task 0.7.
+
+The dashboard service has been restarted **84 times** by the watchdog vs **11** (living-research daemon) and **7** (queue maintainer) — a ~10× outlier — almost always for reason `http_unhealthy` (its `/api/status` probe failing). It has been stable since 2026-06-07T11:56:33Z and never tripped the 6/hour circuit breaker, so it is **not** an active loop; the intermittent probe failures are noise in the reliability signal.
+
+- Investigate why `tar_dashboard.py`'s `/api/status` intermittently fails the watchdog HTTP probe (startup race, slow/blocking route, or too-tight probe timeout).
+- Distinguish "dashboard genuinely down" from "probe too aggressive"; widen the probe timeout or add a dedicated readiness endpoint if the latter.
+
+**Verification:** Dashboard `restart_count` in `watchdog_state.json` stays flat over a 1-week observation window.
 
 ---
 
@@ -3570,7 +3591,7 @@ MONTH  5    6    7    8    9    10   11   12
 **Status:** ACCEPTED by operator, 2026-06-10
 **Exposure:** Anthropic API key, RunPod API + S3 keys, FTP password (committed to the public repo; see Phase E0).
 **Impact if realised:** API abuse billed to operator, RunPod credit drain, FTP write access to the public TAR site.
-**Mitigation deferred:** console rotation (~15 min) — **revisit date: <CHRIS FILLS IN>**
+**Mitigation deferred:** console rotation (~15 min) — **revisit date: 2026-06-11** (set 2026-06-10 per operator: "any date" → chose the soonest; this is a deferral, not a close — rotate sooner if convenient).
 **Provenance:** Logged via working-tree triage 2026-06-10; rotation could not be confirmed from the repo (no old-key material recoverable). Recommend rotating before E0.4 hygiene — E0.4 step 3's "new keys in env" precondition is otherwise unmet.
 
 ---
