@@ -1,0 +1,27 @@
+{
+  "updated_at": "2026-06-03T18:27:59.880297+00:00",
+  "project_id": "tcl_phd_rehabilitation",
+  "title": "Tcl Phd Rehabilitation",
+  "readiness": "waiting",
+  "status": "blocked",
+  "truth_status": "weak",
+  "director_recommendation": "",
+  "frontier_problem_ids": [],
+  "experiment_ids": [
+    "f112297c8f6476ce"
+  ],
+  "waiting_for_experiments": [
+    "f112297c8f6476ce"
+  ],
+  "sections_planned": [
+    "abstract",
+    "s1_introduction",
+    "s2_background",
+    "s3_method",
+    "s4_experiments",
+    "s5_discussion",
+    "s6_conclusion"
+  ],
+  "tex_path": "C:\\Users\\cgard\\TAR\\Thermodynamic-Continual-Learning-delivered\\paper\\tcl_phd_rehabilitation\\main.tex",
+  "pdf_path": ""
+}
