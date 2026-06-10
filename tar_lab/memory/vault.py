@@ -616,6 +616,7 @@ class VectorVault:
         method: str = "",
         dataset: str = "",
         experiment_id: str = "",
+        extra_metadata: Optional[dict] = None,
     ) -> None:
         """Index a finalized autonomous experiment result so the Research Director can
         RECALL TAR's own current work (Seam 1, 2026-06-06).
@@ -658,6 +659,12 @@ class VectorVault:
             "dataset": str(dataset or ""),
             "verdict": verdict,
         }
+        # Additive provenance/trust tags (e.g. trust_tier, publication_allowed) — scalars
+        # only (Chroma metadata constraint); core keys above are never overridden.
+        if extra_metadata:
+            for _k, _v in extra_metadata.items():
+                if _k not in metadata and isinstance(_v, (str, int, float, bool)):
+                    metadata[str(_k)] = _v
         self._upsert(f"experiment_result:{experiment_id or name}", text, metadata)
 
     def search(

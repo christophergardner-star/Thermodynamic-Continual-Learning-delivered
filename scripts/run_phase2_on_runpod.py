@@ -549,6 +549,15 @@ def register_phase2_result(runner_key: str, result_path: str, *,
     tmp = qpath.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.replace(tmp, qpath)
+    # Tier-3: ALSO index into the recall vault at the trusted_rerun tier so the director
+    # can REASON OVER the numbers, not just count them. Never writes SoTA / canonical index.
+    # Fail-safe: a recall-index failure must not fail the (completed) gate registration.
+    try:
+        from tar_lab.runpod_recall_ingest import ingest_runpod_result_into_recall
+        if ingest_runpod_result_into_recall(ws, runner_key, rp):
+            print(f"[register] {runner_key} -> recall-indexed (trusted_rerun)", flush=True)
+    except Exception:
+        pass
     print(f"[register] {runner_key} -> complete ({action}; result {rp.name})", flush=True)
     return True
 
