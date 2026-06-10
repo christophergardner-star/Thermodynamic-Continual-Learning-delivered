@@ -421,6 +421,16 @@ Phase 11 ablation shows governor-alone is worse than SGD (0.250 vs 0.219 forgett
 
 ---
 
+### Task 0.11 — Separate machine-owned vs curated fields in paper_plan.json; enforce append-only manifest writes
+
+> **Numbering note (2026-06-10):** requested as "Task 0.8", but 0.8–0.10 were already assigned; filed as 0.11. Renumber if a different slot is preferred.
+
+Separate machine-owned vs curated fields in paper_plan.json; enforce append-only manifest writes (no in-place re-serialization). Found via working-tree triage: daemon recompute overwrote 4 curated labels and re-hashed 1 auto-manifest.
+
+**Verification:** A daemon recompute of `paper_plan.json` changes only machine-owned fields (counts, timestamps, progress); curated fields (titles, narrative labels) are preserved. Auto-manifest writes append a new file rather than re-serializing an existing one in place.
+
+---
+
 **Phase 0 exit gate — ALL must be true:**
 - [ ] `harder_domain_split_tinyimagenet` complete, result honestly recorded in evidence inventory
 - [ ] Six governance files committed with review comments
@@ -3552,6 +3562,16 @@ MONTH  5    6    7    8    9    10   11   12
 - Manually ingest the 15 essential papers (Task 9.3) using `literature_engine.py` directly
 - Write the related work section from the 15-paper BibTeX file without semantic search
 - Fix the API integration issue separately as a non-blocking task
+
+---
+
+### Risk 8 (R8): Unrotated credentials previously exposed in public repo
+
+**Status:** ACCEPTED by operator, 2026-06-10
+**Exposure:** Anthropic API key, RunPod API + S3 keys, FTP password (committed to the public repo; see Phase E0).
+**Impact if realised:** API abuse billed to operator, RunPod credit drain, FTP write access to the public TAR site.
+**Mitigation deferred:** console rotation (~15 min) — **revisit date: <CHRIS FILLS IN>**
+**Provenance:** Logged via working-tree triage 2026-06-10; rotation could not be confirmed from the repo (no old-key material recoverable). Recommend rotating before E0.4 hygiene — E0.4 step 3's "new keys in env" precondition is otherwise unmet.
 
 ---
 

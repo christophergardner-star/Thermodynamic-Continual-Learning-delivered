@@ -28,6 +28,9 @@ tar_state/runpod_suspended.flag
 tar_state/runpod_dryrun.flag
 tar_state/runpod_partial/
 
+# ── Boot-state churn (owned by Task 0.3 daemon lifecycle, not version-controlled) ──
+manifests/active_session.json
+
 # ── Secrets — never commit these ────────────────────────────────────────────
 .env
 .env.*
