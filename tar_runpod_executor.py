@@ -381,11 +381,12 @@ class RunPodExecutor:
         raise TimeoutError(f"Pod {pod_id} not SSH-ready after {_SSH_READY_TIMEOUT}s")
 
     def _get_ssh_client(self, ssh_info: dict[str, Any]):
-        """Return connected paramiko SSH client."""
+        """Return connected paramiko SSH client (TOFU-pinned host keys)."""
         import paramiko
+        from tar_lab.ssh_hostkeys import apply_tofu_policy
         priv_path, _ = self._setup_ssh_key()
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        apply_tofu_policy(client, self.workspace / "tar_state" / "runpod_known_hosts")
         client.connect(
             hostname=ssh_info["host"],
             port=ssh_info["port"],
@@ -426,19 +427,20 @@ class RunPodExecutor:
         """
         Daemon thread with two tiers:
 
-        WARNING tier  — logs and writes runpod_cost_warning.flag when
-                         spent >= max_cost_usd / 3  (the configured warning threshold).
-                         Dashboard turns orange. User decides whether to kill.
+        WARNING tier  — logs and writes runpod_cost_warning.json when
+                         spent >= 50% of max_cost_usd. Dashboard turns orange.
                          Does NOT terminate the pod — legitimate slow runs continue.
 
-        HARD KILL tier — terminates only when spent >= max_cost_usd (which is set
-                         to 3× the user's warning threshold in run(), so this fires
-                         at $30 when the user set $10 as their warning level).
-                         Also fires if elapsed time exceeds max_h (genuine stuck process).
+        HARD KILL tier — terminates when spent >= max_cost_usd. max_cost_usd IS
+                         the configured max_experiment_cost_usd — the ceiling the
+                         operator set is the ceiling that fires (it was previously
+                         passed in pre-multiplied by 3, so a "$10 hard ceiling"
+                         actually killed at $30). Also fires if elapsed time
+                         exceeds max_h (genuine stuck process).
 
         Checks every 60s. Maximum billing overshoot per check: 1 minute.
         """
-        warn_threshold = max_cost_usd / 3.0 if max_cost_usd > 0 else 0.0
+        warn_threshold = max_cost_usd * 0.5 if max_cost_usd > 0 else 0.0
         warned = False
 
         def _watch() -> None:
@@ -787,8 +789,8 @@ class RunPodExecutor:
                 self._log(
                     f"Cost estimate: ~${est_cost:.2f} "
                     f"({estimated_h:.1f}h × ${price_per_hour:.2f}/hr on {gpu_type}). "
-                    f"Dollar warning threshold: ${max_cost_usd:.2f}. "
-                    f"Hard kill at: ${max_cost_usd * 3:.2f} (3× warning threshold)."
+                    f"Warning at ${max_cost_usd * 0.5:.2f} (50%). "
+                    f"HARD KILL at ${max_cost_usd:.2f} (max_experiment_cost_usd)."
                 )
 
             # ── Step 3: Set up per-run storage folder ───────────────────────
@@ -810,14 +812,23 @@ class RunPodExecutor:
                 "vol_exp_path":   vol_exp_path,
             })
 
-            # Start watchdog — HARD kill only at 3× the dollar warning threshold
-            # (a genuine runaway, not just a slow legitimate run).
-            # Normal overspend shows a dashboard warning; user kills manually.
+            # Start watchdog — the configured max_experiment_cost_usd IS the hard
+            # ceiling (warning fires at 50% of it). When the GPU price is unknown
+            # the dollar tier previously went dead (spent stayed $0 forever);
+            # guard with a conservative assumed price instead so the ceiling
+            # still functions.
+            guard_price = price_per_hour
+            if guard_price <= 0:
+                guard_price = float(self.config.get("assumed_price_per_hour_when_unknown", 2.0))
+                self._log(
+                    f"GPU price unknown — cost guard assuming ${guard_price:.2f}/hr "
+                    f"(config: assumed_price_per_hour_when_unknown)."
+                )
             self._cost_watchdog(
                 pod_id,
                 max_h=max_h,
-                price_per_hour=price_per_hour,
-                max_cost_usd=max_cost_usd * 3.0,  # hard kill at 3× warning threshold
+                price_per_hour=guard_price,
+                max_cost_usd=max_cost_usd,
             )
 
             # ── Step 4: SSH + environment setup ─────────────────────────────

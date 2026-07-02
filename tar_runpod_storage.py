@@ -253,9 +253,10 @@ def _pull_results_via_sftp(
     log_fn: Any = print,
 ) -> dict[str, Any] | None:
     import paramiko
+    from tar_lab.ssh_hostkeys import apply_tofu_policy
 
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    apply_tofu_policy(client)
     try:
         client.connect(
             hostname=ssh_info["host"],

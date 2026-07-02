@@ -99,7 +99,8 @@ def _launch_via_dashboard() -> bool:
     req = urllib.request.Request(
         DASHBOARD_URL,
         data=json.dumps({"script": SCRIPT_KEY}).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        # X-TAR-Control: dashboard CSRF guard on all mutating routes
+        headers={"Content-Type": "application/json", "X-TAR-Control": "1"},
         method="POST",
     )
     try:

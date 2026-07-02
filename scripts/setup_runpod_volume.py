@@ -198,9 +198,10 @@ def _get_pub_key(ws: Path) -> str:
 
 def _get_ssh_client(ws: Path, ssh_info: dict) -> object:
     import paramiko
+    from tar_lab.ssh_hostkeys import apply_tofu_policy
     priv = ws / "tar_state" / "runpod_ssh" / "id_ed25519"
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    apply_tofu_policy(client, ws / "tar_state" / "runpod_known_hosts")
     client.connect(
         hostname=ssh_info["host"],
         port=ssh_info["port"],

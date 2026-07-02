@@ -1758,9 +1758,12 @@ app.config["JSON_SORT_KEYS"] = False
 _UNGUARDED_PREFIXES = ("/api/health", "/api/ping", "/favicon")
 
 
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
 @app.before_request
 def _check_auth() -> None:
-    """Token gate for non-localhost requests.
+    """Token gate for non-localhost requests + CSRF gate for mutating ones.
 
     Behaviour:
     - TAR_DASHBOARD_TOKEN set: require X-TAR-Token header or ?token= for any
@@ -1768,16 +1771,23 @@ def _check_auth() -> None:
       always allowed regardless of token config.
     - TAR_DASHBOARD_TOKEN NOT set: allow localhost silently; log a one-time
       warning for non-localhost requests and reject them with 403.
+    - CSRF: every mutating request (POST/PUT/PATCH/DELETE) — including from
+      localhost — must carry the custom X-TAR-Control header. A cross-origin
+      page in the operator's browser cannot attach a custom header without a
+      CORS preflight this app never approves, which closes the
+      malicious-website -> localhost control-plane hole (incl. DNS rebinding).
     Static resources and /api/health are never gated.
     """
     path = request.path
     for pfx in _UNGUARDED_PREFIXES:
         if path.startswith(pfx):
             return None
+    if request.method in _MUTATING_METHODS and not request.headers.get("X-TAR-Control"):
+        abort(403, description="Missing X-TAR-Control header (CSRF guard).")
     remote = request.remote_addr or ""
     is_local = remote in ("127.0.0.1", "::1", "localhost")
     if is_local:
-        return None  # always allow localhost
+        return None  # always allow localhost (reads)
     token_cfg = os.environ.get("TAR_DASHBOARD_TOKEN", "").strip()
     if not token_cfg:
         import logging
@@ -7160,7 +7170,7 @@ async function submitInject(){
   try{
     const res=await fetch('/api/experiments/inject',{
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json','X-TAR-Control':'1'},
       body:JSON.stringify(payload),
     });
     const data=await res.json();
@@ -7985,7 +7995,7 @@ function returnPaperToAuthor(projectId){
   if(reason===null)return;
   fetch(`/api/paper/return-to-author/${encodeURIComponent(projectId)}`,{
     method:'POST',
-    headers:{'Content-Type':'application/json'},
+    headers:{'Content-Type':'application/json','X-TAR-Control':'1'},
     body:JSON.stringify({reason})
   })
   .then(r=>r.json().then(data=>({ok:r.ok,data})))
@@ -8234,7 +8244,7 @@ async function reviewDecision(reviewId, decision, buildManifest=false){
   const human_notes=needsNote?(window.prompt('Optional note for this review action:','')||''):'';
   const res=await fetch(`/api/human_review/decision/${encodeURIComponent(reviewId)}`,{
     method:'POST',
-    headers:{'Content-Type':'application/json'},
+    headers:{'Content-Type':'application/json','X-TAR-Control':'1'},
     body:JSON.stringify({decision,human_notes,build_manifest_authorised:buildManifest})
   });
   if(!res.ok){
@@ -8249,7 +8259,7 @@ async function answerHumanReviewQuestion(questionId, answer){
   const answer_notes=window.prompt('Optional note for this answer:','')||'';
   const res=await fetch(`/api/human_review/question/${encodeURIComponent(questionId)}/answer`,{
     method:'POST',
-    headers:{'Content-Type':'application/json'},
+    headers:{'Content-Type':'application/json','X-TAR-Control':'1'},
     body:JSON.stringify({answer,answer_notes})
   });
   if(!res.ok){
@@ -8385,4 +8395,8 @@ if __name__ == "__main__":
     print(f"  Workspace : {_WS}")
     print(f"  Open      : http://localhost:{PORT}")
     print(f"{'='*60}\n")
-    app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
+    # Bind localhost by default — the control plane must not face the network
+    # unsolicited. Set TAR_DASHBOARD_BIND=0.0.0.0 (with TAR_DASHBOARD_TOKEN)
+    # for deliberate LAN exposure.
+    bind = os.environ.get("TAR_DASHBOARD_BIND", "127.0.0.1").strip() or "127.0.0.1"
+    app.run(host=bind, port=PORT, debug=False, threaded=True)
