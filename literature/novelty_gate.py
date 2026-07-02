@@ -75,11 +75,10 @@ def _keyword_similarity(text_a: str, text_b: str) -> float:
 def _try_load_sentence_transformer():
     """Load sentence-transformers if available; return None otherwise.
 
-    The model is resolved from TAR_NOVELTY_EMBEDDER_MODEL (default allenai-specter,
-    which is purpose-built for scientific papers). Set it to the VectorVault's
-    bge-small model to unify corpus novelty on the SAME space the corpus backfill
-    writes — otherwise a query embedding and the stored embeddings live in
-    different spaces and cosine similarity silently degrades to 0.0.
+    The model is resolved from TAR_NOVELTY_EMBEDDER_MODEL (default bge-small —
+    the space the corpus backfill writes; see literature.corpus_embedder).
+    A query embedding must live in the SAME space as the stored embeddings or
+    cosine similarity silently degrades to 0.0.
     local_files_only=True prevents silent network calls; set
     TAR_ALLOW_MODEL_DOWNLOAD=1 for the one-time initial download.
     """
@@ -89,7 +88,11 @@ def _try_load_sentence_transformer():
         from literature.corpus_embedder import novelty_embedder_model
         allow_download = os.environ.get("TAR_ALLOW_MODEL_DOWNLOAD", "").strip() == "1"
         model_name = novelty_embedder_model()
-        return SentenceTransformer(model_name, local_files_only=not allow_download)
+        # device="cpu" (mirrors the VectorVault's SemanticEmbedder): planning-time
+        # novelty is a few queries per director cycle — trivially fine on CPU.
+        # Without this, sentence-transformers auto-selects CUDA and the resident
+        # model eats ~1.5GB of the 4GB GTX 1650 that training runs need.
+        return SentenceTransformer(model_name, local_files_only=not allow_download, device="cpu")
     except Exception:
         return None
 
