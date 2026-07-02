@@ -332,7 +332,10 @@ class TARScheduler:
             from tar_autonomy_ramp import is_full_autonomy as _is_full_autonomy
             _ramp_full = _is_full_autonomy(self.workspace)
         except Exception:
-            _ramp_full = True
+            # FAIL CLOSED: if the ramp module cannot even be imported we cannot
+            # know the authorization state — hold director-generated experiments
+            # (phase2 confirmatory runs are unaffected by this gate).
+            _ramp_full = False
 
         for spec in sorted(pending_specs, key=lambda rec: self._priority_key(rec, experiment_ranks, frontier_ranks)):
             exp_vram = _spec_vram_budget(spec)

@@ -15,10 +15,14 @@ Stages:
   hold             - a safety gate failed; held with a reason for human attention
 
 Design notes:
-- OPT-IN: nothing is gated unless init_ramp() has been called (ramp 'enabled'). When no
-  ramp is configured, is_full_autonomy() returns True so existing behaviour is unchanged.
+- OPT-IN for fresh installs: when NO ramp was ever configured (no state file, no
+  configured-sentinel), is_full_autonomy() returns True so existing behaviour is
+  unchanged. Once a ramp HAS been configured, missing/corrupt state FAILS CLOSED:
+  deleting autonomy_ramp.json can never ungate autonomy.
 - The controller NEVER promotes itself past awaiting_confirm without human confirmation
-  (confirm_promotion() or the autonomy_ramp_confirm.flag).
+  (confirm_promotion() or the autonomy_ramp_confirm.flag). When reauth_required_at is
+  set, confirmations recorded BEFORE that checkpoint are stale and do not count — the
+  human must re-affirm (fresh confirm_promotion() / fresh flag).
 - evaluate_ramp() is cheap during confirmatory (only a queue/archive scan); the heavier
   health gate runs only once the confirmatory runs are all terminal.
 """
@@ -30,6 +34,11 @@ from pathlib import Path
 
 RAMP_FILE = "autonomy_ramp.json"
 CONFIRM_FLAG = "autonomy_ramp_confirm.flag"
+# Durable sentinel: written the first time a ramp is configured. Its presence
+# makes a MISSING ramp file fail CLOSED (deleting the state file must never
+# ungate autonomy). Without it, a fresh install keeps the documented opt-in
+# behaviour (no ramp configured -> ungated).
+CONFIGURED_SENTINEL = "autonomy_ramp_configured.flag"
 
 # The pre-registered Phase 2/3 confirmatory runs that must complete before full autonomy.
 # Identified by orchestrator runner_key (the reliable manual-vs-generated discriminator).
@@ -52,6 +61,19 @@ STAGE_HOLD = "hold"
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso(value) -> "datetime | None":
+    """Parse an ISO-8601 timestamp; None for empty/invalid. Naive -> UTC."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip())
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _path(workspace, name: str) -> Path:
@@ -90,6 +112,10 @@ def init_ramp(workspace, runner_keys=None) -> dict:
         "created_at": _now(),
     }
     save_ramp_state(workspace, state)
+    try:
+        _path(workspace, CONFIGURED_SENTINEL).write_text(_now(), encoding="utf-8")
+    except Exception:
+        pass
     return state
 
 
@@ -108,12 +134,26 @@ def ramp_active(workspace) -> bool:
 def is_full_autonomy(workspace) -> bool:
     """Whether director-generated experiments are allowed to run.
 
-    If no ramp is configured/enabled, returns True (the ramp does not gate anything —
-    opt-in, backwards compatible). If a ramp is active, only the full_autonomy stage
-    permits generated experiments.
+    FAIL-CLOSED semantics:
+    - Ramp file present and parseable: only stage==full_autonomy permits
+      generated experiments; enabled=False is the explicit human opt-out
+      (disable_ramp) and ungated.
+    - Ramp file present but CORRUPT: False. Corruption must never ungate.
+    - Ramp file MISSING but the configured-sentinel exists: False. Deleting
+      the state file must never ungate a previously configured ramp.
+    - Never configured (no file, no sentinel): True — the documented opt-in,
+      backwards-compatible default for fresh installs.
     """
-    st = load_ramp_state(workspace)
-    if not st or not st.get("enabled"):
+    p = _path(workspace, RAMP_FILE)
+    if not p.exists():
+        return not _path(workspace, CONFIGURED_SENTINEL).exists()
+    try:
+        st = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(st, dict):
+        return False
+    if not st.get("enabled"):
         return True
     return st.get("stage") == STAGE_FULL_AUTONOMY
 
@@ -242,27 +282,66 @@ def evaluate_ramp(workspace) -> dict | None:
         return st
 
     # All gates pass. Promote ONLY with explicit human confirmation.
-    human_ok = bool(st.get("confirmed_by_human")) or _path(workspace, CONFIRM_FLAG).exists()
+    # REAUTH GUARD: when reauth_required_at is set, any confirmation recorded
+    # BEFORE that checkpoint is stale and does not count — the capability set
+    # changed and the human must re-affirm against it. Enforced HERE, at the
+    # single promotion choke point, so every confirm path (CLI, flag file,
+    # dashboard POST, operator) inherits it.
+    reauth_at = _parse_iso(st.get("reauth_required_at"))
+    confirmed_at = _parse_iso(st.get("confirmed_at"))
+    flag_path = _path(workspace, CONFIRM_FLAG)
+    flag_at = None
+    if flag_path.exists():
+        flag_at = _parse_iso(flag_path.read_text(encoding="utf-8").strip()) if flag_path.stat().st_size else None
+        if flag_at is None:
+            try:
+                flag_at = datetime.fromtimestamp(flag_path.stat().st_mtime, tz=timezone.utc)
+            except OSError:
+                flag_at = None
+
+    if reauth_at is not None:
+        human_ok = bool(
+            (confirmed_at is not None and confirmed_at >= reauth_at)
+            or (flag_at is not None and flag_at >= reauth_at)
+        )
+    else:
+        human_ok = bool(st.get("confirmed_by_human")) or flag_path.exists()
+
     if human_ok:
         st["stage"] = STAGE_FULL_AUTONOMY
         st["promoted_at"] = _now()
         st["confirmed_by_human"] = True
         st["blocked_reason"] = ""
+        if reauth_at is not None:
+            st["reauth_cleared_at"] = _now()
+            st["reauth_required_at"] = ""
     else:
         st["stage"] = STAGE_AWAITING_CONFIRM
+        _reauth_note = str(st.get("reauth_note", "") or "")
         st["blocked_reason"] = (
             "All confirmatory runs complete and safety gates passed. "
             "AWAITING HUMAN FINAL CONFIRMATION to enable full autonomy — run "
             "`python tar_autonomy_ramp.py confirm` or create tar_state/autonomy_ramp_confirm.flag."
+            + (
+                " RE-AUTHORIZATION REQUIRED: a prior confirmation predates the reauth "
+                f"checkpoint ({st.get('reauth_required_at')}). {_reauth_note}"
+                if reauth_at is not None else ""
+            )
         )
     save_ramp_state(workspace, st)
     return st
 
 
 def confirm_promotion(workspace) -> dict:
-    """Human action: give the final go. Only effective once the gates have passed."""
+    """Human action: give the final go. Only effective once the gates have passed.
+
+    Records confirmed_at so the reauth guard in evaluate_ramp can distinguish a
+    FRESH confirmation (valid — the human re-affirmed against the current
+    capability set) from a stale one predating reauth_required_at.
+    """
     st = load_ramp_state(workspace) or init_ramp(workspace)
     st["confirmed_by_human"] = True
+    st["confirmed_at"] = _now()
     save_ramp_state(workspace, st)
     try:
         _path(workspace, CONFIRM_FLAG).write_text(_now(), encoding="utf-8")
