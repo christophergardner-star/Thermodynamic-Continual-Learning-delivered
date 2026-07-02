@@ -1,2 +1,2 @@
 $ErrorActionPreference = "Stop"
-throw "scripts/install_tar_watchdog_startup.ps1 has been retired and moved to legacy_quarantine/scripts/install_tar_watchdog_startup.ps1. Automatic reboot persistence for execution services is no longer allowed."
+throw "RETIRED. This script auto-started EXECUTION services on boot (unsafe). Use scripts/install_tar_platform_task.ps1 instead: it supervises only the watchdog (resurrecting it after a crash/reboot) while execution stays human-gated by the fail-closed autonomy ramp + RAIL-3 manifest. See scripts/tar_platform_supervisor.py."
