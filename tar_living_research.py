@@ -1527,6 +1527,34 @@ def _build_director_followup_specs(
     return specs
 
 
+def _register_spec_proposal(workspace: Path, spec: Any) -> None:
+    """Start the 24h veto/approval clock for a not-yet-approved director spec.
+
+    Fixes the registration deadlock: proposals used to be registered only by
+    the scheduler for specs already IN the queue, but a spec only enters the
+    queue once approved — so a genuinely-new proposal could never start its
+    veto clock and could never run, even with the ramp released.
+
+    Registration is idempotent (an existing entry's clock is never reset) and
+    approval does NOT execute anything: the scheduler's phase-2-precedence and
+    autonomy-ramp gates still hold every director experiment until the ramp is
+    human-confirmed. This only makes the proposal visible in the Human Review
+    panel and lets the designed veto/approve pipeline actually begin.
+    """
+    try:
+        from tar_lab.human_review import register_director_proposal
+        register_director_proposal(
+            workspace,
+            experiment_id=spec.id,
+            name=getattr(spec, "name", "") or getattr(spec, "hypothesis_name", ""),
+            frontier_id=getattr(spec, "frontier_problem_id", "") or "",
+            priority=int(getattr(spec, "priority", 50) or 50),
+            context_why=getattr(spec, "description", "") or getattr(spec, "context", "") or "",
+        )
+    except Exception:
+        pass  # registration failure must never break the seeding cycle
+
+
 def _ensure_director_seeded_queue(
     workspace: Path,
     orch: ExperimentOrchestrator,
@@ -1587,9 +1615,12 @@ def _ensure_director_seeded_queue(
             break
         if spec.id in existing_ids:
             continue
-        if spec.id not in approved_ids:
-            continue
         if active_frontier_ids and spec.frontier_problem_id and spec.frontier_problem_id not in active_frontier_ids:
+            continue
+        if spec.id not in approved_ids:
+            # Deadlock fix: start the veto/approval clock for in-scope,
+            # not-yet-approved proposals instead of silently skipping them.
+            _register_spec_proposal(workspace, spec)
             continue
         orch.submit(spec)
         submitted_ids.append(spec.id)
@@ -1618,6 +1649,10 @@ def _ensure_director_seeded_queue(
         if _current_active + len(submitted_ids) >= _MAX_QUEUED_EXPERIMENTS:
             break
         if spec.id not in approved_ids:
+            # Deadlock fix: start the veto/approval clock (idempotent) so the
+            # designed pipeline (propose -> veto window -> approve -> submit ->
+            # held-at-ramp) can actually begin for new follow-up proposals.
+            _register_spec_proposal(workspace, spec)
             continue
         # Preregister director followup BEFORE it enters the queue
         _append_director_prereg_entry(workspace, spec)
