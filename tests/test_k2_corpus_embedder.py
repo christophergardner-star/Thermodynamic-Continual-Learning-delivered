@@ -1,9 +1,9 @@
 """Workstream A1 — embed the full corpus + unify NoveltyGate on one model.
 
 Guarantees:
-  (A) env resolution is inert by default: novelty_embedder_model() == allenai-specter
-      unless TAR_NOVELTY_EMBEDDER_MODEL is set (then both the gate and the backfill
-      use that one model).
+  (A) env resolution: novelty_embedder_model() defaults to bge-small (the space the
+      corpus is actually embedded in) and honors TAR_NOVELTY_EMBEDDER_MODEL as an
+      override (then both the gate and the backfill use that one model).
   (B) embed_corpus re-embeds the whole corpus into a single coherent space,
       OVERWRITING stale embeddings from a different model (the dim-mismatch footgun).
   (C) only_missing fills just the NULLs; limit is respected.
@@ -62,11 +62,14 @@ def _graph(tmp_path) -> LiteratureKnowledgeGraph:
     return g
 
 
-# ---- (A) env resolution is inert by default ------------------------------------
+# ---- (A) env resolution defaults to the corpus's own space (bge-small) ---------
 
-def test_env_resolution_default_unchanged(monkeypatch):
+def test_env_resolution_default_is_corpus_space(monkeypatch):
+    # The corpus was fully re-embedded into bge-small (384-dim); allenai-specter
+    # (768-dim) silently scored cosine 0.0 against it, so bge-small is the correct
+    # default. TAR_NOVELTY_EMBEDDER_MODEL still overrides.
     monkeypatch.delenv(ce.NOVELTY_EMBEDDER_ENV, raising=False)
-    assert ce.novelty_embedder_model() == ce.LEGACY_NOVELTY_MODEL == "allenai-specter"
+    assert ce.novelty_embedder_model() == ce.LEGACY_NOVELTY_MODEL == "BAAI/bge-small-en-v1.5"
     assert ce.novelty_embedder_configured() is False
 
 

@@ -644,12 +644,15 @@ def quarantine_unregistered_results(
       tar_state/experiments/*/result.json
     os.walk is explicitly not used.
 
-    Phase-A two-tier trust model
-    ----------------------------
+    Two-tier trust model
+    --------------------
     Tier 1 — Index-registered: experiment directory name matches a ``run_id``
-        or ``logical_name`` field in any index_records entry.  Accepted without
-        env_snapshot_hash verification.  Phase B will tighten this to require
-        hash verification for entries that carry an env_snapshot_hash.
+        or ``logical_name`` field in any index_records entry.  Phase B (now
+        active): when the matching index entry carries an ``env_snapshot_hash``
+        and the result has a ``result_env.json`` sibling, the sibling's SHA-256
+        is re-verified against the recorded hash; a MISMATCH is tamper-suspect
+        and quarantined instead of trusted.  Entries without a recorded hash
+        keep Phase-A acceptance (backward compatible).
 
     Tier 2 — Archive-complete: experiment appears in experiment_archive.json
         with status ``"complete"`` but has no matching index entry.  These are
@@ -672,14 +675,21 @@ def quarantine_unregistered_results(
         return [], True
 
     # Tier 1: names drawn from index records — accept run_id OR logical_name.
+    # Also map name -> recorded env_snapshot_hash for Phase-B verification.
     index_names: set[str] = set()
+    index_hash_by_name: dict[str, str] = {}
     for record in index_records:
         r_id = record.get("run_id")
         l_name = record.get("logical_name")
+        rec_hash = record.get("env_snapshot_hash")
         if r_id:
             index_names.add(str(r_id))
+            if rec_hash:
+                index_hash_by_name[str(r_id)] = str(rec_hash)
         if l_name:
             index_names.add(str(l_name))
+            if rec_hash:
+                index_hash_by_name.setdefault(str(l_name), str(rec_hash))
 
     # Tier 2: completed IDs from the autonomous experiment archive.
     archive_complete: set[str] = set()
@@ -697,15 +707,26 @@ def quarantine_unregistered_results(
     quarantine_set: list[str] = []
     for result_path in experiments_dir.glob("*/result.json"):
         run_id = result_path.parent.name
+        env_path = result_path.with_name("result_env.json")
 
         if run_id in index_names:        # tier 1
+            # Phase B: if the index entry recorded an env_snapshot_hash, the
+            # on-disk env snapshot must still hash to it. A mismatch means the
+            # env snapshot changed after registration (tamper-suspect) — do not
+            # trust it. Entries with no recorded hash keep Phase-A acceptance.
+            rec_hash = index_hash_by_name.get(run_id)
+            if rec_hash and env_path.exists():
+                try:
+                    if _compute_env_hash(env_path) != rec_hash:
+                        quarantine_set.append(run_id)
+                except OSError:
+                    quarantine_set.append(run_id)  # unreadable env for a hashed record
             continue
         if run_id in archive_complete:   # tier 2
             continue
 
         # Neither tier matched.  Only flag if an env snapshot is present —
         # env-capable but unregistered is the suspicious case.
-        env_path = result_path.with_name("result_env.json")
         if env_path.exists():
             quarantine_set.append(run_id)
 
