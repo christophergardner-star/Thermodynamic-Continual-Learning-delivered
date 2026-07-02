@@ -256,7 +256,9 @@ def _pull_results_via_sftp(
     from tar_lab.ssh_hostkeys import apply_tofu_policy
 
     client = paramiko.SSHClient()
-    apply_tofu_policy(client)
+    # Pin to the SAME workspace known_hosts as the executor/setup call sites so a
+    # pod host verified on the training connection is cross-verified on the pull.
+    apply_tofu_policy(client, Path(workspace) / "tar_state" / "runpod_known_hosts")
     try:
         client.connect(
             hostname=ssh_info["host"],

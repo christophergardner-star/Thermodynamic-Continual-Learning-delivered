@@ -1465,6 +1465,25 @@ function toast(msg, type='ok') {
   toast._t = setTimeout(() => t.className = '', 3200);
 }
 
+/* CSRF: the server requires the custom X-TAR-Control header on every mutating
+   request (POST/PUT/PATCH/DELETE). Inject it globally here so ALL fetch call
+   sites — the api() helper AND the many direct fetch(...) POSTs — are covered,
+   and no future call site can forget it. A cross-origin page cannot attach a
+   custom header without a CORS preflight the server never grants. */
+(function () {
+  if (window.__tarFetchPatched) return;
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    init = init || {};
+    const method = (init.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD') {
+      init.headers = Object.assign({}, init.headers || {}, { 'X-TAR-Control': '1' });
+    }
+    return _origFetch(input, init);
+  };
+  window.__tarFetchPatched = true;
+})();
+
 async function api(path, opts) {
   const r = await fetch(path, opts);
   if (!r.ok) throw new Error(r.status + ' ' + r.statusText);

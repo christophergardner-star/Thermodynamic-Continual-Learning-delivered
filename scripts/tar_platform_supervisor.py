@@ -29,6 +29,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,7 +37,12 @@ _REPO = Path(__file__).resolve().parent.parent
 _STATE = _REPO / "tar_state"
 _AUTOSTART_FLAG = _STATE / "watchdog_autostart.enabled"
 _LOCK = _STATE / "watchdog.lock.json"
+_WATCHDOG_STATE = _STATE / "watchdog_state.json"
 _LOG = _STATE / "logs" / "supervisor.log"
+# A live watchdog rewrites watchdog_state.json every poll (~15s). If the lock
+# PID looks alive but the state file is older than this, the watchdog is hung or
+# the PID was reused by an unrelated process — treat it as dead and resurrect.
+_STATE_STALE_S = 300.0
 
 
 def _log(msg: str) -> None:
@@ -67,11 +73,25 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _watchdog_alive() -> bool:
+    """Alive = lock PID running AND watchdog_state.json fresh.
+
+    The freshness gate defends against PID reuse (Windows recycles PIDs): a
+    stale lock PID that now belongs to an unrelated process would read as
+    'alive' on a bare PID check, so the supervisor would never resurrect a
+    truly-dead platform — defeating its purpose. A live watchdog keeps
+    watchdog_state.json fresh, so a stale state file means dead/hung even if the
+    PID resolves."""
     try:
         lock = json.loads(_LOCK.read_text(encoding="utf-8"))
-        return _pid_alive(int(lock.get("pid") or 0))
     except Exception:
         return False
+    if not _pid_alive(int(lock.get("pid") or 0)):
+        return False
+    try:
+        age = time.time() - _WATCHDOG_STATE.stat().st_mtime
+    except OSError:
+        return False  # no state file -> not a healthy running watchdog
+    return age <= _STATE_STALE_S
 
 
 def _resolve_python() -> str:

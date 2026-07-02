@@ -61,6 +61,15 @@ def test_corrupt_file_fails_closed(tmp_path):
     assert ramp.is_full_autonomy(ws) is False
 
 
+def test_malformed_dict_without_enabled_key_fails_closed(tmp_path):
+    ws = _ws(tmp_path)
+    ramp.init_ramp(ws)
+    # A parseable dict that never went through init_ramp/disable_ramp (no
+    # 'enabled' key) must NOT be read as an opt-out — fail closed.
+    _ramp_path(ws).write_text(json.dumps({"stage": "full_autonomy"}), encoding="utf-8")
+    assert ramp.is_full_autonomy(ws) is False
+
+
 def test_explicit_disable_is_the_only_ungated_path(tmp_path):
     ws = _ws(tmp_path)
     ramp.init_ramp(ws)
@@ -107,6 +116,24 @@ def test_fresh_confirm_clears_reauth_and_promotes(tmp_path):
     assert out["reauth_required_at"] == ""
     assert out["reauth_cleared_at"]
     assert ramp.is_full_autonomy(ws) is True
+
+
+def test_touched_confirm_flag_does_not_bypass_reauth(tmp_path):
+    # A contentless confirm flag (e.g. created by a stray filesystem touch)
+    # must NOT satisfy a reauth checkpoint — only a timestamped confirmation at/
+    # after the checkpoint counts. Guards against the mtime-spoof vector.
+    ws = _ws(tmp_path)
+    st = ramp.init_ramp(ws, runner_keys=["rk1"])
+    _write_terminal_queue(ws, ["rk1"])
+    st["reauth_required_at"] = (
+        datetime.now(timezone.utc) - timedelta(days=1)
+    ).isoformat()
+    ramp.save_ramp_state(ws, st)
+    # Empty flag file "touched" now (fresh mtime, but no content timestamp).
+    (ws / "tar_state" / ramp.CONFIRM_FLAG).write_text("", encoding="utf-8")
+    out = _evaluate_with_pass_gates(ws)
+    assert out["stage"] == ramp.STAGE_AWAITING_CONFIRM
+    assert ramp.is_full_autonomy(ws) is False
 
 
 def test_legacy_flow_without_reauth_still_promotes(tmp_path):

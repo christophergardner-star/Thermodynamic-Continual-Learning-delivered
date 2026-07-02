@@ -6230,6 +6230,7 @@ def api_phase2_log(key: str):
 
 
 _HEALTH_MAX_AGE_S = 600.0  # auto-regenerate when the cached report is older than this
+_HEALTH_REGEN_LOCK = threading.Lock()  # dedup concurrent regen (endpoint is un-gated)
 
 
 @app.route("/api/health")
@@ -6253,7 +6254,11 @@ def api_health():
         or age_s is None
         or age_s > _HEALTH_MAX_AGE_S
     )
-    if needs_refresh:
+    # Only ONE regeneration at a time: this endpoint is un-gated (no token/CSRF),
+    # so without a lock a burst of ?fresh=true (or many stale hits) would spawn a
+    # subprocess per request. If another regen holds the lock, serve the current
+    # (possibly stale, but freshness-disclosed) report instead of piling on.
+    if needs_refresh and _HEALTH_REGEN_LOCK.acquire(blocking=False):
         try:
             import subprocess, sys as _sys
             subprocess.run(
@@ -6264,6 +6269,8 @@ def api_health():
                 age_s = max(0.0, time.time() - report_path.stat().st_mtime)
         except Exception:
             pass
+        finally:
+            _HEALTH_REGEN_LOCK.release()
     data = _jload(report_path) or {"error": "Not generated yet. Hit /api/health?fresh=true"}
     if isinstance(data, dict):
         data["report_age_s"] = round(age_s, 1) if age_s is not None else None

@@ -106,10 +106,14 @@ def match_inventory_record(
         alias = "hpc_autonomous_" + key[3:].replace("-", "_")
         if alias in verdicts:
             return verdicts[alias]
-    # Prefix match (phaseNN -> phaseNN_*): pick the highest-ranked verdict.
+    # Prefix match (phaseNN -> phaseNN_*): a phase can hold several sub-comparisons
+    # (e.g. phase10_*_tcl_vs_sgd PUBLICATION_ALLOWED and phase10_*_tcl_vs_ewc
+    # DIRECTIONAL). We cannot tell which sub-comparison a public card's stats
+    # belong to, so pick the LOWEST-ranked verdict — never attach a stronger
+    # verdict than the weakest matching record justifies (anti-over-claim).
     matches = [rec for exp_id, rec in verdicts.items() if exp_id.startswith(key + "_") or exp_id == key]
     if not matches and key.startswith("phase"):
         matches = [rec for exp_id, rec in verdicts.items() if exp_id.startswith(key)]
     if not matches:
         return None
-    return max(matches, key=lambda rec: VERDICT_RANK.get(rec.get("verdict", ""), -1))
+    return min(matches, key=lambda rec: VERDICT_RANK.get(rec.get("verdict", ""), 99))

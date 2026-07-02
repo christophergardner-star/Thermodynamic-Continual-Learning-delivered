@@ -136,9 +136,11 @@ def is_full_autonomy(workspace) -> bool:
 
     FAIL-CLOSED semantics:
     - Ramp file present and parseable: only stage==full_autonomy permits
-      generated experiments; enabled=False is the explicit human opt-out
-      (disable_ramp) and ungated.
-    - Ramp file present but CORRUPT: False. Corruption must never ungate.
+      generated experiments; enabled==False (key present) is the explicit human
+      opt-out (disable_ramp) and ungated.
+    - Ramp file present but CORRUPT, non-dict, or MALFORMED (missing the
+      'enabled' key): False. Only an explicit enabled==False ungates; a dict
+      that never went through init_ramp/disable_ramp is not a valid opt-out.
     - Ramp file MISSING but the configured-sentinel exists: False. Deleting
       the state file must never ungate a previously configured ramp.
     - Never configured (no file, no sentinel): True — the documented opt-in,
@@ -153,8 +155,10 @@ def is_full_autonomy(workspace) -> bool:
         return False
     if not isinstance(st, dict):
         return False
+    if "enabled" not in st:
+        return False  # malformed ramp (no explicit enabled flag) -> fail closed
     if not st.get("enabled"):
-        return True
+        return True   # explicit human opt-out (disable_ramp)
     return st.get("stage") == STAGE_FULL_AUTONOMY
 
 
@@ -290,21 +294,27 @@ def evaluate_ramp(workspace) -> dict | None:
     reauth_at = _parse_iso(st.get("reauth_required_at"))
     confirmed_at = _parse_iso(st.get("confirmed_at"))
     flag_path = _path(workspace, CONFIRM_FLAG)
-    flag_at = None
+    # A confirm flag counts as a timestamped confirmation ONLY via its CONTENT
+    # (confirm_promotion writes _now() into it). The file MTIME is deliberately
+    # NOT trusted for the reauth check: a stray filesystem touch (backup, sync,
+    # AV, editor) could otherwise forge a "fresh" confirmation and auto-promote.
+    flag_content_at = None
     if flag_path.exists():
-        flag_at = _parse_iso(flag_path.read_text(encoding="utf-8").strip()) if flag_path.stat().st_size else None
-        if flag_at is None:
-            try:
-                flag_at = datetime.fromtimestamp(flag_path.stat().st_mtime, tz=timezone.utc)
-            except OSError:
-                flag_at = None
+        try:
+            flag_content_at = _parse_iso(flag_path.read_text(encoding="utf-8").strip())
+        except OSError:
+            flag_content_at = None
 
     if reauth_at is not None:
+        # Re-authorization required: only a FRESH, explicitly-timestamped human
+        # confirmation at/after the checkpoint promotes. mtime is not accepted.
         human_ok = bool(
             (confirmed_at is not None and confirmed_at >= reauth_at)
-            or (flag_at is not None and flag_at >= reauth_at)
+            or (flag_content_at is not None and flag_content_at >= reauth_at)
         )
     else:
+        # No reauth checkpoint: legacy behaviour — an explicit human confirm
+        # (confirmed_by_human) or the presence of the confirm flag promotes.
         human_ok = bool(st.get("confirmed_by_human")) or flag_path.exists()
 
     if human_ok:

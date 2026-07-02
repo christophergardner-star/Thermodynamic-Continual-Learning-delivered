@@ -2238,9 +2238,12 @@ def run_portfolio_daemon(
         from tar_lab.memory import MemoryIndexer, VectorVault
         _mem_vault = VectorVault(str(workspace))
         memory_indexer = MemoryIndexer(_mem_vault.store, _mem_vault)
-        memory_indexer.sync_once()   # drain the pending backlog once, synchronously
-        memory_indexer.start()       # then keep it synced in the background
-        _log(workspace, "memory indexer started (recall store live-synced)")
+        # start() only — its background worker calls sync_once() on its first
+        # tick, so the backlog drains OFF the boot path. A synchronous drain here
+        # can re-embed the whole memory corpus before the daemon heartbeat begins,
+        # risking a boot that exceeds the watchdog's stale_after_s and a restart loop.
+        memory_indexer.start()
+        _log(workspace, "memory indexer started (recall store live-synced in background)")
     except Exception as _mem_exc:
         _log(workspace, f"memory indexer start skipped (non-fatal): {_mem_exc}")
         memory_indexer = None

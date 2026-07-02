@@ -175,7 +175,15 @@ def _eval_phase10(data: dict) -> dict:
         n_seeds = data.get("n_seeds", data.get("seeds_completed", 0)) or len(data.get("seeds", []) or [])
         p_ewc = tcl_vs_ewc.get("p_value", tcl_vs_ewc.get("p_val", 1.0))
 
-        outcome_b_met = (p_sgd < 0.05) and (d_sgd > 0.5) and (n_seeds >= 5)
+        # Direction guard (mirror phase11/12): TCL is "better" only when its
+        # forgetting delta vs SGD is negative. Without this, a significant
+        # WRONG-direction result (TCL worse) would be reported as OUTCOME_B_MET
+        # "TCL significantly outperforms SGD" — a false positive. When no delta
+        # is present, don't block (legacy comparisons schema had none).
+        delta_sgd = tcl_vs_sgd.get("mean_delta")
+        tcl_better = delta_sgd is None or float(delta_sgd) < 0
+
+        outcome_b_met = (p_sgd < 0.05) and (d_sgd > 0.5) and (n_seeds >= 5) and tcl_better
 
         if outcome_b_met:
             outcome = "OUTCOME_B_MET"
@@ -185,7 +193,7 @@ def _eval_phase10(data: dict) -> dict:
                 f"(p={p_sgd:.3f}, d={d_sgd:.2f}) across all {n_seeds} seeds."
             )
             recommendation = "Proceed to scale-up (CIFAR-100). Core result is publishable."
-        elif p_sgd < 0.05:
+        elif p_sgd < 0.05 and tcl_better:
             outcome = "PARTIAL_B"
             significance = "MEDIUM"
             key_finding = (
