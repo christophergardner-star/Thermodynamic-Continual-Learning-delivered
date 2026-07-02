@@ -646,13 +646,25 @@ def _result_evidence_payload(path: Path) -> dict[str, Any] | None:
             p_val = p_val if p_val is not None else ewc.get("p_val") or data.get("p_value_vs_strong_baseline")
             cohens_d = cohens_d if cohens_d is not None else ewc.get("cohens_d") or data.get("effect_size_vs_strong_baseline")
 
+    # TRUTH-LOCK: "strong" requires multiple-comparison-CORRECTED significance
+    # (explicit corrected flag or corrected p). A raw p<0.05 or a self-reported
+    # "BREAKTHROUGH" label is at most "moderate" (directional, uncorrected).
     evidence_strength = "weak"
     try:
-        if verdict == "BREAKTHROUGH" or (
-            mean_delta is not None and p_val is not None and float(mean_delta) < 0 and float(p_val) < 0.05
-        ):
+        corrected_sig = bool(
+            stats.get("bonferroni_significant")
+            or stats.get("holm_significant")
+            or (stats.get("p_val_corrected") is not None and float(stats["p_val_corrected"]) < 0.05)
+        )
+        directional = (
+            mean_delta is not None and p_val is not None
+            and float(mean_delta) < 0 and float(p_val) < 0.05
+        )
+        if corrected_sig and (mean_delta is None or float(mean_delta) < 0):
             evidence_strength = "strong"
-        elif verdict == "DIRECTIONAL" or (mean_delta is not None and float(mean_delta) < 0):
+        elif directional or verdict in {"BREAKTHROUGH", "DIRECTIONAL"} or (
+            mean_delta is not None and float(mean_delta) < 0
+        ):
             evidence_strength = "moderate"
     except Exception:
         evidence_strength = "moderate" if verdict in {"BREAKTHROUGH", "DIRECTIONAL"} else "weak"
@@ -4303,37 +4315,18 @@ def api_website_sync_research():
 
         status_map = {"pursue_now": "active", "pursue_next": "queued", "investigate": "investigating"}
 
-        # Build honest evidence cap from honest_evidence_inventory.json
-        # Only values explicitly recorded in the inventory are trusted.
-        # Frontier verdict map: highest honest verdict per frontier_id
-        _VERDICT_RANK = {"PUBLICATION_ALLOWED": 3, "DIRECTIONAL": 2, "EXPLORATION_GRADE": 1, "FALSIFIED": 0}
-        _VERDICT_TO_STRENGTH = {
-            "PUBLICATION_ALLOWED": "strong",
-            "DIRECTIONAL": "directional",
-            "EXPLORATION_GRADE": "weak",
-            "FALSIFIED": "none",
-        }
-        inv = _jload(_WS / "tar_state" / "honest_evidence_inventory.json") or {}
-        inv_results = inv.get("results", []) if isinstance(inv, dict) else []
-        frontier_best_verdict: dict[str, str] = {}
-        for rec in inv_results:
-            if not isinstance(rec, dict):
-                continue
-            fid = str(rec.get("frontier_problem_id", "") or rec.get("experiment_id", "") or "")
-            verdict = str(rec.get("honest_verdict", "") or "").upper()
-            if not fid or verdict not in _VERDICT_RANK:
-                continue
-            prev = frontier_best_verdict.get(fid, "")
-            if not prev or _VERDICT_RANK.get(verdict, -1) > _VERDICT_RANK.get(prev, -1):
-                frontier_best_verdict[fid] = verdict
+        # Honest evidence cap: shared truth-lock mapping (tar_lab.honest_evidence)
+        # — the same module the daemon's writer uses, so the two writers cannot
+        # drift apart again. Only inventory-recorded values are trusted.
+        from tar_lab.honest_evidence import frontier_best_verdict_map, VERDICT_TO_STRENGTH
+
+        frontier_best_verdict = frontier_best_verdict_map(_WS)
 
         def _honest_evidence_strength(frontier_id: str) -> str:
             """Return the evidence_strength backed by honest_evidence_inventory.
             Defaults to 'none' — no invented 'moderate' for unverified frontiers."""
             verdict = frontier_best_verdict.get(str(frontier_id or ""), "")
-            if not verdict:
-                return "none"
-            return _VERDICT_TO_STRENGTH.get(verdict, "none")
+            return VERDICT_TO_STRENGTH.get(verdict, "none")
 
         items = []
         for path in paths:
@@ -4506,15 +4499,51 @@ def api_breakthroughs():
             })
 
     bks.sort(key=lambda x: x.get("found_at", ""), reverse=True)
+
+    # TRUTH-LOCK: the self-reported "BREAKTHROUGH" labels above are advisory.
+    # Cap every entry against honest_evidence_inventory.json before serving;
+    # anything without an inventory record is served as UNVERIFIED, never strong.
+    try:
+        from tar_lab.honest_evidence import (
+            experiment_verdict_map, match_inventory_record, VERDICT_TO_STRENGTH,
+        )
+        _inv_verdicts = experiment_verdict_map(_WS)
+    except Exception:
+        _inv_verdicts = {}
+
     for idx, bk in enumerate(bks, start=1):
         found_at = str(bk.get("found_at", "") or "")
         project_id = str(bk.get("project_id", "") or f"bk-{idx}")
         bk["notification_id"] = f"{bk.get('source', 'bk')}::{project_id}::{found_at}"
+        bk["verdict_self_reported"] = bk.get("verdict", "")
+
+        match_key = ""
+        if bk.get("source") == "autonomous_research":
+            match_key = "ar-" + str(bk.get("name", "")).lower().replace(" ", "_")
+        else:
+            match_key = project_id
+        rec = None
+        try:
+            rec = match_inventory_record(match_key, _inv_verdicts)
+        except Exception:
+            rec = None
+
+        if rec:
+            bk["verdict"] = rec["verdict"]
+            bk["evidence_strength"] = VERDICT_TO_STRENGTH.get(rec["verdict"], "none")
+            bk["honest_note"] = (rec.get("detail") or "")[:300]
+        else:
+            bk["verdict"] = "UNVERIFIED"
+            bk["evidence_strength"] = "unverified"
+            bk["honest_note"] = (
+                "No honest_evidence_inventory record backs this self-reported result. "
+                "Cite the statistics, not the label."
+            )
         bk["summary"] = (
-            f"{bk.get('name', 'Breakthrough')} on {str(bk.get('dataset', '')).replace('split_', '')} "
-            f"with p={bk.get('p_val', '—')} and d={bk.get('cohens_d', '—')}."
+            f"{bk.get('name', 'Result')} on {str(bk.get('dataset', '')).replace('split_', '')} "
+            f"with p={bk.get('p_val', '—')} and d={bk.get('cohens_d', '—')} "
+            f"[{bk['verdict']}]."
         )
-        bk["evidence_strength"] = "strong" if bk.get("p_val") not in (None, "") else "moderate"
     return jsonify({"count": len(bks), "breakthroughs": bks})
 
 
@@ -6190,20 +6219,45 @@ def api_phase2_log(key: str):
     return jsonify({"key": key, "lines": lines, "mtime": mtime, "path": str(log_path)})
 
 
+_HEALTH_MAX_AGE_S = 600.0  # auto-regenerate when the cached report is older than this
+
+
 @app.route("/api/health")
 def api_health():
-    """System health check. Add ?fresh=true to regenerate."""
+    """System health check. Auto-regenerates when the cached report is stale.
+
+    A cached health report that contradicts live state is worse than none:
+    this endpoint previously served a weeks-old snapshot claiming experiments
+    were running. Now it regenerates when older than _HEALTH_MAX_AGE_S and
+    always discloses the report's age.
+    """
     report_path = _WS / "tar_state" / "health_report.json"
-    if request.args.get("fresh", "").lower() == "true" or not report_path.exists():
+    age_s: float | None = None
+    if report_path.exists():
+        try:
+            age_s = max(0.0, time.time() - report_path.stat().st_mtime)
+        except OSError:
+            age_s = None
+    needs_refresh = (
+        request.args.get("fresh", "").lower() == "true"
+        or age_s is None
+        or age_s > _HEALTH_MAX_AGE_S
+    )
+    if needs_refresh:
         try:
             import subprocess, sys as _sys
             subprocess.run(
                 [_sys.executable, str(_REPO / "tar_health_check.py")],
                 cwd=str(_REPO), timeout=30, capture_output=True,
             )
+            if report_path.exists():
+                age_s = max(0.0, time.time() - report_path.stat().st_mtime)
         except Exception:
             pass
     data = _jload(report_path) or {"error": "Not generated yet. Hit /api/health?fresh=true"}
+    if isinstance(data, dict):
+        data["report_age_s"] = round(age_s, 1) if age_s is not None else None
+        data["report_is_stale"] = bool(age_s is None or age_s > _HEALTH_MAX_AGE_S)
     return jsonify(data)
 
 

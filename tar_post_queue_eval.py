@@ -141,21 +141,39 @@ def _load_asc_model(workspace: Path) -> dict[str, Any]:
 # Phase evaluators
 # ===========================================================================
 
+def _pairwise_block(data: dict, *keys: str) -> dict:
+    """Return the first present pairwise sub-block from the canonical schema
+    (data['pairwise'][key]) falling back to the legacy comparisons schema."""
+    pairwise = data.get("pairwise", {})
+    if isinstance(pairwise, dict):
+        for key in keys:
+            block = pairwise.get(key)
+            if isinstance(block, dict) and block:
+                return block
+    return {}
+
+
 def _eval_phase10(data: dict) -> dict:
     """
     Phase 10 — 4-way baseline comparison.
     Outcome B criteria: TCL vs SGD p<0.05, Cohen's d>0.5, all 5 seeds present.
+
+    Canonical schema: data['pairwise']['sgd_baseline'|'ewc'] with
+    {mean_delta, p_val, cohens_d, n_tcl_better}. The legacy
+    data['comparisons']['tcl_vs_sgd'] schema is kept as a fallback — the old
+    reader silently defaulted to p=1.0/d=0.0 on canonical files, reporting a
+    false NULL for the system's single Bonferroni-significant result.
     """
     phase = 10
     try:
         comparisons = data.get("comparisons", {})
-        tcl_vs_sgd = comparisons.get("tcl_vs_sgd", {})
-        tcl_vs_ewc = comparisons.get("tcl_vs_ewc", {})
+        tcl_vs_sgd = comparisons.get("tcl_vs_sgd", {}) or _pairwise_block(data, "sgd_baseline", "sgd")
+        tcl_vs_ewc = comparisons.get("tcl_vs_ewc", {}) or _pairwise_block(data, "ewc")
 
-        p_sgd = tcl_vs_sgd.get("p_value", 1.0)
-        d_sgd = tcl_vs_sgd.get("effect_size", 0.0)
-        n_seeds = data.get("n_seeds", data.get("seeds_completed", 0))
-        p_ewc = tcl_vs_ewc.get("p_value", 1.0)
+        p_sgd = tcl_vs_sgd.get("p_value", tcl_vs_sgd.get("p_val", 1.0))
+        d_sgd = abs(tcl_vs_sgd.get("effect_size", tcl_vs_sgd.get("cohens_d", 0.0)))
+        n_seeds = data.get("n_seeds", data.get("seeds_completed", 0)) or len(data.get("seeds", []) or [])
+        p_ewc = tcl_vs_ewc.get("p_value", tcl_vs_ewc.get("p_val", 1.0))
 
         outcome_b_met = (p_sgd < 0.05) and (d_sgd > 0.5) and (n_seeds >= 5)
 
@@ -207,44 +225,53 @@ def _eval_phase11(data: dict) -> dict:
     """
     phase = 11
     try:
-        ablation = data.get("ablation_results", data.get("results", {}))
+        # Canonical schema: data['pairwise'] holds full_tcl-vs-X blocks for
+        # X in {sgd, governor_only, penalty_only}, each {mean_delta, p_val,
+        # cohens_d, n_full_tcl_better}. The old reader looked for a
+        # 'penalty_only_vs_sgd' block that does not exist in canonical files,
+        # defaulted p=1.0 and concluded GOVERNOR_ESSENTIAL — the OPPOSITE of
+        # the recorded finding (honest inventory: governor never fires,
+        # penalty is the entire mechanism).
+        full_vs_penalty = _pairwise_block(data, "penalty_only")
+        full_vs_sgd = _pairwise_block(data, "sgd")
+        verdict_key = str(data.get("verdict_key", "") or "").upper()
 
-        penalty_vs_sgd = ablation.get("penalty_only_vs_sgd", {})
-        p_pen = penalty_vs_sgd.get("p_value", 1.0)
-        significant_penalty = p_pen < 0.05
+        p_full_vs_pen = full_vs_penalty.get("p_val", full_vs_penalty.get("p_value", 1.0))
+        p_full_vs_sgd = full_vs_sgd.get("p_val", full_vs_sgd.get("p_value", 1.0))
+        delta_full_vs_pen = full_vs_penalty.get("mean_delta")
 
-        # Governor variance contribution
-        full_stds = ablation.get("full_tcl_std_across_seeds", None)
-        penalty_only_stds = ablation.get("penalty_only_std_across_seeds", None)
+        # Legacy fallback (pre-canonical files only)
+        if not full_vs_penalty and not full_vs_sgd:
+            ablation = data.get("ablation_results", data.get("results", {}))
+            penalty_vs_sgd = ablation.get("penalty_only_vs_sgd", {})
+            p_full_vs_pen = penalty_vs_sgd.get("p_value", 1.0)
 
-        governor_note = ""
-        if full_stds is not None and penalty_only_stds is not None:
-            governor_note = (
-                f"governor stabilises variance (full std={full_stds:.3f} "
-                f"vs penalty-only std={penalty_only_stds:.3f})"
-            )
-        else:
-            # Try alternate key names
-            gov = data.get("governor_contribution", {})
-            if gov:
-                governor_note = f"governor contribution metric={gov.get('metric', 'n/a')}"
+        full_beats_penalty = (
+            p_full_vs_pen < 0.05
+            and (delta_full_vs_pen is None or float(delta_full_vs_pen) < 0)
+        )
 
-        if significant_penalty:
-            outcome = "PENALTY_DOMINANT"
-            significance = "HIGH"
-            key_finding = (
-                f"Penalty component alone beats SGD (p={p_pen:.3f}). "
-                + (governor_note or "Governor role requires further analysis.")
-            )
-            recommendation = "Both penalty and governor contribute. Report full ablation in paper."
-        else:
-            outcome = "GOVERNOR_ESSENTIAL"
+        if full_beats_penalty:
+            outcome = "GOVERNOR_CONTRIBUTES"
             significance = "MEDIUM"
             key_finding = (
-                f"Penalty-only insufficient (p={p_pen:.3f}); governor required for improvement. "
-                + governor_note
+                f"Full TCL significantly beats penalty-only (p={p_full_vs_pen:.3f}, uncorrected) "
+                f"— the governor adds measurable benefit beyond the penalty."
             )
-            recommendation = "Governor is the key mechanism — emphasise in mechanism section."
+            recommendation = "Report both components; verify against Bonferroni before any mechanistic claim."
+        else:
+            outcome = "PENALTY_SUFFICIENT"
+            significance = "MEDIUM"
+            key_finding = (
+                f"Full TCL is NOT significantly better than penalty-only "
+                f"(p={p_full_vs_pen:.3f}, uncorrected) — consistent with the honest "
+                f"inventory finding that the penalty is the entire mechanism and the "
+                f"governor never fires. Full-vs-SGD p={p_full_vs_sgd:.3f} (uncorrected)."
+            )
+            recommendation = (
+                "Frame the penalty as the mechanism. Do not attribute improvement to the "
+                "governor. Mechanistic ablation (pre-registered) is the confirmatory step."
+            )
 
         return {
             "phase": phase,
@@ -253,8 +280,9 @@ def _eval_phase11(data: dict) -> dict:
             "key_finding": key_finding,
             "recommendation": recommendation,
             "details": {
-                "p_penalty_vs_sgd": p_pen,
-                "governor_note": governor_note,
+                "p_full_vs_penalty_only": p_full_vs_pen,
+                "p_full_vs_sgd": p_full_vs_sgd,
+                "self_reported_verdict_key": verdict_key,
             },
         }
     except Exception as exc:
@@ -268,7 +296,23 @@ def _eval_phase12(data: dict) -> dict:
     """
     phase = 12
     try:
+        # Canonical schema: data['pairwise_tcl_vs_ewc'] keyed by lambda value,
+        # each {mean_delta, p_val, cohens_d, n_tcl_better}. Legacy
+        # 'lambda_sweep'/'ewc_sweep' kept as fallback (old reader defaulted to
+        # p=1.0 on canonical files).
         sweep = data.get("lambda_sweep", data.get("ewc_sweep", {}))
+        if not sweep:
+            canonical = data.get("pairwise_tcl_vs_ewc", {})
+            if isinstance(canonical, dict) and canonical:
+                sweep = {
+                    lam: {
+                        "p_value": block.get("p_val", block.get("p_value", 1.0)),
+                        "mean_delta": block.get("mean_delta"),
+                        "cohens_d": block.get("cohens_d"),
+                    }
+                    for lam, block in canonical.items()
+                    if isinstance(block, dict)
+                }
         tcl_beats_ewc_lambdas: list[float] = []
         ewc_collapse_lambdas: list[float] = []
 
@@ -287,9 +331,11 @@ def _eval_phase12(data: dict) -> dict:
             ewc_collapsed = entry.get("ewc_collapsed", entry.get("catastrophic_forgetting", False))
             if ewc_collapsed:
                 ewc_collapse_lambdas.append(lam)
-            if p < 0.05:
+            delta = entry.get("mean_delta")
+            tcl_direction_ok = delta is None or float(delta) < 0
+            if p < 0.05 and tcl_direction_ok:
                 tcl_beats_ewc_lambdas.append(lam)
-            if p < best_p:
+            if p < best_p and tcl_direction_ok:
                 best_p = p
                 best_lam = lam
 
@@ -586,7 +632,10 @@ def _recommend_queue2(
 
     # --- Rule 2: Phase 10/11 strong -> task-incremental scale-up ---
     p10_strong = p10.get("outcome") in ("OUTCOME_B_MET",)
-    p11_strong = p11.get("outcome") in ("PENALTY_DOMINANT", "GOVERNOR_ESSENTIAL")
+    p11_strong = p11.get("outcome") in (
+        "PENALTY_DOMINANT", "GOVERNOR_ESSENTIAL",  # legacy keys
+        "PENALTY_SUFFICIENT", "GOVERNOR_CONTRIBUTES",
+    )
     if p10_strong or p11_strong:
         if not any(r["phase"] == 16 for r in recommended):
             recommended.append({
@@ -754,6 +803,14 @@ def _format_report_txt(
     lines.append(f"Generated: {report['generated_at']}")
     lines.append(f"Phases evaluated: {sorted(report['phases_evaluated'])}")
     lines.append("=" * 42)
+    lines.append("")
+    wrap(
+        "ADVISORY REPORT: outcomes below are heuristic labels, NOT verified "
+        "claims. tar_state/honest_evidence_inventory.json is the statistical "
+        "source of truth; where they disagree, the inventory wins. "
+        "All p-values shown are uncorrected unless stated otherwise. "
+        "Cite the statistics, not the labels.", indent=0,
+    )
 
     # Phase outcomes
     h2("PHASE OUTCOMES")
@@ -768,10 +825,10 @@ def _format_report_txt(
 
             # Build a compact inline stats string
             stat_parts: list[str] = []
-            for k in ("p_vs_sgd", "p_value", "p_penalty_vs_sgd", "best_p_vs_ewc"):
+            for k in ("p_vs_sgd", "p_value", "p_full_vs_penalty_only", "p_penalty_vs_sgd", "best_p_vs_ewc"):
                 v = det.get(k)
                 if v is not None:
-                    stat_parts.append(f"p={v:.3f}")
+                    stat_parts.append(f"p={v:.3f} uncorr.")
                     break
             for k in ("d_vs_sgd", "effect_size"):
                 v = det.get(k)
@@ -782,6 +839,12 @@ def _format_report_txt(
             stat_str = f" ({', '.join(stat_parts)})" if stat_parts else ""
             label = f"Phase {ph} ({_phase_short_name(ph)}):"
             lines.append(f"  {label:<{col_w}} {outcome}{stat_str}")
+            honest = ev.get("honest_inventory") or []
+            for rec in honest:
+                lines.append(
+                    f"  {'':<{col_w}} inventory: {rec.get('experiment_id')} -> "
+                    f"{rec.get('honest_verdict')}"
+                )
 
     # Key findings
     h2("KEY FINDINGS (ranked by significance)")
@@ -887,16 +950,45 @@ def _generate_report(workspace: Path) -> dict:
         if evaluator:
             ev = evaluator(data)
         else:
-            # Generic pass-through for unknown phases
+            # Generic pass-through for unknown phases.
+            # TRUTH-LOCK: never echo the file's free-text 'verdict' (which may
+            # embed stale, uncorrected statistical claims) as the outcome.
+            # Report only the short verdict_key, explicitly marked advisory.
+            verdict_key = str(data.get("verdict_key", "") or data.get("outcome", "") or "UNKNOWN")
+            self_reported = str(data.get("verdict", "") or "")
             ev = {
                 "phase": phase_num,
-                "outcome": data.get("outcome", data.get("verdict", "UNKNOWN")),
+                "outcome": f"SELF_REPORTED:{verdict_key}",
                 "significance": "UNKNOWN",
-                "key_finding": f"No evaluator registered for Phase {phase_num}.",
-                "recommendation": "Review manually.",
-                "details": {},
+                "key_finding": (
+                    f"No evaluator registered for Phase {phase_num}. The phase file's own "
+                    f"label is advisory, not verified — cite the statistics, not the label."
+                ),
+                "recommendation": "Review manually against honest_evidence_inventory.json.",
+                "details": {"self_reported_verdict": self_reported[:200]},
             }
         phase_evals.append(ev)
+
+    # ---- Honest-inventory cross-check (source of truth) ----
+    honest_by_phase: dict[int, list[dict]] = {}
+    try:
+        inv = _load_json(workspace / "tar_state" / "honest_evidence_inventory.json") or {}
+        for rec in inv.get("results", []):
+            if not isinstance(rec, dict):
+                continue
+            m = re.match(r"phase(\d+)", str(rec.get("experiment_id", "") or ""))
+            if not m:
+                continue
+            honest_by_phase.setdefault(int(m.group(1)), []).append({
+                "experiment_id": rec.get("experiment_id"),
+                "honest_verdict": rec.get("honest_verdict"),
+            })
+    except Exception:
+        honest_by_phase = {}
+    for ev in phase_evals:
+        honest = honest_by_phase.get(ev.get("phase"))
+        if honest:
+            ev["honest_inventory"] = honest
 
     # ---- Key findings (sort by significance) ----
     sig_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "UNKNOWN": 3}

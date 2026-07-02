@@ -386,14 +386,22 @@ def _paper_frontier_ids(entry: dict) -> list[str]:
 
 
 def _sync_website_research_json(workspace: Path, director_state: dict | None) -> None:
-    """Write website/data/research.json from live Director state. Silent on any error."""
+    """Write website/data/research.json from live Director state. Silent on any error.
+
+    TRUTH-LOCK: evidence_strength comes ONLY from honest_evidence_inventory.json
+    (via tar_lab.honest_evidence). A frontier with no inventory record is "none" —
+    the director's own enthusiasm is a planning label, not a verified claim.
+    """
     import re as _re
     try:
+        from tar_lab.honest_evidence import frontier_best_verdict_map, VERDICT_TO_STRENGTH
+
         website_json = _REPO.parent / "website" / "data" / "research.json"
         if not website_json.parent.exists():
             return
         paths = director_state.get("active_research_paths", []) if isinstance(director_state, dict) else []
         status_map = {"pursue_now": "active", "pursue_next": "queued", "investigate": "investigating"}
+        best_verdicts = frontier_best_verdict_map(workspace)
         items = []
         for p in paths:
             if not isinstance(p, dict):
@@ -406,14 +414,16 @@ def _sync_website_research_json(workspace: Path, director_state: dict | None) ->
             exp_count = int(m.group(1)) if m else 0
             allowed_topics = list(p.get("allowed_topics", []) or [])
             description = str(allowed_topics[2]).strip() if len(allowed_topics) > 2 else ""
+            frontier_id = str(p.get("target_frontier_problem_id", "") or "")
+            honest_verdict = best_verdicts.get(frontier_id, "")
             items.append({
                 "title": title,
                 "status": status_map.get(str(p.get("status", "") or ""), "investigating"),
-                "frontier_id": str(p.get("target_frontier_problem_id", "") or ""),
+                "frontier_id": frontier_id,
                 "description": description[:300],
                 "experiment_count": exp_count,
                 "paper_title": str(p.get("target_paper_id", "") or ""),
-                "evidence_strength": "moderate",
+                "evidence_strength": VERDICT_TO_STRENGTH.get(honest_verdict, "none"),
                 "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             })
         out = {"research": items, "updated_at": datetime.now(timezone.utc).isoformat()}
