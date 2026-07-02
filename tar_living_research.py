@@ -2226,6 +2226,25 @@ def run_portfolio_daemon(
     scheduler = TARScheduler(workspace)
     evidence = ExternalEvidenceIngestor(workspace, poll_interval_s=max(900.0, poll_interval_s * 10.0))
     evidence.start_background()
+
+    # Compounding memory: start the background MemoryIndexer so the recall store
+    # (VectorVault) is continuously synced from the daemon's own outputs — metrics,
+    # knowledge graph, research, verification, breakthroughs, problem studies/execs.
+    # Previously only Stack B (tar_lab.orchestrator) started it, so the live daemon's
+    # recall store went stale (manifest stuck 'rebuild_required'). Fail-safe: a failure
+    # here never blocks the daemon. sync_once() forces a synchronous first drain.
+    memory_indexer = None
+    try:
+        from tar_lab.memory import MemoryIndexer, VectorVault
+        _mem_vault = VectorVault(str(workspace))
+        memory_indexer = MemoryIndexer(_mem_vault.store, _mem_vault)
+        memory_indexer.sync_once()   # drain the pending backlog once, synchronously
+        memory_indexer.start()       # then keep it synced in the background
+        _log(workspace, "memory indexer started (recall store live-synced)")
+    except Exception as _mem_exc:
+        _log(workspace, f"memory indexer start skipped (non-fatal): {_mem_exc}")
+        memory_indexer = None
+
     written_hypotheses: set[str] = set()
     started_papers: set[str] = set()
     director_state = ResearchDirector(workspace).update_state()
@@ -2406,6 +2425,11 @@ def run_portfolio_daemon(
             _log(workspace, "TAR LIVING RESEARCH DAEMON STOPPED")
             heartbeat_stop.set()
             evidence.stop()
+            if memory_indexer is not None:
+                try:
+                    memory_indexer.stop()
+                except Exception:
+                    pass
             daemon_status.update({"status": "stopped", "last_event": "keyboard interrupt"})
             _emit_daemon_state(refresh_scheduler=False)
             heartbeat_from_env(workspace, status="failed", message="living research daemon stopped")

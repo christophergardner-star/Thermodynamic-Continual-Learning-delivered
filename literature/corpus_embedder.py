@@ -26,13 +26,16 @@ from typing import Any, Callable, Optional, Protocol
 from literature.knowledge_graph import LiteratureKnowledgeGraph
 
 
-# The single opt-in knob. Unset -> legacy behaviour (no live change). Set to a
-# sentence-transformers model name (e.g. BAAI/bge-small-en-v1.5) to unify corpus
-# novelty on the same space the VectorVault uses.
+# Override knob. Set to a sentence-transformers model name to force a specific
+# space; unset uses the default below.
 NOVELTY_EMBEDDER_ENV = "TAR_NOVELTY_EMBEDDER_MODEL"
-# Default when the env is unset — preserves the historical NoveltyGate model
-# exactly so there is no behaviour change until an operator opts in.
-LEGACY_NOVELTY_MODEL = "allenai-specter"
+# Default embedder. The corpus was fully re-embedded into bge-small space
+# (1923/1923 papers, 384-dim) on 2026-06-06, and the VectorVault uses the same
+# model — so bge-small is now the CORRECT default. (The historical
+# allenai-specter default is 768-dim and mismatches the stored corpus, which
+# silently scores cosine 0.0; see the module docstring.) Kept as a named
+# constant so a future re-embed can retune it in one place.
+LEGACY_NOVELTY_MODEL = "BAAI/bge-small-en-v1.5"
 
 
 class _Embedder(Protocol):
@@ -42,8 +45,9 @@ class _Embedder(Protocol):
 def novelty_embedder_model(default: str = LEGACY_NOVELTY_MODEL) -> str:
     """Resolve the model NoveltyGate + the corpus backfill should use.
 
-    Returns ``TAR_NOVELTY_EMBEDDER_MODEL`` when set (the opt-in to unify on
-    bge-small), else ``allenai-specter`` so default behaviour is unchanged.
+    Returns ``TAR_NOVELTY_EMBEDDER_MODEL`` when set, else bge-small — the space
+    the corpus is actually embedded in (query and corpus vectors must match or
+    cosine similarity silently degrades to 0.0).
     """
     value = os.environ.get(NOVELTY_EMBEDDER_ENV, "").strip()
     return value or default

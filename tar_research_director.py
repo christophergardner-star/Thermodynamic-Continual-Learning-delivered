@@ -316,6 +316,13 @@ class ResearchDirector:
         # K2.2b: lazily-built, cached VectorVault for prior-trial recall (advisory only).
         self._vault = None
         self._vault_failed = False
+        # Semantic novelty: one embedder-backed NoveltyGate reused across all
+        # frontiers in a cycle (the gate loads a SentenceTransformer once — never
+        # per-frontier). None until first use; _failed latches on load failure so
+        # we fall back to lexical Jaccard without retrying every frontier.
+        self._novelty_gate = None
+        self._novelty_graph = None
+        self._novelty_gate_failed = False
         # K2.3a: per-cycle {domain_id: frontier_problem_id} for gap-derived frontiers
         # registered this update_state pass (used to link the novel_problem path).
         self._gap_frontiers: dict[str, str] = {}
@@ -338,6 +345,46 @@ class ResearchDirector:
         except Exception:
             self._vault_failed = True
             return None
+
+    def _novelty_gate_cached(self):
+        """Lazily build ONE embedder-backed NoveltyGate, reused across frontiers.
+
+        Loads the SentenceTransformer exactly once per director cycle (the old
+        code rebuilt the gate per frontier). Returns None on any failure so
+        _gate_novelty_score falls back to the lexical/heuristic path. The
+        embedder resolves to the corpus's own space (bge-small) via
+        novelty_embedder_model(), so query and corpus vectors are comparable
+        (a space mismatch silently scores cosine 0.0)."""
+        if self._novelty_gate is not None:
+            return self._novelty_gate
+        if self._novelty_gate_failed:
+            return None
+        try:
+            from literature.knowledge_graph import LiteratureKnowledgeGraph
+            from literature.novelty_gate import NoveltyGate
+            self._novelty_graph = LiteratureKnowledgeGraph(str(self.literature_db_path))
+            self._novelty_gate = NoveltyGate(self._novelty_graph, load_embedding_model=True)
+            return self._novelty_gate
+        except Exception:
+            self._novelty_gate_failed = True
+            try:
+                if self._novelty_graph is not None:
+                    self._novelty_graph.close()
+            except Exception:
+                pass
+            self._novelty_graph = None
+            return None
+
+    def _close_novelty_gate(self) -> None:
+        """Release the cached novelty graph handle (call at end of update_state)."""
+        try:
+            if self._novelty_graph is not None:
+                self._novelty_graph.close()
+        except Exception:
+            pass
+        finally:
+            self._novelty_graph = None
+            self._novelty_gate = None
 
     def _recall_prior_trials(self, query: str, n_results: int = 3) -> list[dict]:
         """K2.2b: recall prior similar trials/results from vector memory so the next
@@ -385,6 +432,10 @@ class ResearchDirector:
             external_evidence,
             experiments=experiments,
         )
+        # Novelty scoring (the only consumer of the cached embedder-backed gate)
+        # is done — release the literature-DB handle now so it never lingers as a
+        # Windows file lock against the evidence ingestor's writes.
+        self._close_novelty_gate()
         frontier_directives = self._apply_active_paths_to_frontiers(frontier_directives, active_research_paths)
         paper_directives = self._apply_active_paths_to_papers(
             paper_directives,
@@ -1512,28 +1563,27 @@ class ResearchDirector:
         ).strip()
         method_name = str(frontier.get("solution_family", "TAR/TCL/ASC") or "TAR/TCL/ASC")
         try:
-            from literature.knowledge_graph import LiteratureKnowledgeGraph
-            from literature.novelty_gate import NoveltyGate
-            graph = LiteratureKnowledgeGraph(str(self.literature_db_path))
-            try:
-                gate = NoveltyGate(graph, load_embedding_model=False)
-                report = gate.evaluate(
-                    method_name=method_name,
-                    method_description=method_desc,
-                    benchmark_id=benchmark_id,
-                    metric_name="mean_forgetting",
-                    metric_value=best_forgetting,
-                    higher_is_better=False,
-                )
-                base = self._NOVELTY_VERDICT_SCORES.get(str(report.verdict), fallback)
-                # Blend: 60 % gate score, 40 % confidence-weighted gate score,
-                # capped by the truth_status ceiling so an unverified claim never
-                # reaches 85 just by beating a weak SoTA entry.
-                ceiling = fallback  # don't exceed what truth_status deserves
-                blended = round(min(base * float(report.confidence), ceiling), 1)
-                return max(30.0, blended)
-            finally:
-                graph.close()
+            # Semantic novelty via ONE cached, embedder-backed gate (loads the
+            # embedder once per cycle, reused across frontiers). Falls back to the
+            # heuristic if the gate is unavailable.
+            gate = self._novelty_gate_cached()
+            if gate is None:
+                return fallback
+            report = gate.evaluate(
+                method_name=method_name,
+                method_description=method_desc,
+                benchmark_id=benchmark_id,
+                metric_name="mean_forgetting",
+                metric_value=best_forgetting,
+                higher_is_better=False,
+            )
+            base = self._NOVELTY_VERDICT_SCORES.get(str(report.verdict), fallback)
+            # Blend: gate score confidence-weighted, capped by the truth_status
+            # ceiling so an unverified claim never reaches 85 just by beating a
+            # weak SoTA entry.
+            ceiling = fallback  # don't exceed what truth_status deserves
+            blended = round(min(base * float(report.confidence), ceiling), 1)
+            return max(30.0, blended)
         except Exception:
             return fallback
 
