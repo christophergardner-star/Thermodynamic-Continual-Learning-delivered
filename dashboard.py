@@ -5,7 +5,19 @@ import time
 from pathlib import Path
 from typing import Any
 
-import streamlit as st
+try:
+    import streamlit as st
+except ImportError:  # streamlit is an optional UI dep (the live dashboard is tar_dashboard.py/Flask)
+    class _StreamlitMissing:
+        """Import-safe placeholder. Importing this module must not require
+        streamlit (tests import it for its non-UI helpers); only actually
+        rendering the retired Streamlit UI needs it, and that fails loudly."""
+        def __getattr__(self, name):
+            raise ModuleNotFoundError(
+                "streamlit is not installed; this retired Streamlit dashboard cannot "
+                "render. Use tar_dashboard.py (Flask) instead, or `pip install streamlit`."
+            )
+    st = _StreamlitMissing()  # type: ignore[assignment]
 
 from tar_lab.orchestrator import TAROrchestrator
 

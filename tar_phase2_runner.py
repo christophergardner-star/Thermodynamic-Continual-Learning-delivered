@@ -50,6 +50,39 @@ else:
 _TAR_STATE = Path(r"E:\TAR\Thermodynamic-Continual-Learning-delivered\tar_state")
 
 
+_INTERPRETER_VERIFIED: bool | None = None
+
+
+def _verify_training_interpreter() -> None:
+    """Fail LOUD if the chosen Phase-2 interpreter can't actually train.
+
+    The 3.13 .venv's torch is broken (DataLoader workers spawn under Python313
+    where `torch.__version__` is missing), which SILENTLY stalls a run — the
+    exact hp_selection failure of 2026-06-03. Rather than fall back to it and
+    hang, probe the interpreter once and raise a clear, actionable error.
+    """
+    global _INTERPRETER_VERIFIED
+    if _INTERPRETER_VERIFIED:
+        return
+    probe = subprocess.run(
+        [str(_PHASE2_PYTHON), "-c",
+         "import torch,sys; "
+         "assert hasattr(torch,'__version__'); "
+         "sys.stdout.write(torch.__version__)"],
+        capture_output=True, text=True, timeout=120,
+    )
+    ok = probe.returncode == 0 and (probe.stdout or "").strip()
+    if not ok:
+        raise RuntimeError(
+            "Phase-2 interpreter cannot train (torch not importable / __version__ "
+            f"missing): {_PHASE2_PYTHON}. Install standalone Python 3.11 at "
+            f"{_PY311} with a working torch, or repair the interpreter. Refusing to "
+            "launch — a broken interpreter silently stalls the run instead of failing. "
+            f"[probe rc={probe.returncode} err={(probe.stderr or '').strip()[:200]}]"
+        )
+    _INTERPRETER_VERIFIED = True
+
+
 def _run_script(
     script_name: str,
     extra_args: list[str] | None = None,
@@ -61,6 +94,7 @@ def _run_script(
     if not script.exists():
         raise FileNotFoundError(f"Phase 2 script not found: {script}")
 
+    _verify_training_interpreter()
     cmd = [str(_PHASE2_PYTHON), str(script)] + (extra_args or [])
     proc = subprocess.Popen(
         cmd,

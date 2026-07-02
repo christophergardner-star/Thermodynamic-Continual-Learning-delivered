@@ -3644,7 +3644,6 @@ def api_literature():
 
 
 # ── scheduler ─────────────────────────────────────────────────────────────────
-@app.route("/api/scheduler")
 def _live_gpu_fields() -> dict:
     """Read GPU stats directly from hardware_state.json — always current."""
     hw = _jload(_WS / "tar_state" / "hardware_state.json") or {}
@@ -3658,6 +3657,7 @@ def _live_gpu_fields() -> dict:
     }
 
 
+@app.route("/api/scheduler")
 def api_scheduler():
     queue = _runtime_experiment_records()
     state_path = _WS / "tar_state" / "scheduler_state.json"
