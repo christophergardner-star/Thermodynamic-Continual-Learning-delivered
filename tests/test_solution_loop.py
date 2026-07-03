@@ -173,3 +173,32 @@ def test_render_catalog_block_nonempty():
     from literature.method_catalog import render_catalog_block
     block = render_catalog_block()
     assert "ewc" in block and "[regularization]" in block and len(block.splitlines()) >= 15
+
+
+# ── Phase 2 — SI anomaly seeding (dry-run + schema + criteria consistency) ─────
+
+def test_si_anomaly_gap_constructs_and_is_top_composite():
+    import importlib.util
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("seed_si_anomaly", repo / "scripts" / "seed_si_anomaly.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    from literature.schemas import ResearchGap
+    gap = ResearchGap(gap_id=mod._GAP_ID, gap_type="theoretical", title="t",
+                      description=mod._ANOMALY_STATEMENT, domain="continual_learning",
+                      method_names=["si"], impact_score=0.95, novelty_score=0.90,
+                      tractability_score=0.85)
+    gap.recompute_composite()
+    assert gap.composite_score > 0.9  # must outrank the existing negative_result gaps
+
+
+def test_si_joint_criteria_match_evaluator_keys():
+    import importlib.util
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("seed_si_anomaly", repo / "scripts" / "seed_si_anomaly.py")
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    # Every criterion the seeder writes must be one the orchestrator evaluator enforces.
+    enforced = {"max_delta", "max_p", "min_d", "max_forgetting_std", "min_mean_acc", "min_seed_acc"}
+    assert set(mod._JOINT_CRITERIA) <= enforced
+    assert mod._JOINT_CRITERIA["min_seed_acc"] == 0.55  # collapse guard present
