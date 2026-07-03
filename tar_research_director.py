@@ -3273,6 +3273,14 @@ class ResearchDirector:
                     # (native / generic_cl registry / synthesis) is resolved downstream in
                     # _build_director_followup_specs; a novel key routes to gated synthesis.
                     _pm = str(proposal.get("method", "") or "").strip().lower() or "tcl"
+                    # Phase 4: deterministic pruning — never re-propose a killed region.
+                    try:
+                        from tar_lab.solution_loop import is_killed as _is_killed
+                        if _is_killed(self.workspace, _pm, dict(proposal.get("config_overrides") or {}),
+                                      str(proposal.get("mechanism_class", "") or "")):
+                            continue
+                    except Exception:
+                        pass
                     priority_score = _priority_for(
                         exp_id, status, unmet, 0.0,
                         method=_pm,

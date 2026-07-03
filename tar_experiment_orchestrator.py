@@ -3078,6 +3078,25 @@ class ExperimentOrchestrator:
             else:
                 crit_note = f"  | prereg criteria met={crit_met}"
 
+            # Phase 4: a killed loop-candidate prunes the search — record it to the
+            # append-only kill-ledger so the proposer won't re-propose this region.
+            if verdict in {"NULL", "ADVERSE"}:
+                try:
+                    from tar_lab.solution_loop import record_kill
+                    _failed = [k for k, v in crit_report.items()
+                               if isinstance(v, dict) and v.get("passed") is False]
+                    _mech = ""
+                    if isinstance(spec.config_overrides, dict):
+                        _mech = str(spec.config_overrides.get("mechanism_class", "") or "")
+                    record_kill(
+                        self.workspace, experiment_id=spec.id, method=spec.method,
+                        config_overrides=dict(spec.config_overrides or {}), mechanism_class=_mech,
+                        verdict=("COLLAPSED" if crit_report.get("collapse_detected") else verdict),
+                        kill_reason=crit_note.strip(" |"), criteria_failed=_failed,
+                    )
+                except Exception:
+                    pass
+
         notes = (f"mean_delta={mean_delta:+.4f}  p={p_val:.4f}  d={cohens_d:.3f}"
                  f"  {n_better}/{n} seeds better"
                  f"  bonferroni_n={n_comparisons}  alpha_bonf={alpha_bonf:.4f}{crit_note}")

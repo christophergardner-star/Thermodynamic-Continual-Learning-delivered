@@ -272,3 +272,28 @@ def test_proposer_legacy_mode_without_catalog(monkeypatch):
     )  # no catalog block -> legacy mode, no method key required
     assert "WHOLE continual-learning design space" not in cap["prompt"]
     assert out and "method" not in out[0]
+
+
+# ── Phase 4 — kill-ledger + deterministic pruning ─────────────────────────────
+
+def test_fingerprint_stable_and_config_sensitive():
+    from tar_lab.solution_loop import candidate_fingerprint as fp
+    # order-insensitive, value-sensitive
+    assert fp("si_clamp", {"a": 1, "b": 2.0}) == fp("si_clamp", {"b": 2.0, "a": 1})
+    assert fp("si_clamp", {"a": 1}) != fp("si_clamp", {"a": 2})
+    assert fp("si_clamp", {"a": 1}) != fp("other", {"a": 1})
+
+
+def test_kill_ledger_records_and_prunes(tmp_path):
+    from tar_lab.solution_loop import record_kill, is_killed, load_killed_fingerprints, render_kill_ledger_block
+    assert not is_killed(tmp_path, "si_clamp_decay", {"lam": 0.5}, "regularization")
+    record_kill(tmp_path, experiment_id="e1", method="si_clamp_decay",
+                config_overrides={"lam": 0.5}, mechanism_class="regularization",
+                verdict="COLLAPSED", kill_reason="worst seed acc 0.50 < 0.55",
+                criteria_failed=["min_seed_acc"])
+    # exact region is now pruned; a different HP setting is NOT
+    assert is_killed(tmp_path, "si_clamp_decay", {"lam": 0.5}, "regularization")
+    assert not is_killed(tmp_path, "si_clamp_decay", {"lam": 0.9}, "regularization")
+    assert len(load_killed_fingerprints(tmp_path)) == 1
+    block = render_kill_ledger_block(tmp_path)
+    assert "si_clamp_decay" in block and "COLLAPSED" in block
