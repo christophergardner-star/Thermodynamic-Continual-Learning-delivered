@@ -399,6 +399,17 @@ def _sync_website_research_json(workspace: Path, director_state: dict | None) ->
         website_json = _REPO.parent / "website" / "data" / "research.json"
         if not website_json.parent.exists():
             return
+        validation_dir = workspace / "tar_state" / "validation"
+
+        def _frontier_closed(frontier_id: str) -> bool:
+            # A frontier with a written closure file (verdict FALSIFIED / status
+            # CLOSE) is not public research-in-progress — omit it from the public
+            # site rather than showing a closed line as neutrally "active".
+            fid = str(frontier_id or "").strip()
+            if not fid:
+                return False
+            return (validation_dir / f"{fid.replace('-', '_')}_closure.json").exists()
+
         paths = director_state.get("active_research_paths", []) if isinstance(director_state, dict) else []
         status_map = {"pursue_now": "active", "pursue_next": "queued", "investigate": "investigating"}
         best_verdicts = frontier_best_verdict_map(workspace)
@@ -409,20 +420,23 @@ def _sync_website_research_json(workspace: Path, director_state: dict | None) ->
             title = str(p.get("title", "") or "").strip()
             if not title:
                 continue
+            frontier_id = str(p.get("target_frontier_problem_id", "") or "")
+            if _frontier_closed(frontier_id):
+                continue  # drop closed/falsified frontiers from the public list
             why = str(p.get("why_this_now", "") or "")
             m = _re.search(r"(\d+) complete", why)
             exp_count = int(m.group(1)) if m else 0
             allowed_topics = list(p.get("allowed_topics", []) or [])
             description = str(allowed_topics[2]).strip() if len(allowed_topics) > 2 else ""
-            frontier_id = str(p.get("target_frontier_problem_id", "") or "")
             honest_verdict = best_verdicts.get(frontier_id, "")
+            # NOTE: internal paper_title (project id) is intentionally NOT emitted
+            # to the public JSON — it leaked internal ids like "integration-test".
             items.append({
                 "title": title,
                 "status": status_map.get(str(p.get("status", "") or ""), "investigating"),
                 "frontier_id": frontier_id,
                 "description": description[:300],
                 "experiment_count": exp_count,
-                "paper_title": str(p.get("target_paper_id", "") or ""),
                 "evidence_strength": VERDICT_TO_STRENGTH.get(honest_verdict, "none"),
                 "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             })
