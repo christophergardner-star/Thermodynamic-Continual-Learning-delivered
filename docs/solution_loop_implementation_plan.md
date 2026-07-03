@@ -220,6 +220,34 @@ gates execution; synthesis adoption is human-approved.*
   IS that candidates die honestly.
 - No claim of external SoTA without a cited bar in curated_external_sota.json.
 
+## ACTIVATION RUNBOOK (run in order, only when safe)
+
+The code is BUILT + committed + tested; it activates at the next safe daemon restart.
+Nothing below runs while the HPC confirmatory experiment is training.
+
+1. **Wait for the GPU to free.** The HPC replication + mechanistic ablation own the card.
+   Do NOT restart the daemon or run `--apply` while they train. Check: `nvidia-smi`, and the
+   phase-2 sequencer log.
+2. **Restart the daemon onto the new code** (standard clean restart once GPU idle; the watchdog
+   supervisor + git-on-PATH launch). This loads Phase 0-4.
+3. **(Optional but recommended) verify the catalog.** Open `literature/method_catalog.json`,
+   confirm each `citation` resolves to the named paper, set `"_verified": true`. Until then the
+   catalog is usable proposer material but flagged unverified.
+4. **Seed the anomaly:** `python scripts/seed_si_anomaly.py --apply`
+   (writes the inventory record, the top-composite gap, and the joint-criterion prereg).
+5. **Verify readiness:** `python scripts/solution_loop_status.py` — expect
+   `anomaly is the top gap = True`, `prereg_criterion=True`.
+6. The director (new code) then: picks the anomaly gap -> mints the fp-gap frontier -> the
+   WIDENED proposer composes candidates from the catalog -> each enters the 24h veto window.
+7. **When ready for autonomous execution:** `python tar_autonomy_ramp.py confirm` (a FRESH
+   reauth is required). Candidates screen at n=5 locally (collapse-killed cheaply), survivors go
+   to n>=20 on RunPod (per-run cost cap). Kills are pruned via the ledger automatically.
+8. **Monitor:** `scripts/solution_loop_status.py` (candidates proposed / killed / survived) and
+   the kill-ledger at `tar_state/solution_loop/kill_ledger.jsonl`.
+
+Rollback: everything new is additive or behind flags; reverting the commits + not running
+`--apply` returns TAR to its prior behaviour.
+
 ## Honest expectations
 This makes TAR capable of producing **genuine, validated, usually-incremental solutions** — real
 recombinations that survive an incorruptible selector — and calibrated negative maps when nothing
