@@ -2944,6 +2944,65 @@ class ExperimentOrchestrator:
         return self._build_validation_suite_result(spec, raw)
 
     # ── result builder ────────────────────────────────────────────────────────
+    def _load_prereg_criteria(self, spec: "ExperimentSpec") -> dict:
+        """Return the preregistered criteria dict for this spec (by experiment_id,
+        then by name), or {} if none. Fail-quiet."""
+        try:
+            path = self.workspace / "tar_state" / "autonomous_research" / "preregistration.json"
+            if not path.exists():
+                return {}
+            data = json.loads(path.read_text(encoding="utf-8"))
+            for h in data.get("hypotheses", []):
+                if not isinstance(h, dict):
+                    continue
+                if h.get("experiment_id") == spec.id or h.get("name") == spec.name:
+                    c = h.get("criteria")
+                    return dict(c) if isinstance(c, dict) else {}
+        except Exception:
+            return {}
+        return {}
+
+    def _evaluate_prereg_criteria(
+        self, spec: "ExperimentSpec", *, mean_delta: float, p_val: float,
+        cohens_d: float, std_forgetting: float, mean_accuracy: float,
+        accuracy_list: list[float],
+    ) -> tuple[dict, "bool | None"]:
+        """Check a result against its OWN preregistered criteria. Returns
+        (report, all_met). Empty report + None when nothing was preregistered.
+        Recognised criteria keys (all optional):
+          max_delta, max_p, min_d (existing) ; and the JOINT-criterion extensions
+          max_forgetting_std, min_mean_acc, min_seed_acc (collapse guard)."""
+        crit = self._load_prereg_criteria(spec)
+        if not crit:
+            return {}, None
+        report: dict = {}
+        checks: list[bool] = []
+
+        def _rec(key, ok, threshold, actual):
+            report[key] = {"threshold": threshold, "actual": actual, "passed": bool(ok)}
+            checks.append(bool(ok))
+
+        if "max_delta" in crit:
+            _rec("max_delta", mean_delta <= crit["max_delta"], crit["max_delta"], round(mean_delta, 4))
+        if "max_p" in crit:
+            _rec("max_p", p_val <= crit["max_p"], crit["max_p"], round(p_val, 4))
+        if "min_d" in crit:
+            _rec("min_d", cohens_d >= crit["min_d"], crit["min_d"], round(cohens_d, 3))
+        if "max_forgetting_std" in crit:
+            _rec("max_forgetting_std", std_forgetting <= crit["max_forgetting_std"],
+                 crit["max_forgetting_std"], round(std_forgetting, 5))
+        if "min_mean_acc" in crit:
+            _rec("min_mean_acc", mean_accuracy >= crit["min_mean_acc"],
+                 crit["min_mean_acc"], round(mean_accuracy, 4))
+        if "min_seed_acc" in crit and accuracy_list:
+            worst = min(accuracy_list)
+            ok = worst >= crit["min_seed_acc"]
+            _rec("min_seed_acc", ok, crit["min_seed_acc"], round(worst, 4))
+            if not ok:
+                report["collapse_detected"] = True
+        all_met = all(checks) if checks else None
+        return report, all_met
+
     def _build_result(
         self,
         spec: ExperimentSpec,
@@ -2990,9 +3049,38 @@ class ExperimentOrchestrator:
         verdict = ("BREAKTHROUGH" if is_breakthrough else
                    "DIRECTIONAL"  if is_directional  else
                    "ADVERSE"      if is_adverse       else "NULL")
+
+        # Phase 0.3: enforce the experiment's OWN preregistered criteria (previously
+        # WRITE-ONLY — nothing read them back). A candidate that does not meet its
+        # preregistered joint bar cannot be reported positive; a preregistered
+        # min_seed_acc collapse (learned nothing) vetoes any positive verdict. No
+        # criteria preregistered -> unchanged (backwards compatible).
+        crit_note = ""
+        try:
+            crit_report, crit_met = self._evaluate_prereg_criteria(
+                spec, mean_delta=mean_delta, p_val=p_val, cohens_d=cohens_d,
+                std_forgetting=_std(forgetting_list), mean_accuracy=_mean(accuracy_list),
+                accuracy_list=accuracy_list,
+            )
+        except Exception:
+            crit_report, crit_met = {}, None
+        if crit_report:
+            if crit_report.get("collapse_detected"):
+                verdict = "NULL"
+                _ms = crit_report.get("min_seed_acc", {})
+                crit_note = (f"  | COLLAPSE-VETO: worst seed acc {_ms.get('actual')} < "
+                             f"min_seed_acc {_ms.get('threshold')} (learned nothing)")
+            elif verdict in {"BREAKTHROUGH", "DIRECTIONAL"} and crit_met is False:
+                failed = [k for k, v in crit_report.items()
+                          if isinstance(v, dict) and v.get("passed") is False]
+                verdict = "NULL"
+                crit_note = f"  | prereg criteria NOT met {failed} -> downgraded from {'positive'}"
+            else:
+                crit_note = f"  | prereg criteria met={crit_met}"
+
         notes = (f"mean_delta={mean_delta:+.4f}  p={p_val:.4f}  d={cohens_d:.3f}"
                  f"  {n_better}/{n} seeds better"
-                 f"  bonferroni_n={n_comparisons}  alpha_bonf={alpha_bonf:.4f}")
+                 f"  bonferroni_n={n_comparisons}  alpha_bonf={alpha_bonf:.4f}{crit_note}")
 
         # Composite confidence: blend of p-value evidence, effect size, and seed coverage
         _p_score = max(0.0, 1.0 - p_val / alpha_bonf) if p_val < alpha_bonf else 0.0

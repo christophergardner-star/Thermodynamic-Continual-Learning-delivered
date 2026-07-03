@@ -77,3 +77,58 @@ def test_best_result_excludes_internal_and_novel():
     best2 = g.best_result("b1", "forgetting", higher_is_better=False, exclude_source="tar_internal")
     assert best2 is not None and best2.method_name == "cand_x"  # novel not excluded here
     g.close()
+
+
+# ── Phase 0.3 — preregistered criteria are enforced (were write-only) ──────────
+
+def _orch(tmp_path):
+    from tar_experiment_orchestrator import ExperimentOrchestrator
+    (tmp_path / "tar_state" / "autonomous_research").mkdir(parents=True, exist_ok=True)
+    return ExperimentOrchestrator(tmp_path)
+
+
+def _write_prereg(tmp_path, exp_id, criteria):
+    import json
+    p = tmp_path / "tar_state" / "autonomous_research" / "preregistration.json"
+    p.write_text(json.dumps({"hypotheses": [
+        {"experiment_id": exp_id, "name": exp_id, "criteria": criteria}
+    ]}), encoding="utf-8")
+
+
+def test_prereg_criteria_none_when_unregistered(tmp_path):
+    from types import SimpleNamespace
+    o = _orch(tmp_path)
+    spec = SimpleNamespace(id="exp-x", name="exp-x")
+    report, met = o._evaluate_prereg_criteria(
+        spec, mean_delta=-0.1, p_val=0.001, cohens_d=2.0,
+        std_forgetting=0.005, mean_accuracy=0.8, accuracy_list=[0.8, 0.81])
+    assert report == {} and met is None
+
+
+def test_prereg_joint_criteria_met_and_collapse(tmp_path):
+    from types import SimpleNamespace
+    o = _orch(tmp_path)
+    crit = {"max_delta": -0.01, "max_p": 0.05, "min_d": 0.5,
+            "max_forgetting_std": 0.0075, "min_mean_acc": 0.79, "min_seed_acc": 0.55}
+    _write_prereg(tmp_path, "exp-good", crit)
+    spec = SimpleNamespace(id="exp-good", name="exp-good")
+    # A candidate that genuinely beats the joint bar
+    report, met = o._evaluate_prereg_criteria(
+        spec, mean_delta=-0.05, p_val=0.001, cohens_d=1.2,
+        std_forgetting=0.004, mean_accuracy=0.80, accuracy_list=[0.79, 0.80, 0.81])
+    assert met is True and not report.get("collapse_detected")
+
+    # A "stability by not learning" cheat: tight variance but a seed at chance
+    report2, met2 = o._evaluate_prereg_criteria(
+        spec, mean_delta=-0.05, p_val=0.001, cohens_d=1.2,
+        std_forgetting=0.001, mean_accuracy=0.65, accuracy_list=[0.80, 0.50, 0.80])
+    assert report2.get("collapse_detected") is True
+    assert report2["min_seed_acc"]["passed"] is False
+
+
+# ── Phase 0.4 — silent-SGD guard ──────────────────────────────────────────────
+
+def test_harness_a_rejects_unknown_method():
+    from tar_lab.multimodal_payloads import run_split_cifar10_benchmark
+    with pytest.raises(ValueError):
+        run_split_cifar10_benchmark(None, "some_novel_method")  # guard fires before config use

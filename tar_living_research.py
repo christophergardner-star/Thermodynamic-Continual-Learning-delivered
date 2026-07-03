@@ -388,59 +388,20 @@ def _paper_frontier_ids(entry: dict) -> list[str]:
 def _sync_website_research_json(workspace: Path, director_state: dict | None) -> None:
     """Write website/data/research.json from live Director state. Silent on any error.
 
-    TRUTH-LOCK: evidence_strength comes ONLY from honest_evidence_inventory.json
-    (via tar_lab.honest_evidence). A frontier with no inventory record is "none" —
-    the director's own enthusiasm is a planning label, not a verified claim.
+    TRUTH-LOCK: the payload is built by
+    tar_lab.honest_evidence.build_public_research_payload — the single shared
+    builder that tar_dashboard.api_website_sync_research also serializes, so the
+    two writers cannot drift apart. The builder owns the honest evidence-strength
+    cap, the closed-frontier drop, and the omission of internal paper ids; only
+    the file-path resolution and fail-quiet error handling live here.
     """
-    import re as _re
     try:
-        from tar_lab.honest_evidence import frontier_best_verdict_map, VERDICT_TO_STRENGTH
+        from tar_lab.honest_evidence import build_public_research_payload
 
         website_json = _REPO.parent / "website" / "data" / "research.json"
         if not website_json.parent.exists():
             return
-        validation_dir = workspace / "tar_state" / "validation"
-
-        def _frontier_closed(frontier_id: str) -> bool:
-            # A frontier with a written closure file (verdict FALSIFIED / status
-            # CLOSE) is not public research-in-progress — omit it from the public
-            # site rather than showing a closed line as neutrally "active".
-            fid = str(frontier_id or "").strip()
-            if not fid:
-                return False
-            return (validation_dir / f"{fid.replace('-', '_')}_closure.json").exists()
-
-        paths = director_state.get("active_research_paths", []) if isinstance(director_state, dict) else []
-        status_map = {"pursue_now": "active", "pursue_next": "queued", "investigate": "investigating"}
-        best_verdicts = frontier_best_verdict_map(workspace)
-        items = []
-        for p in paths:
-            if not isinstance(p, dict):
-                continue
-            title = str(p.get("title", "") or "").strip()
-            if not title:
-                continue
-            frontier_id = str(p.get("target_frontier_problem_id", "") or "")
-            if _frontier_closed(frontier_id):
-                continue  # drop closed/falsified frontiers from the public list
-            why = str(p.get("why_this_now", "") or "")
-            m = _re.search(r"(\d+) complete", why)
-            exp_count = int(m.group(1)) if m else 0
-            allowed_topics = list(p.get("allowed_topics", []) or [])
-            description = str(allowed_topics[2]).strip() if len(allowed_topics) > 2 else ""
-            honest_verdict = best_verdicts.get(frontier_id, "")
-            # NOTE: internal paper_title (project id) is intentionally NOT emitted
-            # to the public JSON — it leaked internal ids like "integration-test".
-            items.append({
-                "title": title,
-                "status": status_map.get(str(p.get("status", "") or ""), "investigating"),
-                "frontier_id": frontier_id,
-                "description": description[:300],
-                "experiment_count": exp_count,
-                "evidence_strength": VERDICT_TO_STRENGTH.get(honest_verdict, "none"),
-                "updated": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            })
-        out = {"research": items, "updated_at": datetime.now(timezone.utc).isoformat()}
+        out = build_public_research_payload(workspace, director_state)
         website_json.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
@@ -1463,8 +1424,12 @@ def _build_director_followup_specs(
         # Resolve method: built-ins run through the native runner (runner_key="").
         # Novel method keys are synthesized via method_synthesizer and dispatched
         # through the generic_cl runner (runner_key="generic_cl").
+        # Methods the Harness-A native runner (run_split_cifar10_benchmark) implements.
+        # tcl_full added 2026-07-03 (it IS handled natively as canonical+observer; its
+        # omission wrongly routed tcl_full directives into LLM synthesis). agem is
+        # deliberately NOT here — it lives in the generic_cl registry, not Harness A.
         _NATIVE_METHODS = {
-            "tcl", "tcl_penalty_only", "tcl_canonical",
+            "tcl", "tcl_penalty_only", "tcl_canonical", "tcl_full",
             "ewc", "si", "sgd_baseline", "der_plus_plus", "lwf",
         }
         _proposed_method = str(directive.get("method", "tcl") or "tcl")

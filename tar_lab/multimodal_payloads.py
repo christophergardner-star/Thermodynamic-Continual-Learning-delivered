@@ -748,6 +748,22 @@ def run_split_cifar10_benchmark(
     workspace: Optional[str] = None,
     backbone: str = "tiny",
 ) -> ContinualLearningBenchmarkResult:
+    # Fail-loud guard (2026-07-03): the method dispatch below is an if/elif chain
+    # whose fall-through is plain SGD. An UNRECOGNISED method string therefore used
+    # to train silently as SGD and be recorded under its own name — a wrong-binding
+    # hazard worse than a crash. Refuse unknown methods; novel mechanisms must run
+    # via the generic_cl registry (runner_key="generic_cl"), not Harness A.
+    _HARNESS_A_METHODS = {
+        "sgd", "sgd_baseline",            # fall-through = plain SGD (legitimate)
+        "ewc", "si", "der_plus_plus", "lwf",
+        "tcl", "tcl_penalty_only", "tcl_canonical", "tcl_full",
+    }
+    if str(method) not in _HARNESS_A_METHODS:
+        raise ValueError(
+            f"run_split_cifar10_benchmark: unknown method {method!r}. Harness A implements "
+            f"only {sorted(_HARNESS_A_METHODS)}. Route novel/composed methods through the "
+            f"generic_cl registry (runner_key='generic_cl'), not the native runner."
+        )
     try:
         import torchvision
         import torchvision.transforms as T
