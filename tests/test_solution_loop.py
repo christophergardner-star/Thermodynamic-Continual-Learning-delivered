@@ -4,6 +4,7 @@ Grouped by plan phase. Phase 0 = integrity pre-work that makes the loop sound.
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 
@@ -202,3 +203,72 @@ def test_si_joint_criteria_match_evaluator_keys():
     enforced = {"max_delta", "max_p", "min_d", "max_forgetting_std", "min_mean_acc", "min_seed_acc"}
     assert set(mod._JOINT_CRITERIA) <= enforced
     assert mod._JOINT_CRITERIA["min_seed_acc"] == 0.55  # collapse guard present
+
+
+# ── Phase 3 — widened proposer (catalog injected, method carried, not TCL-pinned) ──
+
+def test_proposer_widened_injects_catalog_and_carries_method(monkeypatch):
+    import tar_lab.llm_bridge as lb
+
+    captured = {}
+
+    def fake_call(prompt, **kw):
+        captured["prompt"] = prompt
+        # A composed candidate from the design space, not TCL:
+        return json.dumps([{
+            "experiment_id": "si-clamp-decay-probe",
+            "title": "SI importance + hard clamp + decay",
+            "dataset": "split_cifar10", "backbone": "resnet18",
+            "method": "si_clamp_decay", "mechanism_class": "regularization",
+            "lineage": ["si", "ewc"],
+            "estimated_runtime_h": 4.0, "config_overrides": {},
+            "hypothesis": "clamped SI importance keeps stability without collapse",
+            "why": "targets the SI stability/collapse cliff",
+        }])
+
+    monkeypatch.setattr(lb, "call_claude", fake_call)
+    # avoid cache interference
+    monkeypatch.setattr(lb, "_cache_read", lambda *a, **k: None)
+    monkeypatch.setattr(lb, "_cache_write", lambda *a, **k: None)
+
+    from pathlib import Path
+    out = lb.propose_followup_experiments(
+        Path(tempfile.mkdtemp()), frontier_id="fp-x", frontier_title="SI anomaly",
+        global_problem_statement="stability without collapse",
+        candidate_datasets=["split_cifar10"], candidate_backbones=["resnet18"],
+        external_baselines=["si", "ewc"], completed_summaries=["e1: split_cifar10"],
+        exclude_ids=set(), max_proposals=2,
+        method_catalog_block="- si [regularization] path-integral importance\n- ewc [regularization] fisher penalty",
+    )
+    # catalog + widened mandate present in the prompt
+    assert "recombination material" in captured["prompt"]
+    assert "WHOLE continual-learning design space" in captured["prompt"]
+    # the proposed composed method is carried through (NOT forced to tcl)
+    assert len(out) == 1
+    assert out[0]["method"] == "si_clamp_decay"
+    assert out[0]["mechanism_class"] == "regularization"
+    assert out[0]["lineage"] == ["si", "ewc"]
+
+
+def test_proposer_legacy_mode_without_catalog(monkeypatch):
+    import tar_lab.llm_bridge as lb
+    cap = {}
+
+    def fake_call(prompt, **kw):
+        cap["prompt"] = prompt
+        return json.dumps([{"experiment_id": "e1", "title": "t", "dataset": "split_cifar10",
+                            "backbone": "resnet18", "estimated_runtime_h": 4.0,
+                            "config_overrides": {}, "hypothesis": "h", "why": "w"}])
+
+    monkeypatch.setattr(lb, "call_claude", fake_call)
+    monkeypatch.setattr(lb, "_cache_read", lambda *a, **k: None)
+    monkeypatch.setattr(lb, "_cache_write", lambda *a, **k: None)
+    from pathlib import Path
+    out = lb.propose_followup_experiments(
+        Path(tempfile.mkdtemp()), frontier_id="fp-x", frontier_title="t",
+        global_problem_statement="p", candidate_datasets=["split_cifar10"],
+        candidate_backbones=["resnet18"], external_baselines=["ewc"],
+        completed_summaries=[], exclude_ids=set(), max_proposals=1,
+    )  # no catalog block -> legacy mode, no method key required
+    assert "WHOLE continual-learning design space" not in cap["prompt"]
+    assert out and "method" not in out[0]

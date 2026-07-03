@@ -703,11 +703,17 @@ def propose_followup_experiments(
     completed_summaries: list[str],
     exclude_ids: set[str],
     max_proposals: int = 2,
+    method_catalog_block: str = "",
 ) -> list[dict]:
     """Ask Claude to propose follow-up experiments when the static catalog is exhausted.
 
     Returns [] if the API is unavailable or proposals don't validate.
     Cache TTL: 2 h, keyed on frontier + completed experiment set.
+
+    method_catalog_block (solution-loop Phase 3): a serialized prior-art catalog
+    (literature.method_catalog.render_catalog_block). When present, the proposer is
+    widened from "test another TCL variant" to "compose a candidate from the whole
+    CL design space", and each proposal carries a method / mechanism_class / lineage.
     """
     if not candidate_datasets or not candidate_backbones:
         return []
@@ -730,6 +736,37 @@ def propose_followup_experiments(
     summaries_str = "\n".join(f"- {s}" for s in completed_summaries) or "None yet"
     exclude_str = ", ".join(sorted(str(x) for x in exclude_ids)[:20]) or "none"
 
+    _widened = bool(method_catalog_block.strip())
+    _catalog_section = (
+        f"\nContinual-learning method catalog (recombination material — mechanism class, summary, "
+        f"failure modes):\n{method_catalog_block}\n" if _widened else ""
+    )
+    if _widened:
+        _rules = (
+            "1. Only use the listed available datasets and backbones.\n"
+            "2. Propose a METHOD from the WHOLE continual-learning design space (see the catalog "
+            "below). You MAY recombine mechanisms (importance estimator x penalty form x rehearsal "
+            "buffer x schedule x reset) into a NEW candidate. Do NOT restrict yourself to TCL. If "
+            "the method is novel/composed, give it a fresh lowercase method_key and list the catalog "
+            "methods it builds on in \"lineage\".\n"
+            "3. A candidate must be compared against a real external baseline — never tested alone.\n"
+            "4. Each proposal must explore a meaningfully different axis / mechanism than what is done.\n"
+            "5. Prefer the cheapest dataset/backbone that still yields useful evidence."
+        )
+        _method_keys = (
+            '    "method": "<an existing method key OR a fresh lowercase slug for a composed candidate>",\n'
+            '    "mechanism_class": "<regularization|replay|distillation|architectural|parameter_isolation|subspace_projection|optimizer_based|bayesian>",\n'
+            '    "lineage": ["catalog method_keys this recombines/differs from"],\n'
+        )
+    else:
+        _rules = (
+            "1. Only propose experiments using the listed available datasets and backbones\n"
+            "2. Always compare against real external baselines — never test a method alone\n"
+            "3. Each proposal must explore a meaningfully different axis than what is already done\n"
+            "4. Prefer the cheapest dataset/backbone combination that still produces useful evidence"
+        )
+        _method_keys = ""
+
     prompt = f"""You are the TAR Research Director generating follow-up experiments for a machine learning research frontier.
 
 Frontier: {frontier_title}
@@ -741,15 +778,11 @@ Completed experiments so far:
 Available datasets: {', '.join(candidate_datasets)}
 Available backbones: {', '.join(candidate_backbones)}
 External baselines to compare against: {', '.join(external_baselines) or 'ewc, sgd_baseline'}
-
+{_catalog_section}
 Already queued or done (do NOT propose these): {exclude_str}
 
 RULES:
-1. Only propose experiments using the listed available datasets and backbones
-2. Always compare TCL against real external baselines — never test TCL alone
-3. Each proposal must explore a meaningfully different axis than what is already done
-4. TAR/TCL/ASC are unpublished internal candidate methods under evaluation — not assumed solutions
-5. Prefer the cheapest dataset/backbone combination that still produces useful evidence
+{_rules}
 
 Return a JSON array of up to {max_proposals} experiments with these exact keys:
 [
@@ -758,7 +791,7 @@ Return a JSON array of up to {max_proposals} experiments with these exact keys:
     "title": "Short descriptive title",
     "dataset": "<one of the available datasets>",
     "backbone": "<one of the available backbones>",
-    "estimated_runtime_h": 6.0,
+{_method_keys}    "estimated_runtime_h": 6.0,
     "config_overrides": {{}},
     "hypothesis": "One falsifiable sentence this experiment tests",
     "why": "Why this is the most valuable next step given results so far"
@@ -796,7 +829,7 @@ Return ONLY the JSON array, no other text."""
             backbone = str(p.get("backbone", "") or "")
             if dataset not in candidate_datasets or backbone not in candidate_backbones:
                 continue
-            valid.append({
+            entry = {
                 "experiment_id": exp_id,
                 "title": str(p.get("title", exp_id) or exp_id)[:80],
                 "dataset": dataset,
@@ -805,7 +838,15 @@ Return ONLY the JSON array, no other text."""
                 "config_overrides": dict(p.get("config_overrides") or {}),
                 "hypothesis": str(p.get("hypothesis", "") or ""),
                 "why": str(p.get("why", "") or ""),
-            })
+            }
+            if _widened:
+                # Carry the proposed method + provenance so the director can dispatch a
+                # composed candidate (validated/resolved downstream) instead of hard-pinning TCL.
+                _m = str(p.get("method", "") or "").strip().lower().replace(" ", "_")
+                entry["method"] = "".join(ch for ch in _m if ch.isalnum() or ch == "_")
+                entry["mechanism_class"] = str(p.get("mechanism_class", "") or "").strip()
+                entry["lineage"] = [str(x) for x in (p.get("lineage") or []) if str(x).strip()]
+            valid.append(entry)
         if valid:
             _cache_write(cache_dir, f"proposals_{content_key}", json.dumps(valid))
         return valid

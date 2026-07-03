@@ -2503,7 +2503,11 @@ class ResearchDirector:
             # Gated on the domain being armed (defense-in-depth): a previously-registered
             # gap-frontier produces NO experiment once its domain is removed from
             # _FRONTIER_AUTONOMY_DOMAINS, so disarming fully stops autonomous generation.
-            _method = "tcl"  # internal method under evaluation, vs the external baselines
+            # Solution-loop Phase 3: honor a candidate method proposed for THIS gap-frontier
+            # (set by the widened proposer / anomaly seeding as frontier["candidate_method"]);
+            # default remains "tcl". Downstream (_build_director_followup_specs) resolves
+            # runnability (native / generic_cl registry / gated synthesis).
+            _method = str(frontier.get("candidate_method", "") or "").strip().lower() or "tcl"
             _cmp = [_method] + [b for b in external_baselines if b != _method][:5]
             _seeds = [42, 0, 1, 2, 3]
             _est_h = 8.0
@@ -3264,9 +3268,14 @@ class ResearchDirector:
                     status = "proposed"
                     unmet: list[str] = []
                     intent = "propose_now"
+                    # Solution-loop Phase 3: use the proposer's chosen method (a composed
+                    # candidate or an existing method), not a hardcoded "tcl". Runnability
+                    # (native / generic_cl registry / synthesis) is resolved downstream in
+                    # _build_director_followup_specs; a novel key routes to gated synthesis.
+                    _pm = str(proposal.get("method", "") or "").strip().lower() or "tcl"
                     priority_score = _priority_for(
                         exp_id, status, unmet, 0.0,
-                        method="tcl",
+                        method=_pm,
                         dataset=str(proposal.get("dataset", "") or "split_cifar10"),
                     )
                     directives.append({
@@ -3274,7 +3283,9 @@ class ResearchDirector:
                         "title": str(proposal.get("title", "") or f"LLM Follow-up - {frontier_title}"),
                         "dataset": str(proposal.get("dataset", "") or "split_cifar10"),
                         "backbone": str(proposal.get("backbone", "resnet18") or "resnet18"),
-                        "method": "tcl",
+                        "method": _pm,
+                        "mechanism_class": str(proposal.get("mechanism_class", "") or ""),
+                        "method_lineage": [str(x) for x in (proposal.get("lineage") or [])],
                         "seeds": [42, 0, 1, 2, 3],
                         "config_overrides": dict(proposal.get("config_overrides") or {}),
                         "estimated_runtime_h": float(proposal.get("estimated_runtime_h", 6.0) or 6.0),
@@ -3534,6 +3545,14 @@ class ResearchDirector:
     ) -> list[dict[str, Any]]:
         """Ask Claude for follow-up experiments when the static catalog is exhausted."""
         from tar_lab.llm_bridge import propose_followup_experiments
+        # Solution-loop Phase 3: give the proposer the CL method catalog as recombination
+        # material so it composes candidates from the whole design space (not TCL variants).
+        # Empty string if the catalog is unavailable -> proposer stays in legacy mode.
+        try:
+            from literature.method_catalog import render_catalog_block
+            _catalog_block = render_catalog_block()
+        except Exception:
+            _catalog_block = ""
         frontier_id = str(frontier.get("problem_id", "") or "")
         frontier_title = str(frontier.get("title", frontier_id) or frontier_id)
         summaries: list[str] = []
@@ -3560,6 +3579,7 @@ class ResearchDirector:
             completed_summaries=summaries,
             exclude_ids=seen_ids,
             max_proposals=2,
+            method_catalog_block=_catalog_block,
         )
 
     def _infer_domain_id(self, text: str) -> str:
