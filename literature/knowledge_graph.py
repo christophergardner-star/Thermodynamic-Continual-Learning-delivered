@@ -557,15 +557,22 @@ class LiteratureKnowledgeGraph:
         benchmark_id: str,
         metric_name: str,
         higher_is_better: bool = True,
-        exclude_source: Optional[str] = None,
+        exclude_source=None,
     ) -> Optional[SoTAEntry]:
-        """Return the single best entry for a benchmark/metric combination."""
+        """Return the single best entry for a benchmark/metric combination.
+
+        exclude_source accepts a single source string OR an iterable of sources
+        (all excluded). Used to keep TAR-internal AND novel results out of the
+        external/novelty comparison bar (circular-self-validation guard).
+        """
         order = "DESC" if higher_is_better else "ASC"
         if exclude_source is not None:
+            sources = [exclude_source] if isinstance(exclude_source, str) else list(exclude_source)
+            placeholders = ",".join("?" for _ in sources) or "''"
             row = self.conn.execute(
                 f"SELECT * FROM sota_entries WHERE benchmark_id = ? AND metric_name = ? "
-                f"AND source != ? ORDER BY metric_value {order} LIMIT 1",
-                (benchmark_id, metric_name, exclude_source),
+                f"AND source NOT IN ({placeholders}) ORDER BY metric_value {order} LIMIT 1",
+                (benchmark_id, metric_name, *sources),
             ).fetchone()
         else:
             row = self.conn.execute(

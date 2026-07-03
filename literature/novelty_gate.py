@@ -195,7 +195,7 @@ class NoveltyGate:
         Fast path: just check if metric_value beats current SoTA.
         Returns (beats_sota, current_best_entry).
         """
-        best = self._g.best_result(benchmark_id, metric_name, higher_is_better, exclude_source="tar_internal")
+        best = self._g.best_result(benchmark_id, metric_name, higher_is_better, exclude_source=("tar_internal", "tar_novel"))
         if best is None:
             return True, None  # no prior result → trivially beats SoTA
         if higher_is_better:
@@ -220,7 +220,7 @@ class NoveltyGate:
             (sota_verdict, rank, delta, delta_pct, best_entry)
         sota_verdict: "better" | "marginal" | "equal" | "worse"
         """
-        best = self._g.best_result(benchmark_id, metric_name, higher_is_better, exclude_source="tar_internal")
+        best = self._g.best_result(benchmark_id, metric_name, higher_is_better, exclude_source=("tar_internal", "tar_novel"))
         sota_table = self._g.get_sota_table(benchmark_id, metric_name)
         rank = sota_table.rank_of(metric_value) if sota_table.entries else 1
 

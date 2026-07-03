@@ -583,10 +583,17 @@ class AGEMMethod(CLMethod):
 
 # ── Thermodynamic Continual Learning ──────────────────────────────────────────
 
-@register_method("tcl")
+@register_method("tcl_canonical")
 class TCLMethod(CLMethod):
     """
     Thermodynamic Continual Learning via gradient-energy EMA importance.
+
+    TRUTH-LOCK (key-collision fix, 2026-07-03): registered under "tcl_canonical",
+    NOT "tcl". The bare key "tcl" denotes the uniform-L2 PROXY in Harness A
+    (multimodal_payloads.py) and in method_identity._TCL_PROXY; this registry class
+    is the CANONICAL gradient-energy algorithm (method_identity._TCL_CANON). Sharing
+    the "tcl" key made a canonical generic_cl run get fingerprinted as the proxy.
+    The key now matches the algorithm's true identity.
 
     Accumulates per-parameter gradient-squared EMA (ThermalImportance) during
     task training. After each task, commits a checkpoint (weights + importance)

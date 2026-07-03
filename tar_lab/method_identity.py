@@ -25,6 +25,24 @@ _TCL_FAMILY = frozenset({"tcl", "tcl_penalty_only", "tcl_canonical", "tcl_full"}
 # Variants that are (entirely or partly) the uniform-L2 proxy, NOT the canonical importance method.
 _TCL_PROXY = frozenset({"tcl", "tcl_penalty_only"})
 
+# Established external CL baselines that TAR REPRODUCES under its own protocol.
+# These (and ONLY these) are allowed to serve as the NoveltyGate comparison bar.
+# Everything else TAR produces — its TCL flagship AND any novel/composed/synthesized
+# candidate — is EXCLUDED from the bar so TAR can never cite its own work as the prior
+# art it must beat (circular self-validation). Matching is exact + case-insensitive:
+# a novel method like "si_clamp_decay" is NOT the "si" baseline.
+_ESTABLISHED_BASELINES = frozenset({
+    "sgd", "sgd_baseline", "sgd_generic", "naive", "finetune",
+    "ewc", "ewc_generic", "si", "si_generic", "mas", "mas_generic",
+    "lwf", "lwf_generic", "der", "der_plus_plus", "derpp", "der++",
+    "agem", "a-gem", "agem_generic", "gem", "icarl",
+    "er", "experience_replay", "replay", "gdumb",
+})
+
+# Result-source tags that must NEVER count as the external/novelty comparison bar.
+# Consumed by NoveltyGate's best_result(exclude_source=...).
+EXCLUDED_FROM_NOVELTY_BAR = frozenset({"tar_internal", "tar_novel"})
+
 
 def method_identity(method: str) -> dict[str, Any]:
     """Return the identity fingerprint of a benchmark method name.
@@ -49,19 +67,22 @@ def method_identity(method: str) -> dict[str, Any]:
 
 
 def internal_source_tag(method: str) -> str:
-    """Source tag for a TAR-produced result, by method provenance.
+    """Source tag for a TAR-produced result, by method provenance. THREE classes:
 
-    - TAR's NOVEL methods (the TCL family) -> 'tar_internal'. These are EXCLUDED from the
-      NoveltyGate comparison bar (best_result(exclude_source='tar_internal')) so TAR never
-      cites its own novel method as the prior art it must beat (circular self-validation).
-    - TAR's reproduction of an ESTABLISHED external baseline (ewc/si/sgd/experience_replay/
-      agem/der/lwf/gem/icarl/...) -> 'tar_internal_baseline'. These DO serve as the
-      protocol-matched comparison bar (they are NOT excluded). Important: an established
-      baseline reproduced by TAR is NOT external LITERATURE, so a result that only beats it
-      is a capability comparison under TAR's own protocol, NOT an external-SoTA/novelty
-      claim — NoveltyGate must label it as such.
+    - TCL flagship family -> 'tar_internal'. EXCLUDED from the NoveltyGate bar.
+    - ESTABLISHED baseline reproduced by TAR (ewc/si/sgd/der++/agem/...) ->
+      'tar_internal_baseline'. This IS the protocol-matched comparison bar (NOT excluded).
+      Beating it is a capability comparison under TAR's protocol, not an external-SoTA claim.
+    - NOVEL / composed / synthesized / unknown method -> 'tar_novel'. EXCLUDED from the bar
+      (fail-safe default): a method TAR invented must never become the prior art it must beat.
+      This closes the circular-self-validation hole for the solution-finding loop, where the
+      proposer mints new method keys that are neither TCL nor established baselines.
     """
-    return "tar_internal" if method_identity(method)["in_tcl_family"] else "tar_internal_baseline"
+    if method_identity(method)["in_tcl_family"]:
+        return "tar_internal"
+    if str(method or "").strip().lower() in _ESTABLISHED_BASELINES:
+        return "tar_internal_baseline"
+    return "tar_novel"
 
 
 def is_proxy_claiming_canonical(method: str, *, claims_canonical_tcl: bool) -> bool:
