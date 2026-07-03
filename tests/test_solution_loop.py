@@ -132,3 +132,44 @@ def test_harness_a_rejects_unknown_method():
     from tar_lab.multimodal_payloads import run_split_cifar10_benchmark
     with pytest.raises(ValueError):
         run_split_cifar10_benchmark(None, "some_novel_method")  # guard fires before config use
+
+
+# ── Phase 1 — method catalog loader + guards ──────────────────────────────────
+
+def test_method_catalog_loads_and_is_all_cited():
+    from literature.method_catalog import load_method_catalog, MECHANISM_CLASSES, _has_citation
+    cat = load_method_catalog()
+    assert len(cat) >= 15, "seed catalog should carry a substantial method set"
+    for m in cat:
+        assert m["mechanism_class"] in MECHANISM_CLASSES
+        assert _has_citation(m["citation"]), f"{m['method_key']} must be cited"
+    keys = {m["method_key"] for m in cat}
+    assert {"ewc", "si", "der_plus_plus", "l2p"} <= keys
+
+
+def test_method_catalog_refuses_uncited(tmp_path):
+    import json
+    from literature.method_catalog import load_method_catalog
+    p = tmp_path / "cat.json"
+    p.write_text(json.dumps({"methods": [
+        {"method_key": "good", "full_name": "Good", "mechanism_class": "replay",
+         "citation": {"paper_title": "X", "arxiv_id": "1234.5678"}},
+        {"method_key": "uncited", "full_name": "Bad", "mechanism_class": "replay",
+         "citation": {"paper_title": "No id"}},          # refused: no arxiv/doi/url
+        {"method_key": "badclass", "full_name": "Y", "mechanism_class": "magic",
+         "citation": {"paper_title": "Z", "doi": "10.x/y"}},  # refused: bad class
+    ]}), encoding="utf-8")
+    cat = load_method_catalog(p)
+    assert {m["method_key"] for m in cat} == {"good"}
+
+
+def test_method_catalog_unverified_until_signed_off():
+    from literature.method_catalog import catalog_is_verified
+    # Seeded catalog ships _verified:false — citations are model-supplied, human must confirm.
+    assert catalog_is_verified() is False
+
+
+def test_render_catalog_block_nonempty():
+    from literature.method_catalog import render_catalog_block
+    block = render_catalog_block()
+    assert "ewc" in block and "[regularization]" in block and len(block.splitlines()) >= 15
