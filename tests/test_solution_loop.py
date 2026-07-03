@@ -297,3 +297,42 @@ def test_kill_ledger_records_and_prunes(tmp_path):
     assert len(load_killed_fingerprints(tmp_path)) == 1
     block = render_kill_ledger_block(tmp_path)
     assert "si_clamp_decay" in block and "COLLAPSED" in block
+
+
+# ── Phase 0.3/4 scoping — legacy director experiments must NOT be loop-downgraded/killed ──
+
+def _build_null_result(tmp_path, exp_id, criteria):
+    """Run _build_result for a NULL-producing result under the given prereg criteria.
+    Returns (verdict, kill_ledger_exists)."""
+    from tar_experiment_orchestrator import ExperimentOrchestrator, ExperimentSpec
+    (tmp_path / "tar_state" / "autonomous_research").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tar_state" / "autonomous_research" / "preregistration.json").write_text(
+        json.dumps({"hypotheses": [{"experiment_id": exp_id, "name": exp_id, "criteria": criteria}]}),
+        encoding="utf-8")
+    o = ExperimentOrchestrator(tmp_path)
+    spec = ExperimentSpec(name=exp_id, project_id="p", hypothesis_name="h",
+                          dataset="split_cifar10", method="si_cand", seeds=[0, 1, 2],
+                          config_overrides={"lam": 0.5})
+    object.__setattr__(spec, "id", exp_id) if not hasattr(spec, "id") else None
+    # Forgetting ~ equal to the fallback baseline -> mean_delta ~ 0 -> NULL verdict.
+    base = o._load_baseline()[:3]
+    res = o._build_result(spec, [{"seed": s} for s in range(3)], list(base), [0.8, 0.8, 0.8])
+    led = tmp_path / "tar_state" / "solution_loop" / "kill_ledger.jsonl"
+    return res.verdict, led.exists()
+
+
+def test_legacy_criteria_not_kill_recorded(tmp_path):
+    # Legacy director prereg (no joint keys): NULL result must NOT create a loop kill.
+    verdict, killed = _build_null_result(tmp_path, "legacy-exp",
+                                         {"max_p": 0.05, "min_d": 0.5, "max_delta": -0.01})
+    assert verdict == "NULL"
+    assert killed is False, "legacy (non-loop) experiment must not be recorded as a loop kill"
+
+
+def test_loop_candidate_is_kill_recorded(tmp_path):
+    # Joint-criterion prereg (loop candidate): NULL result IS recorded to the kill-ledger.
+    verdict, killed = _build_null_result(tmp_path, "loop-exp",
+                                         {"max_delta": -0.01, "max_forgetting_std": 0.0075,
+                                          "min_mean_acc": 0.79, "min_seed_acc": 0.55})
+    assert verdict == "NULL"
+    assert killed is True, "loop candidate NULL must be pruned via the kill-ledger"

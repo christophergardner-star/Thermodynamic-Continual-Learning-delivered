@@ -3065,22 +3065,31 @@ class ExperimentOrchestrator:
         except Exception:
             crit_report, crit_met = {}, None
         if crit_report:
-            if crit_report.get("collapse_detected"):
+            # A "loop candidate" is one whose prereg carries the JOINT-criterion
+            # extensions (max_forgetting_std / min_mean_acc / min_seed_acc). ONLY these
+            # get verdict-downgraded + kill-recorded. Legacy director experiments carry
+            # only {max_p,min_d,max_delta}: we annotate but DO NOT change their verdict,
+            # preserving existing DIRECTIONAL semantics (no regression to the inventory).
+            _loop_candidate = any(
+                k in crit_report for k in ("max_forgetting_std", "min_mean_acc", "min_seed_acc")
+            )
+            if _loop_candidate and crit_report.get("collapse_detected"):
                 verdict = "NULL"
                 _ms = crit_report.get("min_seed_acc", {})
                 crit_note = (f"  | COLLAPSE-VETO: worst seed acc {_ms.get('actual')} < "
                              f"min_seed_acc {_ms.get('threshold')} (learned nothing)")
-            elif verdict in {"BREAKTHROUGH", "DIRECTIONAL"} and crit_met is False:
+            elif _loop_candidate and verdict in {"BREAKTHROUGH", "DIRECTIONAL"} and crit_met is False:
                 failed = [k for k, v in crit_report.items()
                           if isinstance(v, dict) and v.get("passed") is False]
                 verdict = "NULL"
-                crit_note = f"  | prereg criteria NOT met {failed} -> downgraded from {'positive'}"
+                crit_note = f"  | joint criteria NOT met {failed} -> downgraded from positive"
             else:
                 crit_note = f"  | prereg criteria met={crit_met}"
 
-            # Phase 4: a killed loop-candidate prunes the search — record it to the
+            # Phase 4: a killed LOOP candidate prunes the search — record it to the
             # append-only kill-ledger so the proposer won't re-propose this region.
-            if verdict in {"NULL", "ADVERSE"}:
+            # Legacy (non-loop) experiments are never recorded as loop kills.
+            if _loop_candidate and verdict in {"NULL", "ADVERSE"}:
                 try:
                     from tar_lab.solution_loop import record_kill
                     _failed = [k for k, v in crit_report.items()
