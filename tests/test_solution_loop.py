@@ -329,6 +329,31 @@ def test_legacy_criteria_not_kill_recorded(tmp_path):
     assert killed is False, "legacy (non-loop) experiment must not be recorded as a loop kill"
 
 
+def test_forbidden_synthesis_names_block_baseline_collision():
+    # Bug-hunt CONFIRMED finding: a synthesized method carrying an established-
+    # baseline name would be tagged tar_internal_baseline -> bar-eligible.
+    from tar_lab.method_identity import forbidden_synthesis_name
+    for name in ("gem", "er", "mas", "icarl", "gdumb", "replay", "EWC", " si "):
+        assert forbidden_synthesis_name(name) is True
+    for name in ("si_clamp_decay", "hybrid_ema_pathint", "cand_gem_v2", ""):
+        assert forbidden_synthesis_name(name) is False
+
+
+def test_generic_callers_use_canonical_registry_key():
+    # Bug-hunt CONFIRMED finding: the tcl->tcl_canonical rename must be
+    # propagated to every offline generic-registry caller.
+    import re
+    from pathlib import Path
+    repo = Path(__file__).resolve().parent.parent
+    for fname in ("phase16_cifar100_rerun.py", "phase17_tinyimagenet_rerun.py",
+                  "run_hyperparameter_selection.py", "analyze_dpr_forgetting_correlation.py"):
+        text = (repo / fname).read_text(encoding="utf-8")
+        assert "tcl_canonical" in text, f"{fname} must use the renamed registry key"
+        # no bare "tcl" key/lookup remains (allow tcl_canonical / tcl_penalty_lambda etc.)
+        assert not re.search(r"['\"]tcl['\"]\s*[:=]", text.replace("'tcl_canonical'", "").replace('"tcl_canonical"', "")), \
+            f"{fname} still references the bare 'tcl' registry key"
+
+
 def test_loop_candidate_is_kill_recorded(tmp_path):
     # Joint-criterion prereg (loop candidate): NULL result IS recorded to the kill-ledger.
     verdict, killed = _build_null_result(tmp_path, "loop-exp",

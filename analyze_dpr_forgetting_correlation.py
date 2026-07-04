@@ -41,7 +41,8 @@ _DATA_ROOT       = str(_REPO / "dataset_artifacts")
 # Live-mode experiment configuration
 # ---------------------------------------------------------------------------
 
-LIVE_METHODS  = ["tcl", "ewc_generic", "sgd_generic", "der_plus_plus"]
+# Registry key renamed tcl->tcl_canonical (truth-lock key-collision fix, 33ad4a6)
+LIVE_METHODS  = ["tcl_canonical", "ewc_generic", "sgd_generic", "der_plus_plus"]
 LIVE_SEEDS    = [42, 0, 1, 2, 3]
 LIVE_DATASET  = "split_cifar10"
 LIVE_EPOCHS   = 40
@@ -49,7 +50,7 @@ LIVE_BACKBONE = "resnet18"
 
 # Default config overrides for each method (mirrors phase10 / phase16 rerun defaults)
 _METHOD_CONFIGS: dict[str, dict] = {
-    "tcl":          {"ewc_lambda": 400.0, "alpha": 0.5},
+    "tcl_canonical": {"ewc_lambda": 400.0, "alpha": 0.5},
     "ewc_generic":  {"ewc_lambda": 1000.0},
     "sgd_generic":  {},
     "der_plus_plus": {"der_mem_size": 200, "der_alpha": 0.1, "der_beta": 0.5},

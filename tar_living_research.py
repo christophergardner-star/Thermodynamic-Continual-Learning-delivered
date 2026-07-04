@@ -1445,6 +1445,20 @@ def _build_director_followup_specs(
             _synth_dir = workspace / "tar_state" / "synthesized_methods"
             load_generated_methods(_synth_dir)
             if _proposed_method not in METHOD_REGISTRY:
+                # TRUTH-LOCK: never SYNTHESIZE under an established-baseline name.
+                # internal_source_tag classifies by name, so an LLM-invented method
+                # named "gem"/"er"/"mas"/... would be tagged tar_internal_baseline
+                # and become eligible as the NoveltyGate bar (circular validation).
+                # Baseline names are reserved for genuine hand-written baselines.
+                from tar_lab.method_identity import forbidden_synthesis_name
+                if forbidden_synthesis_name(_proposed_method):
+                    print(
+                        f"[Director] REFUSED synthesis under established-baseline name "
+                        f"'{_proposed_method}' (directive '{spec_id}') — novel candidates "
+                        f"must use a fresh method key. Skipping.",
+                        flush=True,
+                    )
+                    continue
                 try:
                     from tar_lab.method_synthesizer import synthesize_and_validate_method
                     _idea = (
@@ -1455,6 +1469,14 @@ def _build_director_followup_specs(
                     if _syn.get("success"):
                         load_generated_methods(_synth_dir)
                         _proposed_method = _syn["method_key"]  # may differ from directive name
+                        if forbidden_synthesis_name(_proposed_method):
+                            # The synthesizer itself may mint a colliding key — same rule.
+                            print(
+                                f"[Director] REFUSED synthesized method key "
+                                f"'{_proposed_method}' (baseline-name collision) — skipping.",
+                                flush=True,
+                            )
+                            continue
                         print(
                             f"[Director] Synthesized method '{_proposed_method}' "
                             f"for directive '{spec_id}'", flush=True

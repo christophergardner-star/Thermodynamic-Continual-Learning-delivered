@@ -103,7 +103,9 @@ DATA_ROOT = str(_REPO / "dataset_artifacts")
 # hyperparameter_selection.json (Task 2.6) before final paper run.
 # NOTE: Run run_hyperparameter_selection.py BEFORE this script.
 METHODS_CONFIG: dict[str, dict] = {
-    "tcl": {
+    # Registry key renamed tcl->tcl_canonical (truth-lock key-collision fix,
+    # commit 33ad4a6): same canonical TCLMethod; only the lookup key changed.
+    "tcl_canonical": {
         "tcl_penalty_lambda": 1.0,
         "tcl_ema_beta":       0.99,
         "tcl_governor_enabled": False,

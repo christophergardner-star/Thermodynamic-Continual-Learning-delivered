@@ -85,7 +85,9 @@ SWEEPS: dict[str, list[dict]] = {
 }
 
 # TCL reference configuration
-TCL_METHOD_KEY = "tcl"   # loaded from synthesized_methods/ at runtime
+# Registry key renamed tcl->tcl_canonical (truth-lock key-collision fix, 33ad4a6):
+# same built-in canonical TCLMethod as before; only the lookup key changed.
+TCL_METHOD_KEY = "tcl_canonical"
 TCL_REFERENCE_CONFIG: dict = {
     "tcl_penalty_lambda": 1.0,
     "tcl_ema_beta":       0.99,

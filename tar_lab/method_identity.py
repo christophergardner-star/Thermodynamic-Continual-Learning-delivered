@@ -44,6 +44,19 @@ _ESTABLISHED_BASELINES = frozenset({
 EXCLUDED_FROM_NOVELTY_BAR = frozenset({"tar_internal", "tar_novel"})
 
 
+def forbidden_synthesis_name(method: str) -> bool:
+    """True if *method* must NOT be minted by the LLM method-synthesizer.
+
+    Closes the residual circular-validation hole: internal_source_tag classifies
+    by NAME, so a SYNTHESIZED (TAR-invented, unverified) method that happens to
+    carry an established-baseline name ("gem", "er", "mas", ...) would be tagged
+    tar_internal_baseline and become ELIGIBLE as the NoveltyGate comparison bar —
+    a fake 'reproduction' serving as the prior art candidates must beat. Baseline
+    names are reserved for genuine hand-written implementations; composed/novel
+    candidates must use fresh keys (and are then tagged tar_novel = excluded)."""
+    return str(method or "").strip().lower() in _ESTABLISHED_BASELINES
+
+
 def method_identity(method: str) -> dict[str, Any]:
     """Return the identity fingerprint of a benchmark method name.
 
