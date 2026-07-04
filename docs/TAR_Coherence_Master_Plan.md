@@ -115,11 +115,22 @@ testable function (injected clock); unit-test: warn fires at 50%, hard-kill at 1
 
 **WS2.1 Drain the phase-2 gate (already in motion — protect it).** HPC replication finishes (SPRT/seed
 target), sequencer auto-launches the mechanistic ablation. Do not restart the daemon until BOTH are
-terminal. Then evaluate_ramp sees hp_selection+hpc_replication+mechanistic_ablation terminal; the
-remaining not_found runners (phase16/17 reruns, hpc_lambda) are ⛔ operator decisions: run on RunPod
-(cost), run locally (days), or formally de-scope them from `phase2_runner_keys` (an honest,
-documented reduction — preferable to a permanently-stuck gate).
-*Acceptance:* ramp reaches `awaiting_confirm` on its own gate report.
+terminal. The remaining not_found runners (phase16/17 reruns, hpc_lambda) are ⛔ operator decisions:
+run on RunPod (cost), run locally (days), or formally de-scope them from `phase2_runner_keys` (an
+honest, documented reduction — preferable to a permanently-stuck gate).
+
+**WS2.1a (CONFIRMED 2026-07-04, first-run finding — MUST land before Phase B): the ramp gate cannot
+see dashboard-launched phase-2 completions.** HPC replication completed (REPLICATION_SUCCESS,
+n=20, Wilcoxon p=0.0200, d=-0.517, result `comparisons/hpc_replication_20260703T214048Z.json`;
+sequencer verified: auto-launched the ablation and exited cleanly) yet `autonomy_ramp.json` still
+reports `hpc_replication_phase2: not_found` — `_phase2_status` (tar_autonomy_ramp.py:165) scans only
+experiment_queue/archive runner_key entries, which dashboard-launched scripts never create. Fix
+WITHOUT weakening the gate: extend `_phase2_status` to also accept a completed canonical comparison
+artifact (comparisons/ + canonical_results_index) mapped per runner_key, or add a completion
+registrar that writes the archive entry when a phase-2 script finishes. Regression test: gate detail
+shows `complete` for a runner whose result exists only as a comparison artifact.
+*Acceptance:* ramp reaches `awaiting_confirm` on its own gate report once the ablation is terminal
+(plus the ⛔ de-scope/run decision on the remaining three).
 
 **WS2.2 Narrative-layer cleanup (the paper/public layer must not contradict the evidence layer).**
 - Fix the live registry contradiction: `fp-catastrophic-forgetting` must carry a closed/falsified
