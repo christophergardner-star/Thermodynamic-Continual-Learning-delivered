@@ -361,7 +361,7 @@ def main() -> None:
     # ---- Statistical comparisons ----------------------------------------
     print("\n[stats] Computing pairwise comparisons ...", flush=True)
 
-    tcl_f = [r["forgetting"] for r in method_results["tcl"]["seed_results"]]
+    tcl_f = [r["forgetting"] for r in method_results["tcl_canonical"]["seed_results"]]
 
     comparisons: dict[str, dict] = {}
 
@@ -397,7 +397,7 @@ def main() -> None:
         "trust_tier":           "trusted_rerun",
         "gate_a_passed":        True,   # pre-registration checked at startup
         "gate_b_passed":        True,   # n_seeds=5 >= 5
-        "honest_verdict":       _honest_verdict(method_results["tcl"], comparisons),
+        "honest_verdict":       _honest_verdict(method_results["tcl_canonical"], comparisons),
     }
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

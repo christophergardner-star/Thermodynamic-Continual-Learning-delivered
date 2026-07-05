@@ -349,9 +349,18 @@ def test_generic_callers_use_canonical_registry_key():
                   "run_hyperparameter_selection.py", "analyze_dpr_forgetting_correlation.py"):
         text = (repo / fname).read_text(encoding="utf-8")
         assert "tcl_canonical" in text, f"{fname} must use the renamed registry key"
-        # no bare "tcl" key/lookup remains (allow tcl_canonical / tcl_penalty_lambda etc.)
-        assert not re.search(r"['\"]tcl['\"]\s*[:=]", text.replace("'tcl_canonical'", "").replace('"tcl_canonical"', "")), \
-            f"{fname} still references the bare 'tcl' registry key"
+        # Strip the safe token so the checks below only see BARE 'tcl'.
+        scrubbed = text.replace("'tcl_canonical'", "").replace('"tcl_canonical"', "")
+        # (a) no bare "tcl": / "tcl"= config-key definition remains.
+        assert not re.search(r"['\"]tcl['\"]\s*[:=]", scrubbed), \
+            f"{fname} still defines the bare 'tcl' registry key"
+        # (b) no bare ["tcl"] SUBSCRIPT lookup remains. This is the class of bug
+        #     that wasted a multi-day run: the config key was renamed but a
+        #     downstream method_results["tcl"] lookup was missed -> KeyError after
+        #     training, before the artifact is written. Labels like "tcl_vs_ewc"
+        #     are fine (not a bare-'tcl' subscript).
+        assert not re.search(r"\[\s*['\"]tcl['\"]\s*\]", scrubbed), \
+            f"{fname} still subscripts the bare 'tcl' key (renamed-key/lookup drift)"
 
 
 def test_loop_candidate_is_kill_recorded(tmp_path):
