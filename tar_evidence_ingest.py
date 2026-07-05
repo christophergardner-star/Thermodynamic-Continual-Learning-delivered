@@ -1170,6 +1170,24 @@ class ExternalEvidenceIngestor:
             out.append(value)
         return out
 
+    def _is_source_in_cooldown(self, source_name: str) -> bool:
+        """True if a source is inside its 4h rate-limit cooldown OR has an open
+        circuit breaker (N consecutive failures), per the persisted source_health.
+
+        Shared by the daily-cycle source selection (_preferred_sources) AND the
+        fast-cycle latest-feed guard (_run_fast_cycle) so BOTH honour cooldowns —
+        previously only the daily cycle did, and the fast cycle re-hit a rate-
+        limited source every cycle, pinning its failure counter high forever.
+        """
+        health = self._prior_state.get("source_health", {}) if isinstance(self._prior_state, dict) else {}
+        entry = health.get(source_name, {}) if isinstance(health, dict) else {}
+        if not isinstance(entry, dict):
+            return False
+        now_iso = datetime.now(timezone.utc).isoformat()
+        until = entry.get("rate_limited_until") or ""
+        circuit = entry.get("circuit_open_until") or ""
+        return bool((until and until > now_iso) or (circuit and circuit > now_iso))
+
     def _preferred_sources(self, *, connected: bool = False) -> list[str]:
         base = (
             ["openalex", "crossref", "semantic_scholar", "arxiv"]
@@ -1177,21 +1195,12 @@ class ExternalEvidenceIngestor:
             ["semantic_scholar", "openalex", "arxiv", "crossref"]
         )
         health = self._prior_state.get("source_health", {}) if isinstance(self._prior_state, dict) else {}
-        now_iso = datetime.now(timezone.utc).isoformat()
-
-        def _is_in_cooldown(source_name: str) -> bool:
-            entry = health.get(source_name, {}) if isinstance(health, dict) else {}
-            if not isinstance(entry, dict):
-                return False
-            until = entry.get("rate_limited_until") or ""
-            circuit = entry.get("circuit_open_until") or ""
-            return bool((until and until > now_iso) or (circuit and circuit > now_iso))
 
         # Exclude sources in their 4h rate-limit cooldown OR with an open circuit
         # breaker (N consecutive failures). If all sources are excluded, the
         # caller gets an empty list and skips the query — correct behaviour;
         # don't waste API calls.
-        available = [s for s in base if not _is_in_cooldown(s)]
+        available = [s for s in base if not self._is_source_in_cooldown(s)]
 
         def _rank(source_name: str) -> tuple[int, int, int]:
             entry = health.get(source_name, {}) if isinstance(health, dict) else {}
@@ -1292,16 +1301,30 @@ class ExternalEvidenceIngestor:
             except Exception as exc:  # network/parse error in the worker thread
                 return None, exc
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            f_arxiv = pool.submit(_safe, _fetch_arxiv)
-            f_openalex = pool.submit(_safe, _fetch_openalex)
-            arxiv_res, arxiv_exc = f_arxiv.result()
-            oa_res, oa_exc = f_openalex.result()
+        # WS3.3a: honour per-source cooldown / open circuit HERE too (the daily
+        # cycle already does via _preferred_sources). A cooled-down source is
+        # skipped WITHOUT recording a SourceRun, so it stays out of ran_sources
+        # and _apply_circuit_breaker preserves its cooldown — instead of the fast
+        # cycle re-hitting a rate-limited feed every cycle and pinning its
+        # consecutive_failures ever higher (observed: arxiv at 119).
+        planned = [
+            ("arxiv", "arxiv_latest", _fetch_arxiv),
+            ("openalex", "openalex_latest", _fetch_openalex),
+        ]
+        active = [(s, lbl, fn) for (s, lbl, fn) in planned if not self._is_source_in_cooldown(s)]
+        for s, _lbl, _fn in planned:
+            if self._is_source_in_cooldown(s):
+                print(f"[evidence-ingest] fast cycle: skipping '{s}' latest feed "
+                      f"(cooldown/circuit open)", flush=True)
+        if not active:
+            return
 
-        for src, label, res, exc in (
-            ("arxiv", "arxiv_latest", arxiv_res, arxiv_exc),
-            ("openalex", "openalex_latest", oa_res, oa_exc),
-        ):
+        with ThreadPoolExecutor(max_workers=len(active)) as pool:
+            futures = {s: pool.submit(_safe, fn) for (s, _lbl, fn) in active}
+            fetched = {s: futures[s].result() for s in futures}
+
+        for src, label, _fn in active:
+            res, exc = fetched[src]
             ok = exc is None and res is not None and res.ok
             run = SourceRun(
                 source=src,
