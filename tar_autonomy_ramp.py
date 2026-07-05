@@ -29,6 +29,7 @@ Design notes:
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -51,6 +52,26 @@ PHASE2_RUNNER_KEYS = [
     "hpc_lambda_momentum_abl",
 ]
 _TERMINAL_STATES = {"complete", "failed", "skipped", "archived"}
+
+# WS2.1a: a phase-2 confirmatory run launched from the dashboard/sequencer
+# (rather than the experiment queue) never creates a queue/archive entry, so the
+# queue-only scan reported it 'not_found' forever and the ramp gate stuck even
+# after the run completed and wrote a valid result. Map each runner_key to the
+# comparison-artifact filename prefix its script emits, so a completed result in
+# tar_state/comparisons/ counts as a terminal sighting. This does NOT weaken the
+# gate: an artifact only counts if it parses, carries a non-empty verdict/decision,
+# is not quarantined in the canonical index, and (when a checkpoint is supplied)
+# completed at/after the ramp's reauth checkpoint — a stale pre-ramp artifact can
+# never satisfy a freshly-armed gate.
+_PHASE2_ARTIFACT_PREFIXES = {
+    "hpc_replication_phase2":      "hpc_replication_",
+    "hp_selection":                "hyperparameter_selection",
+    "mechanistic_ablation_7c":     "mechanistic_ablation_",
+    "phase16_cifar100_rerun":      "phase16_cifar100_rerun_",
+    "phase17_tinyimagenet_rerun":  "phase17_tinyimagenet_rerun_",
+    "hpc_lambda_momentum_abl":     "hpc_lambda_momentum_ablation_",
+}
+_ARTIFACT_STAMP_RE = re.compile(r"_(\d{8}T\d{6}Z)")
 
 STAGE_CONFIRMATORY = "confirmatory"
 STAGE_VERIFYING = "verifying"
@@ -162,8 +183,107 @@ def is_full_autonomy(workspace) -> bool:
     return st.get("stage") == STAGE_FULL_AUTONOMY
 
 
-def _phase2_status(workspace, runner_keys):
-    """Scan queue + archive; return (all_terminal: bool, detail: dict[key->status])."""
+def _artifact_looks_complete(payload) -> bool:
+    """True if a comparison-artifact payload is a genuine completed result.
+
+    Accepts the several phase-2 schemas: a non-empty verdict, an SPRT/analysis
+    decision, or non-empty per-seed / method result rows. Rejects empty or
+    error-only artifacts so a half-written file can't satisfy the gate.
+    """
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("verdict", "") or "").strip():
+        return True
+    if str(payload.get("sprt_final_decision", "") or "").strip():
+        return True
+    for key in ("per_seed_results", "results", "method_results", "conditions", "aggregate"):
+        v = payload.get(key)
+        if isinstance(v, (list, dict)) and len(v) > 0:
+            return True
+    return False
+
+
+def _quarantined_in_index(workspace, result_name: str) -> bool:
+    """True iff the canonical index records this artifact as quarantined.
+
+    Direct-write scripts (e.g. run_hpc_replication) are not registered in the
+    index; absence from the index is NOT quarantine (returns False). Only an
+    explicit quarantined==true entry blocks the artifact.
+    """
+    idx = _path(workspace, "comparisons") / "canonical_results_index.jsonl"
+    if not idx.exists():
+        return False
+    try:
+        for line in idx.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or result_name not in line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if result_name in str(rec.get("result_path", "")):
+                return bool(rec.get("quarantined"))
+    except Exception:
+        return False
+    return False
+
+
+def _artifact_completion(workspace, prefix: str, since):
+    """Newest valid completed comparison artifact for a runner_key prefix.
+
+    Returns (result_path, completed_at_iso) or None. `since` (a datetime) is a
+    recency floor: an artifact older than it does not count (stale pre-ramp result).
+    """
+    comp = _path(workspace, "comparisons")
+    if not comp.exists():
+        return None
+    candidates = []
+    for p in comp.glob(f"{prefix}*.json"):
+        name = p.name
+        if name.endswith("_env.json") or name.endswith("_checkpoint.json"):
+            continue
+        # completion time: prefer the filename stamp, else file mtime.
+        stamp = None
+        m = _ARTIFACT_STAMP_RE.search(name)
+        if m:
+            stamp = _parse_iso(
+                f"{m.group(1)[0:4]}-{m.group(1)[4:6]}-{m.group(1)[6:8]}"
+                f"T{m.group(1)[9:11]}:{m.group(1)[11:13]}:{m.group(1)[13:15]}+00:00"
+            )
+        if stamp is None:
+            try:
+                stamp = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+            except Exception:
+                stamp = None
+        candidates.append((stamp, p))
+    # newest first (None stamps last)
+    candidates.sort(key=lambda t: (t[0] is not None, t[0] or datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
+    for stamp, p in candidates:
+        if since is not None and (stamp is None or stamp < since):
+            continue
+        try:
+            payload = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not _artifact_looks_complete(payload):
+            continue
+        if _quarantined_in_index(workspace, p.name):
+            continue
+        # prefer the artifact's own completed_at when present
+        completed = str(payload.get("completed_at", "") or "") or (stamp.isoformat() if stamp else "")
+        return str(p), completed
+    return None
+
+
+def _phase2_status(workspace, runner_keys, since=None):
+    """Return (all_terminal, detail) for the confirmatory runs.
+
+    Sources (a terminal sighting always wins): (1) experiment_archive/queue
+    entries by runner_key — the original queue-driven path; (2) WS2.1a — a
+    completed comparison artifact mapped to the runner_key, for dashboard/
+    sequencer-launched runs that never create a queue entry. `since` gates the
+    artifact source on recency (see _artifact_completion)."""
     statuses: dict[str, dict] = {}
     for fname in ("experiment_archive.json", "experiment_queue.json"):
         p = _path(workspace, fname)
@@ -188,6 +308,21 @@ def _phase2_status(workspace, runner_keys):
                         "status": st, "stage": stg, "terminal": terminal,
                         "result_path": str(e.get("result_path", "") or ""),
                     }
+    # WS2.1a artifact fallback: any runner not already terminal via queue/archive.
+    for rk in runner_keys:
+        cur = statuses.get(rk)
+        if cur is not None and cur.get("terminal"):
+            continue
+        prefix = _PHASE2_ARTIFACT_PREFIXES.get(rk)
+        if not prefix:
+            continue
+        hit = _artifact_completion(workspace, prefix, since)
+        if hit:
+            result_path, completed = hit
+            statuses[rk] = {
+                "status": "complete_artifact", "stage": "", "terminal": True,
+                "result_path": result_path, "completed_at": completed,
+            }
     all_terminal = True
     detail: dict[str, str] = {}
     for rk in runner_keys:
@@ -218,9 +353,8 @@ def _health_gate(workspace):
         return False, {"pass": False, "error": str(exc)}
 
 
-def _evidence_gate(workspace, runner_keys):
+def _evidence_gate(workspace, runner_keys, since=None):
     """Soft-verify that each terminal confirmatory run produced a result artifact."""
-    all_terminal, detail = _phase2_status(workspace, runner_keys)
     missing_results = []
     # Re-scan for result_path presence on terminal entries.
     statuses: dict[str, str] = {}
@@ -236,6 +370,16 @@ def _evidence_gate(workspace, runner_keys):
             rk = str(e.get("runner_key", "") or "")
             if rk in runner_keys and str(e.get("status", "")) == "complete":
                 statuses[rk] = str(e.get("result_path", "") or "")
+    # WS2.1a: artifact-based completions carry a verified-present result path.
+    for rk in runner_keys:
+        if rk in statuses:
+            continue
+        prefix = _PHASE2_ARTIFACT_PREFIXES.get(rk)
+        if not prefix:
+            continue
+        hit = _artifact_completion(workspace, prefix, since)
+        if hit:
+            statuses[rk] = hit[0]
     for rk in runner_keys:
         rp = statuses.get(rk)
         # Only require a result for runs that COMPLETED (a 'failed' run legitimately has none).
@@ -258,9 +402,13 @@ def evaluate_ramp(workspace) -> dict | None:
         return st  # already promoted; nothing to do
 
     runner_keys = st.get("phase2_runner_keys", PHASE2_RUNNER_KEYS)
+    # WS2.1a recency floor: artifact-based completions count only if produced at
+    # or after the ramp's last reauth checkpoint (or, absent that, its creation),
+    # so a stale pre-ramp/pre-reauth result can never satisfy a freshly-armed gate.
+    since = _parse_iso(st.get("reauth_required_at")) or _parse_iso(st.get("created_at"))
 
     # Cheap gate first: are all confirmatory runs terminal?
-    all_terminal, detail = _phase2_status(workspace, runner_keys)
+    all_terminal, detail = _phase2_status(workspace, runner_keys, since=since)
     report = {"phase2_terminal": {"pass": all_terminal, "detail": detail}}
     if not all_terminal:
         st["stage"] = STAGE_CONFIRMATORY
@@ -271,7 +419,7 @@ def evaluate_ramp(workspace) -> dict | None:
 
     # Confirmatory complete -> run the heavier safety gates.
     health_ok, health_report = _health_gate(workspace)
-    evidence_ok, evidence_report = _evidence_gate(workspace, runner_keys)
+    evidence_ok, evidence_report = _evidence_gate(workspace, runner_keys, since=since)
     report["health"] = health_report
     report["evidence"] = evidence_report
     st["gate_report"] = report

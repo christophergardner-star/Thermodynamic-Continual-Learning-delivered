@@ -144,7 +144,85 @@ def test_legacy_flow_without_reauth_still_promotes(tmp_path):
     assert ramp.load_ramp_state(ws)["stage"] == ramp.STAGE_FULL_AUTONOMY
 
 
+# ------------------------------------------------ WS2.1a artifact gate ------
+# A phase-2 confirmatory run launched from the dashboard/sequencer never creates
+# an experiment_queue/archive entry, so the queue-only scan reported it forever
+# 'not_found' and the ramp gate stuck. _phase2_status now also honours a completed
+# comparison artifact — but strictly: it must be complete, un-quarantined, and (vs
+# a reauth checkpoint) recent. These tests pin that it neither over- nor under-fires.
+
+def test_dashboard_artifact_counts_as_terminal(tmp_path):
+    ws = _ws(tmp_path)
+    since = datetime.now(timezone.utc) - timedelta(days=2)
+    _write_artifact(ws, "hpc_replication_", datetime.now(timezone.utc),
+                    {"verdict": "REPLICATION_SUCCESS", "per_seed_results": [1, 2]})
+    all_terminal, detail = ramp._phase2_status(
+        ws, ["hpc_replication_phase2"], since=since)
+    assert all_terminal is True
+    assert detail["hpc_replication_phase2"] == "complete_artifact"
+
+
+def test_stale_artifact_before_reauth_is_ignored(tmp_path):
+    ws = _ws(tmp_path)
+    since = datetime.now(timezone.utc) - timedelta(days=1)
+    stale = datetime.now(timezone.utc) - timedelta(days=30)
+    _write_artifact(ws, "hpc_replication_", stale, {"verdict": "REPLICATION_SUCCESS"})
+    all_terminal, detail = ramp._phase2_status(
+        ws, ["hpc_replication_phase2"], since=since)
+    assert all_terminal is False
+    assert detail["hpc_replication_phase2"] == "not_found"
+
+
+def test_quarantined_artifact_is_ignored(tmp_path):
+    ws = _ws(tmp_path)
+    since = datetime.now(timezone.utc) - timedelta(days=2)
+    _write_artifact(ws, "hpc_replication_", datetime.now(timezone.utc),
+                    {"verdict": "REPLICATION_SUCCESS"}, quarantined=True)
+    all_terminal, detail = ramp._phase2_status(
+        ws, ["hpc_replication_phase2"], since=since)
+    assert all_terminal is False
+    assert detail["hpc_replication_phase2"] == "not_found"
+
+
+def test_incomplete_artifact_is_ignored(tmp_path):
+    ws = _ws(tmp_path)
+    since = datetime.now(timezone.utc) - timedelta(days=2)
+    _write_artifact(ws, "hpc_replication_", datetime.now(timezone.utc),
+                    {"note": "run started", "per_seed_results": []})
+    all_terminal, detail = ramp._phase2_status(
+        ws, ["hpc_replication_phase2"], since=since)
+    assert all_terminal is False
+    assert detail["hpc_replication_phase2"] == "not_found"
+
+
+def test_evaluate_ramp_reaches_awaiting_confirm_via_artifacts(tmp_path):
+    ws = _ws(tmp_path)
+    st = ramp.init_ramp(ws, runner_keys=["hpc_replication_phase2"])
+    st["reauth_required_at"] = (
+        datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    ramp.save_ramp_state(ws, st)
+    _write_artifact(ws, "hpc_replication_", datetime.now(timezone.utc),
+                    {"verdict": "REPLICATION_SUCCESS", "per_seed_results": [1]})
+    out = _evaluate_with_pass_gates(ws)
+    assert out["gate_report"]["phase2_terminal"]["pass"] is True
+    # gate is satisfied, but promotion still needs a FRESH human confirm.
+    assert out["stage"] == ramp.STAGE_AWAITING_CONFIRM
+    assert ramp.is_full_autonomy(ws) is False
+
+
 # ------------------------------------------------------------- helpers ------
+
+def _write_artifact(ws, prefix, when, payload, quarantined=False):
+    comp = ws / "tar_state" / "comparisons"
+    comp.mkdir(parents=True, exist_ok=True)
+    p = comp / f"{prefix}{when.strftime('%Y%m%dT%H%M%SZ')}.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    if quarantined:
+        idx = comp / "canonical_results_index.jsonl"
+        with idx.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"result_path": str(p), "quarantined": True}) + "\n")
+    return p
+
 
 def _pass_health(_ws):
     return True, {"pass": True, "failed": [], "summary": {}}
