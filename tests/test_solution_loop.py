@@ -193,6 +193,43 @@ def test_si_anomaly_gap_constructs_and_is_top_composite():
     assert gap.composite_score > 0.9  # must outrank the existing negative_result gaps
 
 
+def test_prereg_criteria_join_by_frontier_problem_id(tmp_path):
+    # HANDSHAKE regression: the director mints DYNAMIC spec id/name for a gap probe
+    # (director-fp-gap-...-probe / "Gap probe - ..."), which never equals a seeded
+    # anomaly prereg's name. The only stable join is frontier_problem_id. Without it
+    # the joint collapse-guard criteria silently never load and the loop degrades to
+    # legacy thresholds (no collapse-veto, no kill-ledger).
+    import json
+    from pathlib import Path
+    from tar_experiment_orchestrator import ExperimentSpec, ExperimentOrchestrator
+    pdir = tmp_path / "tar_state" / "autonomous_research"
+    pdir.mkdir(parents=True)
+    orch = ExperimentOrchestrator.__new__(ExperimentOrchestrator)
+    orch.workspace = Path(tmp_path)
+
+    def mkspec(fpid, sid="director-x-probe", name="Gap probe - X"):
+        s = ExperimentSpec.__new__(ExperimentSpec)
+        s.id, s.name, s.frontier_problem_id = sid, name, fpid
+        return s
+
+    _FPID = "fp-gap-tar-anomaly-si-stability-without-collapse"
+    (pdir / "preregistration.json").write_text(json.dumps({"hypotheses": [
+        {"name": "si_stability_without_collapse", "frontier_problem_id": _FPID,
+         "criteria": {"max_forgetting_std": 0.00753, "min_seed_acc": 0.55, "max_delta": -0.01}},
+    ]}), encoding="utf-8")
+    # dynamic id/name that do NOT match, but the anomaly frontier_problem_id does:
+    hit = orch._load_prereg_criteria(
+        mkspec(_FPID, "director-" + _FPID + "-probe", "Gap probe - SI stability"))
+    assert hit.get("min_seed_acc") == 0.55 and hit.get("max_forgetting_std") == 0.00753
+    # an unrelated frontier must NOT pick up these criteria:
+    assert orch._load_prereg_criteria(mkspec("fp-gap-other")) == {}
+    # empty frontier_problem_id on both sides must NOT spuriously match (guards the `_h_fpid and` clause):
+    (pdir / "preregistration.json").write_text(json.dumps({"hypotheses": [
+        {"name": "legacy", "frontier_problem_id": "", "criteria": {"max_delta": -0.01}},
+    ]}), encoding="utf-8")
+    assert orch._load_prereg_criteria(mkspec("")) == {}
+
+
 def test_si_joint_criteria_match_evaluator_keys():
     import importlib.util
     from pathlib import Path

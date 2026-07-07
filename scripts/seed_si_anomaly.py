@@ -138,13 +138,22 @@ def seed_prereg(ws: Path, apply: bool) -> str:
     hyps = prereg.get("hypotheses", [])
     if any(isinstance(h, dict) and h.get("name") == "si_stability_without_collapse" for h in hyps):
         return "  [prereg] already present (idempotent skip)"
+    # HANDSHAKE: the orchestrator loads these criteria for an experiment by matching
+    # spec.id / spec.name / spec.frontier_problem_id (tar_experiment_orchestrator
+    # _load_prereg_criteria). The director mints DYNAMIC spec ids/names for the gap
+    # probe, so the only stable join key is frontier_problem_id, which the director
+    # derives deterministically from the gap_id as f"fp-gap-{_frontier_slug(gap_id)}"
+    # (tar_frontier.frontier_problem_from_gap). Reuse the SAME slug fn so the key can
+    # never drift; without this the joint collapse-guard criteria silently never load.
+    from tar_frontier import _frontier_slug
+    _frontier_pid = f"fp-gap-{_frontier_slug(_GAP_ID)}"
     entry = {
         "name": "si_stability_without_collapse",
         "registered_at": _now(),
         "prediction": ("A composed candidate can match SI's cross-seed stability "
                        "(forgetting-std <= 0.00753) at mean-acc >= 0.794 with no seed below 0.55 acc."),
         "criteria": dict(_JOINT_CRITERIA),
-        "frontier_problem_id": "",   # filled when the gap-derived frontier is registered
+        "frontier_problem_id": _frontier_pid,   # deterministic join key (see above)
         "author_paper_id": "",
         "source": "solution_loop_anomaly",
     }

@@ -2955,7 +2955,17 @@ class ExperimentOrchestrator:
             for h in data.get("hypotheses", []):
                 if not isinstance(h, dict):
                     continue
-                if h.get("experiment_id") == spec.id or h.get("name") == spec.name:
+                # Match by experiment_id, name, OR frontier_problem_id. The last is
+                # the ROBUST join for director-minted specs: the gap-probe/LLM directive
+                # gives the spec a dynamic id/name (director-fp-gap-...-probe / "Gap probe
+                # - ...") that never equals a seeded prereg's name, but its
+                # frontier_problem_id is deterministically fp-gap-{slug(gap_id)} — the same
+                # value the anomaly seeder writes. Without this clause the solution-loop
+                # joint criteria (collapse-veto / variance / kill-ledger) silently never load.
+                _h_fpid = str(h.get("frontier_problem_id", "") or "")
+                if (h.get("experiment_id") == spec.id
+                        or h.get("name") == spec.name
+                        or (_h_fpid and _h_fpid == str(spec.frontier_problem_id or ""))):
                     c = h.get("criteria")
                     return dict(c) if isinstance(c, dict) else {}
         except Exception:
