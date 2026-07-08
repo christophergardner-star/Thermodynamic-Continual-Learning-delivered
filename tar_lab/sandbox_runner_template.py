@@ -54,11 +54,15 @@ _this_module = sys.modules[__name__]
 _GeneratedClass = None
 for _name in dir(_this_module):
     _obj = getattr(_this_module, _name)
+    # Pick the CONCRETE generated subclass of CLMethod — NOT the abstract CLMethod base
+    # itself (it also has regularization_loss/augmented_loss and sorts first, so the old
+    # attribute-only check always picked it and failed with "Can't instantiate abstract
+    # class CLMethod"). Require a real, fully-implemented subclass.
     if (
         isinstance(_obj, type)
-        and hasattr(_obj, "regularization_loss")
-        and hasattr(_obj, "augmented_loss")
-        and _name not in {"_BaseMethod"}
+        and issubclass(_obj, CLMethod)
+        and _obj is not CLMethod
+        and not getattr(_obj, "__abstractmethods__", None)
     ):
         _GeneratedClass = _obj
         break

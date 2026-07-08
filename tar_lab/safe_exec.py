@@ -140,9 +140,13 @@ class SandboxedPythonExecutor:
                 "-w",
                 "/sandbox",
                 self.image,
+                # Write to the container's own stdout/stderr (captured by subprocess pipes)
+                # rather than redirecting into the bind-mounted /sandbox — reading a
+                # container-written file back from a Windows/WSL2 bind mount can raise
+                # PermissionError. Combined 2>&1 so ordering is preserved on one stream.
                 "sh",
                 "-lc",
-                "python task.py > stdout.txt 2>&1",
+                "python task.py 2>&1",
                 ]
             )
             try:
@@ -164,15 +168,21 @@ class SandboxedPythonExecutor:
                     sandbox_audit_log=audit_log,
                 )
 
-            output = ""
+            # Primary: the subprocess pipes (robust on Windows/WSL2 bind mounts). The mounted
+            # stdout file, if present and readable, is a best-effort fallback + audit artifact.
+            output = ((proc.stdout or "") + (proc.stderr or "")).strip()
             artifacts: list[ExecutionArtifact] = []
-            if output_path.exists():
-                output = output_path.read_text(encoding="utf-8", errors="replace").strip()
-                artifacts.append(self._artifact(output_path, "sandbox_stdout"))
-            if script_path.exists():
-                artifacts.append(self._artifact(script_path, "sandbox_script"))
-            if not output:
-                output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+            if not output and output_path.exists():
+                try:
+                    output = output_path.read_text(encoding="utf-8", errors="replace").strip()
+                except OSError:
+                    pass
+            for _p, _label in ((output_path, "sandbox_stdout"), (script_path, "sandbox_script")):
+                if _p.exists():
+                    try:
+                        artifacts.append(self._artifact(_p, _label))
+                    except OSError:
+                        pass
             return SandboxExecutionReport(
                 ok=proc.returncode == 0,
                 output=output,

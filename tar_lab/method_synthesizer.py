@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import textwrap
 import time
@@ -27,6 +28,14 @@ from typing import Any
 
 MAX_RETRIES = 2
 SANDBOX_TIMEOUT_S = 120   # generous — PyTorch imports are slow in Docker
+
+# Docker image the synthesis sandbox runs generated CLMethods in. Must contain torch (the
+# sandbox template imports torch/nn/F/utils.data); the default python:3.11-slim does NOT, so
+# a torch method would fail with "missing pytorch". Build once:
+#   docker build -f scripts/sandbox_torch_cpu.Dockerfile -t tar-sandbox:torch-cpu .
+# Override with TAR_SANDBOX_IMAGE. If Docker is unavailable the executor soft-passes to
+# AST-only + in-process minibench (see _run_sandbox / synthesize_and_validate_method).
+_SANDBOX_IMAGE = os.environ.get("TAR_SANDBOX_IMAGE", "tar-sandbox:torch-cpu")
 
 _ALLOWED_TOP_MODULES = {
     "torch", "math", "random", "typing", "abc", "collections",
@@ -267,7 +276,7 @@ def _run_sandbox(class_code: str, workspace: str) -> tuple[bool, str]:
         return False, "SandboxedPythonExecutor not available"
 
     script = _build_sandbox_script(class_code)
-    executor = SandboxedPythonExecutor(workspace=workspace)
+    executor = SandboxedPythonExecutor(workspace=workspace, image=_SANDBOX_IMAGE)
     ok, output, mode = executor.run(script, timeout_s=SANDBOX_TIMEOUT_S)
 
     if mode == "unavailable":
@@ -336,18 +345,30 @@ def _run_minibench(class_code: str) -> tuple[bool, str]:
 
     loaders = [_make_data(0), _make_data(15)]
 
-    # ── Instantiate method with a minimal config object ───────────────────────
+    # ── Instantiate method with a PERMISSIVE config ──────────────────────────
+    # The widened proposer emits diverse (non-TCL) methods that read their OWN hyperparams
+    # (si_c, ewc_lambda, der_*, ...). A TCL-only SimpleNamespace made those reads raise,
+    # which was swallowed below and looked like a constant-zero regularizer. Return a
+    # sensible default for ANY attribute so diverse methods actually run.
+    class _PermissiveConfig:
+        _known = {
+            "si_c": 0.1, "si_xi": 1e-3, "ewc_lambda": 100.0, "lambda_tcl": 1.0,
+            "penalty_lambda": 1.0, "ema_beta": 0.99, "der_mem_size": 32,
+            "der_alpha": 0.2, "der_beta": 0.5, "lr": 0.01, "weight_decay": 1e-4,
+            "max_tasks": 5, "task_decay": 1.0, "anneal_rate": 1.0, "temperature": 2.0,
+            "alpha": 0.5, "beta": 0.5, "gamma": 0.5, "buffer_size": 64, "replay_batch": 16,
+        }
+        def __getattr__(self, name):
+            return type(self)._known.get(name, 1.0)
     try:
-        cfg = types.SimpleNamespace(
-            lambda_tcl=1.0, ema_beta=0.99, penalty_lambda=1.0,
-            max_tasks=5, task_decay=1.0, anneal_rate=1.0,
-        )
-        method = method_cls(cfg)
+        method = method_cls(_PermissiveConfig())
     except Exception as exc:
         return False, f"Minibench: method instantiation failed: {exc}"
 
     # ── Training loop — 2 tasks × 2 epochs ───────────────────────────────────
     max_reg_loss = 0.0
+    max_aug_loss = 0.0
+    reg_error = ""
     per_task_acc: list[float] = []
 
     try:
@@ -358,14 +379,26 @@ def _run_minibench(class_code: str) -> tuple[bool, str]:
             for _epoch in range(2):
                 for X_b, y_b in loader:
                     opt.zero_grad()
-                    logits = model(X_b.to(device))
-                    ce_loss = criterion(logits, y_b.to(device))
+                    Xd, yd = X_b.to(device), y_b.to(device)
+                    logits = model(Xd)
+                    ce_loss = criterion(logits, yd)
                     try:
                         reg = method.regularization_loss(model)
-                        reg_val = float(reg.item()) if hasattr(reg, "item") else 0.0
-                    except Exception:
+                        reg_val = float(reg.item()) if hasattr(reg, "item") else float(reg)
+                    except Exception as _re:
                         reg_val = 0.0
+                        if not reg_error:
+                            reg_error = f"regularization_loss {type(_re).__name__}: {str(_re)[:120]}"
                     max_reg_loss = max(max_reg_loss, abs(reg_val))
+                    # Also exercise augmented_loss so REPLAY / distillation methods (which do
+                    # their work here and return 0 regularization_loss) can validate — the
+                    # widened proposer emits these, and a reg-only check would reject them all.
+                    try:
+                        aug = method.augmented_loss(model, Xd, yd, task_id, device)
+                        max_aug_loss = max(max_aug_loss, abs(float(aug.item()) if hasattr(aug, "item") else float(aug)))
+                    except Exception as _ae:
+                        if not reg_error:
+                            reg_error = f"augmented_loss {type(_ae).__name__}: {str(_ae)[:120]}"
                     loss = ce_loss + reg_val
                     loss.backward()
                     opt.step()
@@ -396,13 +429,14 @@ def _run_minibench(class_code: str) -> tuple[bool, str]:
             "(likely collapse — method may be interfering with learning)"
         )
 
-    if max_reg_loss == 0.0:
+    if max_reg_loss == 0.0 and max_aug_loss == 0.0:
         return False, (
-            "Minibench: method never produced non-zero regularization loss. "
-            "Likely returns a constant zero — broken implementation."
+            "Minibench: method never produced a non-zero regularization OR augmented loss"
+            + (f" ({reg_error})" if reg_error else " — likely a constant-zero stub.")
         )
 
-    return True, f"Minibench passed (acc={mean_acc:.3f}, max_reg={max_reg_loss:.4f})"
+    return True, (f"Minibench passed (acc={mean_acc:.3f}, "
+                  f"max_reg={max_reg_loss:.4f}, max_aug={max_aug_loss:.4f})")
 
 
 # ---------------------------------------------------------------------------
