@@ -220,16 +220,19 @@ def _ast_safety_check(code: str) -> list[str]:
                 if top not in _ALLOWED_TOP_MODULES:
                     violations.append(f"Forbidden import from: {node.module}")
 
-        # Blocked builtin call checks
+        # Blocked builtin call checks — ONLY the actual dangerous BUILTINS, which are
+        # bare Name-node calls (eval(x)/exec(x)/open(...)/compile(...)/__import__(...)).
+        # A METHOD call like model.eval(), model.train() or torch.compile() is an
+        # ast.Attribute and is SAFE (the import allowlist already blocks dangerous
+        # modules), so it must NOT be flagged. The previous version flagged any
+        # attribute .eval()/.compile(), which rejected essentially every realistic
+        # CLMethod (they all call model.eval()/model.train()) and made synthesis
+        # never succeed. Obfuscated/attribute-based attacks are caught by the import
+        # allowlist + the Docker sandbox validation stage, not this AST pass.
         elif isinstance(node, ast.Call):
             func = node.func
-            name = None
-            if isinstance(func, ast.Name):
-                name = func.id
-            elif isinstance(func, ast.Attribute):
-                name = func.attr
-            if name and name in _BLOCKED_BUILTINS:
-                violations.append(f"Forbidden call: {name}()")
+            if isinstance(func, ast.Name) and func.id in _BLOCKED_BUILTINS:
+                violations.append(f"Forbidden builtin call: {func.id}()")
 
     return violations
 
