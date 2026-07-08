@@ -20,6 +20,18 @@ from typing import Any
 
 _KILLED_VERDICTS = frozenset({"NULL", "ADVERSE", "COLLAPSED", "ERROR"})
 
+# A solution-loop anomaly gap has gap_id "tar_anomaly::<name>"; the director derives
+# its frontier id deterministically as f"fp-gap-{_frontier_slug(gap_id)}" -> it always
+# begins "fp-gap-tar-anomaly". Such a frontier must NOT be probed with the static
+# gap-probe (which defaults method="tcl" — re-testing the falsified incumbent on the
+# anomaly); the widened proposer generates its FIRST candidate instead.
+_ANOMALY_FRONTIER_PREFIX = "fp-gap-tar-anomaly"
+
+
+def is_anomaly_frontier(frontier_id: str) -> bool:
+    """True for a solution-loop anomaly frontier (derived from a tar_anomaly:: gap)."""
+    return str(frontier_id or "").startswith(_ANOMALY_FRONTIER_PREFIX)
+
 
 def _ledger_path(workspace: Path) -> Path:
     return Path(workspace) / "tar_state" / "solution_loop" / "kill_ledger.jsonl"

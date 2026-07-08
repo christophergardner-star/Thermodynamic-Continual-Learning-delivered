@@ -3189,7 +3189,18 @@ class ResearchDirector:
                 str(frontier.get("truth_status", "") or "") == "falsified"
                 and not frontier.get("waiting_on_experiment_ids")
             )
-            _catalog_proposals = [] if _falsified_dead else self._frontier_experiment_catalog(frontier, paper, path)
+            # Solution-loop: a tar_anomaly:: frontier must NOT get the static gap-probe,
+            # whose method defaults to "tcl" (frontier["candidate_method"] is never set) —
+            # that would re-test the falsified incumbent on the anomaly. Suppress the catalog
+            # so the WIDENED LLM proposer (below) generates the FIRST candidate from the whole
+            # CL design space instead. Non-anomaly frontiers are unaffected.
+            try:
+                from tar_lab.solution_loop import is_anomaly_frontier as _is_anom
+                _is_anomaly_frontier = _is_anom(frontier_id)
+            except Exception:
+                _is_anomaly_frontier = False
+            _catalog_proposals = ([] if (_falsified_dead or _is_anomaly_frontier)
+                                  else self._frontier_experiment_catalog(frontier, paper, path))
             # H2: upgrade fresh director probes to powered, discriminating protocols (flag-gated,
             # idempotent, suite/resume arms untouched) — extends the fp-gap wiring to all frontiers.
             _catalog_proposals = [self._apply_experiment_design(_p, frontier) for _p in _catalog_proposals]
@@ -3253,7 +3264,17 @@ class ResearchDirector:
                 )
             ]
             frontier_title = str(frontier.get("title", frontier_id) or frontier_id)
-            if n_pending_for_frontier == 0 and completed_for_frontier:
+            # Fire the widened proposer when the static catalog is exhausted (n_pending==0)
+            # AND either there are completed experiments to learn from OR this is a
+            # solution-loop anomaly frontier whose catalog was deliberately suppressed above
+            # (so its FIRST experiment is an LLM-proposed non-TCL candidate, not the tcl
+            # gap-probe). The anomaly branch still respects the domain autonomy rail; the
+            # ramp/scheduler remain the execution gate regardless.
+            _anomaly_first_probe = (
+                _is_anomaly_frontier
+                and _frontier_autonomy_allowed(str(frontier.get("domain", "") or ""))
+            )
+            if n_pending_for_frontier == 0 and (completed_for_frontier or _anomaly_first_probe):
                 try:
                     llm_proposals = self._llm_propose_followup_experiments(
                         frontier, completed_for_frontier, seen_ids

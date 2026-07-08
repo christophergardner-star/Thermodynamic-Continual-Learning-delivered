@@ -193,6 +193,22 @@ def test_si_anomaly_gap_constructs_and_is_top_composite():
     assert gap.composite_score > 0.9  # must outrank the existing negative_result gaps
 
 
+def test_is_anomaly_frontier_matches_real_derived_id():
+    # The SI anomaly's first experiment must NOT be the tcl gap-probe; the director
+    # detects a solution-loop anomaly frontier by id prefix and defers to the widened
+    # proposer. Tie the detector to the ACTUAL derivation so slug changes can't break it.
+    from tar_lab.solution_loop import is_anomaly_frontier
+    from tar_frontier import _frontier_slug
+    real_fid = "fp-gap-" + _frontier_slug("tar_anomaly::si_stability_without_collapse")
+    assert is_anomaly_frontier(real_fid) is True
+    assert is_anomaly_frontier("fp-gap-tar-anomaly-anything") is True
+    # non-anomaly frontiers MUST NOT match (their catalog probe stays intact):
+    assert is_anomaly_frontier("fp-gap-hpc-high-lambda-replication") is False
+    assert is_anomaly_frontier("fp-catastrophic-forgetting") is False
+    assert is_anomaly_frontier("") is False
+    assert is_anomaly_frontier(None) is False
+
+
 def test_prereg_criteria_join_by_frontier_problem_id(tmp_path):
     # HANDSHAKE regression: the director mints DYNAMIC spec id/name for a gap probe
     # (director-fp-gap-...-probe / "Gap probe - ..."), which never equals a seeded
