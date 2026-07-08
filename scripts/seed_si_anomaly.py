@@ -52,8 +52,16 @@ _ANOMALY_STATEMENT = (
     "no seed below 0.55 accuracy (else the 'stability' is an artifact of learning nothing)."
 )
 
+_SI_N_SEEDS = 5   # SI reference seed count (for the F-test degrees of freedom)
+
 _JOINT_CRITERIA = {
-    "max_forgetting_std": _SI_FORGETTING_STD,
+    # Stability is tested by a real one-sided F-test (variance_ratio): is the candidate's
+    # cross-seed forgetting variance NOT significantly greater than SI's? The absolute
+    # max_forgetting_std is kept only as the scipy-unavailable fallback.
+    "variance_ratio_alpha": 0.05,
+    "si_forgetting_std": _SI_FORGETTING_STD,
+    "si_n_seeds": _SI_N_SEEDS,
+    "max_forgetting_std": _SI_FORGETTING_STD,   # fallback bound if the F-test can't run
     "min_mean_acc": _SI_ACC_MEAN,
     "min_seed_acc": _COLLAPSE_MIN_SEED_ACC,
     "max_delta": -0.01,   # must reduce forgetting vs the TCL baseline used by _build_result
@@ -136,8 +144,6 @@ def seed_prereg(ws: Path, apply: bool) -> str:
         except Exception:
             prereg = {}
     hyps = prereg.get("hypotheses", [])
-    if any(isinstance(h, dict) and h.get("name") == "si_stability_without_collapse" for h in hyps):
-        return "  [prereg] already present (idempotent skip)"
     # HANDSHAKE: the orchestrator loads these criteria for an experiment by matching
     # spec.id / spec.name / spec.frontier_problem_id (tar_experiment_orchestrator
     # _load_prereg_criteria). The director mints DYNAMIC spec ids/names for the gap
@@ -147,6 +153,20 @@ def seed_prereg(ws: Path, apply: bool) -> str:
     # never drift; without this the joint collapse-guard criteria silently never load.
     from tar_frontier import _frontier_slug
     _frontier_pid = f"fp-gap-{_frontier_slug(_GAP_ID)}"
+    # UPSERT (not skip): refresh criteria + join key if the hypothesis already exists, so
+    # re-running --apply picks up criteria changes (e.g. the variance-ratio keys).
+    for h in hyps:
+        if isinstance(h, dict) and h.get("name") == "si_stability_without_collapse":
+            if (h.get("criteria") == dict(_JOINT_CRITERIA)
+                    and h.get("frontier_problem_id") == _frontier_pid):
+                return "  [prereg] already up to date (idempotent skip)"
+            if apply:
+                h["criteria"] = dict(_JOINT_CRITERIA)
+                h["frontier_problem_id"] = _frontier_pid
+                h["updated_at"] = _now()
+                path.write_text(json.dumps(prereg, indent=2), encoding="utf-8")
+                return "  [prereg] APPLIED: updated si_stability_without_collapse criteria + join key"
+            return "  [prereg] DRY-RUN: would UPDATE existing si_stability_without_collapse criteria"
     entry = {
         "name": "si_stability_without_collapse",
         "registered_at": _now(),

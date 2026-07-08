@@ -317,6 +317,11 @@ class ExperimentResult:
     completed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     confidence_score: float = 0.0     # 0–1: composite of effect size, p-value, n_seeds
     power_analysis: dict[str, Any] = field(default_factory=dict)
+    # TL-4 / solution-loop: family-wise-corrected significance recorded by the PRODUCER.
+    # Only a POWERED confirmatory run (n>=CONFIRM_MIN_SEEDS) whose primary test survives
+    # the per-frontier Bonferroni family alpha sets this True; an n=5 screen never does.
+    # validation.classify_trust_tier requires it for publication_allowed.
+    family_wise_significant: bool = False
 
 
 def _compute_power_analysis(
@@ -2998,7 +3003,31 @@ class ExperimentOrchestrator:
             _rec("max_p", p_val <= crit["max_p"], crit["max_p"], round(p_val, 4))
         if "min_d" in crit:
             _rec("min_d", cohens_d >= crit["min_d"], crit["min_d"], round(cohens_d, 3))
-        if "max_forgetting_std" in crit:
+        # Stability criterion. Prefer the REAL variance-ratio F-test (is the candidate's
+        # cross-seed variance not significantly greater than SI's?) when the prereg gives
+        # the SI reference; else fall back to the absolute std bound. The F-test is the
+        # correct "match SI's stability" test — an absolute std cutoff is noise-sensitive
+        # at small n and rejects a candidate whose std is only trivially above SI's.
+        if crit.get("si_forgetting_std") is not None and "variance_ratio_alpha" in crit and accuracy_list:
+            from tar_lab.solution_loop import variance_ratio_test
+            _vr_pass, _vr_p, _vr_F = variance_ratio_test(
+                std_forgetting, len(accuracy_list),
+                crit["si_forgetting_std"], crit.get("si_n_seeds", 5),
+                crit["variance_ratio_alpha"],
+            )
+            if _vr_pass is None:
+                # scipy/data unavailable -> conservative fallback to the absolute bound
+                if "max_forgetting_std" in crit:
+                    _rec("max_forgetting_std", std_forgetting <= crit["max_forgetting_std"],
+                         crit["max_forgetting_std"], round(std_forgetting, 5))
+            else:
+                _rec("variance_ratio", _vr_pass,
+                     {"alpha": crit["variance_ratio_alpha"], "si_std": crit["si_forgetting_std"],
+                      "si_n": crit.get("si_n_seeds", 5)},
+                     {"cand_std": round(std_forgetting, 5),
+                      "p": (round(_vr_p, 4) if _vr_p is not None else None),
+                      "F": (round(_vr_F, 3) if _vr_F is not None else None)})
+        elif "max_forgetting_std" in crit:
             _rec("max_forgetting_std", std_forgetting <= crit["max_forgetting_std"],
                  crit["max_forgetting_std"], round(std_forgetting, 5))
         if "min_mean_acc" in crit:
@@ -3066,6 +3095,7 @@ class ExperimentOrchestrator:
         # min_seed_acc collapse (learned nothing) vetoes any positive verdict. No
         # criteria preregistered -> unchanged (backwards compatible).
         crit_note = ""
+        _loop_candidate = False   # set below; also gates family_wise + confirm-escalation
         try:
             crit_report, crit_met = self._evaluate_prereg_criteria(
                 spec, mean_delta=mean_delta, p_val=p_val, cohens_d=cohens_d,
@@ -3081,7 +3111,8 @@ class ExperimentOrchestrator:
             # only {max_p,min_d,max_delta}: we annotate but DO NOT change their verdict,
             # preserving existing DIRECTIONAL semantics (no regression to the inventory).
             _loop_candidate = any(
-                k in crit_report for k in ("max_forgetting_std", "min_mean_acc", "min_seed_acc")
+                k in crit_report for k in
+                ("max_forgetting_std", "min_mean_acc", "min_seed_acc", "variance_ratio")
             )
             if _loop_candidate and crit_report.get("collapse_detected"):
                 verdict = "NULL"
@@ -3115,6 +3146,39 @@ class ExperimentOrchestrator:
                     )
                 except Exception:
                     pass
+
+        # ── Two-tier significance + confirm-stage escalation (solution-loop) ──────
+        # An n=5 SCREEN is kill-only and NEVER publishable: family_wise_significant is
+        # set ONLY for a BREAKTHROUGH (which already means p < the per-frontier Bonferroni
+        # family alpha) produced by a POWERED confirmatory run (n >= CONFIRM_MIN_SEEDS).
+        # This is the missing gate validation.classify_trust_tier requires; without the
+        # seed floor an underpowered screen could otherwise reach publication.
+        try:
+            from tar_lab.solution_loop import CONFIRM_MIN_SEEDS as _CONFIRM_N
+        except Exception:
+            _CONFIRM_N = 20
+        family_wise_significant = bool(verdict == "BREAKTHROUGH" and n >= _CONFIRM_N)
+
+        # A loop-candidate that SURVIVES the n=5 screen (positive, not killed) but is
+        # underpowered is escalated to a powered confirmatory run. record is idempotent
+        # per candidate fingerprint; the director consumes pending requests and emits an
+        # n>=CONFIRM_MIN_SEEDS run preserving frontier_problem_id (so the prereg still loads).
+        if _loop_candidate and verdict in {"BREAKTHROUGH", "DIRECTIONAL"} and n < _CONFIRM_N:
+            try:
+                from tar_lab.solution_loop import record_confirmation_request
+                _mech = (str((spec.config_overrides or {}).get("mechanism_class", "") or "")
+                         if isinstance(spec.config_overrides, dict) else "")
+                record_confirmation_request(
+                    self.workspace, method=spec.method,
+                    config_overrides=dict(spec.config_overrides or {}), mechanism_class=_mech,
+                    frontier_problem_id=str(spec.frontier_problem_id or ""),
+                    dataset=spec.dataset,
+                    backbone=str(getattr(spec, "backbone", "resnet18") or "resnet18"),
+                    screen_experiment_id=spec.id, screen_verdict=verdict,
+                )
+                crit_note += f"  | SCREEN survivor -> confirmatory n>={_CONFIRM_N} requested"
+            except Exception:
+                pass
 
         notes = (f"mean_delta={mean_delta:+.4f}  p={p_val:.4f}  d={cohens_d:.3f}"
                  f"  {n_better}/{n} seeds better"
@@ -3159,6 +3223,7 @@ class ExperimentOrchestrator:
             optimizer_backend_config=spec.optimizer_backend_config,
             confidence_score=confidence_score,
             power_analysis=power_analysis,
+            family_wise_significant=family_wise_significant,
         )
 
     def _build_suite_result(self, spec: ExperimentSpec, raw: dict[str, Any]) -> ExperimentResult:

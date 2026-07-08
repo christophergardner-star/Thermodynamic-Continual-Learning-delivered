@@ -246,6 +246,125 @@ def test_prereg_criteria_join_by_frontier_problem_id(tmp_path):
     assert orch._load_prereg_criteria(mkspec("")) == {}
 
 
+def test_confirmatory_directive_survives_spec_builder(tmp_path):
+    # CRITICAL regression (adversarial-review catch): a solution_loop_confirm directive
+    # must pass BOTH the origin allowlist and the active-frontier allowlist in
+    # _build_director_followup_specs, else the powered confirmatory run never runs and the
+    # confirm stage is a silent dead end (nothing can become family_wise_significant).
+    import tar_living_research as tlr
+    directive = {
+        "experiment_id": "confirm-deadbeef",
+        "proposal_origin": "solution_loop_confirm",
+        "proposal_kind": "confirmatory",
+        "status": "proposed",
+        "scheduler_intent": "propose_now",
+        "title": "Confirmatory n>=20 - ewc",
+        "method": "ewc",                       # native -> no synthesis needed for the test
+        "mechanism_class": "regularization",
+        "config_overrides": {"ewc_lambda": 1000.0},
+        "seeds": list(range(20)),
+        "dataset": "split_cifar10",
+        "backbone": "resnet18",
+        "epochs": 40,
+        "frontier_problem_id": "fp-gap-tar-anomaly-si-stability-without-collapse",
+    }
+    director_state = {"experiment_directives": [directive]}
+    # allowlist restricts to a DIFFERENT frontier -> the confirmatory must still pass (exempt):
+    coord = {"allowed_frontier_problem_ids": ["fp-gap-some-other-frontier"]}
+    specs = tlr._build_director_followup_specs(tmp_path, director_state, [], coord)
+    assert len(specs) == 1, "solution_loop_confirm directive was dropped by the spec builder"
+    s = specs[0]
+    assert s.id == "confirm-deadbeef"
+    assert s.method == "ewc"
+    assert s.frontier_problem_id == "fp-gap-tar-anomaly-si-stability-without-collapse"
+    assert len(s.seeds) == 20   # powered confirmatory tier
+
+
+def test_variance_ratio_test_matches_si_stability():
+    from tar_lab.solution_loop import variance_ratio_test
+    # candidate as stable as SI -> cannot reject -> PASS
+    passed, p, F = variance_ratio_test(0.00753, 20, 0.00753, 5, 0.05)
+    assert passed is True and p is not None
+    # candidate MUCH less stable (bigger variance) -> reject -> FAIL
+    passed, p, F = variance_ratio_test(0.05, 20, 0.00753, 5, 0.05)
+    assert passed is False
+    # candidate MORE stable -> PASS
+    passed, _, _ = variance_ratio_test(0.002, 20, 0.00753, 5, 0.05)
+    assert passed is True
+    # insufficient n -> None (caller falls back to absolute bound)
+    passed, _, _ = variance_ratio_test(0.005, 1, 0.00753, 5, 0.05)
+    assert passed is None
+    # zero reference variance -> matches only if candidate ~0
+    assert variance_ratio_test(0.0, 5, 0.0, 5)[0] is True
+    assert variance_ratio_test(0.01, 5, 0.0, 5)[0] is False
+
+
+def test_confirmation_ledger_idempotent_and_consumable(tmp_path):
+    from pathlib import Path
+    from tar_lab.solution_loop import (
+        record_confirmation_request, load_pending_confirmations,
+        mark_confirmation_consumed, candidate_fingerprint,
+    )
+    ws = Path(tmp_path)
+    kw = dict(method="mas_er_hybrid", config_overrides={"a": 1}, mechanism_class="replay",
+              frontier_problem_id="fp-gap-tar-anomaly-x", dataset="split_cifar10",
+              backbone="resnet18", screen_experiment_id="e1", screen_verdict="BREAKTHROUGH")
+    assert record_confirmation_request(ws, **kw) is True
+    assert record_confirmation_request(ws, **kw) is False   # idempotent per fingerprint
+    pend = load_pending_confirmations(ws)
+    assert len(pend) == 1 and pend[0]["method"] == "mas_er_hybrid"
+    mark_confirmation_consumed(ws, candidate_fingerprint("mas_er_hybrid", {"a": 1}, "replay"))
+    assert load_pending_confirmations(ws) == []   # consumed -> no longer pending
+
+
+def test_build_result_two_tier_screen_then_confirm(tmp_path):
+    # Integration: an n=5 SCREEN survivor is NOT family_wise_significant and triggers a
+    # confirmatory request; the same candidate at n=20 (confirm tier) IS family_wise_significant.
+    import json
+    from pathlib import Path
+    from tar_experiment_orchestrator import ExperimentSpec, ExperimentOrchestrator
+    from tar_lab.solution_loop import load_pending_confirmations
+    _FPID = "fp-gap-tar-anomaly-si-stability-without-collapse"
+    pdir = tmp_path / "tar_state" / "autonomous_research"; pdir.mkdir(parents=True)
+    crit = {"variance_ratio_alpha": 0.05, "si_forgetting_std": 0.00753, "si_n_seeds": 5,
+            "max_forgetting_std": 0.00753, "min_mean_acc": 0.79412, "min_seed_acc": 0.55,
+            "max_delta": -0.01, "max_p": 0.05, "min_d": 0.5}
+    (pdir / "preregistration.json").write_text(json.dumps({"hypotheses": [
+        {"name": "si_stability_without_collapse", "frontier_problem_id": _FPID, "criteria": crit}]}),
+        encoding="utf-8")
+    orch = ExperimentOrchestrator.__new__(ExperimentOrchestrator)
+    orch.workspace = Path(tmp_path)
+    orch._load_baseline = lambda: [0.15] * 40          # TCL baseline (candidate must beat it)
+    orch._load_archive_records = lambda: []
+    orch._log = lambda *a, **k: None
+
+    def mkspec(n):
+        s = ExperimentSpec.__new__(ExperimentSpec)
+        s.id = "director-" + _FPID + "-probe"; s.name = "Gap probe - SI"
+        s.frontier_problem_id = _FPID; s.project_id = "p"; s.hypothesis_name = "gp"
+        s.dataset = "split_cifar10"; s.method = "mas_er_hybrid"; s.seeds = list(range(n))
+        s.config_overrides = {"mechanism_class": "replay"}
+        s.optimizer_backend = "sgd"; s.optimizer_backend_config = {}; s.backbone = "resnet18"
+        return s
+
+    def data(n):   # stable (std << SI), clearly beats baseline, high accuracy
+        fg = [0.05 + 0.0008 * ((i % 3) - 1) for i in range(n)]
+        ac = [0.80 + 0.0008 * ((i % 3) - 1) for i in range(n)]
+        return [{"seed": i, "forgetting": fg[i], "accuracy": ac[i]} for i in range(n)], fg, ac
+
+    sr5, fg5, ac5 = data(5)
+    r5 = orch._build_result(mkspec(5), sr5, fg5, ac5)
+    assert r5.verdict == "BREAKTHROUGH"          # passes its joint criteria at n=5...
+    assert r5.family_wise_significant is False    # ...but a screen is NEVER significant
+    pend = load_pending_confirmations(Path(tmp_path))
+    assert len(pend) == 1 and pend[0]["method"] == "mas_er_hybrid"   # escalation requested
+
+    sr20, fg20, ac20 = data(20)
+    r20 = orch._build_result(mkspec(20), sr20, fg20, ac20)
+    assert r20.verdict == "BREAKTHROUGH"
+    assert r20.family_wise_significant is True     # confirm tier (n>=20) can be significant
+
+
 def test_si_joint_criteria_match_evaluator_keys():
     import importlib.util
     from pathlib import Path
@@ -253,9 +372,13 @@ def test_si_joint_criteria_match_evaluator_keys():
     spec = importlib.util.spec_from_file_location("seed_si_anomaly", repo / "scripts" / "seed_si_anomaly.py")
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
     # Every criterion the seeder writes must be one the orchestrator evaluator enforces.
-    enforced = {"max_delta", "max_p", "min_d", "max_forgetting_std", "min_mean_acc", "min_seed_acc"}
+    # Includes the variance-ratio F-test inputs (variance_ratio_alpha/si_forgetting_std/
+    # si_n_seeds), which _evaluate_prereg_criteria consumes for the real stability test.
+    enforced = {"max_delta", "max_p", "min_d", "max_forgetting_std", "min_mean_acc",
+                "min_seed_acc", "variance_ratio_alpha", "si_forgetting_std", "si_n_seeds"}
     assert set(mod._JOINT_CRITERIA) <= enforced
-    assert mod._JOINT_CRITERIA["min_seed_acc"] == 0.55  # collapse guard present
+    assert mod._JOINT_CRITERIA["min_seed_acc"] == 0.55        # collapse guard present
+    assert mod._JOINT_CRITERIA["variance_ratio_alpha"] == 0.05  # F-test enabled
 
 
 # ── Phase 3 — widened proposer (catalog injected, method carried, not TCL-pinned) ──

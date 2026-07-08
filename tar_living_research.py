@@ -1335,10 +1335,19 @@ def _build_director_followup_specs(
             and directive_status == "failed"
             and scheduler_intent in {"retry_now", "queue_now"}
         )
-        if proposal_origin not in {"director", "suite"} and not retryable_existing:
+        # 'solution_loop_confirm' is the powered n>=CONFIRM_MIN_SEEDS confirmatory run of a
+        # screen survivor (director emits it). It must be admitted to the spec builder like a
+        # director proposal, else the confirm stage is a dead end (the survivor never gets a
+        # powered run, so nothing can ever become family_wise_significant / publishable).
+        if proposal_origin not in {"director", "suite", "solution_loop_confirm"} and not retryable_existing:
             continue
         frontier_id = str(directive.get("frontier_problem_id", "") or "")
-        if proposal_origin != "suite" and allowed_frontier_ids and frontier_id and frontier_id not in allowed_frontier_ids:
+        # The confirmatory is a follow-up to an already-screened candidate, so it is exempt
+        # from the active-frontier allowlist (like suite runs) — its frontier may have rotated
+        # out of the top gaps by the time the screen survivor is confirmed. The ramp remains
+        # the execution gate.
+        if (proposal_origin not in {"suite", "solution_loop_confirm"}
+                and allowed_frontier_ids and frontier_id and frontier_id not in allowed_frontier_ids):
             continue
         if directive_status not in {"proposed", "failed"}:
             continue

@@ -3403,6 +3403,58 @@ class ResearchDirector:
                 })
                 seen_ids.add(exp_id)
 
+        # Solution-loop CONFIRM stage: emit a POWERED (n>=CONFIRM_MIN_SEEDS) run for each
+        # screen survivor pending confirmation. Preserves frontier_problem_id so the joint
+        # prereg criteria still load (tar_living_research._build_director_followup_specs:1340
+        # -> spec.frontier_problem_id); idempotent by experiment id (confirm-<fingerprint>).
+        # The scheduler/ramp remain the execution gate. Additive: no effect until a survivor
+        # exists, and never touches non-solution-loop directives.
+        try:
+            from tar_lab.solution_loop import load_pending_confirmations, CONFIRM_SEEDS
+            for _req in load_pending_confirmations(self.workspace):
+                _fp = str(_req.get("fingerprint", "") or "")
+                _cid = f"confirm-{_fp}"
+                if not _fp or _cid in seen_ids:
+                    continue
+                _cstatus = _experiment_status(experiment_by_id.get(_cid, {}))
+                if _cstatus == "complete":
+                    # Powered confirmatory run finished -> mark the request consumed so it
+                    # stops being pending (append-only ledger), instead of relying only on
+                    # the experiment record staying in experiment_by_id forever.
+                    from tar_lab.solution_loop import mark_confirmation_consumed
+                    mark_confirmation_consumed(self.workspace, _fp)
+                    continue
+                _cmethod = str(_req.get("method", "") or "")
+                _cdataset = str(_req.get("dataset", "") or "split_cifar10")
+                directives.append({
+                    "experiment_id": _cid,
+                    "title": f"Confirmatory n>={len(CONFIRM_SEEDS)} - {_cmethod}",
+                    "dataset": _cdataset,
+                    "backbone": str(_req.get("backbone", "resnet18") or "resnet18"),
+                    "method": _cmethod,
+                    "mechanism_class": str(_req.get("mechanism_class", "") or ""),
+                    "config_overrides": dict(_req.get("config_overrides") or {}),
+                    "seeds": list(CONFIRM_SEEDS),
+                    "epochs": 40,
+                    "estimated_runtime_h": 24.0,
+                    "hardware_budget": {"vram_gb": 2.5, "cpu_cores": 4},
+                    "frontier_problem_id": str(_req.get("frontier_problem_id", "") or ""),
+                    "depends_on": [],
+                    "status": _cstatus,
+                    "scheduler_intent": _intent_for(_cstatus, []),
+                    "priority_score": _priority_for(_cid, _cstatus, [], 5.0,
+                                                    method=_cmethod, dataset=_cdataset),
+                    "proposal_origin": "solution_loop_confirm",
+                    "proposal_kind": "confirmatory",
+                    "confirmatory": True,
+                    "why_now": (f"Confirmatory power run for screen survivor "
+                                f"{_req.get('screen_experiment_id','')} "
+                                f"(verdict {_req.get('screen_verdict','')})."),
+                })
+                seen_ids.add(_cid)
+        except Exception as _conf_exc:
+            print(f"[Director] confirm-stage emission failed: {_conf_exc}", flush=True)
+
         intent_rank = {
             "maintain_running": 0,
             "resume_now": 1,
